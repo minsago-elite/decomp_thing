@@ -799,10 +799,39 @@ async function qualifyControls({ fixture, makeTarget, cdp, evaluate, ready, brow
     const before = jobsReads();
     await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' + search }, tab.sessionId);
     if (length === QUERY_BOUND) {
-      await ready(tab, `location.search === '' && document.body.innerText.includes('The saved job page cannot be restored') && (${rows}).length === 50`,
-        'maximum total query is parsed and invalid cursor is bounded');
+      const recoveredFirstPage = `(() => {
+        const params = new URLSearchParams(location.search);
+        const cursors = params.getAll('cursor');
+        return params.size === 1 && cursors.length === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(cursors[0]) &&
+          [...document.querySelectorAll('[role="status"]')].some(node => node.textContent.includes('The saved job page cannot be restored')) &&
+          (${rows}).length === 50;
+      })()`;
+      try {
+        await ready(tab, recoveredFirstPage, 'maximum total query is parsed and invalid cursor is bounded');
+      } catch (error) {
+        const state = await evaluate(tab, `(() => {
+          const params = new URLSearchParams(location.search);
+          const cursors = params.getAll('cursor');
+          return {
+            searchLength: location.search.length,
+            queryKeys: [...params.keys()],
+            cursorCount: cursors.length,
+            cursorLength: cursors[0]?.length ?? null,
+            fallbackNoticeVisible: [...document.querySelectorAll('[role="status"]')]
+              .some(node => node.textContent.includes('The saved job page cannot be restored')),
+            rows: (${rows}).length,
+          };
+        })()`);
+        throw new Error(`${error.message}; total-query fallback state=${JSON.stringify(state)}; jobReads=${jobsReads() - before}`);
+      }
       assert.equal(jobsReads() - before, 1, 'A total query at the location limit should fall back to one first-page read');
-      result.queryBoundary[`${length}LocationCharacters`] = { jobReads: 1, cursorRefused: true, totalQueryAccepted: true };
+      const fallbackCursorLength = await evaluate(tab,
+        `new URLSearchParams(location.search).get('cursor')?.length ?? null`);
+      assert.ok(Number.isInteger(fallbackCursorLength) && fallbackCursorLength > 0 && fallbackCursorLength <= 128,
+        'The accepted first-page snapshot cursor must remain bounded');
+      result.queryBoundary[`${length}LocationCharacters`] = {
+        jobReads: 1, cursorRefused: true, totalQueryAccepted: true, fallbackCursorLength,
+      };
     } else {
       await ready(tab, `location.search.length === ${length} && document.querySelector('[role="alert"]')?.textContent === 'The saved filters are invalid. Reset filters to load jobs.'`,
         'total query one character over the location limit is rejected');
