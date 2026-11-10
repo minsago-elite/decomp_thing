@@ -207,6 +207,14 @@ async function externalizeSourceTreeRequestEvidence() {
       workflowSha: report.workflowSha,
       profile: report.profile,
       fixture: report.sourceTreeScale.fixture,
+      runtime: {
+        archiveSha256: report.archiveSha256, applicationJarSha256: report.applicationJarSha256,
+        buildId: report.buildId, browserProduct: report.browser?.product ?? null,
+        chromeSha256: report.tools.chromeSha256, javaSha256: report.tools.javaSha256,
+        javaModulesSha256: report.tools.javaModulesSha256, javaReleaseSha256: report.tools.javaReleaseSha256,
+        checkoutParents: report.checkoutParents, pullRequestIdentity: report.pullRequestIdentity,
+        sourceTreeDriverSha256: report.sourceTreeDriverSha256,
+      },
       requests: routeRequests,
       coldSamples: coldSummary.samples,
     };

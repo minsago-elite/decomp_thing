@@ -52,11 +52,40 @@ journey. The
 integration test also seeds 25,001 files and confirms the real catalog and
 revision readers refuse that over-limit input.
 
-The repeated page samples are taken from one warmed packaged JVM; they are not
-fresh-process cold-load measurements. The synthetic tree does not qualify real
-generated projects, cross-browser behavior, long sessions, or production
-workloads. A client abort proves stale browser work is discarded, not that
-server processing stopped. The larger-than-supported tree is refused rather
-than partially displayed; if the job provides `source-tree.zip`, use its
-verified archive route as the alternative. These fixture and CI results are
-evidence for #1056, not production qualification or completion of parent #625.
+### Fresh-process first-page samples
+
+Before the full journey, qualification attempts 20 sequential cold first-page
+trials per source-tree profile. An unconfirmed teardown stops the sequence and
+fails the profile. Every started trial uses a new packaged JVM, Chromium
+process, and empty uniquely identified browser profile. The fixture is written before the
+JVM starts; authentication and application startup are recorded separately and
+excluded from the page timing. The measured interval starts with direct
+navigation to the deterministic `modules` route and ends after the exact first
+50 filenames render and the bounded directory response has completion
+evidence. All 20 attempts are retained; failures are not replaced or dropped.
+
+After those trials, the existing full pagination, interaction, search, detail,
+heap, and RSS journey runs in its own application and browser process. Its
+repeated page and resource measurements describe that journey, not the
+fresh-process cold p95. Fixture seeding and runtime identity reads can warm the
+filesystem page cache; the OS cache is uncontrolled and no cold-disk performance
+is claimed.
+
+The final `report.json` keeps the cold median/p95, gate, attempt/failure counts,
+and evidence references. Complete source-tree request records and all cold
+sample records are retained in the sibling `source-tree-scale-evidence.json`
+artifact, bounded to 8 MiB and bound by its byte count and SHA-256. The outer
+supervised report verifies its schema, profile, source/workflow and
+package/browser identity, fixture identity, sample count, route counts, and
+digest before copying it beside the final report. Evidence is copied after the supervisor confirms that no
+owned processes remain, including for a failed performance gate; a failed gate
+remains failed. If the sidecar exceeds its bound or cannot be written, the run
+fails explicitly and marks complete evidence retention as unconfirmed.
+
+The synthetic tree does not qualify real generated projects, cross-browser
+behavior, long sessions, or production workloads. A client abort proves stale
+browser work is discarded, not that server processing stopped. The
+larger-than-supported tree is refused rather than partially displayed; if the
+job provides `source-tree.zip`, use its verified archive route as the
+alternative. These fixture and CI results are evidence for #1056, not production
+qualification or completion of parent #625.

@@ -142,6 +142,19 @@ try {
       assert.equal(evidenceDocument.profile, driverReport.profile);
       assert.equal(evidenceDocument.driverCommit, driverReport.driverCommit);
       assert.equal(evidenceDocument.workflowSha, driverReport.workflowSha);
+      assert.deepEqual(evidenceDocument.runtime, {
+        archiveSha256: driverReport.archiveSha256,
+        applicationJarSha256: driverReport.applicationJarSha256,
+        buildId: driverReport.buildId,
+        browserProduct: driverReport.browser?.product ?? null,
+        chromeSha256: driverReport.tools?.chromeSha256,
+        javaSha256: driverReport.tools?.javaSha256,
+        javaModulesSha256: driverReport.tools?.javaModulesSha256,
+        javaReleaseSha256: driverReport.tools?.javaReleaseSha256,
+        checkoutParents: driverReport.checkoutParents,
+        pullRequestIdentity: driverReport.pullRequestIdentity,
+        sourceTreeDriverSha256: driverReport.sourceTreeDriverSha256,
+      }, 'Full source-tree evidence package/browser/source identity differs from the driver report');
       assert.deepEqual(evidenceDocument.fixture, driverReport.sourceTreeScale.fixture,
         'Full source-tree evidence fixture identity differs from the driver report');
       assert.ok(Array.isArray(evidenceDocument.coldSamples));
