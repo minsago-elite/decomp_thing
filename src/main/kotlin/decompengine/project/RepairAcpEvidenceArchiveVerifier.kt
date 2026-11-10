@@ -3,6 +3,7 @@ package decompengine.project
 import decompengine.acp.acpSandboxCanonicalStringDigest
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
@@ -521,19 +522,24 @@ internal object RepairAcpEvidenceArchiveVerifier {
             }
             previousIteration = metadata.iterationIndex
             validateMetadata(metadata, graph)
-            require(metadata.publicationMode == "acp_release" && metadata.agentInvocation != null) {
+            val invocation = metadata.agentInvocation
+            val interruptedIntentOnly = graph.schemaVersion >= 7 && node.status == "rejected" &&
+                invocation == null && metadata.turnIntent != null
+            require(metadata.publicationMode == "acp_release" && (invocation != null || interruptedIntentOnly)) {
                 "non-ACP repair evidence cannot satisfy the release gate: ${node.id}"
             }
-            val expectedAssessment = node.status
-            require(metadata.agentInvocation.assessmentStatus == expectedAssessment) {
-                "repair release assessment status disagrees with its graph node: ${node.id}"
+            if (invocation != null) {
+                require(invocation.assessmentStatus == node.status) {
+                    "repair release assessment status disagrees with its graph node: ${node.id}"
+                }
             }
             if (node.status in setOf("accepted", "provisional")) {
                 require(node.changes.isNotEmpty()) { "accepted repair has no exact source change: ${node.id}" }
-                require(metadata.agentInvocation.releaseComplete &&
-                    metadata.agentInvocation.terminalOutcome == "returned-completed"
+                val acceptedInvocation = requireNotNull(invocation)
+                require(acceptedInvocation.releaseComplete &&
+                    acceptedInvocation.terminalOutcome == "returned-completed"
                 ) { "accepted repair lacks release-complete ACP evidence: ${node.id}" }
-                require(metadata.agentInvocation.resultChangesSha256 == agentChangeSetSha256(node.changes)) {
+                require(acceptedInvocation.resultChangesSha256 == agentChangeSetSha256(node.changes)) {
                     "accepted repair exact changes differ from its ACP receipt: ${node.id}"
                 }
                 if (node.status == "accepted") {
@@ -551,15 +557,15 @@ internal object RepairAcpEvidenceArchiveVerifier {
             "repair release graph head or next ordinal is stale"
         }
 
-        val expectedReceiptPaths = graph.nodes.drop(1).mapTo(sortedSetOf()) { node ->
-            requireNotNull(node.repairMetadata?.agentInvocation).receiptPath
+        val expectedReceiptPaths = graph.nodes.drop(1).mapNotNullTo(sortedSetOf()) { node ->
+            node.repairMetadata?.agentInvocation?.receiptPath
         }
         val observedReceiptPaths = payloadSha256.keys.filter(REPAIR_RECEIPT_PATH::matches).toSortedSet()
         require(observedReceiptPaths == expectedReceiptPaths) {
             "repair release evidence contains missing, extra, or stale ACP receipts"
         }
         val expectedIntentPaths = graph.nodes.drop(1).mapNotNullTo(sortedSetOf()) { node ->
-            node.repairMetadata?.agentInvocation?.intentPath
+            node.repairMetadata?.agentInvocation?.intentPath ?: node.repairMetadata?.turnIntent?.intentPath
         }
         val observedIntentPaths = payloadSha256.keys.filter(REPAIR_INTENT_PATH::matches).toSortedSet()
         require(observedIntentPaths == expectedIntentPaths) {
@@ -871,7 +877,16 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     assessment.receiptSha256 == invocation.receiptSha256 &&
                     assessment.changesSha256 == invocation.resultChangesSha256 &&
                     assessment.beforeSha256 == parent.sourceRevisionSha256 &&
-                    assessment.policySha256 == intent.policySha256) {
+                    intent.policySha256 == verified.accessPolicySha256 &&
+                    assessment.policySha256 == verified.accessPolicySha256 &&
+                    assessment.updatesSha256 == verified.updatesSha256 &&
+                    assessment.sessionIdSha256 == verified.sessionIdCommitmentSha256?.let {
+                        sha256("acp-session-commitment-v1:$it".toByteArray(StandardCharsets.UTF_8))
+                    } &&
+                    assessment.normalizedStopReason == verified.terminalOutcome
+                        .takeIf { it.startsWith("returned-") }
+                        ?.removePrefix("returned-")
+                        ?.let { AgentStopReason.valueOf(it.uppercase().replace('-', '_')) }) {
                     "repair workflow assessment is cross-paired with invocation: ${node.id}"
                 }
                 if (node.status == "accepted" || node.status == "provisional") {

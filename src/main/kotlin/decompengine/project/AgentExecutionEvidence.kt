@@ -446,6 +446,7 @@ internal data class VerifiedAcpExecutionReceiptDocument(
     val terminalOutcome: String,
     val releaseComplete: Boolean,
     val releaseFacts: VerifiedAcpReleaseReceiptFacts?,
+    val sessionIdCommitmentSha256: String? = null,
 )
 
 /**
@@ -582,6 +583,13 @@ internal fun verifyAcpExecutionReceiptDocument(
     } else {
         null
     }
+    val sessionIdCommitmentSha256 = (root["session"] as? JsonObject)?.let { session ->
+        require(session.keys == setOf("harnessId", "sessionId", "resumeReference")) {
+            "ACP receipt session has missing, extra, or duplicate fields"
+        }
+        session.receiptTextCommitment("sessionId", requireNonEmpty = true)
+        session.receiptObject("sessionId").receiptString("sha256")
+    }
     return VerifiedAcpExecutionReceiptDocument(
         requestSha256,
         accessPolicySha256,
@@ -591,6 +599,7 @@ internal fun verifyAcpExecutionReceiptDocument(
         terminalOutcome,
         releaseComplete,
         releaseFacts,
+        sessionIdCommitmentSha256,
     )
 }
 

@@ -212,7 +212,7 @@ class RepairRunSemanticsTest {
         assertEquals("pass3", fixture.root.resolve("code.c").readText())
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
             val state = graph.snapshot
-            assertEquals(6, state.schemaVersion)
+            assertEquals(7, state.schemaVersion)
             assertEquals(state.headId, state.fullyAcceptedHeadId)
             assertNull(state.provisionalHeadId)
             assertEquals(state.nodes[1].id, state.nodes[2].parentId)

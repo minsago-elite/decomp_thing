@@ -2403,7 +2403,12 @@ private fun recoverPersistedInvocationBinding(
         intentSha256 = intentBinding?.intentSha256,
         turnId = intentBinding?.turnId,
     )
-    require(oldBinding == null || oldBinding.copy(assessmentStatus = RepairAgentAssessmentStatus.PENDING) == binding) {
+    val oldReceiptBinding = oldBinding?.copy(
+        assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+        assessmentPath = null,
+        assessmentSha256 = null,
+    )
+    require(oldReceiptBinding == null || oldReceiptBinding == binding) {
         "persisted repair receipt binding conflicts with its immutable document"
     }
     val assessmentFile = if (hasAssessment) {
@@ -2414,7 +2419,17 @@ private fun recoverPersistedInvocationBinding(
         val intentValue = requireNotNull(intent) { "repair assessment exists without its pre-dispatch intent" }
         require(parsed.turnId == intentValue.turnId && parsed.intentSha256 == intentValue.sha256 &&
             parsed.receiptSha256 == receipt.sha256 && parsed.changesSha256 == verified.resultChangesSha256 &&
-            parsed.beforeSha256 == intentValue.beforeSha256 && parsed.policySha256 == intentValue.policySha256) {
+            parsed.beforeSha256 == intentValue.beforeSha256 &&
+            intentValue.policySha256 == verified.accessPolicySha256 &&
+            parsed.policySha256 == verified.accessPolicySha256 &&
+            parsed.sessionIdSha256 == verified.sessionIdCommitmentSha256?.let {
+                sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+            } &&
+            parsed.updatesSha256 == verified.updatesSha256 &&
+            parsed.normalizedStopReason == verified.terminalOutcome
+                .takeIf { it.startsWith("returned-") }
+                ?.removePrefix("returned-")
+                ?.let { decompengine.agent.AgentStopReason.valueOf(it.uppercase().replace('-', '_')) }) {
             "recovered repair assessment is cross-paired with its immutable intent or receipt"
         }
         binding.copy(
@@ -2422,8 +2437,17 @@ private fun recoverPersistedInvocationBinding(
             assessmentSha256 = file.sha256,
         )
     } ?: binding
-    require(oldBinding == null || oldBinding.copy(assessmentStatus = RepairAgentAssessmentStatus.PENDING) == assessedBinding) {
-        "persisted repair assessment binding conflicts with its immutable document"
+    if (assessmentFile == null) {
+        require(oldBinding?.assessmentPath == null && oldBinding?.assessmentSha256 == null) {
+            "persisted repair assessment binding has no immutable document"
+        }
+    } else {
+        val oldAssessmentPath = oldBinding?.assessmentPath
+        val oldAssessmentSha = oldBinding?.assessmentSha256
+        require((oldAssessmentPath == null && oldAssessmentSha == null) ||
+            (oldAssessmentPath == assessedBinding.assessmentPath && oldAssessmentSha == assessedBinding.assessmentSha256)) {
+            "persisted repair assessment binding conflicts with its immutable document"
+        }
     }
     return pending.copy(repairMetadata = metadata.copy(
         turnIntent = intentBinding,
@@ -5001,7 +5025,16 @@ internal class ModuleRevisionGraph private constructor(
                     require(assessment.turnId == intent.turnId && assessment.intentSha256 == intentSha &&
                         assessment.receiptSha256 == binding.receiptSha256 &&
                         assessment.changesSha256 == binding.resultChangesSha256 &&
-                        assessment.policySha256 == intent.policySha256) {
+                        intent.policySha256 == verified.accessPolicySha256 &&
+                        assessment.policySha256 == verified.accessPolicySha256 &&
+                        assessment.updatesSha256 == verified.updatesSha256 &&
+                        assessment.sessionIdSha256 == verified.sessionIdCommitmentSha256?.let {
+                            sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+                        } &&
+                        assessment.normalizedStopReason == verified.terminalOutcome
+                            .takeIf { it.startsWith("returned-") }
+                            ?.removePrefix("returned-")
+                            ?.let { decompengine.agent.AgentStopReason.valueOf(it.uppercase().replace('-', '_')) }) {
                         "repair assessment is cross-paired with intent or receipt: $attemptId"
                     }
                     if (expectedAssessment == RepairAgentAssessmentStatus.ACCEPTED) require(

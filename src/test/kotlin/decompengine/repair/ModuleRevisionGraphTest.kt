@@ -31,6 +31,7 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentSessionReference
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.AgentHarness
@@ -608,6 +609,88 @@ class ModuleRevisionGraphTest {
             )
         }
         assertTrue(receiptPath.exists())
+    }
+
+    @Test
+    fun `startup reconciles an assessment persisted before its graph binding`() {
+        val project = generatedProject()
+        var armed = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.AfterStatePublicationExchange &&
+                    point.scope == "revision-state" && point.name == "graph.json"
+                ) throw IllegalStateException("simulated process stop after assessment sidecar publication")
+            },
+        )
+        val sourcePath = "src/modules/alpha.c"
+        val before = project.resolve(sourcePath).readBytes()
+        val after = before + "\n/* durable assessment recovery fixture */\n".toByteArray()
+        val corpus = graph.retainedRegressionCorpus()
+        graph.beginRun(1, 60_000)
+        val attempt = graph.beginAttempt(
+            listOf(sourcePath),
+            RevisionRepairMetadata(1, "compile", "bounded failure", null, emptyList(), null, corpus.sha256),
+        )
+        val receipt = completeAcpReceiptDocument(project, attempt, sourcePath, before, after)
+        val verified = decompengine.project.verifyAcpExecutionReceiptDocument(
+            receipt.json.toByteArray(Charsets.UTF_8),
+            TRACE_REPAIR_ACP_RECEIPT_KIND,
+            TRACE_REPAIR_ACP_TASK_FIELD,
+            attempt.id,
+        )
+        val identity = AgentTurnIdentity(
+            java.util.UUID.randomUUID().toString(), attempt.id, receipt.requestSha256, "assessment-recovery-workflow",
+        )
+        val intent = decompengine.project.AgentTurnIntent.create(
+            identity,
+            "assessment-recovery-workflow",
+            attempt.id,
+            graph.snapshot.profileSha256,
+            verified.accessPolicySha256,
+            graph.snapshot.nodes.single { it.id == graph.snapshot.headId }.sourceRevisionSha256,
+        )
+        graph.persistAndBindAgentTurnIntent(attempt, intent)
+        graph.persistAndBindAgentInvocation(attempt, receipt)
+        val assessment = decompengine.project.AcpChangeAssessment.create(
+            intent = intent,
+            receiptSha256 = receipt.sha256,
+            sessionIdSha256 = verified.sessionIdCommitmentSha256?.let {
+                sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+            },
+            changesSha256 = verified.resultChangesSha256,
+            beforeSha256 = intent.beforeSha256,
+            afterSha256 = null,
+            observation = decompengine.project.AcpChangeObservationStatus.UNKNOWN,
+            protocolStopCode = null,
+            normalizedStopReason = AgentStopReason.COMPLETED,
+            policyVerdict = decompengine.project.AcpChangePolicyVerdict.REJECT,
+            reasonCodes = listOf("candidate_not_authorized"),
+            validationStatus = decompengine.project.AcpChangeValidationStatus.NOT_RUN,
+            validationProofSha256 = emptyList(),
+            eligibility = decompengine.project.AcpChangePublicationEligibility.REJECTED,
+            updatesSha256 = verified.updatesSha256,
+        )
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        val receiptOnlyGraph = graphPath.readBytes()
+        armed = true
+        assertFailsWith<RepairAgentEvidencePersistenceException> {
+            graph.persistAndBindAgentAssessment(attempt, assessment)
+        }
+        graph.close()
+        // Model a crash after the immutable sidecar was published but before the graph reference
+        // was committed. The sidecar remains authoritative only when it matches the pending turn.
+        graphPath.writeBytes(receiptOnlyGraph)
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
+            val recovered = reopened.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, recovered.status)
+            assertTrue(recovered.recoveredAfterCrash)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED,
+                recovered.repairMetadata?.agentInvocation?.assessmentStatus)
+            assertEquals(assessment.sha256, recovered.repairMetadata?.agentInvocation?.assessmentSha256)
+        }
     }
 
     @Test
@@ -4477,6 +4560,27 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `intent-only interrupted repair remains archivable before a later accepted repair`() {
+        val fixture = releaseRepairFixture(intentOnlyRejectedPrefix = true, schema7AgentEvidence = true)
+        var interruptedIntentPath = ""
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { graph ->
+            val interrupted = graph.snapshot.nodes.drop(1).first()
+            assertEquals(ModuleRevisionStatus.REJECTED, interrupted.status)
+            assertNotNull(interrupted.repairMetadata?.turnIntent)
+            assertNull(interrupted.repairMetadata?.agentInvocation)
+            interruptedIntentPath = requireNotNull(interrupted.repairMetadata?.turnIntent?.intentPath)
+            assertEquals(ModuleRevisionStatus.ACCEPTED, graph.snapshot.nodes.last().status)
+        }
+
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("intent-only-prefix.zip"))
+        val extracted = fixture.project.parent.resolve("intent-only-prefix-extracted")
+        val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath, extracted)
+        assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+        assertEquals(1, lineage.source.acceptedAcpContributions.size)
+        assertTrue(extracted.resolve(interruptedIntentPath).exists())
+    }
+
+    @Test
     fun `accepted ACP repair of undispatched fallback clears unresolved manifest ownership`() {
         val fixture = releaseRepairFixture(undispatchedFallback = true)
         val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
@@ -6706,6 +6810,42 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `repair assessment provenance is cross checked against the immutable ACP receipt`() {
+        val fields = listOf(
+            "sessionIdSha256" to "0".repeat(64),
+            "updatesSha256" to "1".repeat(64),
+            "normalizedStopReason" to "no_changes",
+            "policySha256" to "2".repeat(64),
+        )
+        fields.forEach { (field, replacement) ->
+            val fixture = releaseRepairFixture(schema7AgentEvidence = true)
+            val graphPath = fixture.project.resolve("reports/repair-revisions/graph.json")
+            val graph = Json.parseToJsonElement(graphPath.readText()).jsonObject
+            val acceptedNode = graph.getValue("nodes").jsonArray.last().jsonObject
+            val invocation = acceptedNode.getValue("repairMetadata").jsonObject
+                .getValue("agentInvocation").jsonObject
+            val assessmentPath = fixture.project.resolve(invocation.getValue("assessmentPath").jsonPrimitive.content)
+            val oldDigest = invocation.getValue("assessmentSha256").jsonPrimitive.content
+            val changedAssessment = JsonObject(
+                Json.parseToJsonElement(assessmentPath.readText()).jsonObject +
+                    (field to JsonPrimitive(replacement)),
+            )
+            val bytes = OracleJson.canonicalBytes(changedAssessment, StrictJsonLimits())
+            val newDigest = sha256(bytes)
+            assessmentPath.writeBytes(bytes)
+            listOf(graphPath, fixture.project.resolve("reports/repair_history.json")).forEach { path ->
+                path.writeText(path.readText().replace(oldDigest, newDigest))
+            }
+
+            val failure = assertFailsWith<IllegalArgumentException>(field) {
+                ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile)
+            }
+            assertTrue(failure.message.orEmpty().contains("assessment") ||
+                failure.message.orEmpty().contains("invocation"), failure.message)
+        }
+    }
+
+    @Test
     fun `archive creation rejects a pending repair assessment`() {
         val fixture = releaseRepairFixture()
         ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { graph ->
@@ -8556,6 +8696,8 @@ class ModuleRevisionGraphTest {
         budget: RepairResourceBudget = RepairResourceBudget(),
         legacyRejectedPrefix: Boolean = false,
         legacyPrefixHasChanges: Boolean = true,
+        intentOnlyRejectedPrefix: Boolean = false,
+        schema7AgentEvidence: Boolean = false,
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
         val project = generatedProject(undispatchedFallback, profile, temporaryParent)
@@ -8566,8 +8708,30 @@ class ModuleRevisionGraphTest {
         val target = project.resolve(relative)
         val before = target.readBytes()
         val after = before + "\n/* archive release ACP repair */\n".toByteArray()
-        require(!(recoveredRollbackPrefix && legacyRejectedPrefix))
-        val prefixAttempts = if (recoveredRollbackPrefix || legacyRejectedPrefix) 1 else 0
+        require(listOf(recoveredRollbackPrefix, legacyRejectedPrefix, intentOnlyRejectedPrefix).count { it } <= 1)
+        require(!intentOnlyRejectedPrefix || schema7AgentEvidence)
+        val prefixAttempts = if (recoveredRollbackPrefix || legacyRejectedPrefix || intentOnlyRejectedPrefix) 1 else 0
+        if (intentOnlyRejectedPrefix) {
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
+                val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
+                graph.beginRun(2, 60_000)
+                val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
+                    1, "compile", "bounded failure", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
+                val identity = decompengine.agent.AgentTurnIdentity(
+                    java.util.UUID.randomUUID().toString(), attempt.id, "a".repeat(64), "interrupted-archive-workflow",
+                )
+                graph.createAndPersistAgentTurnIntent(
+                    attempt, identity, "interrupted-archive-workflow", "b".repeat(64),
+                )
+            }
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
+                val interrupted = graph.snapshot.nodes.last()
+                assertEquals(ModuleRevisionStatus.REJECTED, interrupted.status)
+                assertNotNull(interrupted.repairMetadata?.turnIntent)
+                assertNull(interrupted.repairMetadata?.agentInvocation)
+                graph.synchronizeRepairHistory()
+            }
+        }
         if (legacyRejectedPrefix) {
             require(!includeProvisional && rejectedAttempts == 0)
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
@@ -8680,6 +8844,40 @@ class ModuleRevisionGraphTest {
                 ))
             }
             graph.beginRun((if (includeProvisional && !abandonProvisional) 2 else 1) + rejectedAttempts, 60_000)
+            fun persistInvocationWithIntent(
+                attempt: ModuleRevisionAttempt,
+                document: AcpExecutionReceiptDocument,
+            ): decompengine.project.AgentTurnIntent? {
+                if (!schema7AgentEvidence) {
+                    graph.persistAndBindAgentInvocation(attempt, document)
+                    return null
+                }
+                val verified = decompengine.project.verifyAcpExecutionReceiptDocument(
+                    document.json.toByteArray(Charsets.UTF_8),
+                    TRACE_REPAIR_ACP_RECEIPT_KIND,
+                    TRACE_REPAIR_ACP_TASK_FIELD,
+                    attempt.id,
+                )
+                val workflowId = "archive-schema-seven-workflow"
+                val identity = AgentTurnIdentity(
+                    java.util.UUID.randomUUID().toString(), attempt.id, document.requestSha256, workflowId,
+                )
+                val intent = decompengine.project.AgentTurnIntent.create(
+                    identity,
+                    workflowId,
+                    attempt.id,
+                    graph.snapshot.profileSha256,
+                    verified.accessPolicySha256,
+                    graph.snapshot.nodes.single {
+                        it.id == (graph.snapshot.provisionalHeadId ?: graph.snapshot.headId)
+                    }.sourceRevisionSha256,
+                )
+                assertEquals(attempt.id, intent.attemptId)
+                assertEquals(attempt.id, intent.taskId)
+                graph.persistAndBindAgentTurnIntent(attempt, intent)
+                graph.persistAndBindAgentInvocation(attempt, document)
+                return intent
+            }
             fun bindObservations(proof: RepairValidationProof) {
                 graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
                 graph.bindExpectedObservations(sha256(buildString {
@@ -8693,7 +8891,8 @@ class ModuleRevisionGraphTest {
             repeat(rejectedAttempts) { index ->
                 val rejected = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
                     prefixAttempts + index + 1, "compile", "bounded failure", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
-                graph.persistAndBindAgentInvocation(rejected, completeAcpReceiptDocument(project, rejected, relative, before, after))
+                persistInvocationWithIntent(rejected,
+                    completeAcpReceiptDocument(project, rejected, relative, before, after))
                 graph.installCandidate(rejected, mapOf(relative to after))
                 graph.reject(rejected, RepairEvidence("rejected", "synthetic prior rejected candidate"))
             }
@@ -8705,7 +8904,7 @@ class ModuleRevisionGraphTest {
                     iterationIndex = prefixAttempts + rejectedAttempts + 1, failureKind = "compile", prompt = "bounded failure", summary = null,
                     retainedRegressionIds = corpus.inputs.map(ProcessInput::id), before = null,
                     regressionCorpusSha256 = corpus.sha256))
-                graph.persistAndBindAgentInvocation(provisional,
+                persistInvocationWithIntent(provisional,
                     completeAcpReceiptDocument(project, provisional, path, betaBefore, betaAfter))
                 graph.installCandidate(provisional, mapOf(path to betaAfter))
                 val proof = archiveValidationProofFixture(graph, provisional, project, corpus.inputs,
@@ -8731,10 +8930,38 @@ class ModuleRevisionGraphTest {
                 ),
             )
             val document = completeAcpReceiptDocument(project, attempt, relative, before, after)
-            graph.persistAndBindAgentInvocation(attempt, document)
+            val intent = persistInvocationWithIntent(attempt, document)
             graph.installCandidate(attempt, mapOf(relative to after))
             val proof = archiveValidationProofFixture(graph, attempt, project, corpus.inputs)
             bindObservations(proof)
+            if (intent != null) {
+                val verified = decompengine.project.verifyAcpExecutionReceiptDocument(
+                    document.json.toByteArray(Charsets.UTF_8),
+                    TRACE_REPAIR_ACP_RECEIPT_KIND,
+                    TRACE_REPAIR_ACP_TASK_FIELD,
+                    attempt.id,
+                )
+                val assessment = decompengine.project.AcpChangeAssessment.create(
+                    intent = intent,
+                    receiptSha256 = document.sha256,
+                    sessionIdSha256 = verified.sessionIdCommitmentSha256?.let {
+                        sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+                    },
+                    changesSha256 = verified.resultChangesSha256,
+                    beforeSha256 = intent.beforeSha256,
+                    afterSha256 = proof.sourceRevisionSha256,
+                    observation = decompengine.project.AcpChangeObservationStatus.COMPLETE,
+                    protocolStopCode = null,
+                    normalizedStopReason = AgentStopReason.COMPLETED,
+                    policyVerdict = decompengine.project.AcpChangePolicyVerdict.ALLOW,
+                    reasonCodes = emptyList(),
+                    validationStatus = decompengine.project.AcpChangeValidationStatus.PASSED,
+                    validationProofSha256 = listOf(proof.evidenceSha256),
+                    eligibility = decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+                    updatesSha256 = verified.updatesSha256,
+                )
+                graph.persistAndBindAgentAssessment(attempt, assessment)
+            }
             val accepted = graph.accept(attempt, RepairEvidence("valid", "synthetic archive fixture observations matched"), proof)
             binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
             graph.synchronizeRepairHistory()

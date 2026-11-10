@@ -35,6 +35,7 @@ import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentUsage
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.renderAgentPrompt
+import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -1081,6 +1082,64 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         } finally {
             Files.walk(temp).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `schema seven cache reuse rejects a rehashed assessment that disagrees with its receipt`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "reconstruction-cache-assessment-")
+        val output = temp.resolve("output")
+        try {
+            val model = RecoveredProgramModel(
+                inputSha256 = transactionalInputSha256,
+                functions = listOf(RecoveredFunction(
+                    "fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)",
+                )),
+            )
+            val firstHarness = ArchiveEvidenceHarness(accepted = true)
+            val (project, _) = generateTransactionalAgentProject(
+                output, model, GeneratedCMakeReconstructionProfile.descriptor,
+                BoundedLlmModuleReconstructor(
+                    firstHarness,
+                    harnessProvenanceDescriptor = firstHarness.factoryProvenance.stableDescriptor,
+                ),
+                observedBehavior = "cache assessment verification",
+            )
+            val checkpointPath = project.resolve(CHECKPOINT_PATH)
+            val checkpoint = Json.parseToJsonElement(checkpointPath.readText()).jsonObject
+            val sidecarPath = output.resolve(checkpoint.getValue("changeAssessmentPath").jsonPrimitive.content)
+            val changedAssessment = JsonObject(
+                Json.parseToJsonElement(sidecarPath.readText()).jsonObject +
+                    ("updatesSha256" to JsonPrimitive("0".repeat(64))),
+            )
+            val changedBytes = OracleJson.canonicalBytes(changedAssessment)
+            Files.write(sidecarPath, changedBytes)
+            val changedCheckpoint = JsonObject(checkpoint + mapOf(
+                "changeAssessment" to changedAssessment,
+                "changeAssessmentSha256" to JsonPrimitive(sha256(changedBytes)),
+            ))
+            rewriteCheckpointConfidenceAndManifest(project, changedCheckpoint)
+
+            val acceptedSeed = temp.resolve("accepted-source-seed")
+            copyTree(project, acceptedSeed)
+            var dispatched = false
+            val trackingHarness = ArchiveEvidenceHarness(accepted = true, beforeExecution = { dispatched = true })
+            generateTransactionalAgentProject(
+                output, model, GeneratedCMakeReconstructionProfile.descriptor,
+                BoundedLlmModuleReconstructor(
+                    trackingHarness,
+                    harnessProvenanceDescriptor = trackingHarness.factoryProvenance.stableDescriptor,
+                ),
+                observedBehavior = "cache assessment verification",
+                seedSourceTree = acceptedSeed,
+            )
+            assertTrue(dispatched, "tampered schema-7 evidence must not authorize cache reuse")
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(Files::deleteIfExists)
             }
         }
     }

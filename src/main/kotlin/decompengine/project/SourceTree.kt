@@ -870,7 +870,10 @@ object SourceTreeGenerator {
                     currentSourcePassesAdapter
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
                 it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
-                    it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
+                    it.hasCurrentExecutionEvidence(
+                        projectDir, configuredExecutionEvidencePath, false, turnEvidenceStore, module.id,
+                        profile, module.sourcePath,
+                    )
             }
             val request = ModuleReconstructionRequest(
                 module,
@@ -926,6 +929,10 @@ object SourceTreeGenerator {
                         projectDir = projectDir,
                         configuredEvidencePath = configuredExecutionEvidencePath,
                         evidenceRequired = selectedReconstructor.requiresExecutionEvidenceForCheckpointReuse(),
+                        turnEvidenceStore = turnEvidenceStore,
+                        moduleId = module.id,
+                        profile = profile,
+                        sourcePath = module.sourcePath,
                     ) &&
                     (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
@@ -1553,6 +1560,10 @@ object SourceTreeGenerator {
             projectDir: Path,
             configuredEvidencePath: String?,
             evidenceRequired: Boolean,
+            turnEvidenceStore: ReconstructionTurnEvidenceStore?,
+            moduleId: String,
+            profile: ReconstructionProfile,
+            sourcePath: String,
         ): Boolean {
             val checkpointClaimsAgentExecution =
                 moduleClaimsAgentExecution(generator, reconstructorIdentity)
@@ -1564,7 +1575,28 @@ object SourceTreeGenerator {
             if (configuredEvidencePath == null || evidencePath != configuredEvidencePath) return false
             val expectedDigest = requireNotNull(executionEvidenceSha256)
             if (schemaVersion >= 4 && accepted && executionReleaseComplete != true) return false
-            return boundedCheckpointExecutionEvidenceSha256(projectDir, evidencePath) == expectedDigest
+            if (boundedCheckpointExecutionEvidenceSha256(projectDir, evidencePath) != expectedDigest) return false
+            if (schemaVersion < 7) return true
+            return turnEvidenceStore?.verifyCheckpointProvenance(
+                moduleId = moduleId,
+                profileSha256 = profile.sha256,
+                sourcePath = sourcePath,
+                sourceSha256 = sourceSha256,
+                accepted = accepted,
+                intentPath = turnIntentPath,
+                intentSha256 = turnIntentSha256,
+                intent = turnIntent,
+                receiptPath = turnReceiptPath,
+                receiptSha256 = turnReceiptSha256,
+                executionEvidenceSha256 = executionEvidenceSha256,
+                assessmentPath = changeAssessmentPath,
+                assessmentSha256 = changeAssessmentSha256,
+                assessment = changeAssessment,
+                compilation = compilation,
+                executionRequestSha256 = executionRequestSha256,
+                executionTerminalOutcome = executionTerminalOutcome,
+                executionReleaseComplete = executionReleaseComplete,
+            ) == true
         }
 
         fun toJson(): String = buildString {
