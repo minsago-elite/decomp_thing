@@ -932,7 +932,10 @@ class ArchivalReconstructionService(
         onCommittedPublication: () -> Unit = {},
     ): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
-        val admittedOutputDir = workspace?.canonicalRoot ?: outputDir
+        // Canonicalize the caller's supplied root before comparing it with the lease. This
+        // accepts symlinked ancestors while still rejecting a caller path unrelated to the
+        // workspace that owns publication.
+        val admittedOutputDir = if (workspace == null) outputDir else outputDir.toRealPath()
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val publicationRequirement = selectedReconstructor.publicationRequirement()
         require(publicationRequirement != ReconstructionPublicationRequirement.TRANSACTIONAL || workspace != null) {
