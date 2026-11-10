@@ -58,7 +58,6 @@ class HistoricalModulePromptReplayTest {
             for (base in ReconstructionProfiles.builtIn) {
                 val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
                     base.budgets.copy(reconstructionMaximumContextCharacters = 1), base.adapterConfiguration)
-                val project = temp.resolve(profile.id)
                 val model = model()
                 val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
                 val module = plan.modules.single()

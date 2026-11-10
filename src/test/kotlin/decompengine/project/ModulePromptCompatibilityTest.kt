@@ -574,7 +574,7 @@ class ModulePromptCompatibilityTest {
             assertTrue(failure.message.orEmpty().contains("agent-generated module is not accepted"), failure.message)
             assertEquals(priorAudit, project.resolve("reports/archival_audit.json").readText())
         } finally {
-            Files.walk(output).use { paths ->
+            Files.walk(project).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
         }
@@ -604,7 +604,7 @@ class ModulePromptCompatibilityTest {
             assertTrue(failure.message.orEmpty().contains("checkpoint is absent from the source manifest"))
             assertFalse(Files.exists(project.resolve("reports/archival_audit.json")))
         } finally {
-            Files.walk(output).use { paths ->
+            Files.walk(project).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
         }
