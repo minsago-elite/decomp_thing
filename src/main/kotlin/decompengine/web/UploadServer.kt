@@ -891,8 +891,8 @@ class UploadServer(
         val view = jobs.presentation(jobId)
         val query = parseRecordedRepairHistoryQuery(exchange.requestURI.rawQuery)
         val reports = query.runId?.let { jobs.reportContext(jobId, it) } ?: view.reports
-        val captured = try { jobs.withRunSourceReadLease(jobId, reports.runId) {
-            val recorded = jobs.readRecordedRepairHistory(jobId, reports.runId)
+        val captured = try { jobs.withRunSourceReadLease(jobId, reports.runId, failFast = true) {
+            val recorded = jobs.readRecordedRepairHistory(jobId, reports.runId, failFast = true)
             val page = try {
                 decompengine.repair.recordedRepairHistoryPage(recorded, query.selection, MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS)
             } catch (failure: decompengine.repair.RepairRecordedSelectionFailure) {
@@ -1152,7 +1152,7 @@ class UploadServer(
             it.removePrefix("runId=")
         }
         val context = jobs.reportContext(jobId, runId)
-        val captured = jobs.withRunSourceReadLease(jobId, context.runId) {
+        val captured = jobs.withRunSourceReadLease(jobId, context.runId, failFast = true) {
             val source = sourceEvidence.read(jobId, context.artifactPrefix)
             val text = source.text(normalized)
             val currentBuild = runCatching { archiveEvidence.read(jobId, reportPrefix = context.artifactPrefix) }.getOrNull()
@@ -1182,7 +1182,7 @@ class UploadServer(
             return
         }
         val limit = if (isProgressJournalArtifact(relativePath)) AgentProgressJournal.MAXIMUM_READ_BYTES.toLong() else MAX_ARTIFACT_BYTES
-        val artifact = jobs.readArtifact(jobId, relativePath, limit)
+        val artifact = jobs.readArtifact(jobId, relativePath, limit, failFast = true)
         val name = Path.of(relativePath).fileName
         exchange.sendUntrustedAttachment(200, progressArtifactProjection(relativePath, artifact.bytes), contentType(name), name.toString())
     }

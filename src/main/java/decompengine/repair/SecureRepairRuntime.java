@@ -37,6 +37,15 @@ public final class SecureRepairRuntime {
 
     /** Opens the sole production repair facade from immutable data-only configuration. */
     public static SecureRepairSession open(RepairRuntimeConfiguration configuration) {
+        return open(prepare(configuration));
+    }
+
+    /**
+     * Resolve configuration, containment, and harness-selection refusals without opening history
+     * or a graph. CLI callers run this under the exclusive publication lease before persisting
+     * the repair-in-progress marker.
+     */
+    public static Prepared prepare(RepairRuntimeConfiguration configuration) {
         Objects.requireNonNull(configuration, "configuration");
         RepairRuntimeProfileRegistry.ResolvedProfile resolved =
             PROFILE_REGISTRY.requireProfile(configuration.getProfileId());
@@ -50,11 +59,6 @@ public final class SecureRepairRuntime {
                 "public repair execution requires a strict contained validation strategy"
             );
         }
-        RegisteredProfile profile = new RegisteredProfile(
-            resolved.id(),
-            resolved.indexProfile()
-        );
-
         Map<String, String> hostEnvironment = Map.copyOf(System.getenv());
         String harnessOverride = configuration.getHarnessOverride();
         Map<String, String> effectiveEnvironment = hostEnvironment;
@@ -68,6 +72,21 @@ public final class SecureRepairRuntime {
         AcpHarnessSelection harnessSelection = AcpHarnessFactory.INSTANCE.fromEnvironment(
             effectiveEnvironment
         );
+        RegisteredProfile profile = new RegisteredProfile(
+            resolved.id(),
+            resolved.indexProfile()
+        );
+        return new Prepared(configuration, profile, validation, harnessSelection);
+    }
+
+    /** Opens a previously prepared runtime, consuming the opaque plan exactly once. */
+    public static SecureRepairSession open(Prepared prepared) {
+        Objects.requireNonNull(prepared, "prepared");
+        prepared.consume();
+        RepairRuntimeConfiguration configuration = prepared.configuration;
+        RegisteredProfile profile = prepared.profile;
+        RepairValidationStrategy validation = prepared.validation;
+        AcpHarnessSelection harnessSelection = prepared.harnessSelection;
         AgentHarness harness = harnessSelection.createHarness();
         RepairHistory history = new RepairHistory(
             configuration.getHistoryPath(),
@@ -87,6 +106,32 @@ public final class SecureRepairRuntime {
             false
         );
         return new SecureRepairSession(loop, harnessSelection.getProvenance().getStableDescriptor());
+    }
+
+    /** Opaque one-shot preparation data; it carries no caller-readable graph or runtime authority. */
+    public static final class Prepared {
+        private final RepairRuntimeConfiguration configuration;
+        private final RegisteredProfile profile;
+        private final RepairValidationStrategy validation;
+        private final AcpHarnessSelection harnessSelection;
+        private boolean consumed;
+
+        private Prepared(
+            RepairRuntimeConfiguration configuration,
+            RegisteredProfile profile,
+            RepairValidationStrategy validation,
+            AcpHarnessSelection harnessSelection
+        ) {
+            this.configuration = configuration;
+            this.profile = profile;
+            this.validation = validation;
+            this.harnessSelection = harnessSelection;
+        }
+
+        private synchronized void consume() {
+            if (consumed) throw new IllegalStateException("prepared repair runtime was already consumed");
+            consumed = true;
+        }
     }
 
     /** Package-owned graph acquisition; callers cannot construct a {@link RegisteredProfile}. */

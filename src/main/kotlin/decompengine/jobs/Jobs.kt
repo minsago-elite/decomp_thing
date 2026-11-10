@@ -336,6 +336,7 @@ class JobStore internal constructor(
         jobId: String,
         runId: String?,
         cancel: () -> Unit = {},
+        failFast: Boolean = false,
     ): RepairHistoryReadResult {
         if (!jobId.matches(Regex("[a-f0-9]{32}")) ||
             (runId != null && !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))) {
@@ -349,7 +350,7 @@ class JobStore internal constructor(
         if (!Files.isDirectory(reportPath, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return capture()
         val canonical = reportDirectoryForRead(jobId, reportPrefix)
         return decompengine.project.ReconstructionOutputWorkspace.withReadLeaseIfManaged(
-            canonical, failFast = false, action = capture,
+            canonical, failFast = failFast, action = capture,
         )
     }
 
@@ -357,6 +358,7 @@ class JobStore internal constructor(
         jobId: String,
         relativePath: String,
         maximumBytes: Long,
+        failFast: Boolean = false,
     ): StableRegularFile {
         jobDirectory(jobId)
         requireCanonicalReportPath(relativePath)
@@ -374,7 +376,7 @@ class JobStore internal constructor(
         }
         return if (publicationRoot != null) {
             decompengine.project.ReconstructionOutputWorkspace.withReadLeaseIfManaged(
-                jobDirectory(jobId).resolve(publicationRoot), failFast = false, action = read,
+                jobDirectory(jobId).resolve(publicationRoot), failFast = failFast, action = read,
             )
         } else read()
     }

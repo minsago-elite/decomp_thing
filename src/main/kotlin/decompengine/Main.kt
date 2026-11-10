@@ -88,11 +88,12 @@ internal fun <T> withCliRepairReadLease(projectDirectory: Path, action: (Path) -
 
 internal fun <R : AutoCloseable, T> withRepairRuntimeUnderPublicationLease(
     projectDirectory: Path,
+    beforeRepairMarker: (Path) -> Unit,
     openRuntime: (Path) -> R,
     canRetireRepairMarker: (T) -> Boolean,
     action: (R, Path) -> T,
 ): T = ReconstructionOutputWorkspace.withProjectMutationLease(
-    projectDirectory, canRetireRepairMarker,
+    projectDirectory, canRetireRepairMarker, beforeRepairMarker,
 ) { admittedProject -> openRuntime(admittedProject).use { runtime -> action(runtime, admittedProject) } }
 
 internal fun repairOutcomeAllowsWorkspaceMarkerRetirement(outcome: decompengine.repair.RepairRunOutcome): Boolean =
@@ -454,10 +455,15 @@ private fun runRepair(args: List<String>) {
     val projectDirectory: Path = project
     val environment = System.getenv()
     val exitCode = runRepairCliAction(environment.values) { redactor ->
-        val result = withRepairRuntimeUnderPublicationLease(projectDirectory, { admittedProject ->
+        var preparedRuntime: SecureRepairRuntime.Prepared? = null
+        val result = withRepairRuntimeUnderPublicationLease(projectDirectory, beforeRepairMarker = { admittedProject ->
             val reportsDir = decompengine.repair.repairReportsDirectory(admittedProject, reports)
-            SecureRepairRuntime.open(prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride))
-        }, ::repairOutcomeAllowsWorkspaceMarkerRetirement) { runtime, admittedProject ->
+            preparedRuntime = SecureRepairRuntime.prepare(
+                prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride),
+            )
+        }, openRuntime = { _ ->
+            SecureRepairRuntime.open(checkNotNull(preparedRuntime) { "repair runtime preflight was not completed" })
+        }, canRetireRepairMarker = ::repairOutcomeAllowsWorkspaceMarkerRetirement) { runtime, admittedProject ->
             val reportsDir = decompengine.repair.repairReportsDirectory(admittedProject, reports)
             renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {

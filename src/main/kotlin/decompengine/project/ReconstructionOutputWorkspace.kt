@@ -351,6 +351,14 @@ internal class ReconstructionOutputWorkspace private constructor(
             projectDirectory: Path,
             canRetireRepairMarker: (T) -> Boolean,
             action: (Path) -> T,
+        ): T = withProjectMutationLease(projectDirectory, canRetireRepairMarker, {}, action)
+
+        /** Run configuration-only checks under the exclusive lease but before persisting repair state. */
+        internal fun <T> withProjectMutationLease(
+            projectDirectory: Path,
+            canRetireRepairMarker: (T) -> Boolean,
+            beforeRepairMarker: (Path) -> Unit,
+            action: (Path) -> T,
         ): T {
             val project = resolveProjectAuthority(projectDirectory)
             if (project.fileName?.toString() != "source-tree") return action(project)
@@ -359,6 +367,7 @@ internal class ReconstructionOutputWorkspace private constructor(
             val hasLockMarker = Files.exists(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)
             if (!hasActiveMarker && !hasLockMarker) {
                 requireReadablePublicationState(reports)
+                beforeRepairMarker(project)
                 return action(project)
             }
             if (!Files.isRegularFile(reports.resolve(ACTIVE), NOFOLLOW_LINKS) ||
@@ -415,6 +424,7 @@ internal class ReconstructionOutputWorkspace private constructor(
                 }
                 requireReadablePublicationState(canonicalRoot, allowRepairInProgress = true)
                 removeAbandonedRepairMutationTemps(rootDescriptor, canonicalRoot)
+                beforeRepairMarker(project)
                 ensureRepairMutationMarker(rootDescriptor, canonicalRoot)
                 val result = action(project)
                 validateExclusiveMutationAuthority(rootDescriptor, lockDescriptor, canonicalRoot)

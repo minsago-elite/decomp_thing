@@ -9,14 +9,13 @@ import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowRunObservation
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowUsage
-import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
-import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -131,33 +130,58 @@ internal class WorkflowExecutionMeter(
     /** Exact retained bytes, or null when the bounded walk could not complete (treated as exhausted). */
     fun outputBytes(): Long? {
         outputBytesOverride?.let { return it() }
-        // isDirectory collapses absence, denied reads, links and replaced roots into false. Only
-        // known absence is empty output; every other incomplete observation must fail closed.
-        val root = try {
+        // Inspect the retained tree through descriptor metadata and O_NOATIME directory reads.
+        // Ordinary Files.walkFileTree advances directory atime, which is part of the exact source
+        // witness captured by repair publication and would make the metering read mutate its input.
+        val rootState = try {
             Files.readAttributes(reportsDirectory, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
         } catch (_: NoSuchFileException) { return 0L } catch (_: java.io.IOException) { return null }
-        if (!root.isDirectory) return null
+        if (!rootState.isDirectory || maximumEntries <= 0) return null
         var total = 0L
         var entries = 0
         return try {
-            Files.walkFileTree(reportsDirectory, object : SimpleFileVisitor<Path>() {
-                override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    if (++entries > maximumEntries) throw WalkLimit()
-                    return FileVisitResult.CONTINUE
+            LinuxFilesystemSyscalls.openRoot(reportsDirectory).use { root ->
+                val rootIdentity = LinuxFilesystemSyscalls.identity(root.fd)
+                if (!rootIdentity.isDirectory || rootIdentity.isSymbolicLink) {
+                    throw java.io.IOException("output root is not a directory")
                 }
-                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    // The root may have been replaced after its initial metadata read.
-                    if (file == reportsDirectory || ++entries > maximumEntries) throw WalkLimit()
-                    total = if (Long.MAX_VALUE - total < attrs.size()) Long.MAX_VALUE else total + attrs.size()
-                    return FileVisitResult.CONTINUE
+                entries = 1
+
+                fun visit(directory: decompengine.acp.LinuxDescriptor) {
+                    val names = LinuxFilesystemSyscalls.directoryEntryNamesWithoutAtime(
+                        directory,
+                        maximumEntries,
+                        onEntry = {
+                            if (entries >= maximumEntries) throw WalkLimit()
+                            entries++
+                        },
+                    )
+                    for (name in names) {
+                        val entry = LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)
+                        if (entry == null) {
+                            // Match Files.walkFileTree's vanished-entry behavior.
+                            entries--
+                            continue
+                        }
+                        entry.use { pinnedEntry ->
+                            val state = LinuxFilesystemSyscalls.fileState(pinnedEntry)
+                            if (state.identity.isDirectory && !state.identity.isSymbolicLink) {
+                                LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { childDirectory ->
+                                    val opened = LinuxFilesystemSyscalls.identity(childDirectory.fd)
+                                    if (opened.key != state.identity.key || opened.mountId != state.identity.mountId) {
+                                        throw java.io.IOException("output directory changed during metering")
+                                    }
+                                    visit(childDirectory)
+                                }
+                            } else {
+                                total = if (Long.MAX_VALUE - total < state.size) Long.MAX_VALUE else total + state.size
+                            }
+                        }
+                    }
                 }
-                // A vanished entry is no longer retained. Denied/incomplete reads cannot prove a
-                // byte total and must not turn an unreadable subtree into zero/partial output.
-                override fun visitFileFailed(file: Path, exc: java.io.IOException): FileVisitResult {
-                    if (exc is NoSuchFileException) return FileVisitResult.CONTINUE
-                    throw exc
-                }
-            })
+
+                visit(root)
+            }
             total
         } catch (_: WalkLimit) { null } catch (_: java.io.IOException) { null }
     }

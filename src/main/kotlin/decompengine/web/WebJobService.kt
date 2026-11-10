@@ -888,10 +888,14 @@ class WebJobService(
         listLegacyArtifactSummaries(reportContext(jobId, runId), recordedRepair, page)
 
     /** Authorize the selected durable job/run before the fixed retained canonical read. */
-    internal fun readRecordedRepairHistory(jobId: String, runId: String? = null): decompengine.repair.RepairHistoryReadResult {
+    internal fun readRecordedRepairHistory(
+        jobId: String,
+        runId: String? = null,
+        failFast: Boolean = true,
+    ): decompengine.repair.RepairHistoryReadResult {
         requireInitializedRead()
         val selected = reportContext(jobId, runId)
-        return store.readRecordedRepairHistory(jobId, selected.runId)
+        return store.readRecordedRepairHistory(jobId, selected.runId, failFast = failFast)
     }
 
     /** One existing read unit under lifecycle ownership; manifest parsing never holds this monitor. */
@@ -991,11 +995,18 @@ class WebJobService(
     }
 
     /** Hold one shared lease across a complete capture of one authorized attempt. */
-    internal fun <T> withRunSourceReadLease(jobId: String, runId: String?, action: () -> T): T {
+    internal fun <T> withRunSourceReadLease(
+        jobId: String,
+        runId: String?,
+        failFast: Boolean = true,
+        action: () -> T,
+    ): T {
         // Resolve authorization before taking the publication lease. Service authorization uses
         // this monitor, while publication can wait for the workspace lock; do not nest them.
         val selected = reportContext(jobId, runId)
-        return decompengine.project.ReconstructionOutputWorkspace.withReadLeaseIfManaged(selected.reportsDirectory) {
+        return decompengine.project.ReconstructionOutputWorkspace.withReadLeaseIfManaged(
+            selected.reportsDirectory, failFast = failFast,
+        ) {
             val previous = leasedReportContext.get()
             leasedReportContext.set(LeasedReportContext(jobId, selected))
             try { action() } finally {
@@ -1137,14 +1148,19 @@ class WebJobService(
     }
 
     /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */
-    internal fun readArtifact(jobId: String, relativePath: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
+    internal fun readArtifact(
+        jobId: String,
+        relativePath: String,
+        maximumBytes: Long,
+        failFast: Boolean = true,
+    ): decompengine.repair.StableRegularFile {
         val segments = canonicalReportSegments(relativePath)
         leasedReportContext.get()?.takeIf { it.jobId == jobId }?.let { leased ->
             require(relativePath.startsWith("${leased.context.artifactPrefix}/")) {
                 "artifact read escaped its pinned report context"
             }
             requireInitializedRead()
-            return store.readArtifact(jobId, relativePath, maximumBytes)
+            return store.readArtifact(jobId, relativePath, maximumBytes, failFast)
         }
         val selectedVersion = synchronized(this) {
             requireInitializedRead()
@@ -1152,7 +1168,7 @@ class WebJobService(
             else presentationStateToken(presentation(jobId))
         }
         // Never hold the service monitor while the store waits for the reconstruction read lease.
-        val artifact = store.readArtifact(jobId, relativePath, maximumBytes)
+        val artifact = store.readArtifact(jobId, relativePath, maximumBytes, failFast)
         synchronized(this) {
             requireInitializedRead()
             val currentVersion = if (segments[1] == "runs") getAttempt(jobId, segments[2]).version

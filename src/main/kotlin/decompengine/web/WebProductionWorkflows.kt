@@ -312,7 +312,7 @@ internal class RepairWorkflowAdapter(
                 val publication = workspace.publish(setOf("source-tree"), { stage ->
                     val project = stage.resolve("source-tree")
                     // The attempt owns a private staged copy; selected revision evidence is never modified.
-                    ReconstructionOutputWorkspace.withReadLease(input.parent) { copyWebSourceTree(input, project) }
+                    ReconstructionOutputWorkspace.withReadLeaseIfManaged(input.parent) { copyWebSourceTree(input, project) }
                     val outcome = engines.repair(project, context.job.binaryPath, context.reportsDirectory, harness)
                     repairOutcome = outcome
                     check(outcome.recoveryComplete && outcome.runState.terminal &&
