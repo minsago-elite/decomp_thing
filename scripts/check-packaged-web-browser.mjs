@@ -46,6 +46,59 @@ if (values.help) {
 const nodeVersion = process.versions.node;
 const expectedNode = readFileSync(join(repo, '.node-version'), 'utf8').trim();
 assert.equal(nodeVersion, expectedNode, `Use the pinned test-driver Node ${expectedNode}`);
+function gitText(args, maxBuffer = 1024 * 1024) {
+  return execFileSync('git', args, { cwd: repo, encoding: 'utf8', maxBuffer }).trim();
+}
+function identifyQualificationSource() {
+  const checkedOutCommit = gitText(['rev-parse', 'HEAD']);
+  const driverCommit = process.env.GITHUB_SHA ?? checkedOutCommit;
+  assert.equal(driverCommit, checkedOutCommit, 'GITHUB_SHA must identify the checked-out qualification source');
+  const treeSha = gitText(['rev-parse', `${driverCommit}^{tree}`]);
+  const status = gitText(['status', '--porcelain=v1', '--untracked-files=all', '--', 'scripts']);
+  assert.equal(status, '', 'qualification scripts must match the checked-out source tree');
+
+  const entries = execFileSync('git', ['ls-tree', '-r', '-z', '--full-tree', driverCommit, '--', 'scripts'], {
+    cwd: repo,
+    encoding: 'buffer',
+    maxBuffer: 8 * 1024 * 1024,
+  }).toString('utf8').split('\0').filter(Boolean).map((entry) => {
+    const tab = entry.indexOf('\t');
+    assert.ok(tab > 0, 'Git returned a malformed qualification source tree entry');
+    const [mode, type, blob] = entry.slice(0, tab).split(' ');
+    return { mode, type, blob, path: entry.slice(tab + 1) };
+  }).filter((entry) => entry.type === 'blob');
+  assert.ok(entries.length > 0, 'the checked-out source tree has no tracked qualification scripts');
+  const sourceManifest = entries
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+    .map(({ mode, blob, path }) => `${mode} ${blob} ${path}\n`)
+    .join('');
+
+  let pullRequest = null;
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (eventPath) {
+    const event = JSON.parse(readFileSync(eventPath, 'utf8'));
+    if (event.pull_request) {
+      const baseSha = event.pull_request.base?.sha;
+      const headSha = event.pull_request.head?.sha;
+      assert.match(baseSha ?? '', /^[0-9a-f]{40}$/i, 'pull request event must declare its base commit');
+      assert.match(headSha ?? '', /^[0-9a-f]{40}$/i, 'pull request event must declare its head commit');
+      const commit = gitText(['cat-file', '-p', driverCommit]);
+      const parents = commit.split('\n').filter((line) => line.startsWith('parent ')).map((line) => line.slice(7));
+      const isHeadCheckout = driverCommit === headSha;
+      const isMergeCandidate = parents.length === 2 && parents.includes(baseSha) && parents.includes(headSha);
+      assert.ok(isHeadCheckout || isMergeCandidate,
+        'checked-out qualification commit must be the requested PR head or its two-parent merge candidate');
+      pullRequest = { baseSha, headSha, relation: isHeadCheckout ? 'pull-request-head' : 'pull-request-merge-candidate' };
+    }
+  }
+  return {
+    driverCommit,
+    treeSha,
+    qualificationScripts: { count: entries.length, manifestSha256: createHash('sha256').update(sourceManifest).digest('hex') },
+    pullRequest,
+  };
+}
+const qualificationSource = identifyQualificationSource();
 for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
@@ -99,7 +152,8 @@ let applicationOutput = '';
 let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, ...(values.mode === 'scale' ? { profile: values.profile } : {}), testDirectory: root, driverNode: nodeVersion,
-  driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
+  driverCommit: qualificationSource.driverCommit,
+  sourceIdentity: qualificationSource,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
