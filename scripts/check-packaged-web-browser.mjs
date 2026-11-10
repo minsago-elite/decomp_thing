@@ -370,6 +370,19 @@ async function waitFor(check, label, timeout = 20000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+async function makeOwnedDirectoriesRemovable(directory) {
+  const info = await fs.lstat(directory);
+  assert.ok(info.isDirectory() && !info.isSymbolicLink(), 'Owned cleanup root must be a real directory');
+  await fs.chmod(directory, 0o700);
+  for (const name of await fs.readdir(directory)) {
+    const child = join(directory, name);
+    const childInfo = await fs.lstat(child);
+    if (childInfo.isDirectory() && !childInfo.isSymbolicLink()) {
+      await makeOwnedDirectoriesRemovable(child);
+    }
+  }
+}
+
 async function runSourceTreeColdSamples(expected) {
   const samples = coldSampleRecords;
   const sampleRoot = join(root, 'source-tree-cold-samples');
@@ -511,6 +524,9 @@ async function runSourceTreeColdSamples(expected) {
     assert.equal(await fs.realpath(dirname(workerBrowserTmp)), buildRoot, 'Cold worker temp directory escaped the short owned build path');
     assert.match(basename(workerBrowserTmp), /^\.ct-[A-Za-z0-9]+$/u, 'Cold worker temp directory is not an owned Chromium socket directory');
     await fs.rm(workerBrowserTmp, { recursive: true, force: true });
+    assert.equal(await fs.realpath(dirname(workerWorkParent)), await fs.realpath(sampleDirectory),
+      'Cold worker files escaped their unique sample owner');
+    await makeOwnedDirectoriesRemovable(workerWorkParent);
     await fs.rm(workerWorkParent, { recursive: true, force: true });
     samples.at(-1).cleanup = { ...samples.at(-1).cleanup,
       browserTempRemovedAfterConfirmedTeardown: true, workerFilesRemovedAfterConfirmedTeardown: true };
