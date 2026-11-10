@@ -71,6 +71,22 @@ function sourceRevision(files) {
   return sha256(Buffer.from(canonical, 'utf8'));
 }
 
+function revisionSourceDirectoryId(jobId, runId, revisionId, sourceSha256, files, directoryPath) {
+  const prefix = `${directoryPath}/`;
+  let low = 0;
+  let high = files.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (files[middle].path < prefix) low = middle + 1;
+    else high = middle;
+  }
+  assert.ok(low < files.length && files[low].path.startsWith(prefix), 'fixture modules directory must contain source files');
+  const depth = directoryPath.split('/').length;
+  const digest = sha256(Buffer.from(['revision-source-directory-v1', jobId, runId, revisionId,
+    sourceSha256, directoryPath, String(low), String(depth)].join('\0'), 'utf8'));
+  return `dir_${low}_${depth}_${digest}`;
+}
+
 function manifestFile(path, sha, roles, acceptedImplementation = null) {
   return { path, sha256: sha, generator, promptSha256: null, acceptedImplementation,
     contentKind: 'utf8-text', roles: [...roles].sort(), entityIds: [] };
@@ -140,6 +156,7 @@ export async function seedSourceTreeFixture(root, fileCount = sourceFiles) {
   }
   files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   const sourceSha256 = sourceRevision(files);
+  const modulesDirectoryId = revisionSourceDirectoryId(jobId, runId, revisionId, sourceSha256, files, 'src/modules');
   const manifest = {
     schemaVersion: 3,
     profileId,
@@ -175,7 +192,7 @@ export async function seedSourceTreeFixture(root, fileCount = sourceFiles) {
   };
   await fs.writeFile(join(jobDirectory, 'workflow-state.json'), JSON.stringify(state), { flag: 'wx', mode: 0o600 });
 
-  return { jobId, runId, revisionId, fileCount, sourceSha256, binarySha256, profileId, profileSha256,
+  return { jobId, runId, revisionId, modulesDirectoryId, fileCount, sourceSha256, binarySha256, profileId, profileSha256,
     manifestPath: `reports/runs/${runId}/source-tree/source_tree_manifest.json`,
     descriptorPath: `reports/runs/${runId}/source-tree/reports/build_contract.json` };
 }
