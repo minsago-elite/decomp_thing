@@ -932,27 +932,28 @@ class ArchivalReconstructionService(
         onCommittedPublication: () -> Unit = {},
     ): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
+        val admittedOutputDir = workspace?.canonicalRoot ?: outputDir
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val publicationRequirement = selectedReconstructor.publicationRequirement()
         require(publicationRequirement != ReconstructionPublicationRequirement.TRANSACTIONAL || workspace != null) {
             "agent-backed archival reconstruction requires an active output workspace lease"
         }
-        workspace?.publicationLock?.requireInvocation(outputDir, binaryPath, workspace.inputSha256)
-        adapter.admitGeneration(outputDir.resolve("source-tree"), profile, selectedReconstructor)
-        outputDir.createDirectories()
+        workspace?.publicationLock?.requireInvocation(admittedOutputDir, binaryPath, workspace.inputSha256)
+        adapter.admitGeneration(admittedOutputDir.resolve("source-tree"), profile, selectedReconstructor)
+        admittedOutputDir.createDirectories()
         val observedBehavior = ReconstructionExplorationInput.read(
-            outputDir, profile.budgets.reconstructionMaximumContextCharacters,
+            admittedOutputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
         val selectedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
             ?.withExportBudgets(profile.budgets)
             ?: analyzer
         adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
-        val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        val model = selectedAnalyzer.analyze(binaryPath, admittedOutputDir.resolve("analysis"))
         progress.runContext(model.inputSha256, profile.sha256)
-        val project = outputDir.resolve("source-tree")
-        val compilerFeedback = ModuleCompilerFeedbackStore(outputDir, model.inputSha256, profile.sha256)
-        val progressPath = outputDir.resolve("reconstruction_progress.json")
+        val project = admittedOutputDir.resolve("source-tree")
+        val compilerFeedback = ModuleCompilerFeedbackStore(admittedOutputDir, model.inputSha256, profile.sha256)
+        val progressPath = admittedOutputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
@@ -1024,7 +1025,7 @@ class ArchivalReconstructionService(
             fun publishedPath(path: Path): Path {
                 val normalized = path.toAbsolutePath().normalize()
                 val candidate = candidateRoot.toAbsolutePath().normalize()
-                return if (normalized.startsWith(candidate)) outputDir.resolve(candidate.relativize(normalized)) else path
+                return if (normalized.startsWith(candidate)) admittedOutputDir.resolve(candidate.relativize(normalized)) else path
             }
             publishedBuild = build.copy(
                 projectDir = publishedPath(build.projectDir),
@@ -1035,7 +1036,7 @@ class ArchivalReconstructionService(
         }
 
         val publicationResult = if (workspace == null) {
-            buildCandidate(outputDir)
+            buildCandidate(admittedOutputDir)
             PublicationResult.PUBLISHED
         } else {
             require(workspace.inputSha256 == model.inputSha256) { "reconstruction model input does not match the admitted workspace" }
@@ -1067,8 +1068,8 @@ class ArchivalReconstructionService(
         try {
             progress.phase(if (completeImplementation) AgentWorkflowPhase.COMPLETED else AgentWorkflowPhase.UNRESOLVED)
         } catch (_: Exception) { /* A failed observer cannot undo the durable publication decision. */ }
-        val bundle = requireNotNull(publishedBundle).copy(archivePath = outputDir.resolve("source-tree.zip"))
-        return ArchivalReconstructionResult(outputDir.resolve("source-tree"), requireNotNull(publishedBuild), bundle)
+        val bundle = requireNotNull(publishedBundle).copy(archivePath = admittedOutputDir.resolve("source-tree.zip"))
+        return ArchivalReconstructionResult(admittedOutputDir.resolve("source-tree"), requireNotNull(publishedBuild), bundle)
     }
 }
 
