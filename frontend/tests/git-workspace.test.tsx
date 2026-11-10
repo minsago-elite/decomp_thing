@@ -717,6 +717,53 @@ it('bounds an inspected commit diff and drops an older-history page that arrives
   expect(screen.queryByText('Record candidate')).toBeNull();
 });
 
+it('resets the history window when a refreshed snapshot arrives after paging the old snapshot', async () => {
+  const all = Array.from({ length: 220 }, (_, index) =>
+    commitSummary(index.toString(16).padStart(40, '0'), `History ${index}`, false));
+  historyPages = {};
+  for (let start = 0; start < all.length; start += 20) {
+    historyPages[start === 0 ? 'first' : `page_${start}`] = {
+      entries: all.slice(start, start + 20),
+      nextCursor: start + 20 < all.length ? `page_${start + 20}` : null,
+    };
+  }
+
+  const refreshGate = deferred();
+  let repositoryReads = 0;
+  let holdRefresh = false;
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitRepositories') {
+      repositoryReads++;
+      if (holdRefresh && repositoryReads === 2) await refreshGate.promise;
+    }
+    return serve(kind, path);
+  });
+
+  mount();
+  for (let last = 39; last <= 219; last += 20) {
+    fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
+    await screen.findByText(`History ${last}`);
+  }
+  const history = () => screen.getByRole('list', { name: 'History' });
+  expect(history().querySelectorAll('li')).toHaveLength(200);
+  expect(history().querySelector('li')?.textContent).toContain('History 20');
+  expect(history().querySelector('li:last-child')?.textContent).toContain('History 219');
+
+  holdRefresh = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(repositoryReads).toBe(2));
+  // The old snapshot remains visible while refresh is pending. Move away from its first window;
+  // installing the new 20-row snapshot must reset this offset before rendering it.
+  fireEvent.click(screen.getByRole('button', { name: 'Older commits' }));
+  expect(history().querySelector('li')?.textContent).toContain('History 20');
+  refreshGate.resolve();
+
+  await waitFor(() => {
+    expect(history().querySelectorAll('li')).toHaveLength(20);
+    expect(history().querySelector('li')?.textContent).toContain('History 0');
+  });
+});
+
 it('requests each older history page once and keeps changed files visible when provenance is unavailable', async () => {
   provenanceFails = true;
   mount();
