@@ -599,9 +599,11 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val attemptReceipt = project.resolve("reports/modules/parse.attempt.execution.json")
         assertTrue(attemptReceipt.exists())
         assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("parse.attempt.execution.json"))
+        val acceptedHarness = ArchiveEvidenceHarness(accepted = true)
         generateTransactionalAgentProject(
             project.parent, model, GeneratedCMakeReconstructionProfile.descriptor,
-            BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
+            BoundedLlmModuleReconstructor(acceptedHarness,
+                harnessProvenanceDescriptor = acceptedHarness.factoryProvenance.stableDescriptor),
         )
         assertFalse(attemptReceipt.exists())
         MakeProjectBuilder.build(project)
