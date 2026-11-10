@@ -72,6 +72,7 @@ import decompengine.agent.AgentSessionReference
 import decompengine.agent.AgentSessionJournal
 import decompengine.agent.AgentSessionRecoveryException
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentUsage
@@ -173,8 +174,10 @@ class AcpAgentHarness(
     fun preflight(workflow: AcpPreflightWorkflow, cancellation: AgentCancellation): AcpAgentPreflightResult {
         val requiredCapabilities = configuration.requiredAgentCapabilities + workflow.requiredAgentCapabilities
         val authentication = AtomicReference<AcpAuthenticationInventory?>()
+        val request = preflightRequest(cancellation)
         val receipt = executeInternalReceipt(
-            request = preflightRequest(cancellation),
+            request = request,
+            turnIdentity = AgentTurnIdentity.create("acp-preflight", request),
             onEvent = {},
             capturedFilesystem = null,
             preflightWorkflow = workflow,
@@ -218,8 +221,19 @@ class AcpAgentHarness(
     override fun executeReceipt(
         request: AgentExecutionRequest,
         onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionReceipt = executeReceipt(
+        request,
+        AgentTurnIdentity.create(request.sessionContinuation?.taskId ?: "acp-invocation", request),
+        onEvent,
+    )
+
+    override fun executeReceipt(
+        request: AgentExecutionRequest,
+        turnIdentity: AgentTurnIdentity,
+        onEvent: (AgentExecutionEvent) -> Unit,
     ): AgentExecutionReceipt = executeInternalReceipt(
         request,
+        turnIdentity,
         onEvent,
         capturedFilesystem = null,
         preflightWorkflow = null,
@@ -237,8 +251,23 @@ class AcpAgentHarness(
         initialFiles: Map<String, ByteArray>,
         output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionReceipt = executeCapturedReceipt(
+        request,
+        AgentTurnIdentity.create(request.sessionContinuation?.taskId ?: "acp-captured-invocation", request),
+        initialFiles,
+        output,
+        onEvent,
+    )
+
+    override fun executeCapturedReceipt(
+        request: AgentExecutionRequest,
+        turnIdentity: AgentTurnIdentity,
+        initialFiles: Map<String, ByteArray>,
+        output: BoundedRepairOutput,
+        onEvent: (AgentExecutionEvent) -> Unit,
     ): AgentExecutionReceipt = executeInternalReceipt(
         request,
+        turnIdentity,
         onEvent,
         AcpCapturedRepairFilesystem(initialFiles, output),
         preflightWorkflow = null,
@@ -246,6 +275,7 @@ class AcpAgentHarness(
 
     private fun executeInternalReceipt(
         request: AgentExecutionRequest,
+        turnIdentity: AgentTurnIdentity,
         onEvent: (AgentExecutionEvent) -> Unit,
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
@@ -256,6 +286,7 @@ class AcpAgentHarness(
             RuntimeCopyStatistics.Prefix.create(wallDeadline::observationSample)
         }
         val binding = AgentExecutionRequestBinding.capture(request)
+        turnIdentity.requireBoundTo(binding)
         val evidenceState = AcpInvocationEvidenceState(factoryProvenance.get())
         var schedulingPermit: AcpExecutionScheduler.Permit? = null
         var sessionJournal: AgentSessionJournal? = null
@@ -277,7 +308,7 @@ class AcpAgentHarness(
                         if (request.cancellation.isCancellationRequested()) throw WorkspaceSnapshotCancelled()
                         if (wallDeadline.hasExpired()) throw workspaceSnapshotTimeout("session-reconciliation", null)
                     }
-                    sessionJournal.processStarting(binding.requestSha256)
+                    sessionJournal.processStarting(binding.requestSha256, turnIdentity.turnId)
                     sessionTurnStarted = true
                 } catch (cancelled: WorkspaceSnapshotCancelled) {
                     throw cancelled
@@ -336,7 +367,7 @@ class AcpAgentHarness(
                 includeCompleteExecution = preflightWorkflow == null && outcome is AgentExecutionOutcome.Returned,
             )
             publishCompatibilityEvidence(evidence, modelExecution = preflightWorkflow == null)
-            val receipt = AgentExecutionReceipt(binding, outcome, evidence, cause)
+            val receipt = AgentExecutionReceipt(binding, outcome, evidence, cause, turnIdentity)
             if (sessionTurnStarted) sessionRecovery {
                 sessionJournal?.finishTurn(
                     receipt,

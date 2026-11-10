@@ -14,6 +14,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentWorkspacePath
@@ -1621,6 +1622,7 @@ class TraceGuidedRepairLoop private constructor(
         }
         val stagedBefore = baseContent
         lateinit var agentRequest: AgentExecutionRequest
+        var turnIdentity: AgentTurnIdentity? = null
         val eventRecorder = BoundedAgentExecutionEventRecorder()
         var taskProgress = decompengine.agent.AgentTaskProgress.NONE
         val stagedExecution = try {
@@ -1685,7 +1687,10 @@ class TraceGuidedRepairLoop private constructor(
                         cancellation = cancellation,
                     ).also {
                         agentRequest = it
-                        taskProgress = progress?.task(attempt.id, it, graph) ?: decompengine.agent.AgentTaskProgress.NONE
+                        val identity = AgentTurnIdentity.create(attempt.id, it, graph.snapshot.runs.last().id)
+                        turnIdentity = identity
+                        taskProgress = progress?.task(attempt.id, it, graph, identity)
+                            ?: decompengine.agent.AgentTaskProgress.NONE
                     }
                 },
                 onEvent = { event ->
@@ -1693,6 +1698,7 @@ class TraceGuidedRepairLoop private constructor(
                     taskProgress.event(event)
                     onAgentEvent(event)
                 },
+                turnIdentity = { turnIdentity },
             )
         } catch (failure: Throwable) {
             if (failure is Exception) {

@@ -3,8 +3,22 @@ package decompengine.agent
 /** Display-only workflow observations. A progress event never authorizes a revision. */
 interface AgentWorkflowProgress {
     fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress
+    fun beginTask(taskId: String, request: AgentExecutionRequest, turnIdentity: AgentTurnIdentity): AgentTaskProgress {
+        require(turnIdentity.taskId == taskId) { "agent turn identity belongs to another task" }
+        turnIdentity.requireBoundTo(AgentExecutionRequestBinding.capture(request))
+        return beginTask(taskId, request)
+    }
     fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress =
         beginTask(taskId, request)
+    fun beginTask(
+        taskId: String,
+        request: AgentExecutionRequest,
+        workflowRunId: String,
+        turnIdentity: AgentTurnIdentity,
+    ): AgentTaskProgress {
+        require(turnIdentity.workflowRunId == workflowRunId) { "agent turn identity belongs to another workflow run" }
+        return beginTask(taskId, request, turnIdentity)
+    }
     fun phase(phase: AgentWorkflowPhase, taskId: String? = null, acceptedRevisionSha256: String? = null)
     fun runState(observation: AgentWorkflowRunObservation) =
         phase(observation.phase, observation.taskId, observation.acceptedRevisionSha256)
@@ -24,11 +38,13 @@ interface AgentWorkflowProgress {
 }
 
 interface AgentTaskProgress {
+    val turnIdentity: AgentTurnIdentity? get() = null
     fun event(event: AgentExecutionEvent)
     fun complete(receipt: AgentExecutionReceipt)
 
     companion object {
         val NONE = object : AgentTaskProgress {
+            override val turnIdentity: AgentTurnIdentity? get() = null
             override fun event(event: AgentExecutionEvent) = Unit
             override fun complete(receipt: AgentExecutionReceipt) = Unit
         }

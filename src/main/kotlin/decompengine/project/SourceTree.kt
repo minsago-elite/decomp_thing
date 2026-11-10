@@ -17,6 +17,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.AgentWorkflowPhase
@@ -319,8 +320,9 @@ class BoundedLlmModuleReconstructor(
                 sessionContinuation = sessionContinuation(request),
             )
             val eventRecorder = BoundedAgentExecutionEventRecorder()
-            val taskProgress = progress.beginTask(request.module.id, agentRequest)
-            val receipt = harness.executeReceipt(agentRequest) { event ->
+            val turnIdentity = AgentTurnIdentity.create(request.module.id, agentRequest)
+            val taskProgress = progress.beginTask(request.module.id, agentRequest, turnIdentity)
+            val receipt = harness.executeReceipt(agentRequest, turnIdentity) { event ->
                 eventRecorder.record(event)
                 taskProgress.event(event)
             }

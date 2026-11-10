@@ -167,12 +167,25 @@ class AgentSessionJournal private constructor(
 
     @Synchronized
     fun processStarting(requestSha256: String) {
+        processStarting(requestSha256, turnId = null)
+    }
+
+    @Synchronized
+    fun processStarting(requestSha256: String, turnId: String?) {
         requireSessionDigest(requestSha256)
-        change(
+        turnId?.let { require(runCatching { java.util.UUID.fromString(it) }.isSuccess) { "session turn id must be a UUID" } }
+        val updates = mutableListOf<Pair<String, JsonElement>>(
             "pendingRequestSha256" to JsonPrimitive(requestSha256),
             "cleanupVerified" to JsonPrimitive(false),
             "lastEventSequence" to JsonPrimitive(-1L),
         )
+        if (turnId != null) {
+            updates += "schemaVersion" to JsonPrimitive(2)
+            updates += "pendingTurnId" to JsonPrimitive(turnId)
+        } else if (state.getValue("schemaVersion").jsonPrimitive.int == 2) {
+            updates += "pendingTurnId" to JsonNull
+        }
+        change(*updates.toTypedArray())
     }
 
     @Synchronized
@@ -189,6 +202,9 @@ class AgentSessionJournal private constructor(
     fun finishTurn(receipt: AgentExecutionReceipt, cleanupVerified: Boolean) {
         val requestSha256 = receipt.requestBinding.requestSha256
         require(state.optionalText("pendingRequestSha256") == requestSha256) { "session receipt belongs to another request" }
+        state.optionalText("pendingTurnId")?.let { pendingTurnId ->
+            require(receipt.turnIdentity?.turnId == pendingTurnId) { "session receipt belongs to another turn" }
+        }
         val returned = (receipt.outcome as? AgentExecutionOutcome.Returned)?.result
         val finished = cleanupVerified && returned?.stopReason in setOf(AgentStopReason.COMPLETED, AgentStopReason.NO_CHANGES)
         val phase = if (state.optionalText("phase") in setOf("LOAD_FAILED", "QUARANTINED")) state.optionalText("phase")!!
@@ -199,6 +215,7 @@ class AgentSessionJournal private constructor(
         )
         if (finished) updates["turns"] = appendBounded(state.getValue("turns").jsonArray, buildJsonObject {
             put("requestSha256", requestSha256)
+            receipt.turnIdentity?.let { put("turnId", it.turnId) }
             put("sessionId", requireNotNull(sessionId))
             put("lastEventSequence", lastDurableEventSequence)
             put("outcome", requireNotNull(returned).stopReason.name)
@@ -249,12 +266,13 @@ class AgentSessionJournal private constructor(
         private const val MAXIMUM_BYTES = 1024 * 1024
         private const val MAXIMUM_RECORDS = 256
         private val limits = StrictJsonLimits(maximumInputBytes = MAXIMUM_BYTES)
-        private val keys = setOf(
+        private val baseKeys = setOf(
             "schemaVersion", "workflowSha256", "taskId", "workspaceFiles", "acceptedRevisionSha256",
             "acceptedRequestSha256", "acceptedReceiptSha256", "agentIdentitySha256", "agentIdentity", "sessionId",
             "phase", "decision", "decisions", "conversationRestored", "cleanupVerified",
             "pendingRequestSha256", "lastEventSequence", "turns",
         )
+        private val schema2Keys = baseKeys + "pendingTurnId"
 
         fun open(continuation: AgentSessionContinuation): AgentSessionJournal {
             createPrivateDirectory(continuation.directory)
@@ -279,12 +297,22 @@ class AgentSessionJournal private constructor(
                     requirePrivate(path, directory = false)
                     require(Files.size(path) <= MAXIMUM_BYTES) { "session journal exceeds its byte bound" }
                     val parsed = OracleJson.parseCanonical(Files.readAllBytes(path), limits).jsonObject
-                    require(parsed.keys == keys + "sha256") { "session journal has unknown or missing fields" }
+                    val schemaVersion = parsed["schemaVersion"]?.jsonPrimitive?.int
+                        ?: error("session journal schema is missing")
+                    val allowedKeys = when (schemaVersion) {
+                        1 -> baseKeys + "sha256"
+                        2 -> schema2Keys + "sha256"
+                        else -> error("session journal schema is unsupported")
+                    }
+                    require(parsed.keys == allowedKeys) { "session journal has unknown or missing fields" }
                     val inner = JsonObject(parsed - "sha256")
                     require(parsed.getValue("sha256").jsonPrimitive.content == sessionDigest(OracleJson.canonicalBytes(inner))) {
                         "session journal commitment mismatch"
                     }
-                    require(inner.getValue("schemaVersion") == JsonPrimitive(1))
+                    require(inner.getValue("schemaVersion") == JsonPrimitive(schemaVersion))
+                    inner.optionalText("pendingTurnId")?.let {
+                        require(runCatching { java.util.UUID.fromString(it) }.isSuccess) { "session turn id is invalid" }
+                    }
                     require(inner.getValue("turns").jsonArray.size <= MAXIMUM_RECORDS && inner.getValue("decisions").jsonArray.size <= MAXIMUM_RECORDS)
                     parseFiles(inner.getValue("workspaceFiles").jsonArray)
                     require(inner.getValue("workflowSha256").jsonPrimitive.content == continuation.workflowSha256 &&

@@ -81,6 +81,22 @@ process/sandbox cleanup and without complete execution evidence or a returned
 partial change list. This is deterministic fault injection, not a claim that an
 agent bypassed the independent filesystem or protocol-frame limits.
 
+### Turn correlation
+
+Workflow callers that record progress create one host-owned `AgentTurnIdentity`
+before dispatch. Its UUID, task identity and request commitment are passed to the
+progress projection and execution receipt, including captured repair dispatch.
+ACP session journals write schema 2 when a correlated turn starts and retain that
+turn UUID with a cleanup-verified completed turn. Schema-1 journals remain
+readable; their historical records are not assigned synthetic turn IDs.
+
+This is correlation metadata, not durable workflow intent or an acceptance
+decision. Progress remains display-only. A turn UUID, completed receipt or
+provider stop reason does not prove a complete change observation, authorize a
+candidate, establish validation, or commit publication. Durable intent and
+workflow-assessment records bound to publication recovery remain the separate
+#733 acceptance boundary.
+
 ## Captured repair
 
 `CapturedRepairStagingAuthority` freezes the selected readable source bytes and
