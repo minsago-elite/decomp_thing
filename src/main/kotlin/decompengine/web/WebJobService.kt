@@ -1976,10 +1976,16 @@ class WebJobService(
                     try { requireInitializedRead(); true } catch (_: Exception) { false }
                 }
                 if (!readable) { complete = false; break@jobs }
-                // Storage may wait for publication recovery/readers. Never hold the service monitor
-                // across that wait: source readers can hold the shared lease while consulting it.
+                // This is an HTTP preview: do not wait behind publication ownership or hold the
+                // service monitor across a storage read. Mark transient refusal as incomplete.
                 val bytes = try {
-                    store.readArtifact(id, path, decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong()).bytes
+                    store.readArtifact(id, path, decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong(),
+                        failFast = true).bytes
+                } catch (_: decompengine.project.ReconstructionOutputReadUnavailableException) {
+                    // The HTTP preview is bounded. A publication that is currently exclusive makes
+                    // this preview incomplete; it must not pin a request worker waiting for it.
+                    complete = false
+                    null
                 } catch (_: Exception) { null } ?: continue
                 readBytes += bytes.size
                 val replacement = try { decompengine.jobs.AgentProgressJournalRetention.expiredSnapshot(attempt, bytes, now) }
