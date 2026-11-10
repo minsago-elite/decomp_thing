@@ -52,7 +52,9 @@ internal data class WebJobQuery(
             val archived = fields["archived"] ?: "exclude"
             if (archived !in setOf("exclude", "all", "only")) invalid()
             val cursor = fields["cursor"]
-            if (cursor != null && !cursor.matches(Regex("[A-Za-z0-9_-]{1,128}"))) throw WebAccessDenied(400, "INVALID_CURSOR", "Use a cursor returned by this job collection.")
+            if (cursor != null && (cursor.length !in 1..128 || !cursor.matches(Regex("[A-Za-z0-9_-]+")))) {
+                throw WebAccessDenied(400, "INVALID_CURSOR", "Use a cursor returned by this job collection.")
+            }
             return WebJobQuery(search.lowercase(Locale.ROOT), status, after, before, limit, sort, archived) to cursor
         }
     }
