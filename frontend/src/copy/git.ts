@@ -75,7 +75,7 @@ export const gitCopy = {
   exportDigest: 'Source export SHA-256: {sha}',
   exportVerified: 'Export verified against the commit tree’s blob IDs.',
   exportMismatch: 'Export verification failed.',
-  downloadExport: 'Download source ZIP',
+  downloadExport: 'Download source export',
   refNames: 'Named by: {names}',
   tagName: 'Tag name',
   tagAction: 'Tag this commit',
