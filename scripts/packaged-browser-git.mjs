@@ -104,7 +104,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
   await ready(tab, `document.body.innerText.includes('Branch main') && document.body.innerText.includes('fixture: history 1000')`, 'imported repository status and history');
   const historyRows = `document.querySelectorAll('ol[aria-label="History"] li')`;
-  const maximumRenderedHistoryRows = 500;
+  const maximumRenderedHistoryRows = 200;
   const expectedHistoryIds = fixture.repository.git('local', ['rev-list', 'main']).stdout.trim().split('\n');
   assert.equal(expectedHistoryIds.length, fixture.repository.historyLength, 'The fixture history length must match its Git source');
   assert.equal(await evaluate(tab, `${historyRows}.length`), 20, 'History must start with one bounded page');
