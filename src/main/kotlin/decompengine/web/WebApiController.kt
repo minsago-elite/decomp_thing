@@ -408,6 +408,9 @@ internal class WebApiController(
             }
         } catch (_: decompengine.jobs.ArtifactChangedException) {
             access.sendDenied(exchange, WebAccessDenied(409, "ARTIFACT_CHANGED", publicWebDiagnosticMessage("ARTIFACT_CHANGED")))
+        } catch (_: decompengine.project.ReconstructionOutputReadUnavailableException) {
+            access.sendDenied(exchange, WebAccessDenied(503, "JOB_STORAGE_UNAVAILABLE",
+                publicWebDiagnosticMessage("JOB_STORAGE_UNAVAILABLE")))
         } catch (_: JobStoreException) {
             access.sendDenied(exchange, if (deletedJobResource(resource)) WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained.")
                 else WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))

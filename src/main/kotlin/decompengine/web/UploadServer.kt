@@ -777,6 +777,10 @@ class UploadServer(
             legacyError(exchange, 409, "ARTIFACT_CHANGED", publicWebDiagnosticMessage("ARTIFACT_CHANGED"), requestDiagnosticOutput) {
                 renderErrorPage(409, "Artifact changed", publicWebDiagnosticMessage("ARTIFACT_CHANGED"))
             }
+        } catch (_: decompengine.project.ReconstructionOutputReadUnavailableException) {
+            legacyError(exchange, 503, "JOB_STORAGE_UNAVAILABLE", publicWebDiagnosticMessage("JOB_STORAGE_UNAVAILABLE"), requestDiagnosticOutput) {
+                renderErrorPage(503, "Job storage unavailable", publicWebDiagnosticMessage("JOB_STORAGE_UNAVAILABLE"))
+            }
         } catch (exception: JobStoreException) {
             legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.", requestDiagnosticOutput) {
                 renderErrorPage(404, "Job not found", "The requested job is unavailable.")
