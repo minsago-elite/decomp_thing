@@ -86,6 +86,11 @@ agent bypassed the independent filesystem or protocol-frame limits.
 Workflow callers that record progress create one host-owned `AgentTurnIdentity`
 before dispatch. Its UUID, task identity and request commitment are passed to the
 progress projection and execution receipt, including captured repair dispatch.
+Invocation receipt schema 3 persists the UUID, task identity and request digest as
+an exact binding; schema-2 receipts remain readable as historical evidence and do
+not receive synthetic turn IDs. Repair schema-7 graphs and reconstruction
+schema-7 checkpoints require the serialized identity to match the separately
+persisted pre-dispatch intent before reuse, recovery, or archive verification.
 ACP session journals write schema 2 when a correlated turn starts and retain that
 turn UUID with a cleanup-verified completed turn. Schema-1 journals remain
 readable; their historical records are not assigned synthetic turn IDs.
@@ -141,6 +146,9 @@ previous target bytes, or removes a newly created target.
 `SourceTreeGenerator` applies the module/profile checks and compiler gate before
 publishing an accepted checkpoint. It records invocation and compiler evidence
 and restores the previous accepted checkpoint when a replacement is rejected.
+For ACP-produced source, publication preserves the exact staged bytes so the
+assessment's after hash remains the hash observed in the invocation receipt;
+non-agent generators retain the existing host newline normalization.
 The current module compiler receipt is local validation evidence, not a contained
 production full-project build or complete behavioral-equivalence proof. Those
 limits remain tracked by #64, #84 and the archive/release issues.

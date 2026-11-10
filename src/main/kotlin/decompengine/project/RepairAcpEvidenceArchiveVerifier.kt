@@ -801,7 +801,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 return@forEach
             }
             val expectedPath = "reports/repair-revisions/${node.id}.acp-receipt.json"
-            require(invocation.receiptPath == expectedPath && invocation.receiptSchemaVersion == 2) {
+            require(invocation.receiptPath == expectedPath && invocation.receiptSchemaVersion in 2..3) {
                 "repair ACP receipt path or schema is cross-paired: ${node.id}"
             }
             val bytes = readPayloadFile(
@@ -821,6 +821,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 node.id,
             )
             require(verified.requestSha256 == invocation.requestSha256 &&
+                verified.schemaVersion == invocation.receiptSchemaVersion &&
                 verified.promptSha256 == metadata.promptSha256 &&
                 verified.resultChangesSha256 == invocation.resultChangesSha256 &&
                 verified.terminalOutcome == invocation.terminalOutcome &&
@@ -848,6 +849,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     ?: error("repair turn intent parent is missing: ${node.id}")
                 require(intent.turnId == turnId && intent.attemptId == node.id &&
                     intent.requestSha256 == invocation.requestSha256 &&
+                    verified.schemaVersion == 3 &&
+                    verified.turnIdentity?.turnId == intent.turnId &&
+                    verified.turnIdentity.taskId == intent.taskId &&
+                    verified.turnIdentity.requestSha256 == intent.requestSha256 &&
                     intent.profileSha256 == graph.profileSha256 &&
                     intent.beforeSha256 == parent.sourceRevisionSha256) {
                     "repair turn intent identity or preimage differs from graph: ${node.id}"
@@ -906,8 +911,11 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 } else if (node.status == "rejected") {
                     require(assessment.eligibility == AcpChangePublicationEligibility.REJECTED ||
                         assessment.eligibility == AcpChangePublicationEligibility.INTERRUPTED ||
-                        assessment.eligibility == AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION &&
-                            node.rollbackRecord?.candidateSourceInstallStarted == false) {
+                        node.recoveredAfterCrash && node.rollbackRecord?.candidateSourceInstallStarted == false &&
+                            assessment.eligibility in setOf(
+                                AcpChangePublicationEligibility.PROVISIONAL,
+                                AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+                            )) {
                         "rejected repair revision has a non-rejection assessment: ${node.id}"
                     }
                 }

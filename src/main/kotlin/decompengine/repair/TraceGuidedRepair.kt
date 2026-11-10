@@ -33,6 +33,7 @@ import decompengine.project.AcpChangeObservationStatus
 import decompengine.project.AcpChangePolicyVerdict
 import decompengine.project.AcpChangeValidationStatus
 import decompengine.project.AcpChangePublicationEligibility
+import decompengine.project.verifyAcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
 import decompengine.project.DeclaredRoleMutationPolicy
 import decompengine.project.ProjectFileRole
@@ -1557,11 +1558,12 @@ class TraceGuidedRepairLoop private constructor(
         ) {
             val evidence = executionEvidence ?: return
             val intent = turnIntent ?: return
-            val root = Json.parseToJsonElement(evidence.json).jsonObject
-            val session = root["session"]?.takeUnless { it === JsonNull }?.jsonObject
-                ?: error("agent receipt lacks session identity")
-            val sessionCommitment = session["sessionId"]?.jsonObject?.get("sha256")?.jsonPrimitive?.content
-                ?: error("agent receipt lacks session commitment")
+            val verified = verifyAcpExecutionReceiptDocument(
+                evidence.json.toByteArray(Charsets.UTF_8),
+                TRACE_REPAIR_ACP_RECEIPT_KIND,
+                TRACE_REPAIR_ACP_TASK_FIELD,
+                intent.taskId,
+            )
             val candidateSha256 = proof?.sourceRevisionSha256 ?: runCatching {
                 repairCandidateSourceSha256(graph.candidateSources(attempt))
             }.getOrNull()
@@ -1575,7 +1577,9 @@ class TraceGuidedRepairLoop private constructor(
             val assessment = AcpChangeAssessment.create(
                 intent = intent,
                 receiptSha256 = evidence.sha256,
-                sessionIdSha256 = sha256("acp-session-commitment-v1:$sessionCommitment".toByteArray(Charsets.UTF_8)),
+                sessionIdSha256 = verified.sessionIdCommitmentSha256?.let {
+                    sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+                },
                 changesSha256 = evidence.resultChangesSha256,
                 beforeSha256 = intent.beforeSha256,
                 afterSha256 = candidateSha256.takeIf { observation == AcpChangeObservationStatus.COMPLETE },
@@ -1904,6 +1908,20 @@ class TraceGuidedRepairLoop private constructor(
                         else -> "candidate-error"
                     }
                 }
+                val failedTurnIntent = turnIntent
+                if (executionEvidence != null && failedTurnIntent != null && graph.snapshot.schemaVersion >= 7) {
+                    runCatching {
+                        graph.persistAndBindAgentAssessment(
+                            attempt,
+                            rejectedAssessment(
+                                failedTurnIntent,
+                                executionEvidence,
+                                stagedExecution.receipt.outcome,
+                                failure,
+                            ),
+                        )
+                    }.onFailure(failure::addSuppressed)
+                }
                 abortPendingGraph(graph, attempt, failure, evidenceKind)
             } else {
             }
@@ -1922,6 +1940,55 @@ class TraceGuidedRepairLoop private constructor(
             graph.synchronizeRepairHistory()
             history.adoptCanonicalProjection(graph.derivedRepairIterations(), graph.retainedRegressionCorpus().inputs, graph.snapshot.runs)
         }.onFailure(original::addSuppressed)
+    }
+
+    private fun rejectedAssessment(
+        intent: AgentTurnIntent,
+        receipt: AcpExecutionReceiptDocument,
+        outcome: AgentExecutionOutcome,
+        failure: Exception,
+    ): AcpChangeAssessment {
+        val verified = verifyAcpExecutionReceiptDocument(
+            receipt.json.toByteArray(Charsets.UTF_8),
+            TRACE_REPAIR_ACP_RECEIPT_KIND,
+            TRACE_REPAIR_ACP_TASK_FIELD,
+            intent.taskId,
+        )
+        val normalizedStop = (outcome as? AgentExecutionOutcome.Returned)?.result?.stopReason
+        val interrupted = failure is InterruptedException ||
+            normalizedStop in setOf(AgentStopReason.CANCELLED, AgentStopReason.LIMIT_EXHAUSTED)
+        val policyRejected = failure.message.orEmpty().let { message ->
+            message.startsWith("repair agent reported an unauthorized file change") ||
+                message.startsWith("repair may only modify existing project files")
+        }
+        return AcpChangeAssessment.create(
+            intent = intent,
+            receiptSha256 = receipt.sha256,
+            sessionIdSha256 = verified.sessionIdCommitmentSha256?.let {
+                sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+            },
+            // This commits to the immutable receipt's recorded result digest only. UNKNOWN
+            // observation status prevents a failed receipt's empty digest from claiming that
+            // the source was observed unchanged.
+            changesSha256 = verified.resultChangesSha256,
+            beforeSha256 = intent.beforeSha256,
+            afterSha256 = null,
+            observation = AcpChangeObservationStatus.UNKNOWN,
+            protocolStopCode = null,
+            normalizedStopReason = normalizedStop,
+            policyVerdict = if (policyRejected) AcpChangePolicyVerdict.REJECT
+                else AcpChangePolicyVerdict.NOT_EVALUATED,
+            reasonCodes = listOf(when {
+                interrupted -> "workflow-interrupted"
+                policyRejected -> "mutation-policy-rejected"
+                else -> "candidate-rejected"
+            }),
+            validationStatus = AcpChangeValidationStatus.NOT_RUN,
+            validationProofSha256 = emptyList(),
+            eligibility = if (interrupted) AcpChangePublicationEligibility.INTERRUPTED
+                else AcpChangePublicationEligibility.REJECTED,
+            updatesSha256 = verified.updatesSha256,
+        )
     }
 
     private fun portableRepairRequestText(projectRoot: Path, value: String): String {

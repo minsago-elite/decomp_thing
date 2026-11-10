@@ -244,6 +244,12 @@ class TraceGuidedRepairAcpIntegrationTest {
         val bytes = fixture.project.resolve(binding.receiptPath).readBytes()
         assertEquals(binding.receiptSha256, sha256(bytes))
         val receipt = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+        assertEquals(3, receipt.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        val turnIdentity = receipt.getValue("turnIdentity").jsonObject
+        assertEquals(binding.turnId, turnIdentity.getValue("turnId").jsonPrimitive.content)
+        assertEquals(binding.requestSha256, turnIdentity.getValue("requestSha256").jsonPrimitive.content)
+        assertEquals(receipt.getValue("attemptId").jsonPrimitive.content,
+            turnIdentity.getValue("taskId").jsonPrimitive.content)
         assertEquals(TRACE_REPAIR_ACP_RECEIPT_KIND, receipt.getValue("kind").jsonPrimitive.content)
         assertEquals("trace-scripted-acp-v1", receipt.getValue("factoryProvenance").jsonObject
             .getValue("implementationId").jsonPrimitive.content)
@@ -258,6 +264,21 @@ class TraceGuidedRepairAcpIntegrationTest {
         assertTrue(request.getValue("maximumOutputBytes").jsonPrimitive.content.toLong() > 0)
         assertTrue(receipt.getValue("events").jsonObject.getValue("records").jsonArray.isNotEmpty())
         assertTrue(receipt.getValue("sandbox").jsonObject.getValue("outerAgentContained").jsonPrimitive.content.toBoolean())
+        val assessmentPath = assertNotNull(binding.assessmentPath)
+        val assessment = decompengine.project.AcpChangeAssessment.parse(
+            fixture.project.resolve(assessmentPath).readBytes(),
+        )
+        assertEquals(binding.turnId, assessment.turnId)
+        assertEquals(binding.receiptSha256, assessment.receiptSha256)
+        if (!accepted) {
+            assertEquals(
+                if (binding.terminalOutcome == "returned-limit-exhausted")
+                    decompengine.project.AcpChangePublicationEligibility.INTERRUPTED
+                else decompengine.project.AcpChangePublicationEligibility.REJECTED,
+                assessment.eligibility,
+            )
+            assertTrue(assessment.reasonCodes.isNotEmpty())
+        }
         if (completed) {
             assertEquals("returned-completed", binding.terminalOutcome)
             assertTrue(binding.receiptReleaseComplete)

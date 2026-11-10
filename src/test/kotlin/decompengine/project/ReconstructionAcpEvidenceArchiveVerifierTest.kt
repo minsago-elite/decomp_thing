@@ -116,6 +116,13 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             assertEquals(checkpoint.getValue("executionEvidenceSha256").jsonPrimitive.content,
                 checkpoint.getValue("turnReceiptSha256").jsonPrimitive.content)
             assertFalse(manifest.files.any { it.path == checkpoint.getValue("turnReceiptPath").jsonPrimitive.content })
+            val verifiedReceipt = verifyAcpExecutionReceiptDocument(
+                receiptPath.readBytes(), "decomp-engine.reconstruction-acp-execution-receipt", "moduleId", "parse",
+            )
+            assertEquals(3, verifiedReceipt.schemaVersion)
+            assertEquals(intent.turnId, verifiedReceipt.turnIdentity?.turnId)
+            assertEquals(intent.taskId, verifiedReceipt.turnIdentity?.taskId)
+            assertEquals(intent.requestSha256, verifiedReceipt.turnIdentity?.requestSha256)
             assertEquals(checkpoint.getValue("turnIntentSha256").jsonPrimitive.content, intent.sha256)
             assertEquals(checkpoint.getValue("changeAssessmentSha256").jsonPrimitive.content, assessment.sha256)
             assertEquals(intent.turnId, assessment.turnId)
@@ -280,7 +287,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                     "    \"unknownBound\": true,\n    \"contractVersion\":",
                 )
             },
-            "wrong-schema" to { text -> text.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1") },
+            "wrong-schema" to { text -> text.replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": 2") },
             "wrong-kind" to { text -> text.replaceFirst(EVIDENCE_KIND, "decomp-engine.patch-acp-execution") },
             "wrong-module" to { text -> text.replaceFirst("\"moduleId\": \"parse\"", "\"moduleId\": \"other\"") },
             "non-completed" to { text -> text.replaceFirst("\"stopReason\":\"completed\"", "\"stopReason\":\"refused\"") },
@@ -352,7 +359,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
                 val fallbackRequest = ProfileModulePromptInputs(model, plan, profile).request("parse", project, null)
                 val fallbackSource = ReconstructionAdapters.resolve(profile).defaultReconstructor()
-                    .reconstruct(fallbackRequest).source.trimEnd() + "\n"
+                    .reconstruct(fallbackRequest).source
                 assertEquals(fallbackSource, project.resolve(SOURCE_PATH).readText())
                 assertFalse("return 17;" in project.resolve(SOURCE_PATH).readText())
                 val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
@@ -516,10 +523,15 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 rewriteEvidenceAndBindings(project) { text ->
                     val root = Json.parseToJsonElement(text).jsonObject
                     val request = root.getValue("request").jsonObject
-                    JsonObject(root + ("request" to JsonObject(request + mapOf(
+                    val identity = root.getValue("turnIdentity").jsonObject
+                    JsonObject(root + mapOf(
+                        "schemaVersion" to JsonPrimitive(3),
+                        "turnIdentity" to JsonObject(identity + ("requestSha256" to JsonPrimitive(legacyBinding.requestSha256))),
+                        "request" to JsonObject(request + mapOf(
                         "accessPolicySha256" to JsonPrimitive(legacyBinding.accessPolicySha256),
                         "requestSha256" to JsonPrimitive(legacyBinding.requestSha256),
-                    )))).toString() + "\n"
+                    )),
+                    )).toString() + "\n"
                 }
 
                 val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject

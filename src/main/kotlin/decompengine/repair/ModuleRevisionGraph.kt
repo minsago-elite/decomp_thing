@@ -1686,7 +1686,7 @@ data class RepairAgentInvocationBinding(
     init {
         require(receiptPath.matches(REPAIR_RECEIPT_PATH)) { "repair ACP receipt path is invalid" }
         require(receiptSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP receipt digest is invalid" }
-        require(receiptSchemaVersion == 2) { "repair ACP receipt schema is unsupported" }
+        require(receiptSchemaVersion in 2..3) { "repair ACP receipt schema is unsupported" }
         require((intentPath == null) == (intentSha256 == null)) { "repair ACP intent reference is incomplete" }
         intentPath?.let { require(it.matches(REPAIR_INTENT_PATH)) { "repair ACP intent path is invalid" } }
         intentSha256?.let { require(it.matches(REPAIR_BLOB_DIGEST)) { "repair ACP intent digest is invalid" } }
@@ -2389,11 +2389,17 @@ private fun recoverPersistedInvocationBinding(
     require(intent == null || intent.requestSha256 == verified.requestSha256) {
         "recovered repair receipt request differs from its pre-dispatch intent"
     }
+    require(intent == null || (verified.schemaVersion == 3 &&
+        verified.turnIdentity?.turnId == intent.turnId &&
+        verified.turnIdentity.taskId == intent.taskId &&
+        verified.turnIdentity.requestSha256 == intent.requestSha256)) {
+        "recovered repair receipt turn identity differs from its pre-dispatch intent"
+    }
     val oldBinding = metadata.agentInvocation
     val binding = RepairAgentInvocationBinding(
         receiptPath = "reports/repair-revisions/$receiptName",
         receiptSha256 = receipt.sha256,
-        receiptSchemaVersion = 2,
+        receiptSchemaVersion = verified.schemaVersion,
         requestSha256 = verified.requestSha256,
         resultChangesSha256 = verified.resultChangesSha256,
         terminalOutcome = verified.terminalOutcome,
@@ -3661,11 +3667,18 @@ internal class ModuleRevisionGraph private constructor(
         val intentBinding = metadata.turnIntent
         if (state.schemaVersion >= 7) {
             requireNotNull(intentBinding) { "repair invocation cannot be persisted without its pre-dispatch turn intent" }
-            require(document.requestSha256 == AgentTurnIntent.parse(
+            val intent = AgentTurnIntent.parse(
                 stateStore.readRevisionFile(
                     "${pending.id}.acp-intent.json", MAXIMUM_REPAIR_INTENT_BYTES.toLong(),
                 ).bytes,
-            ).requestSha256) { "repair ACP receipt request differs from its pre-dispatch intent" }
+            )
+            require(document.requestSha256 == intent.requestSha256 &&
+                document.turnIdentity?.turnId == intent.turnId &&
+                document.turnIdentity.taskId == pending.id &&
+                document.turnIdentity.requestSha256 == intent.requestSha256) {
+                "repair ACP receipt turn/request identity differs from its pre-dispatch intent"
+            }
+            require(document.schemaVersion == 3) { "schema-7 repair requires a turn-bound ACP receipt" }
         }
         val fileName = "${pending.id}.acp-receipt.json"
         val receiptPath = "reports/repair-revisions/$fileName"
@@ -4992,6 +5005,7 @@ internal class ModuleRevisionGraph private constructor(
                 attemptId,
             )
             require(verified.requestSha256 == binding.requestSha256 &&
+                verified.schemaVersion == binding.receiptSchemaVersion &&
                 verified.promptSha256 == expectedPromptSha256 &&
                 verified.resultChangesSha256 == binding.resultChangesSha256 &&
                 verified.terminalOutcome == binding.terminalOutcome &&
@@ -5008,7 +5022,11 @@ internal class ModuleRevisionGraph private constructor(
                     metadataIntent.turnId == binding.turnId) { "repair invocation and graph intent binding disagree: $attemptId" }
                 val intent = validateTurnIntentBinding(metadataIntent, attemptId, null)
                 require(intent.turnId == binding.turnId &&
-                    intent.taskId == attemptId && intent.requestSha256 == verified.requestSha256) {
+                    intent.taskId == attemptId && intent.requestSha256 == verified.requestSha256 &&
+                    verified.schemaVersion == 3 &&
+                    verified.turnIdentity?.turnId == intent.turnId &&
+                    verified.turnIdentity.taskId == intent.taskId &&
+                    verified.turnIdentity.requestSha256 == intent.requestSha256) {
                     "repair turn intent is cross-paired with invocation receipt: $attemptId"
                 }
                 val assessmentPath = binding.assessmentPath
@@ -5047,8 +5065,14 @@ internal class ModuleRevisionGraph private constructor(
                         assessment.eligibility in setOf(
                             decompengine.project.AcpChangePublicationEligibility.REJECTED,
                             decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
-                        ) || assessment.eligibility == decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION &&
-                            state.nodes.singleOrNull { it.id == attemptId }?.rollbackRecord?.candidateSourceInstallStarted == false,
+                        ) || state.nodes.singleOrNull { it.id == attemptId }?.let { rejectedNode ->
+                            rejectedNode.recoveredAfterCrash &&
+                                rejectedNode.rollbackRecord?.candidateSourceInstallStarted == false &&
+                                assessment.eligibility in setOf(
+                                    decompengine.project.AcpChangePublicationEligibility.PROVISIONAL,
+                                    decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+                                )
+                        } == true,
                     ) { "rejected repair has inconsistent assessment: $attemptId" }
                     if (expectedAssessment in setOf(RepairAgentAssessmentStatus.ACCEPTED, RepairAgentAssessmentStatus.PROVISIONAL)) {
                         val expectedProof = state.nodes.singleOrNull { it.id == attemptId }?.validationProof

@@ -144,6 +144,9 @@ internal class ReconstructionTurnEvidenceStore(
                 moduleId,
             )
             require(verified.requestSha256 == boundIntent.requestSha256 &&
+                verified.turnIdentity?.turnId == boundIntent.turnId &&
+                verified.turnIdentity.taskId == boundIntent.taskId &&
+                verified.turnIdentity.requestSha256 == boundIntent.requestSha256 &&
                 verified.accessPolicySha256 == boundIntent.policySha256 &&
                 verified.terminalOutcome == executionTerminalOutcome &&
                 verified.releaseComplete == executionReleaseComplete)

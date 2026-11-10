@@ -19,6 +19,7 @@ import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.AgentFileChange
@@ -732,18 +733,39 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         expectedAccessPolicySha256: Set<String>?,
     ): VerifiedAcpExecutionReceiptDocument {
         val root = strictObject(bytes, EVIDENCE_JSON_LIMITS, "reconstruction ACP execution receipt")
-        root.requireExactKeys(RECEIPT_FIELDS, "reconstruction ACP execution receipt")
-        require(root.requiredLong("schemaVersion", "ACP receipt") == 2L) {
+        val receiptSchemaVersion = root.requiredLong("schemaVersion", "ACP receipt").toInt()
+        require(receiptSchemaVersion in 2..3 &&
+            (checkpoint.schemaVersion < 7 || receiptSchemaVersion == 3)) {
             "unsupported reconstruction ACP execution receipt schema: $moduleId"
         }
+        root.requireExactKeys(
+            RECEIPT_FIELDS + if (receiptSchemaVersion >= 3) setOf("turnIdentity") else emptySet(),
+            "reconstruction ACP execution receipt",
+        )
         require(root.requiredString("kind", "ACP receipt") == RECONSTRUCTION_ACP_RECEIPT_KIND) {
             "wrong reconstruction ACP execution receipt kind: $moduleId"
         }
         require(root.requiredString("moduleId", "ACP receipt") == moduleId) {
             "reconstruction ACP execution receipt names the wrong module: $moduleId"
         }
+        val turnIdentity = if (receiptSchemaVersion >= 3) {
+            val value = root.requiredObject("turnIdentity", "ACP receipt")
+            value.requireExactKeys(setOf("turnId", "taskId", "requestSha256"), "ACP receipt turn identity")
+            val parsed = AgentTurnIdentity(
+                value.requiredString("turnId", "ACP receipt turn identity"),
+                value.requiredString("taskId", "ACP receipt turn identity"),
+                value.requiredSha256("requestSha256", "ACP receipt turn identity"),
+            )
+            require(parsed.taskId == moduleId && (checkpoint.schemaVersion < 7 || checkpoint.turnIntent?.let {
+                parsed.turnId == it.turnId && parsed.taskId == it.taskId && parsed.requestSha256 == it.requestSha256
+            } == true)) { "reconstruction ACP receipt turn identity differs from its checkpoint intent: $moduleId" }
+            parsed
+        } else null
 
         val requestBounds = verifyReceiptRequest(root, checkpoint, expectedAccessPolicySha256)
+        require(turnIdentity == null || turnIdentity.requestSha256 == requestBounds.requestSha256) {
+            "reconstruction ACP receipt turn identity request is cross-paired: $moduleId"
+        }
         val provider = root.requiredObject("provider", "ACP receipt")
         provider.requireExactKeys(RECEIPT_PROVIDER_FIELDS, "ACP receipt provider")
         require(provider.requiredString("id", "ACP receipt provider") == "acp" &&
@@ -816,6 +838,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             terminalOutcome = "returned-completed",
             releaseComplete = true,
             releaseFacts = VerifiedAcpReleaseReceiptFacts(session, resultChanges.records),
+            schemaVersion = receiptSchemaVersion,
+            turnIdentity = turnIdentity,
         )
     }
 

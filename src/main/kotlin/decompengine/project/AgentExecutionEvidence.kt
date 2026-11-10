@@ -28,6 +28,8 @@ import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeEvent
 import decompengine.agent.AgentMessageEvent
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
+import decompengine.agent.isCanonicalAgentTurnId
 import decompengine.agent.AgentPermissionEvent
 import decompengine.agent.AgentPlanEvent
 import decompengine.agent.AgentToolEvent
@@ -216,12 +218,13 @@ internal class BoundedAcpExecutionArtifact private constructor(
     }
 }
 
-/** Immutable schema-v2 evidence for one ACP invocation, before workflow assessment. */
+/** Immutable schema-v2/3 evidence for one ACP invocation, before workflow assessment. */
 internal class BoundedAcpExecutionReceiptArtifact private constructor(
     private val request: ArchivedReceiptRequest,
     private val outcome: AgentExecutionOutcome,
     private val events: ArchivedAgentEventSnapshot,
     private val acp: AcpInvocationEvidenceSnapshot,
+    private val turnIdentity: AgentTurnIdentity?,
 ) {
     val requestSha256: String get() = request.requestSha256
     val wirePromptSha256: String? get() = request.wirePromptSha256
@@ -293,11 +296,15 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
         require(taskId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
             "ACP receipt task identity is invalid"
         }
+        require(turnIdentity == null || turnIdentity.taskId == taskId) {
+            "ACP receipt turn identity task is cross-paired"
+        }
         val text = buildString {
-            append("{\n  \"schemaVersion\": 2,")
+            append("{\n  \"schemaVersion\": ").append(if (turnIdentity == null) 2 else 3).append(',')
             append("\n  \"kind\": ").append(evidenceKind.jsonString()).append(',')
             append("\n  ").append(taskIdentityField.jsonString()).append(": ")
                 .append(taskId.jsonString()).append(',')
+            turnIdentity?.let { appendReceiptTurnIdentity(it) }
             appendReceiptRequest(request)
             appendReceiptProvider(acp)
             appendReceiptLifecycle(acp, releaseComplete)
@@ -323,10 +330,11 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
         // the independently bounded event and audit collections collapse to whole-list digests.
         // A compact artifact can never satisfy the release-complete verifier.
         val compact = buildString {
-            append("{\n  \"schemaVersion\": 2,")
+            append("{\n  \"schemaVersion\": ").append(if (turnIdentity == null) 2 else 3).append(',')
             append("\n  \"kind\": ").append(evidenceKind.jsonString()).append(',')
             append("\n  ").append(taskIdentityField.jsonString()).append(": ")
                 .append(taskId.jsonString()).append(',')
+            turnIdentity?.let { appendReceiptTurnIdentity(it) }
             appendReceiptRequest(request)
             appendReceiptProvider(acp)
             appendReceiptLifecycle(acp, releaseComplete = false)
@@ -366,11 +374,13 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
                 "ACP receipt artifact request differs from its invocation binding"
             }
             require(promptSha256.isSha256()) { "ACP receipt prompt digest is invalid" }
+            receipt.turnIdentity?.requireBoundTo(binding)
             return BoundedAcpExecutionReceiptArtifact(
                 request = ArchivedReceiptRequest.capture(request, promptSha256, provider.wirePromptSha256),
                 outcome = receipt.outcome,
                 events = events,
                 acp = provider,
+                turnIdentity = receipt.turnIdentity,
             )
         }
     }
@@ -382,7 +392,7 @@ internal data class RenderedAcpReceiptArtifact(
 )
 
 /**
- * A fully rendered, immutable schema-v2 invocation document suitable for immediate persistence.
+ * A fully rendered, immutable schema-v2/3 invocation document suitable for immediate persistence.
  * Workflow assessment is deliberately not part of this value: accepting or rejecting a candidate
  * must never rewrite what the provider invocation actually returned.
  */
@@ -393,8 +403,9 @@ internal class AcpExecutionReceiptDocument private constructor(
     val terminalOutcome: String,
     val releaseComplete: Boolean,
     val json: String,
+    val turnIdentity: AgentTurnIdentity?,
 ) {
-    val schemaVersion: Int = 2
+    val schemaVersion: Int = if (turnIdentity == null) 2 else 3
     val sha256: String = sha256(json.toByteArray(StandardCharsets.UTF_8))
     /** Digest of the bounded, sequenced event/update section, independent of its raw peer text. */
     val updatesSha256: String = run {
@@ -432,6 +443,7 @@ internal class AcpExecutionReceiptDocument private constructor(
                 artifact.terminalOutcome,
                 rendered.releaseComplete,
                 rendered.json,
+                receipt.turnIdentity,
             )
         }
     }
@@ -447,6 +459,8 @@ internal data class VerifiedAcpExecutionReceiptDocument(
     val releaseComplete: Boolean,
     val releaseFacts: VerifiedAcpReleaseReceiptFacts?,
     val sessionIdCommitmentSha256: String? = null,
+    val schemaVersion: Int = 2,
+    val turnIdentity: AgentTurnIdentity? = null,
 )
 
 /**
@@ -462,11 +476,26 @@ internal fun verifyAcpExecutionReceiptDocument(
 ): VerifiedAcpExecutionReceiptDocument {
     require(bytes.size <= MAXIMUM_ARCHIVED_EVIDENCE_BYTES) { "ACP receipt exceeds its artifact cap" }
     val root = OracleJson.parse(bytes, ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject
-    val expectedRootFields = ACP_RECEIPT_BINDING_ROOT_FIELDS + taskIdentityField
+    val schemaVersion = root.receiptInt("schemaVersion")
+    require(schemaVersion in 2..3) { "ACP receipt schema is unsupported" }
+    val expectedRootFields = ACP_RECEIPT_BINDING_ROOT_FIELDS + taskIdentityField +
+        if (schemaVersion >= 3) setOf("turnIdentity") else emptySet()
     require(root.keys == expectedRootFields) { "ACP receipt has missing, extra, or duplicate binding fields" }
-    require(root.receiptInt("schemaVersion") == 2) { "ACP receipt schema is unsupported" }
     require(root.receiptString("kind") == evidenceKind) { "ACP receipt kind is cross-paired" }
     require(root.receiptString(taskIdentityField) == taskId) { "ACP receipt task identity is cross-paired" }
+    val turnIdentity = if (schemaVersion >= 3) {
+        val value = root.receiptObject("turnIdentity")
+        require(value.keys == setOf("turnId", "taskId", "requestSha256")) {
+            "ACP receipt turn identity has missing, extra, or duplicate fields"
+        }
+        val turnId = value.receiptString("turnId")
+        val boundTask = value.receiptString("taskId")
+        val boundRequest = value.receiptString("requestSha256")
+        require(isCanonicalAgentTurnId(turnId) && boundTask == taskId && boundRequest.isSha256()) {
+            "ACP receipt turn identity is invalid or cross-paired"
+        }
+        AgentTurnIdentity(turnId, boundTask, boundRequest)
+    } else null
 
     val request = root.receiptObject("request")
     require(request.keys == ACP_RECEIPT_BINDING_REQUEST_FIELDS) {
@@ -474,6 +503,9 @@ internal fun verifyAcpExecutionReceiptDocument(
     }
     val requestSha256 = request.receiptString("requestSha256")
     require(requestSha256.isSha256()) { "ACP receipt request digest is invalid" }
+    require(turnIdentity == null || turnIdentity.requestSha256 == requestSha256) {
+        "ACP receipt turn identity request is cross-paired"
+    }
     val accessPolicySha256 = request.receiptString("accessPolicySha256")
     require(accessPolicySha256.isSha256()) { "ACP receipt policy digest is invalid" }
     val promptSha256 = request.receiptString("promptSha256")
@@ -600,7 +632,15 @@ internal fun verifyAcpExecutionReceiptDocument(
         releaseComplete,
         releaseFacts,
         sessionIdCommitmentSha256,
+        schemaVersion,
+        turnIdentity,
     )
+}
+
+private fun StringBuilder.appendReceiptTurnIdentity(identity: AgentTurnIdentity) {
+    append("\n  \"turnIdentity\": {\"turnId\": ").append(identity.turnId.jsonString())
+    append(", \"taskId\": ").append(identity.taskId.jsonString())
+    append(", \"requestSha256\": ").append(identity.requestSha256.jsonString()).append("},")
 }
 
 private fun JsonObject.receiptString(field: String): String =

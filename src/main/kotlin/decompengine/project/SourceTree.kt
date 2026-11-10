@@ -65,9 +65,6 @@ data class ModuleReconstructionRequest(
     val observedBehavior: String? = null,
     /** Workflow-owned sink invoked before a provider receipt is interpreted or validated. */
     val persistAgentExecutionEvidence: ((ReconstructionAgentExecutionEvidence) -> Unit)? = null,
-    /** Durable pre-dispatch workflow identity; evidence must be written before the harness call. */
-    val persistAgentTurnIntent: ((AgentTurnIntent) -> Unit)? = null,
-    val workflowRunId: String? = null,
     val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     val sessionEvidenceFingerprint: String? = null,
     val acceptedSourceSha256: String? = null,
@@ -75,7 +72,21 @@ data class ModuleReconstructionRequest(
     val compilerDiagnostics: String? = null,
     /** Recovered ownership used to select only required cross-module interfaces. */
     val modulePlan: ModulePlan? = null,
-)
+) {
+    /** Durable pre-dispatch workflow identity; evidence must be written before the harness call. */
+    internal var persistAgentTurnIntent: ((AgentTurnIntent) -> Unit)? = null
+        private set
+    internal var workflowRunId: String? = null
+        private set
+
+    internal fun withAgentTurnContext(
+        workflowRunId: String?,
+        persistAgentTurnIntent: ((AgentTurnIntent) -> Unit)?,
+    ): ModuleReconstructionRequest = apply {
+        this.workflowRunId = workflowRunId
+        this.persistAgentTurnIntent = persistAgentTurnIntent
+    }
+}
 
 data class ReconstructedModule(
     val source: String,
@@ -86,8 +97,14 @@ data class ReconstructedModule(
     val issues: List<ModuleReconstructionIssue> = emptyList(),
     val retryable: Boolean = true,
     val agentExecutionEvidence: ReconstructionAgentExecutionEvidence? = null,
-    val agentTurnIntent: AgentTurnIntent? = null,
-)
+) {
+    internal var agentTurnIntent: AgentTurnIntent? = null
+        private set
+
+    internal fun withAgentTurnIntent(intent: AgentTurnIntent?): ReconstructedModule = apply {
+        agentTurnIntent = intent
+    }
+}
 
 data class ModuleReconstructionIssue(
     val code: String,
@@ -102,7 +119,9 @@ internal fun requestForCheckpointReconciliation(
     checkpointReused: Boolean,
 ): ModuleReconstructionRequest = if (checkpointReused &&
     request.sessionEvidenceFingerprint != checkpointFingerprint) {
-    request.copy(sessionEvidenceFingerprint = checkpointFingerprint)
+    request.copy(sessionEvidenceFingerprint = checkpointFingerprint).also { copied ->
+        copied.withAgentTurnContext(request.workflowRunId, request.persistAgentTurnIntent)
+    }
 } else request
 
 fun interface ModuleReconstructor {
@@ -398,8 +417,7 @@ class BoundedLlmModuleReconstructor(
                 promptCharacters = contextSize,
                 promptBudgetCharacters = contextBudget,
                 agentExecutionEvidence = invocationEvidence,
-                agentTurnIntent = turnIntent,
-            )
+            ).withAgentTurnIntent(turnIntent)
         } catch (failure: Exception) {
             if (generateSequence<Throwable>(failure) { it.cause }.any { it is AgentSessionRecoveryException }) throw failure
             if (before == null) sourcePath.deleteIfExists() else sourcePath.writeBytes(before)
@@ -903,18 +921,19 @@ object SourceTreeGenerator {
                         persistedTurnReceiptSha256 = receipt.second
                     }
                 },
+                profile = profile,
+                sessionEvidenceFingerprint = fingerprint,
+                acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
+                compilerDiagnostics = priorCompilerDiagnostics,
+                modulePlan = plan,
+            ).withAgentTurnContext(
+                workflowRunId = reconstructionWorkflowId,
                 persistAgentTurnIntent = if (turnEvidenceStore == null) null else { intent ->
                     turnEvidenceStore.let { store ->
                         persistedTurnIntentPath = store.persistIntent(intent)
                         persistedTurnIntent = intent
                     }
                 },
-                workflowRunId = reconstructionWorkflowId,
-                profile = profile,
-                sessionEvidenceFingerprint = fingerprint,
-                acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
-                compilerDiagnostics = priorCompilerDiagnostics,
-                modulePlan = plan,
             )
             val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
@@ -1000,8 +1019,12 @@ object SourceTreeGenerator {
                         "pre-dispatch-context-budget-fallback" else "exception-fallback"
                     unresolvedFallback(request, cacheIdentity, failure)
                 }
-                val attempted = attemptedRaw.copy(agentTurnIntent = attemptedRaw.agentTurnIntent ?: persistedTurnIntent)
-                val normalizedSource = attempted.source.trimEnd() + "\n"
+                val attempted = if (attemptedRaw.agentTurnIntent == null && persistedTurnIntent != null)
+                    attemptedRaw.withAgentTurnIntent(persistedTurnIntent) else attemptedRaw
+                // ACP change commitments identify exact staged bytes. Host-side newline
+                // normalization would otherwise make the committed after hash diverge.
+                val normalizedSource = if (attempted.agentExecutionEvidence != null) attempted.source
+                    else attempted.source.trimEnd() + "\n"
                 adapter.validateSourceContent(profile, normalizedSource.toByteArray(), module.sourcePath)
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     ?: persistedExecutionEvidence
