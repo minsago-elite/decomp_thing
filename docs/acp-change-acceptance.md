@@ -1251,6 +1251,43 @@ production repair validator. It does not qualify live-provider behavior,
 production validation under #236, other repair profiles, the full mutation or
 resource-limit matrix, or hosted exact-head CI. #734 and #63 remain open.
 
+## Public reconstruction final-snapshot mutation refusals — 2026-11-11
+
+Commit `5caf8bce96cec000bb5fa6a29359ae23fa177655` extends
+`AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and
+preserves publication on limit outcomes` with four cases that run a scripted
+ACP write through the public reconstruction workflow, wait for its successful
+callback acknowledgement, then inject a host-side workspace change before the
+final snapshot. The cases replace the candidate with invalid UTF-8, replace it
+with valid source one byte above the 256 KiB grant, substitute a symlink to a
+fixture file outside the staged workspace, or add a hard link to an outside
+name.
+
+Every case requires the invocation-bound receipt to match the task request and
+turn identity and to report `WORKSPACE_VIOLATION` at
+`final-workspace-snapshot`. The invalid-content and grant-size cases bind the
+rejected path to the `project` workspace root; link cases require the exact
+`symbolic-link` or `unsupported-link-count` refusal. All four receipts show
+the original ACP target write was allowed, reached the final snapshot, retain
+no complete execution evidence, and report verified process and sandbox
+cleanup. The test compares the published output metadata with the accepted
+baseline and requires no transaction residue. For link cases, the outside
+file's bytes remain intact after the rejected stage is removed.
+
+The focused test passed locally at source commit
+`5caf8bce96cec000bb5fa6a29359ae23fa177655`: one test, zero failures, errors or
+skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-final-snapshot-violation-2026-11-11.xml)
+and [provenance record](evidence/issue-734-public-reconstruction-final-snapshot-violation-2026-11-11.json)
+bind the result to the source, command, toolchain and report digest.
+
+These are deterministic host-side injections after a scripted peer's
+acknowledged write; they are not mutations available to the ACP agent. They
+qualify final-snapshot refusal and publication preservation in the Generated C
+Make profile. They do not qualify live-provider behavior, production
+validation under #236, mutation after the final snapshot or publication-time
+revalidation under #732, metadata/xattr/FIFO/socket cases, other profiles, or
+hosted exact-head CI. #734 and #63 remain open.
+
 ## Public reconstruction terminal delete/move refusal — 2026-11-11
 
 Commit `5869c936a5923e5a957431f0d7ccbada440cce33` extends
