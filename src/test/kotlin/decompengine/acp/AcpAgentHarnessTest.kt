@@ -1300,14 +1300,42 @@ class AcpAgentHarnessTest {
         assertEquals(false, successful.implementationExistedAtDispatch)
 
         // The public reconstruction grant is one non-recursive target path. Its parent entries
-        // make the initial entry-count bound reachable, but the target itself is absent at dispatch,
-        // so file-count/file-bytes/total-bytes cannot be induced on this path without changing the
-        // production staging contract.
-        val snapshotLimitCases = listOf("entry-count" to WorkspaceSnapshotLimits(entries = 2))
-        for ((offset, scenario) in snapshotLimitCases.withIndex()) {
-            val (dimension, limits) = scenario
-            val limitedSnapshot = runAttempt(
+        // make initial entry-count reachable. The target itself is absent at dispatch, so byte
+        // ceilings are exercised by the final snapshot after the scripted agent creates it.
+        data class SnapshotLimitCase(
+            val dimension: String,
+            val limits: WorkspaceSnapshotLimits,
+            val phase: String,
+            val lifecyclePhase: AcpExecutionLifecyclePhase,
+            val mode: String,
+        )
+        val snapshotLimitCases = listOf(
+            SnapshotLimitCase(
+                "entry-count",
+                WorkspaceSnapshotLimits(entries = 2),
+                "initial-workspace-snapshot",
+                AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT,
                 "reconstruction-mutation-grant",
+            ),
+            SnapshotLimitCase(
+                "file-bytes",
+                WorkspaceSnapshotLimits(fileBytes = 1),
+                "final-workspace-snapshot",
+                AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT,
+                "reconstruction-role-policy",
+            ),
+            SnapshotLimitCase(
+                "total-bytes",
+                WorkspaceSnapshotLimits(totalBytes = 1),
+                "final-workspace-snapshot",
+                AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT,
+                "reconstruction-role-policy",
+            ),
+        )
+        for ((offset, scenario) in snapshotLimitCases.withIndex()) {
+            val (dimension, limits, phase, lifecyclePhase, mode) = scenario
+            val limitedSnapshot = runAttempt(
+                mode,
                 index = 10 + offset,
                 snapshotLimits = limits,
             )
@@ -1318,15 +1346,26 @@ class AcpAgentHarnessTest {
             val snapshotFailure = assertIs<AgentExecutionOutcome.Failed>(snapshotReceipt.outcome).failure
             assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, snapshotFailure.kind)
             assertEquals(dimension, snapshotFailure.details["limit"])
-            assertEquals("initial-workspace-snapshot", snapshotFailure.details["phase"])
+            assertEquals(phase, snapshotFailure.details["phase"])
             val snapshotEvidence = assertIs<AcpInvocationEvidenceSnapshot>(snapshotReceipt.providerEvidence)
-            assertEquals(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT, snapshotEvidence.phaseReached)
-            assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, snapshotEvidence.cleanupDisposition)
-            assertNull(snapshotEvidence.diagnostics)
-            assertNull(snapshotEvidence.sandboxEvidence)
+            assertEquals(lifecyclePhase, snapshotEvidence.phaseReached)
+            if (phase == "initial-workspace-snapshot") {
+                assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, snapshotEvidence.cleanupDisposition)
+                assertNull(snapshotEvidence.diagnostics)
+                assertNull(snapshotEvidence.sandboxEvidence)
+                assertTrue(limitedSnapshot.harness.latestFilesystemAudit().isEmpty())
+                assertNull(limitedSnapshot.harness.latestDiagnostics())
+            } else {
+                assertEquals(AcpExecutionCleanupDisposition.VERIFIED, snapshotEvidence.cleanupDisposition)
+                assertNotNull(snapshotEvidence.diagnostics)
+                assertNotNull(snapshotEvidence.sandboxEvidence)
+                assertTrue(limitedSnapshot.harness.latestFilesystemAudit().any {
+                    it.policyPath?.relativePath == implementationPath && it.outcome == AcpFilesystemAuditOutcome.ALLOWED
+                })
+                assertTrue(requireNotNull(snapshotEvidence.diagnostics).remainingProcessIds.isEmpty())
+                assertTrue(snapshotEvidence.diagnostics.sandboxCleanupVerified)
+            }
             assertNull(snapshotEvidence.completeExecutionEvidence)
-            assertTrue(limitedSnapshot.harness.latestFilesystemAudit().isEmpty())
-            assertNull(limitedSnapshot.harness.latestDiagnostics())
             assertEquals(acceptedMetadata, capturePublishedMetadata(output), dimension)
             assertNoReconstructionPublicationResidue(output)
         }
