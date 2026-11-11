@@ -1214,3 +1214,35 @@ published project: that service creates a fresh private stage. The case uses a
 scripted ACP peer and one reconstruction profile; it does not qualify an
 independent provider, production validation under #236, all mutation
 categories or limits, or hosted exact-head CI. #734 and #63 remain open.
+
+## Active repair exact patch-quota retry — 2026-11-11
+
+Commit `1481daf2743390277b5d60d415f40a1db89d6095` adds
+`TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate
+after refusing an oversized retry`. A scripted ACP peer writes a 4,096-byte
+replacement under a 4,096-byte `maximumPatchBytes` budget, attempts a 4,097-byte
+replacement, observes the resource-limit refusal, then reads back the unchanged
+4,096-byte candidate. The source-file and staging budgets have headroom over
+both writes, isolating the patch-byte quota.
+
+The active repair loop records one `MODIFIED` change with the exact accepted
+preimage, candidate digest and byte count, and hands those exact candidate
+bytes to a `STRICT_CONTAINED` validation strategy. The injected validator
+checks the candidate and then throws a sentinel. The test verifies a durable
+rejected assessment and receipt linkage, the resource-limit audit between the
+successful write and readback, unchanged accepted source and Makefile, an
+unchanged graph head, no pending attempt, and verified process and sandbox
+cleanup. This demonstrates active-path quota refusal, candidate preservation,
+validator handoff and rejection handling; it does not demonstrate successful
+compilation or behavioral validation.
+
+The focused test passed locally at source commit `1481daf2743390277b5d60d415f40a1db89d6095`: one test, zero failures, errors or skips. The retained
+[JUnit report](evidence/issue-734-active-repair-patch-quota-retry-2026-11-11.xml)
+and [provenance record](evidence/issue-734-active-repair-patch-quota-retry-2026-11-11.json)
+bind the result to the source commit, command, toolchain, and report digest.
+
+This is local evidence using a scripted ACP peer and
+`CapturedRepairStagingAuthority`, with an injected validator rather than the
+production repair validator. It does not qualify live-provider behavior,
+production validation under #236, other repair profiles, the full mutation or
+resource-limit matrix, or hosted exact-head CI. #734 and #63 remain open.
