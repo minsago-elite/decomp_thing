@@ -33,6 +33,7 @@ import decompengine.project.SourceTreeGenerator
 import decompengine.project.sha256
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
+import decompengine.validation.BehaviorComparisonReport
 import decompengine.validation.BehaviorExecutionOutcomeException
 import decompengine.validation.BehaviorExecutionTimeoutException
 import decompengine.validation.BehaviorOutputLimitException
@@ -1619,6 +1620,101 @@ class TraceGuidedRepairTest {
         )
 
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+        }
+    }
+
+    @Test
+    fun `active repair path rejects a candidate over the patch file count`() {
+        val project = createProject(
+            createTempDirectory("repair-active-patch-file-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val firstPath = "src/modules/reconstructed.c"
+        val secondPath = "src/modules/secondary.c"
+        project.resolve(secondPath).writeText("int secondary(void) { return 1; }\n")
+        val paths = listOf(firstPath, secondPath).sorted()
+        val before = paths.associateWith { project.resolve(it).readBytes() }
+        val profile = DeclarativeRepairIndexProfile(
+            "two-file-active-repair-v1",
+            RepairIndexLayout(sourcePaths = paths, editablePaths = paths),
+        )
+        val budget = RepairResourceBudget(maximumPatchFiles = 1)
+        val baselineHead = ModuleRevisionGraph.open(project, profile, budget).use { it.snapshot.headId }
+        val failureText = paths.joinToString("\n") { "$it: compiler error" }
+        val replacements = paths.associateWith { path ->
+            ("/* candidate $path */\n" + before.getValue(path).decodeToString()).toByteArray()
+        }
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                assertEquals(paths.toSet(), initialFiles.keys)
+                output.replace(firstPath, replacements.getValue(firstPath))
+                output.replace(secondPath, replacements.getValue(secondPath))
+                error("two-file candidate unexpectedly passed the one-file patch budget")
+            }
+        }
+        val validation = object : RepairValidationStrategy {
+            override val assurance = RepairValidationAssurance.TEST_ONLY_HOST_PROCESS
+            override fun requireAvailable() = Unit
+            override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                error("patch-file refusal must happen before validation")
+            override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                error("patch-file refusal must happen before rebuild")
+            override fun evaluateBehavior(
+                id: String,
+                projectDir: Path,
+                originalBinary: Path,
+                rebuiltBinary: Path,
+                inputs: List<ProcessInput>,
+                reportsDir: Path,
+                budget: RepairResourceBudget,
+            ): BehaviorComparisonReport = error("patch-file refusal must happen before behavior validation")
+        }
+
+        val failure = assertFailsWith<Exception> {
+            TraceGuidedRepairLoop.forTesting(
+                harness,
+                RepairHistory(project.resolve("reports/repair_history.json")),
+                profile,
+                validation,
+                CapturedRepairStagingAuthority,
+                resourceBudget = budget,
+            ).repairCompileError(
+                project,
+                CompileFailure(listOf("cc"), 1, "", failureText),
+                emptyList(),
+            )
+        }
+        val messages = generateSequence<Throwable>(failure) { it.cause }
+            .mapNotNull { it.message }
+            .toList()
+        assertTrue(messages.any { it.contains("captured repair output exceeds the patch-file budget") }, messages.toString())
+        before.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes(), path) }
+
+        val persistedState = Json.parseToJsonElement(
+            project.resolve("reports/repair-revisions/graph.json").readText(),
+        ).jsonObject
+        assertEquals(JsonNull, persistedState.getValue("pending"))
+        assertEquals(baselineHead, persistedState.getValue("headId").jsonPrimitive.content)
+        val terminalNode = persistedState.getValue("nodes").jsonArray.last().jsonObject
+        assertEquals("rejected", terminalNode.getValue("status").jsonPrimitive.content)
+        assertEquals("agent-failure-resource-exhausted", terminalNode.getValue("evidenceKind").jsonPrimitive.content)
+        assertEquals(false, terminalNode.getValue("recoveredAfterCrash").jsonPrimitive.boolean)
+
+        ModuleRevisionGraph.open(project, profile, budget).use { graph ->
             assertNull(graph.snapshot.pendingAttemptId)
             assertEquals(baselineHead, graph.snapshot.headId)
             assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
