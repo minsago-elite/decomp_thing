@@ -1893,6 +1893,160 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active ACP repair enforces returned token ceilings after a write and permits exact usage`() {
+        data class TokenCase(
+            val label: String,
+            val limits: AgentExecutionLimits,
+            val exhausted: Boolean,
+        )
+
+        val cases = listOf(
+            TokenCase("input", AgentExecutionLimits(maxInputTokens = 10), exhausted = true),
+            TokenCase("output", AgentExecutionLimits(maxOutputTokens = 6), exhausted = true),
+            TokenCase(
+                "exact",
+                AgentExecutionLimits(maxInputTokens = 11, maxOutputTokens = 7),
+                exhausted = false,
+            ),
+        )
+        cases.forEach { case ->
+            val project = createProject(
+                createTempDirectory("repair-active-acp-token-limit-${case.label}-").resolve("project"),
+                reconstructedSource = "int decomp_engine_main(void) {\n",
+            )
+            val target = project.resolve("src/modules/reconstructed.c")
+            val acceptedSource = target.readBytes()
+            val acceptedMakefile = project.resolve("Makefile").readBytes()
+            val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use {
+                it.snapshot.headId
+            }
+            val harness = AcpAgentHarnessTest().harness(
+                "repair-active-declared-role-token-limit-after-write",
+            )
+            val validationFailure = IllegalStateException("token usage reached candidate validation")
+            var validationCalls = 0
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    assertEquals(
+                        listOf("Makefile", "include/modules/reconstructed.h", "src/main.c", "src/modules/reconstructed.c"),
+                        request.candidateSourcePaths,
+                    )
+                    throw validationFailure
+                }
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("compilation is outside this token-ceiling control")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("rebuild is outside this token-ceiling control")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport = error("behavior evaluation is outside this token-ceiling control")
+            }
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = RepairHistory(project.resolve("reports/repair_history.json")),
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = case.limits,
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = RepairResourceBudget(),
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+
+            val failure = assertFailsWith<Exception> {
+                loop.repairCompileError(project, collectCompileFailure(project), emptyList())
+            }
+            if (case.exhausted) {
+                assertTrue(generateSequence<Throwable>(failure) { it.cause }.any {
+                    it.message.orEmpty().contains("repair agent stopped with limit_exhausted")
+                }, "${case.label} ceiling failure: ${generateSequence<Throwable>(failure) { it.cause }
+                    .mapNotNull { it.message }.toList()}")
+                assertEquals(0, validationCalls)
+            } else {
+                assertSame(validationFailure, failure)
+                assertEquals(1, validationCalls)
+            }
+            assertContentEquals(acceptedSource, target.readBytes())
+            assertContentEquals(acceptedMakefile, project.resolve("Makefile").readBytes())
+
+            val rawGraph = Json.parseToJsonElement(
+                project.resolve("reports/repair-revisions/graph.json").readText(),
+            ).jsonObject
+            assertEquals(JsonNull, rawGraph.getValue("pending"), case.label)
+            assertEquals(baselineHead, rawGraph.getValue("headId").jsonPrimitive.content, case.label)
+            val expectedRun = if (case.exhausted) "resource_exhausted" else "validation_failed"
+            assertEquals(expectedRun, rawGraph.getValue("runs").jsonArray.last()
+                .jsonObject.getValue("status").jsonPrimitive.content, case.label)
+
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId, case.label)
+                assertEquals(baselineHead, graph.snapshot.headId, case.label)
+                assertEquals(
+                    if (case.exhausted) RepairRunStatus.RESOURCE_EXHAUSTED else RepairRunStatus.VALIDATION_FAILED,
+                    graph.snapshot.runs.last().status,
+                    case.label,
+                )
+                val rejected = graph.snapshot.nodes.last()
+                assertEquals(ModuleRevisionStatus.REJECTED, rejected.status, case.label)
+                assertFalse(rejected.recoveredAfterCrash, case.label)
+                val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+                assertEquals(
+                    if (case.exhausted) "returned-limit-exhausted" else "returned-completed",
+                    binding.terminalOutcome,
+                    case.label,
+                )
+                assertEquals(!case.exhausted, binding.receiptReleaseComplete, case.label)
+                val receiptBytes = project.resolve(binding.receiptPath).readBytes()
+                assertEquals(binding.receiptSha256, sha256(receiptBytes), case.label)
+                val receipt = Json.parseToJsonElement(receiptBytes.decodeToString()).jsonObject
+                val outcome = receipt.getValue("outcome").jsonObject
+                assertEquals("returned", outcome.getValue("type").jsonPrimitive.content, case.label)
+                val result = outcome.getValue("result").jsonObject
+                assertEquals(
+                    if (case.exhausted) "limit-exhausted" else "completed",
+                    result.getValue("stopReason").jsonPrimitive.content,
+                    case.label,
+                )
+                val usage = result.getValue("usage").jsonObject
+                assertEquals(11, usage.getValue("inputTokens").jsonPrimitive.int, case.label)
+                assertEquals(7, usage.getValue("outputTokens").jsonPrimitive.int, case.label)
+                assertEquals(3, usage.getValue("cachedInputTokens").jsonPrimitive.int, case.label)
+                val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
+                val record = filesystem.getValue("records").jsonArray.single().jsonObject
+                assertEquals(1, filesystem.getValue("recordCount").jsonPrimitive.int, case.label)
+                assertEquals("allowed", record.getValue("outcome").jsonPrimitive.content, case.label)
+                assertEquals("completed", record.getValue("reason").jsonPrimitive.content, case.label)
+                val process = receipt.getValue("process").jsonObject
+                assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int, case.label)
+                assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean, case.label)
+                if (case.exhausted) {
+                    val assessment = decompengine.project.AcpChangeAssessment.parse(
+                        project.resolve(requireNotNull(binding.assessmentPath)).readBytes(),
+                    )
+                    assertEquals(
+                        decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
+                        assessment.eligibility,
+                        case.label,
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
     fun `active repair path rejects candidate growth beyond the staging byte budget`() {
         val project = createProject(
             createTempDirectory("repair-active-staging-byte-limit-").resolve("project"),

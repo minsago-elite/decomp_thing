@@ -73,6 +73,7 @@ RECONSTRUCTION_MODES = {
 ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
     "repair-active-output-limit",
+    "repair-active-declared-role-token-limit-after-write",
     "repair-active-declared-role-tool-limit-after-write",
     "repair-active-declared-role-frame-limit-after-write",
     "repair-active-declared-role-frame-size-after-write",
@@ -257,6 +258,7 @@ expected_fs = {
     "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-token-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-tool-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-frame-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-frame-size-after-write": {"readTextFile": True, "writeTextFile": True},
@@ -769,6 +771,24 @@ if MODE == "repair-active-declared-role-tool-limit-after-write":
     sys.stdout.write("".join(json.dumps(message, separators=(",", ":")) + "\n"
                             for message in completion_burst))
     sys.stdout.flush()
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-token-limit-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* token-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        149,
+    )
+    time.sleep(0.05)
+    respond(prompt, {
+        "stopReason": "end_turn",
+        "usage": {
+            "inputTokens": 11,
+            "outputTokens": 7,
+            "totalTokens": 18,
+            "cachedReadTokens": 3,
+        },
+    })
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-frame-limit-after-write":
     source = join_path(cwd, "src/modules/reconstructed.c")
