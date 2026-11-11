@@ -836,6 +836,28 @@ no-change case. These selected cases do not exhaust the resource-limit matrix
 or prove that a validated candidate reaches the production validator. #734 and
 #63 remain open.
 
+`TraceGuidedRepairTest.active ACP repair passes a receipt-backed candidate to
+the validation strategy` adds the complementary active-path handoff control at
+`d64d1bc479007b32a2bf4b35012e554e8f0c16a9`. A real scripted ACP process makes
+one allowed declared-role source edit and returns a completed, release-complete
+execution receipt. The active repair loop passes the full immutable candidate
+snapshot and matching source digest to the injected validation strategy. The
+test correlates the validation invocation's candidate and run identities with
+the durable rejected node, and correlates the receipt change digest with the
+rejection assessment. A sentinel validation exception then verifies rejection
+is persisted before return, with no pending attempt, no recovery-derived
+terminal state, no suppressed cleanup error, and unchanged accepted source and
+head. Eight selected active-repair methods passed locally at this commit with
+zero failures, errors, or skips.
+
+The validator here is an injected test strategy with strict-assurance labeling;
+it is not the registered production validator, and the test deliberately does
+not claim compilation, behavior validation, or successful publication. This
+proves active-path candidate handoff and failure rollback around the validator
+seam only. Production validation under #236, live-provider behavior, complete
+resource coverage, and hosted exact-head CI remain unqualified. #734 and #63
+remain open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
