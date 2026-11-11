@@ -1417,3 +1417,26 @@ This is local evidence using a scripted ACP peer and
 production repair validator. It does not qualify live-provider behavior,
 production validation under #236, other repair profiles, the full mutation or
 resource-limit matrix, or hosted exact-head CI. #734 and #63 remain open.
+
+## Public reconstruction FIFO final-snapshot refusal — 2026-11-11
+
+Commit `6a677d1676eb1c1db9f04aa3dd7118bc15522f4f` extends the same public
+reconstruction test with an additional special-file case. After the scripted
+ACP process receives acknowledgement for its target write, a host-side hook
+replaces the staged implementation with a writer-free FIFO. The final
+workspace snapshot reports `WORKSPACE_VIOLATION` with reason
+`special-file`; the invocation-bound receipt is request-bound and has a
+non-null matching turn identity, no complete execution evidence, and the
+original allowed/completed target-write audit. The test also requires verified
+process and sandbox cleanup, unchanged accepted publication metadata, and no
+publication residue.
+
+The accumulated focused test passed locally at source commit
+`6a677d1676eb1c1db9f04aa3dd7118bc15522f4f`: one test, zero failures, errors or
+skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-fifo-refusal-2026-11-11.xml)
+and [provenance record](evidence/issue-734-public-reconstruction-fifo-refusal-2026-11-11.json)
+bind the result to the exact source, command, toolchain and report digest.
+This is host-side injection with a scripted ACP process for the Generated C
+Make profile; it does not qualify live-provider behavior, production
+validation under #236, publication-time revalidation under #732, other
+profiles, or hosted exact-head CI. #734 and #63 remain open.

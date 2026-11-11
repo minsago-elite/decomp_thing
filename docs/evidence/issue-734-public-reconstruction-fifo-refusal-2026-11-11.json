@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "6a677d1676eb1c1db9f04aa3dd7118bc15522f4f",
+  "sourceParent": "70ff8600bb6217acfb73bd6f7661de1442f28d9a",
+  "sourceTree": "2b8de4ecd4e606203621c46b1dd42310a8a99530",
+  "test": "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes",
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "environment": {
+    "java": "openjdk version 21.0.12.1",
+    "node": "v26.12.1",
+    "npm": "11.20.0",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 63.384,
+    "suiteSeconds": 63.399,
+    "timestamp": "2026-11-11T11:52:41.064Z",
+    "junitSha256": "b79a8ebe6e10ee0e9839400fef863fc8fa40d872f6fd529829741530af95a2bc"
+  },
+  "scope": {
+    "profile": "Generated C Make",
+    "provider": "scripted ACP process with host-side final-snapshot injection",
+    "scenario": "After the scripted ACP target write is acknowledged, the host replaces the staged implementation with a FIFO created by /usr/bin/mkfifo. Final snapshot refuses it as WORKSPACE_VIOLATION with reason special-file.",
+    "receipt": "The request-bound and non-null turn-identity-bound receipt reports final-workspace-snapshot, has no complete execution evidence, and retains the original allowed/completed target-write audit.",
+    "rollback": "Accepted output metadata remains unchanged; no publication residue remains.",
+    "cleanup": "ACP process stopped, no owned processes remain, and sandbox cleanup is verified.",
+    "qualificationLimits": [
+      "host-side injection is not an agent-accessible mutation",
+      "local scripted ACP fixture only",
+      "one reconstruction profile",
+      "no live-provider behavior",
+      "no production validator qualification under #236",
+      "no publication-time revalidation under #732",
+      "no hosted exact-head CI"
+    ]
+  }
+}
