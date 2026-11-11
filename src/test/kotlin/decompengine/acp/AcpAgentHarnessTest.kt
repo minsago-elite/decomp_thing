@@ -1303,8 +1303,37 @@ class AcpAgentHarnessTest {
         val extracted = fixture.resolve("verified-success")
         ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
         assertFalse(extracted.resolve("src/modules/decomp_extra.c").exists())
-        val acceptedMetadata = capturePublishedMetadata(output)
+        var acceptedMetadata = capturePublishedMetadata(output)
         assertEquals(false, successful.implementationExistedAtDispatch)
+
+        val exactSourceBoundary = runAttempt(
+            "reconstruction-exact-source-byte-boundary",
+            index = 18,
+            maximumFrameBytes = 512 * 1024,
+        )
+        assertNull(exactSourceBoundary.failure, "a source file exactly at its declared grant limit must be accepted")
+        assertEquals(1, exactSourceBoundary.taskCount)
+        assertEquals(1, exactSourceBoundary.receipts.size)
+        assertEquals(false, exactSourceBoundary.implementationExistedAtDispatch)
+        val exactBoundaryResult = assertNotNull(exactSourceBoundary.result)
+        assertEquals(0, exactBoundaryResult.build.returnCode)
+        val exactBoundaryReceipt = exactSourceBoundary.receipts.single().requireResult()
+        assertEquals(AgentStopReason.COMPLETED, exactBoundaryReceipt.stopReason)
+        assertEquals(AgentFileChangeKind.CREATED, exactBoundaryReceipt.changes.single().kind)
+        assertEquals(256L * 1024, exactBoundaryReceipt.changes.single().sizeBytes)
+        val exactBoundaryAudit = exactSourceBoundary.harness.latestFilesystemAudit().last()
+        assertEquals(implementationPath, assertNotNull(exactBoundaryAudit.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, exactBoundaryAudit.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, exactBoundaryAudit.reason)
+        val exactBoundaryExtracted = fixture.resolve("verified-exact-source-byte-boundary")
+        ArchivalBundleVerifier.extractAndVerify(
+            exactBoundaryResult.bundle.archivePath,
+            exactBoundaryExtracted,
+            profile = profile,
+        )
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactBoundaryExtracted, profile).returnCode)
+        acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
 
         // The public reconstruction grant is one non-recursive target path. Its parent entries
         // make initial entry-count reachable. The target itself is absent at dispatch, so byte

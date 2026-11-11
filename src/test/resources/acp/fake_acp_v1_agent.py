@@ -63,6 +63,7 @@ GENERIC_CONTRACT_MODES = {
 RECONSTRUCTION_MODES = {
     "reconstruction-role-policy",
     "reconstruction-mutation-grant",
+    "reconstruction-exact-source-byte-boundary",
     "reconstruction-tool-limit-after-write",
     "reconstruction-limit-after-write",
     "reconstruction-missing-usage-after-write",
@@ -87,7 +88,8 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-candidate",
     "repair-active-declared-role-timeout-after-write",
 }
-RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
+RECONSTRUCTION_MAXIMUM_SOURCE_BYTES = 256 * 1024
+RECONSTRUCTION_OVERSIZED_BYTES = RECONSTRUCTION_MAXIMUM_SOURCE_BYTES + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
 int main(void) {
     char badge[8];
@@ -256,6 +258,7 @@ expected_fs = {
     "fs-cap-none": None,
     "reconstruction-role-policy": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-mutation-grant": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-exact-source-byte-boundary": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-tool-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-missing-usage-after-write": {"readTextFile": False, "writeTextFile": True},
@@ -1418,6 +1421,14 @@ if MODE in RECONSTRUCTION_MODES:
         "/* fn_0000000000001000 */\n"
         "int decomp_engine_main(void) { return 0; }\n"
     )
+    if MODE == "reconstruction-exact-source-byte-boundary":
+        suffix = "*/\n"
+        padding_bytes = RECONSTRUCTION_MAXIMUM_SOURCE_BYTES - len(content.encode("utf-8")) - 2 - len(suffix)
+        if padding_bytes < 0:
+            raise SystemExit(135)
+        content += "/*" + ("b" * padding_bytes) + suffix
+        if len(content.encode("utf-8")) != RECONSTRUCTION_MAXIMUM_SOURCE_BYTES:
+            raise SystemExit(136)
     if MODE == "reconstruction-mutation-grant":
         outside_path = join_path(cwd, f"src/modules/{module_id}_extra.c")
         outside = try_write_workspace_file(outside_path, "unauthorized sibling\n", 817)
