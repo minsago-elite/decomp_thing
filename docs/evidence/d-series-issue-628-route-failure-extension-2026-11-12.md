@@ -249,3 +249,18 @@ Verification at this source checkpoint:
 - `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local frontend/JSDOM evidence only. It does not qualify browser or assistive-technology behavior, every route/panel failure combination, or full #628/#221 acceptance.
+
+## Retained legacy-page navigation after a failed continuation — 2026-11-12
+
+Implementation/source checkpoint: `5dae1feeada937f2ece293ba4b184b3eb81dbd1a` on PR #1946.
+
+For peers without signed `currentCursor` metadata, the dashboard now anchors Previous/Next to the page whose rows are actually displayed after a transient continuation failure. An explicit navigation-attempt identity allows a user to retry the same failed destination without changing the requested page index or automatically retrying. The packaged scale journey now verifies the transient failure retains Page 1, leaves only Next enabled, and a keyboard retry loads exactly Page 2 before the explicit Refresh recovery.
+
+Verification on a repository-local archive snapshot reconstructed from the exact PR parent plus the three source/test/script files in this checkpoint:
+
+- Focused Vitest: `job-dashboard.test.tsx` — 53 tests passed.
+- `npm run typecheck` with Node 24.20.0/npm 11.19.0 — generated API drift and TypeScript checks passed.
+- `npm run lint` with Node 24.20.0/npm 11.19.0 — passed with zero warnings.
+- `node --check scripts/packaged-browser-scale.mjs` — passed.
+
+The source-level tests cover legacy peers without cursor metadata; the packaged retry journey exercises the signed-cursor browser fixture. Hosted checks for this checkpoint remain authoritative. This evidence does not establish all dashboard failure classes, every route or panel, packaged accessibility beyond the existing gates, assistive-technology behavior, or full #628/#221 acceptance. #628 remains OPEN.
