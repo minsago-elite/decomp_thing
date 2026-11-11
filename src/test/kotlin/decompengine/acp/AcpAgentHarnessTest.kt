@@ -1310,6 +1310,10 @@ class AcpAgentHarnessTest {
             "reconstruction-exact-source-byte-boundary",
             index = 18,
             maximumFrameBytes = 512 * 1024,
+            snapshotLimits = WorkspaceSnapshotLimits(
+                fileBytes = 256L * 1024,
+                totalBytes = 256L * 1024,
+            ),
         )
         assertNull(exactSourceBoundary.failure, "a source file exactly at its declared grant limit must be accepted")
         assertEquals(1, exactSourceBoundary.taskCount)

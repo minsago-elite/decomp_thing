@@ -89,7 +89,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-timeout-after-write",
 }
 RECONSTRUCTION_MAXIMUM_SOURCE_BYTES = 256 * 1024
-RECONSTRUCTION_OVERSIZED_BYTES = RECONSTRUCTION_MAXIMUM_SOURCE_BYTES + 1
+RECONSTRUCTION_OVERSIZED_SOURCE_BYTES = RECONSTRUCTION_MAXIMUM_SOURCE_BYTES + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
 int main(void) {
     char badge[8];
@@ -1434,9 +1434,14 @@ if MODE in RECONSTRUCTION_MODES:
         outside = try_write_workspace_file(outside_path, "unauthorized sibling\n", 817)
         if outside.get("error", {}).get("code") != -32602:
             raise SystemExit(126)
+        oversized_content = (
+            "/*" + ("a" * (RECONSTRUCTION_OVERSIZED_SOURCE_BYTES - 5)) + "*/\n"
+        )
+        if len(oversized_content.encode("utf-8")) != RECONSTRUCTION_OVERSIZED_SOURCE_BYTES:
+            raise SystemExit(137)
         oversized = try_write_workspace_file(
             source,
-            "/*" + ("a" * RECONSTRUCTION_OVERSIZED_BYTES) + "*/\n",
+            oversized_content,
             818,
         )
         if oversized.get("error", {}).get("code") != -32602:
