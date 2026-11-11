@@ -89,6 +89,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-no-change",
     "repair-active-declared-role-candidate",
     "repair-active-declared-role-quota-retry",
+    "repair-active-declared-role-patch-count-retry",
     "repair-active-declared-role-timeout-after-write",
 }
 RECONSTRUCTION_MAXIMUM_SOURCE_BYTES = 256 * 1024
@@ -286,6 +287,7 @@ expected_fs = {
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-candidate": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-quota-retry": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-patch-count-retry": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
@@ -926,6 +928,26 @@ if MODE == "repair-active-declared-role-quota-retry":
     readback = read_workspace_file(source, 156)
     if "error" in readback or readback.get("result", {}).get("content") != candidate:
         raise SystemExit(157)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-patch-count-retry":
+    first = join_path(cwd, "src/modules/reconstructed.c")
+    second = join_path(cwd, "src/modules/secondary.c")
+    first_candidate = "/* retained one-file patch */\nint decomp_engine_main(void) { return 1; }\n"
+    second_candidate = "int secondary(void) { return 1; }\n"
+    write_workspace_file(first, first_candidate, 170)
+
+    refused = try_write_workspace_file(second, second_candidate, 171)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(172)
+
+    first_readback = read_workspace_file(first, 173)
+    if "error" in first_readback or first_readback.get("result", {}).get("content") != first_candidate:
+        raise SystemExit(173)
+    second_readback = read_workspace_file(second, 174)
+    if "error" in second_readback or second_readback.get("result", {}).get("content") != \
+            "int secondary(void) { return 0; }\n":
+        raise SystemExit(174)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-timeout-after-write":
