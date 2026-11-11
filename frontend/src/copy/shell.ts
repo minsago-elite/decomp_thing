@@ -93,6 +93,7 @@ export const panelBoundaryCopy = {
     attemptControls: 'Attempt actions', progressPin: 'Progress pin', activity: 'Activity',
     exploration: 'Exploration evidence', validation: 'Validation evidence',
     sourcePreview: 'Source preview', digestCheck: 'Download digest check', storage: 'Stored data',
+    scheduler: 'Web workflow scheduler', progressRetention: 'Progress history retention',
   },
 } as const;
 

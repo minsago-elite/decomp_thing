@@ -47,8 +47,8 @@ export default function Runtime({ identity, session = null, basePath = '' }: { i
           <dt>{copy.git}</dt><dd>{snapshot.runtime.gitVersion ?? copy.notReported}</dd>
           <dt>{copy.maximumUpload}</dt><dd>{snapshot.limits.maxUploadBytes === '0' ? copy.uploadsUnavailable : formatExactBytes(snapshot.limits.maxUploadBytes)}</dd>
         </dl>
-        <SchedulerSummary scheduler={snapshot.runtime.scheduler} />
-        <ProgressRetentionSummary retention={snapshot.runtime.progressRetention} />
+        <PanelBoundary name={panelBoundaryCopy.names.scheduler}><SchedulerSummary scheduler={snapshot.runtime.scheduler} /></PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.progressRetention}><ProgressRetentionSummary retention={snapshot.runtime.progressRetention} /></PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.storage}><StorageSummary basePath={basePath} /></PanelBoundary>
         <h3>{copy.workflowCapabilities}</h3>
         {snapshot.capabilities.length === 0 ? <p>{copy.noCapabilitiesReported}</p> : <ul>
