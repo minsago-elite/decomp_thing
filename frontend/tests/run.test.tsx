@@ -461,6 +461,7 @@ it.each([
   ['401', new ApiClientError('http_error', { status: 401 }), 'Reconnect the local session to read attempt history', false],
   ['403', new ApiClientError('http_error', { status: 403 }), 'Access to attempt history was denied', false],
   ['404', new ApiClientError('http_error', { status: 404 }), 'Attempt history is unavailable', false],
+  ['deleted-job', new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' }), 'This job was deleted. Its attempt history was removed', false],
   ['expired-cursor', new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }), 'Attempt history changed or this page expired', false],
   ['corrupt-storage', new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_WORKFLOW_STATE' }), 'Attempt history could not be verified', true],
   ['invalid-response', new ApiClientError('invalid_response'), 'Attempt history could not be verified', true],
