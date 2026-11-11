@@ -549,7 +549,6 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   };
   const theme = async (tab, scheme) => cdp.call('Emulation.setEmulatedMedia', { features: [
     { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
-  const crossTabPreferences = await qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, evaluate, ready, capture });
   const tab = await makeTarget();
   await intercept(tab);
   const layout = []; const contrast = []; const focus = [];
@@ -727,14 +726,16 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     })`);
     feedback.push(timing.focused); data.push(timing.populated);
   }
+  // Run after the visual and navigation measurements so the stored test values cannot affect them.
+  const crossTabPreferences = await qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, evaluate, ready, capture });
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice, crossTabPreferences,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
 }
 
-async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, evaluate, ready, capture }) {
-  const tabs = [await makeTarget(), await makeTarget()];
-  const failures = [];
+export async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, evaluate, ready, capture }) {
+  const tabs = [];
+  const cleanupFailures = [];
   const installed = [];
   const state = (tab) => evaluate(tab, `(() => {
     const controls = [...document.querySelectorAll('.display-preference-fields select')];
@@ -752,8 +753,13 @@ async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, 
     control.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
   })()`);
-  const result = { sameOrigin: true, targetIds: tabs.map((tab) => tab.targetId), initial: null, initialTabs: [], steps: [], finalTabs: [] };
+  const result = { sameOrigin: false, targetIds: [], initial: null, initialTabs: [], steps: [], finalTabs: [] };
+  let preferenceMutationStarted = false;
   try {
+    tabs.push(await makeTarget());
+    result.targetIds.push(tabs[0].targetId);
+    tabs.push(await makeTarget());
+    result.targetIds.push(tabs[1].targetId);
     for (const tab of tabs) {
       await intercept(tab);
       await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
@@ -777,9 +783,19 @@ async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, 
         };
         window.addEventListener('storage', audit.onStorage);
         audit.originalSetItem = Storage.prototype.setItem;
+        audit.originalRemoveItem = Storage.prototype.removeItem;
+        audit.originalClear = Storage.prototype.clear;
         Storage.prototype.setItem = function (name, value) {
-          if (name === key) audit.writes += 1;
+          if (this === window.localStorage && name === key) audit.writes += 1;
           return audit.originalSetItem.call(this, name, value);
+        };
+        Storage.prototype.removeItem = function (name) {
+          if (this === window.localStorage && name === key) audit.writes += 1;
+          return audit.originalRemoveItem.call(this, name);
+        };
+        Storage.prototype.clear = function () {
+          if (this === window.localStorage && this.getItem(key) !== null) audit.writes += 1;
+          return audit.originalClear.call(this);
         };
         return true;
       })()`);
@@ -787,6 +803,7 @@ async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, 
       installed.push(tab);
       await evaluate(tab, `document.querySelector('.display-preferences > button')?.click()`);
     }
+    preferenceMutationStarted = true;
     assert.equal(await setField(tabs[0], 0, 'dark'), true, 'First tab theme control is missing');
     await ready(tabs[1], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === 'dark' && s[1]?.value === 'system' && window.__displayPreferenceAudit.events.length === 1; })()`,
       'second packaged tab receives first preference update');
@@ -803,19 +820,57 @@ async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, 
     await Promise.all(tabs.map((tab, index) => capture(tab, `audit-preferences-tab-${index + 1}.png`)));
     result.finalTabs = await Promise.all(tabs.map(state));
     result.storage = await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)})`);
+  } catch (error) {
+    result.failure = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown browser audit failure';
   } finally {
+    if (preferenceMutationStarted) {
+      try {
+        const preferenceRemoved = await evaluate(tabs[0], `(() => {
+          localStorage.removeItem(${JSON.stringify(displayPreferencesKey)});
+          return localStorage.getItem(${JSON.stringify(displayPreferencesKey)}) === null;
+        })()`);
+        result.cleanup = { preferenceRemoved: preferenceRemoved === true, otherTabReset: false, targetsClosed: false };
+        assert.equal(preferenceRemoved, true, 'Cross-tab audit preference must be removed from the shared profile');
+      } catch (error) {
+        result.cleanup ??= { preferenceRemoved: false, otherTabReset: false, targetsClosed: false };
+        cleanupFailures.push(String(error));
+      }
+      if (result.cleanup?.preferenceRemoved === true) {
+        try {
+        await ready(tabs[1], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === 'system' && s[1]?.value === 'system' && window.__displayPreferenceAudit.events.length === 2; })()`,
+          'preference tabs reset after cross-tab audit');
+        result.cleanup.otherTabReset = true;
+        } catch (error) { cleanupFailures.push(String(error)); }
+      }
+    } else if (result.sameOrigin) {
+      try {
+        result.cleanup = { preferenceRemoved: await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)}) === null`),
+          otherTabReset: true, targetsClosed: false };
+      } catch (error) { cleanupFailures.push(String(error)); }
+    }
     for (const tab of installed) {
       await evaluate(tab, `(() => {
         const audit = window.__displayPreferenceAudit;
         if (!audit) return true;
         window.removeEventListener('storage', audit.onStorage);
         Storage.prototype.setItem = audit.originalSetItem;
+        Storage.prototype.removeItem = audit.originalRemoveItem;
+        Storage.prototype.clear = audit.originalClear;
         delete window.__displayPreferenceAudit;
         return true;
-      })()`).catch((error) => failures.push(String(error)));
+      })()`).catch((error) => cleanupFailures.push(String(error)));
     }
+    const closed = [];
+    for (const tab of tabs) {
+      try {
+        const response = await cdp.call('Target.closeTarget', { targetId: tab.targetId });
+        closed.push(response?.success === true);
+      } catch (error) { closed.push(false); cleanupFailures.push(String(error)); }
+    }
+    result.cleanup ??= { preferenceRemoved: false, otherTabReset: false, targetsClosed: false };
+    result.cleanup.targetsClosed = closed.length === tabs.length && closed.every(Boolean);
   }
-  if (failures.length) throw new Error(`Preference audit cleanup failed: ${failures.join('; ')}`);
+  result.cleanupFailures = cleanupFailures;
   return result;
 }
 
@@ -824,6 +879,9 @@ export function crossTabPreferenceFailures(evidence) {
   const failures = [];
   const fail = (message) => failures.push(`cross-tab preferences: ${message}`);
   if (!evidence || typeof evidence !== 'object') { fail('missing evidence'); return failures; }
+  if (typeof evidence.failure === 'string' && evidence.failure) fail(`scenario failed: ${evidence.failure}`);
+  if (Array.isArray(evidence.cleanupFailures)) for (const cleanupFailure of evidence.cleanupFailures)
+    fail(`cleanup failed: ${cleanupFailure}`);
   if (evidence.sameOrigin !== true) fail('tabs did not prove a shared packaged origin');
   const targets = Array.isArray(evidence.targetIds) ? evidence.targetIds : [];
   if (targets.length !== 2 || targets.some((value) => typeof value !== 'string' || !value) || new Set(targets).size !== 2)
@@ -857,11 +915,14 @@ export function crossTabPreferenceFailures(evidence) {
     if (tab.storageEvents !== 1 || tab.writes !== 1) fail(`final tab ${index + 1} event/write counts ${JSON.stringify(tab)}`);
   }
   if (evidence.storage !== '{"version":1,"theme":"dark","motion":"reduce"}') fail('shared persisted record does not match the final controls');
+  if (evidence.cleanup?.preferenceRemoved !== true || evidence.cleanup?.otherTabReset !== true || evidence.cleanup?.targetsClosed !== true)
+    fail(`test preference or browser targets were not cleaned up ${JSON.stringify(evidence.cleanup)}`);
   return failures;
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
-export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 }, { connectionNotice = true } = {}) {
+export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 },
+  { connectionNotice = true, crossTabPreferences = true } = {}) {
   const failures = [];
   // Expectations come from the qualification contract, not the report's claimed coverage.
   const schemes = ['light', 'dark'];
@@ -923,7 +984,7 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   }
   // Chrome-DevTools-only evidence; the Playwright cross-engine runner opts out explicitly.
   if (connectionNotice !== false) failures.push(...connectionNoticeFailures(audit.connectionNotice));
-  failures.push(...crossTabPreferenceFailures(audit.crossTabPreferences));
+  if (crossTabPreferences !== false) failures.push(...crossTabPreferenceFailures(audit.crossTabPreferences));
   if (audit.unmapped.length) failures.push(`unmapped API reads: ${[...new Set(audit.unmapped)].join(', ')}`);
   // Every packaged script, style, worker and font must resolve under the deployment base.
   const assetBase = `${origin}/nested/assets/ui/`;

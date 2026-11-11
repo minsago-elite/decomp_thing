@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, crossTabPreferenceFailures, displayPreferencesKey, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, crossTabPreferenceFailures, displayPreferencesKey, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, qualifyCrossTabPreferences } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -50,6 +50,7 @@ function crossTabPreferenceEvidence() {
     ],
     finalTabs: [values(1, 1), values(1, 1)],
     storage: '{"version":1,"theme":"dark","motion":"reduce"}',
+    cleanup: { preferenceRemoved: true, otherTabReset: true, targetsClosed: true },
   };
 }
 function connectionEvidence() {
@@ -93,6 +94,94 @@ test('packaged audit requires two real tabs to converge without echo writes', ()
   }
   const missing = clean(); delete missing.crossTabPreferences;
   assert.match(verdict(missing).join('\n'), /cross-tab preferences: missing evidence/);
+});
+
+test('cross-tab audit records both deliveries and clears its profile state and targets', async () => {
+  const origin = 'http://127.0.0.1:4173';
+  const tabs = [
+    { targetId: 'target-a', sessionId: 'session-a' },
+    { targetId: 'target-b', sessionId: 'session-b' },
+  ];
+  const values = new Map(tabs.map(tab => [tab.sessionId, { theme: 'system', motion: 'system', writes: 0, events: [] }]));
+  let stored = null;
+  const closed = [];
+  const state = tab => {
+    const value = values.get(tab.sessionId);
+    return { theme: value.theme, motion: value.motion, dataTheme: value.theme, dataMotion: value.motion,
+      storageEvents: value.events.length, writes: value.writes,
+      lastStorageEventTrusted: value.events.at(-1)?.trusted ?? null,
+      lastStorageEventArea: value.events.at(-1)?.storageArea ?? null };
+  };
+  const result = await qualifyCrossTabPreferences({ origin,
+    cdp: { async call(method, params) { if (method === 'Target.closeTarget') { closed.push(params.targetId); return { success: true }; } return {}; } },
+    makeTarget: async () => tabs.shift(), intercept: async () => {}, capture: async () => {},
+    ready: async (tab, _expression, label) => {
+      const current = values.get(tab.sessionId);
+      if (label === 'display preferences in packaged workspace') return true;
+      if (label === 'second packaged tab receives first preference update') return current.theme === 'dark' && current.events.length === 1;
+      if (label === 'first packaged tab receives second preference update') return current.motion === 'reduce' && current.events.length === 1;
+      if (label === 'preference tabs reset after cross-tab audit') return current.theme === 'system' && current.motion === 'system' && current.events.length === 2;
+      return false;
+    },
+    evaluate: async (tab, expression) => {
+      const current = values.get(tab.sessionId);
+      if (expression === 'location.origin') return origin;
+      if (expression.startsWith('(() => {\n    const controls = [...document.querySelectorAll')) return state(tab);
+      if (expression.includes('const key =') && expression.includes('addEventListener')) return true;
+      if (expression.includes("document.querySelector('.display-preferences > button')")) return true;
+      if (expression.startsWith('(() => {\n    const control =')) {
+        const index = Number(expression.match(/\[(\d+)\]/)?.[1]);
+        const field = ['theme', 'motion'][index];
+        const next = JSON.parse(expression.match(/control.value = (.*);/)?.[1] ?? 'null');
+        current[field] = next;
+        current.writes++;
+        stored = JSON.stringify({ version: 1, theme: current.theme, motion: current.motion });
+        const receiver = values.get(tab.sessionId === 'session-a' ? 'session-b' : 'session-a');
+        receiver[field] = next;
+        receiver.events.push({ key: displayPreferencesKey, trusted: true, storageArea: 'localStorage' });
+        return true;
+      }
+      if (expression.startsWith('localStorage.getItem(')) return stored;
+      if (expression.includes('localStorage.removeItem(')) {
+        stored = null;
+        for (const value of values.values()) {
+          value.theme = 'system'; value.motion = 'system';
+          value.events.push({ key: displayPreferencesKey, trusted: true, storageArea: 'localStorage' });
+        }
+        return true;
+      }
+      if (expression.includes('window.__displayPreferenceAudit')) return true;
+      throw new Error(`Unexpected cross-tab probe expression: ${expression}`);
+    },
+  });
+  assert.deepEqual(crossTabPreferenceFailures(result), []);
+  assert.deepEqual(closed.sort(), ['target-a', 'target-b']);
+  assert.equal(result.storage, '{"version":1,"theme":"dark","motion":"reduce"}');
+  assert.equal(result.cleanup.preferenceRemoved, true);
+  assert.equal(result.cleanup.otherTabReset, true);
+  assert.equal(result.cleanup.targetsClosed, true);
+});
+
+test('cross-tab audit retains partial-startup failure and closes every created target', async () => {
+  const closed = [];
+  let launches = 0;
+  const result = await qualifyCrossTabPreferences({ origin: 'http://127.0.0.1:4173',
+    cdp: { async call(method, params) {
+      if (method === 'Target.closeTarget') { closed.push(params.targetId); return { success: true }; }
+      return {};
+    } },
+    makeTarget: async () => {
+      launches++;
+      if (launches === 2) throw new Error('second target launch failed');
+      return { targetId: 'target-a', sessionId: 'session-a' };
+    },
+    intercept: async () => {}, evaluate: async () => null, ready: async () => true, capture: async () => {},
+  });
+  assert.match(result.failure, /second target launch failed/);
+  assert.deepEqual(closed, ['target-a']);
+  assert.equal(result.cleanup.targetsClosed, true);
+  assert.match(crossTabPreferenceFailures(result).join('\n'), /scenario failed: Error: second target launch failed/);
+  assert.match(crossTabPreferenceFailures(result).join('\n'), /expected two distinct browser targets/);
 });
 
 test('rejects absent, empty, partial, duplicate and unexpected measurement matrices', () => {
@@ -318,6 +407,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
         return { sessionId: attached };
       }
       if (method === 'Fetch.enable') return {};
+      if (method === 'Target.closeTarget') return { success: true };
       if (method === 'Page.navigate') {
         if (params.url === `${origin}/nested/` && sessionId?.startsWith('preference-session-')) { counts.navigations++; return {}; }
         page = fixtures.pages.find(candidate => origin + candidate.path === params.url);
@@ -333,7 +423,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
   await assert.rejects(qualifyAudit({ origin, repo, manifest, evidenceDirectory: repo, cdp,
     delay: async () => {}, capture: async () => {},
     makeTarget: async () => {
-      if (targetNumber >= 2) return { sessionId: 'modeled' };
+      if (targetNumber === 0) { targetNumber++; return { sessionId: 'modeled' }; }
       const targetId = `preference-target-${++targetNumber}`;
       const sessionId = `preference-session-${targetNumber}`;
       preferenceTabs.set(sessionId, { theme: 'system', motion: 'system', events: 0, writes: 0 });
@@ -344,6 +434,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       const receiver = preferenceTabs.get(tab.sessionId);
       if (label === 'second packaged tab receives first preference update') return receiver.theme === 'dark' && receiver.events === 1;
       if (label === 'first packaged tab receives second preference update') return receiver.motion === 'reduce' && receiver.events === 1;
+      if (label === 'preference tabs reset after cross-tab audit') return receiver.theme === 'system' && receiver.motion === 'system' && receiver.events === 2;
       return current.ready(tab, expression, label);
     },
     evaluate: async (tab, expression) => {
@@ -368,6 +459,12 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
         }
         return true;
       }
+      if (expression.includes('localStorage.removeItem(')) {
+        for (const tab of preferenceTabs.values()) {
+          tab.theme = 'system'; tab.motion = 'system'; tab.events++;
+        }
+        return true;
+      }
       if (expression.startsWith('localStorage.getItem(')) return '{"version":1,"theme":"dark","motion":"reduce"}';
       if (expression.startsWith('(() => {\n        const audit = window.__displayPreferenceAudit;')) return true;
       let kind = null;
@@ -383,7 +480,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 86 });
+  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
@@ -617,9 +714,12 @@ test('connection notice evidence fails closed when missing, misbound, mis-ordere
   fails(c => { c.restoration.failed = ['Accessibility.disable failed']; }, /cleanup/);
   fails(c => { delete c.restoration; }, /cleanup/);
   assert.deepEqual(connectionNoticeFailures(connectionEvidence()), []);
-  const engine = clean(); delete engine.connectionNotice;
-  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined, { connectionNotice: false }).failures, [],
-    'only the explicit cross-engine opt-out skips Chrome connection evidence');
+  const engine = clean(); delete engine.connectionNotice; delete engine.crossTabPreferences;
+  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined,
+    { connectionNotice: false, crossTabPreferences: false }).failures, [],
+    'explicit cross-engine opt-outs skip Chrome DevTools evidence');
+  assert.match(assertAudit(engine, manifest, responses, origin, undefined, { connectionNotice: false }).failures.join('\n'),
+    /cross-tab preferences: missing evidence/);
   assert.match(assertAudit(engine, manifest, responses, origin, undefined, {}).failures.join('\n'), /missing evidence/);
 });
 
