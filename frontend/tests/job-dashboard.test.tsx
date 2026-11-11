@@ -468,6 +468,70 @@ it('keeps a retained signed snapshot navigable after a transient read failure', 
   expect(transport.get.mock.calls.map(call => call[1])).toEqual(['/jobs?limit=50', '/jobs?limit=50', '/jobs?limit=50&cursor=cursor_next']);
 });
 
+it('retries the next legacy page from the retained page without skipping or auto-retrying', async () => {
+  history.replaceState(null, '', '/');
+  transport.get.mockResolvedValueOnce(page([job(1)], 'cursor_1'))
+    .mockRejectedValueOnce(new ApiClientError('timeout'))
+    .mockResolvedValueOnce(page([job(2)], 'cursor_2'))
+    .mockResolvedValueOnce(page([job(3)]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  await waitFor(() => expect(document.activeElement).toBe(alert));
+  expect(screen.getByText('Page 1')).toBeTruthy();
+  expect(screen.getByText('program-1.elf')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', false);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(transport.get).toHaveBeenCalledTimes(2);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByText('Page 2')).toBeTruthy();
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' })));
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual([
+    '/jobs?limit=50', '/jobs?limit=50&cursor=cursor_1', '/jobs?limit=50&cursor=cursor_1',
+  ]);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('program-3.elf')).toBeTruthy();
+  expect(screen.getByText('Page 3')).toBeTruthy();
+  expect(transport.get.mock.calls[3]?.[1]).toBe('/jobs?limit=50&cursor=cursor_2');
+});
+
+it('bases previous navigation on the displayed legacy page after a failed next read', async () => {
+  history.replaceState(null, '', '/');
+  transport.get.mockResolvedValueOnce(page([job(1)], 'cursor_1'))
+    .mockResolvedValueOnce(page([job(2)], 'cursor_2'))
+    .mockResolvedValueOnce(page([job(3)], 'cursor_3'))
+    .mockRejectedValueOnce(new ApiClientError('timeout'))
+    .mockResolvedValueOnce(page([job(2)], 'cursor_2'));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('program-3.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  const alert = await screen.findByRole('alert');
+  await waitFor(() => expect(document.activeElement).toBe(alert));
+
+  expect(screen.getByText('Page 3')).toBeTruthy();
+  expect(screen.getByText('program-3.elf')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', false);
+  fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+  await waitFor(() => expect(document.querySelector('ul[aria-label="Uploaded jobs"] li h4 a')?.textContent).toBe('program-2.elf'));
+  expect(screen.getByText('Page 2')).toBeTruthy();
+  console.log('focus after previous', document.activeElement?.outerHTML, 'page', screen.getByText('Page 2').textContent);
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' })));
+  expect(transport.get.mock.calls[4]?.[1]).toBe('/jobs?limit=50&cursor=cursor_1');
+});
+
 it('preserves nanosecond date ranges and compares timezone-equivalent boundaries exactly', () => {
   const filters = { ...DEFAULT_FILTERS, status: 'uploaded', limit: '200',
     createdAfter: '2026-09-05T00:00:00.000000001Z', createdBefore: '2026-09-05T09:00:00.000000002+09:00' };

@@ -42,6 +42,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const [pageIndex, setPageIndex] = useState(0);
   const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
+  const [navigationAttempt, setNavigationAttempt] = useState(0);
   const [observation, setData] = useState<Received<Jobs> | null>(null);
   const data = observation?.value;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -80,8 +81,11 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   // Only one extra bounded page is retained; continuation pages stay server-backed.
   const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; basePath: string; data: Received<Jobs> } | null>(null);
   const cursor = selection.cursor ?? cursors[pageIndex] ?? null;
+  const navigationPageIndex = phase === 'error' && retainedPageNavigation && displayedPageIndex !== null
+    ? displayedPageIndex : pageIndex;
   const dashboardPath = useRef(location.pathname);
-  const binding = useMemo(() => ({ selection, refresh, client, basePath, pageIndex, cursor }), [selection, refresh, client, basePath, pageIndex, cursor]);
+  const binding = useMemo(() => ({ selection, refresh, client, basePath, pageIndex, cursor, navigationAttempt }),
+    [selection, refresh, client, basePath, pageIndex, cursor, navigationAttempt]);
   const activeBinding = useRef<typeof binding | null>(binding);
   activeBinding.current = binding;
   const entryPin = useRef<{ query: string; client: typeof client; cursor: string } | null>(null);
@@ -415,10 +419,11 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       </li>)}
     </ul>}
     <nav class="job-actions" aria-label={copy.jobPages}>
-      <button type="button" disabled={phase === 'loading' || (phase === 'error' && !retainedPageNavigation) || (snapshotPage ? !snapshotPage.previousCursor : pageIndex === 0)} onClick={() => {
+      <button type="button" disabled={phase === 'loading' || (phase === 'error' && !retainedPageNavigation) || (snapshotPage ? !snapshotPage.previousCursor : navigationPageIndex === 0)} onClick={() => {
         if (snapshotPage) { if (snapshotPage.previousCursor) goToPage(snapshotPage.previousCursor); return; }
         activeBinding.current = null;
-        moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1));
+        moveFocus.current = true; setNavigationAttempt(value => value + 1);
+        setPageIndex(Math.max(0, navigationPageIndex - 1));
       }}>{copy.previousPage}</button>
       <span aria-live="polite">{data && displayedPageIndex !== null ? displayMessage(copy.page, { page: snapshotPage?.pageNumber ?? displayedPageIndex + 1 })
         : phase === 'loading' && selection.valid ? selection.cursor ? copy.loadingSavedPage : displayMessage(copy.loadingPage, { page: pageIndex + 1 }) : copy.noPageAvailable}</span>
@@ -426,7 +431,9 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
         if (!data?.page.nextCursor) return;
         if (snapshotPage) { goToPage(data.page.nextCursor); return; }
         activeBinding.current = null;
-        moveFocus.current = true; setCursors(previous => [...previous.slice(0, pageIndex + 1), data.page.nextCursor]); setPageIndex(pageIndex + 1);
+        moveFocus.current = true; setNavigationAttempt(value => value + 1);
+        setCursors(previous => [...previous.slice(0, navigationPageIndex + 1), data.page.nextCursor]);
+        setPageIndex(navigationPageIndex + 1);
       }}>{copy.nextPage}</button>
     </nav>
   </section>;

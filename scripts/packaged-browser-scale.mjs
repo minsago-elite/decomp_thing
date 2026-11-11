@@ -136,7 +136,24 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
     assert.deepEqual(interceptionErrors, []);
     assert.equal(await evaluate(tab, `document.querySelector('nav[aria-label="Job pages"] span')?.textContent`), 'Page 1');
     assert.deepEqual(await evaluate(tab, rows), oldest);
-    assert.ok(await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').disabled`));
+    const requestCountAfterPrevious = tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length;
+    assert.equal(requestCountAfterPrevious, readsBeforePrevious + 1, 'only the injected continuation failed; no automatic retry ran');
+    assert.equal(await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Previous page').disabled`), true);
+    assert.equal(await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').disabled`), false);
+
+    // Retained rows remain a truthful navigation base. Retry the same next page
+    // with trusted keyboard activation and verify that the page index advances once.
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').focus()`);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+    const secondPage = fixture.ids.slice(200, 400).map(id => '/nested/jobs/' + id);
+    await ready(tab, `(${rows})[0] === ${JSON.stringify(secondPage[0])} &&
+      document.querySelector('nav[aria-label="Job pages"] span')?.textContent === 'Page 2' &&
+      document.activeElement.textContent === 'Job results' && !document.querySelector('[role="alert"]')`, 'retry retained continuation');
+    assert.deepEqual(await evaluate(tab, rows), secondPage);
+    assert.equal(failedContinuations, 2, 'the retry must pass through the same observed request boundary');
+    assert.deepEqual(interceptionErrors, []);
+    assert.equal(tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length, requestCountAfterPrevious + 1);
   } finally { await cdp.call('Fetch.disable', {}, tab.sessionId); }
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Refresh jobs').click()`);
   await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])} &&
