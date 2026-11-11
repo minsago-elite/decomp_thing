@@ -577,6 +577,25 @@ delete/move enforcement is not reachable in this path; repair delete refusal
 is covered separately. Aggregate stdout/stderr, wall-clock, idle and snapshot
 inventory limit outcomes remain separate #734 gaps. Keep #734 and #63 open.
 
+## Reconstruction change-claim consistency checkpoint — 2026-11-11
+
+Commit `6a195ace9` adds
+`SourceTreeTest.reconstruction rejects agent change claims that disagree with
+observed target bytes`. Its seven fake-harness cases report a wrong path,
+multiple paths, a false deletion, the wrong change kind, a wrong before hash,
+a wrong after hash, or a wrong size after writing candidate bytes. Each
+dispatches through `BoundedLlmModuleReconstructor` and `SourceTreeGenerator`;
+the resulting module remains unresolved, its checkpoint is unaccepted, and
+the untrusted candidate bytes are absent from the generated source.
+
+The focused offline Gradle test passed: one test method, seven claim variants,
+zero failures, errors or skips. This exercises the reconstruction validator's
+claim checks with a scripted in-process harness; it is not a real ACP-process
+or public workflow test. The preceding public ACP checkpoint covers the real
+filesystem broker and publication refusal path. Neither checkpoint covers all
+resource ceilings or proves production validation, live-provider behavior, or
+hosted exact-head CI. #734 and #63 remain open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
