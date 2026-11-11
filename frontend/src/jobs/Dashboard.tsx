@@ -44,6 +44,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const data = observation?.value;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
+  const [retainedPageNavigation, setRetainedPageNavigation] = useState(false);
   const [validationError, setValidationError] = useState<JobFilterError | null>(retainedDraft?.validationError ?? null);
   useEffect(() => {
     rememberFilterDraft(draftOwner, basePath, filterSearch(selection.filters), draft, validationError);
@@ -147,6 +148,8 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       }[category];
       retainPrevious = canRetainMetadata(failure);
     }
+    setRetainedPageNavigation(retainPrevious && canRetainMetadata(failure) &&
+      !['LISTING_BUSY', 'LISTING_LIMIT', 'LISTING_UNAVAILABLE', 'CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(serverCode ?? ''));
     if (!retainPrevious) {
       firstPage.current = null;
       // The URL may still carry the cursor for this first-page snapshot. Keep
@@ -192,11 +195,11 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     if (cached && ((!cursor && cached.selection === selection) || retainedSnapshot)) {
       if (!pinReceivedPage(cached.data.value.page)) return;
       if (retainedSnapshot) setPageNotice(copy.cachedFirstSnapshot);
-      setData(cached.data); setDisplayedPageIndex(0); setPhase('ready'); setError('');
+      setData(cached.data); setDisplayedPageIndex(0); setPhase('ready'); setError(''); setRetainedPageNavigation(false);
       return;
     }
     const controller = new AbortController();
-    setPhase('loading'); setError('');
+    setPhase('loading'); setError(''); setRetainedPageNavigation(false);
     const params = new URLSearchParams(filterSearch(selection.filters));
     params.set('limit', selection.filters.limit);
     if (cursor) params.set('cursor', cursor);
@@ -211,7 +214,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       if (!pinReceivedPage(page)) return;
       const received = receive(response.data);
       if (!cursor) firstPage.current = { selection, refresh, client, basePath, data: received };
-      setData(received); setDisplayedPageIndex(pageIndex); setPhase('ready');
+      setData(received); setDisplayedPageIndex(pageIndex); setPhase('ready'); setRetainedPageNavigation(false);
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return;
@@ -410,14 +413,14 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       </li>)}
     </ul>}
     <nav class="job-actions" aria-label={copy.jobPages}>
-      <button type="button" disabled={phase !== 'ready' || (snapshotPage ? !snapshotPage.previousCursor : pageIndex === 0)} onClick={() => {
+      <button type="button" disabled={phase === 'loading' || (phase === 'error' && !retainedPageNavigation) || (snapshotPage ? !snapshotPage.previousCursor : pageIndex === 0)} onClick={() => {
         if (snapshotPage) { if (snapshotPage.previousCursor) goToPage(snapshotPage.previousCursor); return; }
         activeBinding.current = null;
         moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1));
       }}>{copy.previousPage}</button>
       <span aria-live="polite">{data && displayedPageIndex !== null ? displayMessage(copy.page, { page: snapshotPage?.pageNumber ?? displayedPageIndex + 1 })
         : phase === 'loading' && selection.valid ? selection.cursor ? copy.loadingSavedPage : displayMessage(copy.loadingPage, { page: pageIndex + 1 }) : copy.noPageAvailable}</span>
-      <button type="button" disabled={phase !== 'ready' || !data?.page.nextCursor} onClick={() => {
+      <button type="button" disabled={phase === 'loading' || (phase === 'error' && !retainedPageNavigation) || !data?.page.nextCursor} onClick={() => {
         if (!data?.page.nextCursor) return;
         if (snapshotPage) { goToPage(data.page.nextCursor); return; }
         activeBinding.current = null;

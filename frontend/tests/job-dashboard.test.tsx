@@ -444,6 +444,26 @@ it.each([
   expect(transport.get).toHaveBeenCalledTimes(3);
 });
 
+it('keeps a retained page navigable after a transient read failure', async () => {
+  transport.get.mockResolvedValueOnce(page([job(1)], 'next_page'))
+    .mockRejectedValueOnce(new ApiClientError('timeout'))
+    .mockResolvedValueOnce(page([job(2)], 'later_page'));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('Jobs could not be loaded. Refresh the job library to try again.');
+  expect(screen.getByText('program-1.elf')).toBeTruthy();
+  expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  const next = screen.getByRole('button', { name: 'Next page' });
+  expect(next).toHaveProperty('disabled', false);
+  fireEvent.click(next);
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', false);
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual(['/jobs?limit=50', '/jobs?limit=50', '/jobs?limit=50&cursor=next_page']);
+});
+
 it('preserves nanosecond date ranges and compares timezone-equivalent boundaries exactly', () => {
   const filters = { ...DEFAULT_FILTERS, status: 'uploaded', limit: '200',
     createdAfter: '2026-09-05T00:00:00.000000001Z', createdBefore: '2026-09-05T09:00:00.000000002+09:00' };
