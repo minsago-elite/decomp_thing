@@ -1546,3 +1546,22 @@ pending state, and verifies process/sandbox cleanup. The evidence is local
 scripted-ACP coverage for the Generated C repair profile. It does not qualify
 live providers, successful production validation under #236, other profiles,
 hosted exact-head CI, or complete #734/#63 acceptance. Keep #734 and #63 open.
+
+## Active repair ACP quota boundary regression group — 2026-11-11
+
+Source commit `19251d1e15072b8d3a0329605c4b3ea2321d375a` aligns the staging
+retry assertion with the shared fixture's exact candidate bytes. The six-test
+focused group then passes together: active patch-byte, staging-byte, and
+patch-file-count retries, ACP filesystem read/write byte refusals, and the
+per-file source mutation grant boundary. The [JUnit report](evidence/issue-734-active-repair-quota-matrix-2026-11-11.xml)
+and [provenance record](evidence/issue-734-active-repair-quota-matrix-2026-11-11.json)
+retain the complete selector list, exact source/tree identity, environment,
+and report hash.
+
+Each control reaches the injected `STRICT_CONTAINED` validator and expects its
+sentinel rejection. The cases verify invocation-bound receipt/assessment
+evidence, preserved accepted source and head, cleared pending state, and
+process/sandbox cleanup. This remains local scripted-ACP evidence for the
+Generated C repair profile. It does not establish successful production
+validation under #236, live-provider behavior, other profiles, hosted
+exact-head CI, or complete #734/#63 acceptance. Keep #734 and #63 open.
