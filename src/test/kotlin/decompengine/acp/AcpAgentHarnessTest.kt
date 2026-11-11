@@ -1133,7 +1133,7 @@ class AcpAgentHarnessTest {
     }
 
     @Test
-    @Timeout(value = 120, unit = TimeUnit.SECONDS)
+    @Timeout(value = 180, unit = TimeUnit.SECONDS)
     fun `transactional ACP source generation accepts a bounded modification of an existing owned implementation`() {
         val profile = GeneratedCMakeReconstructionProfile.descriptor
         val buildRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
@@ -1308,6 +1308,7 @@ class AcpAgentHarnessTest {
             snapshotLimits: WorkspaceSnapshotLimits? = null,
             gatePromptCompletion: Boolean = false,
             cancelAfterAcknowledgedMessage: String? = null,
+            afterPromptCompletion: ((Path) -> Unit)? = null,
         ): Attempt {
             val receipts = mutableListOf<AgentExecutionReceipt>()
             val requestSha256s = mutableListOf<String>()
@@ -1315,13 +1316,15 @@ class AcpAgentHarnessTest {
             val cancellationReady = cancelAfterAcknowledgedMessage?.let { CountDownLatch(1) }
             var taskCount = 0
             var implementationExistedAtDispatch: Boolean? = null
+            var implementationPathAtDispatch: Path? = null
             val progress = object : AgentWorkflowProgress {
                 override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
                     taskCount++
                     requestSha256s += AgentExecutionRequestBinding.capture(request).requestSha256
                     val rule = request.accessPolicy.pathRules.single()
-                    implementationExistedAtDispatch = request.workspaceRoots.single { it.id == rule.path.rootId }
-                        .path.resolve(rule.path.relativePath).let(Files::isRegularFile)
+                    implementationPathAtDispatch = request.workspaceRoots.single { it.id == rule.path.rootId }
+                        .path.resolve(rule.path.relativePath)
+                    implementationExistedAtDispatch = implementationPathAtDispatch!!.let(Files::isRegularFile)
                     return object : AgentTaskProgress {
                         override fun event(event: AgentExecutionEvent) {
                             if (event is AgentMessageEvent && event.textDelta == cancelAfterAcknowledgedMessage) {
@@ -1350,9 +1353,10 @@ class AcpAgentHarnessTest {
                 } ?: timeouts(),
                 workspaceSnapshotLimits = snapshotLimits,
             ).also { configured ->
-                if (gatePromptCompletion) {
+                if (gatePromptCompletion || afterPromptCompletion != null) {
                     configured.withPromptLoopGateForTesting { promptJob ->
                         kotlinx.coroutines.withTimeout(5_000) { promptJob.join() }
+                        afterPromptCompletion?.invoke(requireNotNull(implementationPathAtDispatch))
                     }
                 }
             }
@@ -1591,6 +1595,114 @@ class AcpAgentHarnessTest {
             assertNull(snapshotEvidence.completeExecutionEvidence)
             assertEquals(acceptedMetadata, capturePublishedMetadata(output), dimension)
             assertNoReconstructionPublicationResidue(output)
+        }
+
+        data class FinalSnapshotViolation(
+            val label: String,
+            val index: Int,
+            val expectedReason: String?,
+            val inject: (Path, Path) -> Unit,
+            val expectedFailure: AgentFailureKind,
+        )
+        val oversizedValidSource = ("/*" + "x".repeat(256 * 1024 - 4) + "*/\n").toByteArray(Charsets.UTF_8)
+        assertEquals(256 * 1024 + 1, oversizedValidSource.size)
+        val finalSnapshotViolations = listOf(
+            FinalSnapshotViolation(
+                label = "invalid-utf8",
+                index = 22,
+                expectedReason = null,
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, _ ->
+                    Files.write(target, Files.readAllBytes(target) + byteArrayOf(0xff.toByte()))
+                },
+            ),
+            FinalSnapshotViolation(
+                label = "grant-size",
+                index = 23,
+                expectedReason = null,
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, _ -> Files.write(target, oversizedValidSource) },
+            ),
+            FinalSnapshotViolation(
+                label = "symbolic-link",
+                index = 24,
+                expectedReason = "symbolic-link",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, outside ->
+                    Files.write(outside, Files.readAllBytes(target))
+                    Files.delete(target)
+                    Files.createSymbolicLink(target, outside.toAbsolutePath())
+                },
+            ),
+            FinalSnapshotViolation(
+                label = "hard-link",
+                index = 25,
+                expectedReason = "unsupported-link-count",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, outside -> Files.createLink(outside, target) },
+            ),
+        )
+        for (scenario in finalSnapshotViolations) {
+            val outside = fixture.resolve("final-snapshot-${scenario.label}-outside.c")
+            Files.deleteIfExists(outside)
+            var injected = 0
+            var expectedOutsideBytes: ByteArray? = null
+            val finalSnapshotRefusal = runAttempt(
+                "reconstruction-role-policy",
+                index = scenario.index,
+                afterPromptCompletion = { target ->
+                    if (scenario.label == "symbolic-link" || scenario.label == "hard-link") {
+                        expectedOutsideBytes = Files.readAllBytes(target)
+                    }
+                    scenario.inject(target, outside)
+                    injected++
+                },
+            )
+            assertEquals(1, injected, scenario.label)
+            assertNotNull(finalSnapshotRefusal.failure, "${scenario.label} final snapshot must refuse publication")
+            assertEquals(1, finalSnapshotRefusal.taskCount, scenario.label)
+            assertEquals(1, finalSnapshotRefusal.receipts.size, scenario.label)
+            val violationReceipt = finalSnapshotRefusal.receipts.single()
+            assertEquals(
+                finalSnapshotRefusal.requestSha256s.single(),
+                violationReceipt.requestBinding.requestSha256,
+                scenario.label,
+            )
+            val turnIdentity = assertNotNull(violationReceipt.turnIdentity, scenario.label)
+            assertEquals(violationReceipt.requestBinding.requestSha256, turnIdentity.requestSha256, scenario.label)
+            val violationFailure = assertIs<AgentExecutionOutcome.Failed>(violationReceipt.outcome).failure
+            assertEquals(scenario.expectedFailure, violationFailure.kind, scenario.label)
+            assertEquals("final-workspace-snapshot", violationFailure.details["phase"], scenario.label)
+            if (scenario.expectedReason == null) {
+                assertEquals("project", violationFailure.details["rootId"], scenario.label)
+                assertEquals(implementationPath, violationFailure.details["relativePath"], scenario.label)
+            } else {
+                assertEquals(scenario.expectedReason, violationFailure.details["reason"], scenario.label)
+            }
+            val violationEvidence = assertIs<AcpInvocationEvidenceSnapshot>(violationReceipt.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, violationEvidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, violationEvidence.cleanupDisposition)
+            assertNull(violationEvidence.completeExecutionEvidence)
+            val diagnostics = assertNotNull(violationEvidence.diagnostics, scenario.label)
+            assertTrue(diagnostics.remainingProcessIds.isEmpty(), scenario.label)
+            assertTrue(diagnostics.sandboxCleanupVerified, scenario.label)
+            assertProcessStopped(diagnostics.pid)
+            assertTrue(finalSnapshotRefusal.harness.latestFilesystemAudit().any {
+                it.policyPath?.relativePath == implementationPath &&
+                    it.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                    it.reason == AcpFilesystemAuditReason.COMPLETED
+            }, scenario.label)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), scenario.label)
+            assertNoReconstructionPublicationResidue(output)
+            if (scenario.label == "symbolic-link" || scenario.label == "hard-link") {
+                assertTrue(Files.isRegularFile(outside), scenario.label)
+                assertContentEquals(
+                    requireNotNull(expectedOutsideBytes),
+                    Files.readAllBytes(outside),
+                    scenario.label,
+                )
+            }
+            Files.deleteIfExists(outside)
         }
 
         val limited = runAttempt("reconstruction-limit-after-write", index = 2)
