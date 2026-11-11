@@ -2,8 +2,9 @@
 
 Source checkpoint: `48da5630de3394c176a9714781647093dab75d25` on PR #1946.
 
-This checkpoint extends the focused #628 work in two areas:
+This checkpoint extends the focused #628 work in four areas:
 
+- Dashboard listing errors use the shared failure classifier, fixed messages, validated correlation references, and explicit empty/partial-result behavior; the route's forms and navigation remain available after failure.
 - `RunHistory` is now the fifth route in the shared failure-class matrix. The matrix exercises session, denied, missing, unsupported, corrupt/unverified, and server failures; checks fixed copy and correlation-reference behavior; rejects protocol diagnostics; and verifies route headings and main navigation remain available.
 - Runtime storage and maintenance reads use the shared failure classifier. Their six failure classes have distinct fixed messages, validated reference IDs are retained, and errors use an alert. A `PanelBoundary` isolates storage-panel render faults while preserving the runtime identity and capability sections.
 - The dashboard refresh regression binds its URL cursor through a non-retainable read failure, then proves an explicit refresh can publish a new first-page cursor.
