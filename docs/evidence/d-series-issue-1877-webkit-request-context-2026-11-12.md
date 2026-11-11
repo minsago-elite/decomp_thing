@@ -2,7 +2,8 @@
 
 ## Scope
 
-Source checkpoint: `9c3b99efcc9d90ea1461f696f6833db0cea18a54`, based directly on master
+Source checkpoint: `3e53e0d7250c8cf45ef80d330ff8d4554308ebf3`, based on diagnostic commit
+`9c3b99efcc9d90ea1461f696f6833db0cea18a54` and ultimately on master
 `2b1121999c806d5b3f89d3723fca8a39879c49b1`.
 
 This change adds event-only, bounded diagnostics to the packaged cross-engine runner. It records
