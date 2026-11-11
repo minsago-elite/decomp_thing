@@ -34,3 +34,25 @@ The new tests use the production API client and real components with mocked `fet
 not run a browser or live server. This checkpoint does not close #629. It does not qualify
 screen-reader behavior, real multi-tab timing, hosted exact-head CI, or the full identity-bound
 command matrix.
+
+## Review corrections at `c45e7ac87cbcb75b5475b777e942f74ebec62540`
+
+Two current-head review findings are corrected in this source:
+
+- During an acknowledged save's readback window, a newer same-job version now updates untouched
+  form fields while retaining only post-submit edits. The regression has another tab archive the
+  job before the readback fails, then verifies that the refreshed archived value remains selected
+  and a subsequent Save performs no request.
+- Deletion presentation now selects the fixed recovery-required guidance from the operation's
+  `recoveryRequired` flag, including when the operation state is `failed`. The server's free-form
+  message remains excluded.
+
+Verification on the exact source tree:
+
+- `npm test -- tests/job-lifecycle-629.test.tsx` — **1 file, 40 tests passed**.
+- `npm test -- tests/job-lifecycle-629.test.tsx tests/job-lifecycle.test.tsx tests/job-deletion-reconciliation.test.tsx` — **3 files, 64 tests passed**.
+- `npm run build` — passed, including generated API check, typecheck, lint, production bundle and
+  bundle-size gates.
+
+These are local component/API-client tests and build results. They do not qualify real browser
+cross-tab timing, hosted exact-head CI, or #629's complete original acceptance criteria.
