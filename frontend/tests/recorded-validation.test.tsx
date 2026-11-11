@@ -68,6 +68,37 @@ it('bounds validation history and case previews in named keyboard-scrollable tab
   expect(fetcher).toHaveBeenCalledTimes(2);
 });
 
+it.each([
+  ['session', () => Promise.resolve(errorResponse('SESSION_EXPIRED', 401)),
+    'Reconnect the local session to read validation evidence.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  ['denied', () => Promise.resolve(errorResponse('ACCESS_DENIED', 403)),
+    'Access to validation evidence was denied. Check local permissions.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  ['missing', () => Promise.resolve(errorResponse('NOT_FOUND', 404)),
+    'Validation evidence is unavailable at this job and attempt. Read current history to choose another retained observation.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  ['unsupported', () => Promise.resolve(new Response(JSON.stringify({ apiVersion: 2, kind: 'validationHistory', requestId: 'request_example_1', data: {} }),
+    { status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })),
+    'This interface cannot read the validation evidence format. Update the application before retrying.', null],
+  ['unverified', () => Promise.resolve(new Response('{ malformed', { status: 200,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })),
+    'Validation evidence could not be verified. No result is inferred; read history to retry.', null],
+  ['failed', () => Promise.reject(new Error('private network diagnostic')),
+    'Validation evidence could not be read. Retry the safe history read.', null],
+] as const)('distinguishes %s validation-history failures without leaking diagnostics', async (_kind, outcome, message, reference) => {
+  const fetcher = vi.fn<typeof fetch>().mockImplementationOnce(outcome);
+  vi.stubGlobal('fetch', fetcher); mount();
+  fireEvent.click(screen.getByRole('button', { name: 'Read validation evidence' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(message);
+  if (reference) expect(alert.textContent).toContain(reference);
+  else expect(alert.textContent).not.toContain('Reference ID:');
+  expect(alert.textContent).not.toContain('private response detail');
+  expect(alert.textContent).not.toContain('private network diagnostic');
+  expect(alert.textContent).not.toContain('SESSION_EXPIRED');
+  expect(screen.queryByRole('button', { name: inspectName })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Read validation evidence' })).toBeTruthy();
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
 type SavedValidation = Pick<Report, 'reportId' | 'binding' | 'summary' | 'validationCases' | 'validationFailure'> & {
   format: string; exportSchemaVersion: number; scope: string; limitations: string[];
 };
