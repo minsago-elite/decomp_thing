@@ -91,8 +91,34 @@ it('clears a previous recovery snapshot when refreshed access is denied', async 
   expect(await screen.findByText(/Observed 1 upload stages/)).toBeTruthy();
   expect(await screen.findByText('recovery-example.elf')).toBeTruthy();
   denied = true; fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
-  expect(await screen.findByText(/Recovery state is unknown/)).toBeTruthy();
+  expect(await screen.findByText(/This session cannot inspect recovery files/)).toBeTruthy();
   expect(screen.queryByText(/Observed 1 upload stages/)).toBeNull();
+});
+
+it('distinguishes recovery inspection failures with sanitized correlation', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  const failures: [ApiClientError, string, boolean][] = [
+    [new ApiClientError('http_error', { status: 401, requestId, serverCode: 'SESSION_EXPIRED' }), 'Reconnect the local session', true],
+    [new ApiClientError('http_error', { status: 403, requestId, serverCode: 'ACCESS_DENIED' }), 'cannot inspect recovery files', true],
+    [new ApiClientError('http_error', { status: 404, requestId, serverCode: 'NOT_FOUND' }), 'unavailable at this server address', true],
+    [new ApiClientError('unsupported_contract', { serverCode: 'PRIVATE_DIAGNOSTIC' }), 'cannot read the recovery response format', false],
+    [new ApiClientError('invalid_response', { serverCode: 'CORRUPT_WORKFLOW_STATE' }), 'could not be verified', false],
+    [new ApiClientError('http_error', { status: 503, requestId, serverCode: 'INTERNAL_ERROR' }), 'Recovery state is unknown', true],
+  ];
+  const messages = new Set<string>();
+  for (const [failure, expected, hasReference] of failures) {
+    const client = { get: vi.fn().mockRejectedValue(failure) } as unknown as ReturnType<typeof ClientModule.createApiClient>;
+    const mounted = render(<RecoverySummary client={client} refresh={0} />);
+    const alert = await screen.findByRole('alert');
+    const text = alert.textContent ?? '';
+    expect(text).toContain(expected);
+    expect(text.includes(`Reference ID: ${requestId}.`)).toBe(hasReference);
+    for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'PRIVATE_DIAGNOSTIC', 'ApiClientError', 'Web API request failed'])
+      expect(text).not.toContain(leaked);
+    messages.add(text.replace(` Reference ID: ${requestId}.`, ''));
+    mounted.unmount();
+  }
+  expect(messages.size).toBe(failures.length);
 });
 
 it('pauses recovery inspection during uploads and waits for explicit refresh after they settle', async () => {

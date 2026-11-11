@@ -74,6 +74,11 @@ export const recoverySummaryCopy = {
   "preserveTheseFilesUntilRecoveryHasBeenVerifiedCountsAre": "Preserve these files until recovery has been verified. Counts are a display-only snapshot and do not authorize cleanup or establish accepted source revisions.",
   "refreshJobsToInspectRecoveryFilesAgain": "Refresh jobs to inspect recovery files again.",
   "recoveryFilesCouldNotBeInspectedRecoveryStateIsUnknown": "Recovery files could not be inspected. Recovery state is unknown; preserve stored data before retrying.",
+  sessionExpired: 'Reconnect the local session to inspect recovery files.',
+  accessDenied: 'This session cannot inspect recovery files. Check local permissions.',
+  missing: 'Recovery information is unavailable at this server address. Preserve stored data until its status is known.',
+  unsupported: 'This interface cannot read the recovery response format. Update the application before retrying.',
+  unverified: 'Recovery information could not be verified. Preserve stored data until its status is known.',
   "recoveryInspectionPaused": "Recovery inspection paused",
   "retainedRecoveryFiles": "Retained recovery files"
 } as const;

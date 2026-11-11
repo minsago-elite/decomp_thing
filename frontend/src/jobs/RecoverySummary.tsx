@@ -8,6 +8,7 @@ import type { Recovery } from '../api/generated';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 type RecoveryClient = ReturnType<typeof createApiClient>;
 
@@ -27,8 +28,15 @@ export function RecoverySummary({ client, refresh }: {
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       const busy = failure instanceof ApiClientError && failure.serverCode === 'RECOVERY_INSPECTION_BUSY';
-      setState({ client, refresh, data: null, busy, error: busy ? '' : withApiFailureReference(
-        copy.recoveryFilesCouldNotBeInspectedRecoveryStateIsUnknown, failure) });
+      const message = {
+        session: copy.sessionExpired,
+        denied: copy.accessDenied,
+        missing: copy.missing,
+        unsupported: copy.unsupported,
+        unverified: copy.unverified,
+        failed: copy.recoveryFilesCouldNotBeInspectedRecoveryStateIsUnknown,
+      }[metadataFailureKind(failure)];
+      setState({ client, refresh, data: null, busy, error: busy ? '' : withApiFailureReference(message, failure) });
     });
     return () => { controller.abort(); };
   }, [client, refresh]);
@@ -42,7 +50,7 @@ export function RecoverySummary({ client, refresh }: {
   return <section aria-labelledby="recovery-summary-title" class="notice">
     <h3 id="recovery-summary-title">{busy ? copy.recoveryInspectionPaused : copy.retainedRecoveryFiles}</h3>
     {busy ? <p role="status">{copy.anUploadIsInProgressRefreshJobsAfterUploadsFinish}</p>
-      : error ? <p role="status">{error}</p> : !data ? <p role="status">{copy.inspectingRecoveryFiles}</p> : <>
+      : error ? <p role="alert">{error}</p> : !data ? <p role="status">{copy.inspectingRecoveryFiles}</p> : <>
       <MetadataReceipt kind="recovery" receipt={observation?.receipt} />
       <p>{displayMessage(copy.inventory, { qualifier: data.inventoryComplete ? copy.observed : copy.atLeast, stages: data.retainedUploadStages, metadata: data.retainedMetadataFiles, bytes: data.observedBytes })}</p>
       {!data.inventoryComplete && <p>{copy.inspectionIsIncompleteAdditionalFilesOrBytesMayRemain}</p>}
