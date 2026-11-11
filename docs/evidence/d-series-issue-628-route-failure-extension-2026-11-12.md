@@ -235,3 +235,17 @@ Verification at this source checkpoint:
 - `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local frontend/JSDOM evidence only. It does not qualify packaged-browser or assistive-technology behavior, recovery endpoint failures beyond the existing component matrix, or full #628/#221 acceptance.
+
+## Exploration evidence read failure classes — 2026-11-12
+
+Exact test source checkpoint: `85d20fd8c5d3f813fc975462801fca8199ed4457` on PR #1946. The production categorization was already present in the reviewed source; this change adds focused evidence for its six read-failure classes.
+
+The component test covers expired session, denied access, missing route, unsupported response, unverified response, and general server failure. It requires distinct fixed guidance, includes only validated request IDs, rejects private server diagnostics, and confirms one explicit report read per attempt without automatic retry.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `exploration-evidence-failures.test.tsx`, `exploration-failure-cases.test.tsx`, `dashboard-recovery.test.tsx`, and `resilience.test.tsx` — 4 files, 46 tests passed.
+- Full frontend Vitest suite — 85 files, 1,235 tests passed.
+- `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local frontend/JSDOM evidence only. It does not qualify browser or assistive-technology behavior, every route/panel failure combination, or full #628/#221 acceptance.
