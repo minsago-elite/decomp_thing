@@ -126,3 +126,16 @@ Verification at this source checkpoint:
 - `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local component/build evidence only. Packaged-browser behavior, all signed-cursor failure permutations, and full #628/#221 acceptance remain open.
+
+## Job-library route matrix coverage — 2026-11-12
+
+Implementation checkpoint: `d8b5ff6703838f43887d87c7c1666080f2428eef`; exact matrix test checkpoint: `840c9893eb0319e12badc82cf367c6ad0b98b34f` on PR #1946.
+
+The shared route failure matrix now includes the authenticated job library alongside job overview, attempt history, attempt overview, saved activity window, source directory and source file. Every route is exercised with session, denied, missing, unsupported, corrupt/unverified, and server failure responses. The test checks category-distinct fixed messages, request-reference filtering, diagnostic redaction, and that the route heading and main navigation remain available.
+
+Verification at test checkpoint `840c9893e`:
+
+- Focused Vitest: `resilience.test.tsx` — 1 file, 17 tests passed; the matrix covers seven routes across six failure categories.
+- `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local component/build evidence only. It does not qualify packaged-browser or assistive-technology behavior, the complete panel matrix, or full #628/#221 acceptance.
