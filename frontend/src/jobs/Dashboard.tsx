@@ -17,6 +17,8 @@ import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import { RecoverySummary } from './RecoverySummary';
 import { onLibraryChange } from './libraryChannel';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
 
 function currentFilters() {
   try { return { ...jobLocation(location.search), valid: true }; }
@@ -365,7 +367,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     : data ? copy.loadingJobsPreviouslyLoadedRowsRemainBelow : copy.loadingJobs;
   return <section aria-labelledby="job-library-title">
     <h2 id="job-library-title">{copy.uploadedJobs}</h2>
-    <RecoverySummary client={client} refresh={refresh} />
+    <PanelBoundary name={panelBoundaryCopy.names.recovery}><RecoverySummary client={client} refresh={refresh} /></PanelBoundary>
     <form ref={form} class="job-filters" onSubmit={event => { event.preventDefault(); apply(draft); }}>
       <label>{copy.filenameSearch}<input {...fieldA11y('search')} value={draft.search} maxLength={256} onInput={event => field('search', event.currentTarget.value)} /></label>
       <label>{copy.workflowState}<select {...fieldA11y('status')} value={draft.status} onChange={event => field('status', event.currentTarget.value)}>

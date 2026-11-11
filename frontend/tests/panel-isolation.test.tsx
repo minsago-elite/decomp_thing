@@ -12,7 +12,7 @@ import { createBrowserSession } from '../src/session/session';
 // One independent panel failing to render must not take down its route (#628).
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string) => Promise<unknown>>(), post: vi.fn() }));
 const failing = vi.hoisted(() => ({ renders: 0, storageRenders: 0, storage: false,
-  schedulerRenders: 0, scheduler: false, retentionRenders: 0, retention: false }));
+  schedulerRenders: 0, scheduler: false, retentionRenders: 0, retention: false, recoveryRenders: 0, recovery: false }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 vi.mock('../src/jobs/ExplorationEvidence', () => ({
   ExplorationEvidence: () => { failing.renders += 1; throw new Error('private stack detail /home/user/secret'); },
@@ -38,6 +38,13 @@ vi.mock('../src/jobs/ProgressRetentionSummary', () => ({
     return <h3>Progress retention sibling remains visible</h3>;
   },
 }));
+vi.mock('../src/jobs/RecoverySummary', () => ({
+  RecoverySummary: () => {
+    failing.recoveryRenders += 1;
+    if (failing.recovery) throw new Error('private recovery render failure');
+    return <p>Recovery inventory sibling remains visible</p>;
+  },
+}));
 
 type Fixture = { data: Record<string, unknown> };
 const fixture = (name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as Fixture;
@@ -49,11 +56,13 @@ const runId = run.data.runId as string;
 const responses: Record<string, () => unknown> = {
   run: () => run, job: () => job,
   validationHistory: () => { const document = fixture('validation-history'); document.data.binding = { jobId, runId, revisionId: null }; return document; },
+  jobs: () => fixture('jobs-page'),
 };
 
 beforeEach(() => {
   failing.renders = 0; failing.storageRenders = 0; failing.storage = false;
   failing.schedulerRenders = 0; failing.scheduler = false; failing.retentionRenders = 0; failing.retention = false;
+  failing.recoveryRenders = 0; failing.recovery = false;
   transport.get.mockReset(); transport.post.mockReset();
   transport.get.mockImplementation(kind => responses[kind] ? Promise.resolve(responses[kind]()) : Promise.reject(new ApiClientError('http_error', { status: 404 })));
 });
@@ -92,6 +101,33 @@ it('replaces only the failed panel with a fixed, accessible notice and retries b
   } finally {
     silence.mockRestore();
   }
+});
+
+it('isolates the dashboard recovery inventory from upload and job-list controls', async () => {
+  failing.recovery = true;
+  const auth = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  sessions.push(auth); await auth.initialize({ kind: 'absent' });
+  const silence = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    history.replaceState(null, '', '/nested/');
+    render(<App basePath="/nested" session={auth} />);
+    const notice = await screen.findByRole('alert', { name: 'Recovery files could not be displayed' });
+    expect(notice.textContent).toContain('The rest of this page is still available.');
+    expect(document.body.textContent).not.toContain('private recovery render failure');
+    expect(screen.getByRole('heading', { level: 1, name: 'Your work, with its evidence' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Uploaded jobs' })).toBeTruthy();
+    expect(await screen.findByRole('link', { name: 'synthetic.elf' })).toBeTruthy();
+    expect(screen.getByLabelText('Filename or label search')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Upload binary' })).toBeTruthy();
+    const before = failing.recoveryRenders;
+    fireEvent.click(screen.getByRole('button', { name: 'Show this section again' }));
+    expect(failing.recoveryRenders).toBeGreaterThan(before);
+    expect(await screen.findByRole('alert', { name: 'Recovery files could not be displayed' })).toBeTruthy();
+    expect(transport.post).not.toHaveBeenCalled();
+  } finally { silence.mockRestore(); }
 });
 
 it('isolates a Runtime storage-panel render failure from build identity and capabilities', async () => {
