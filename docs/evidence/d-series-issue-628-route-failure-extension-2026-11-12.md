@@ -294,3 +294,24 @@ The conditionally mounted status paragraph was corrected in source checkpoint
 `df3c37d8ae3f5de62346e258c52ef00ff9b5ae36`. This remains local component evidence; packaged
 browser and assistive-technology qualification, remaining panels, and full #628/#221 acceptance
 remain outstanding.
+
+## Managed Git repository panel read failures — 2026-11-12
+
+Source checkpoint: `877f3bdf0c3c0b1fc9b4b9ad46711f2ed13cd37f` on PR #1946.
+The job overview's managed Git repository panel now gives its own read failures distinct fixed
+guidance for expired session, denied access, missing route/resource, unsupported response format,
+unverified/corrupt response, and other server failure. It retains only the canonical request
+reference, leaves Refresh repository available, and does not expose Initialize repository until a
+candidate revision has been verified. Initialization failures retain their existing separate
+identity-bound recovery wording.
+
+Verification on the source checkpoint, using pinned Node 24.20.0/npm 11.19.0:
+
+- `git-repository-panel.test.tsx` — 5 tests passed, including the six-class failure matrix.
+- `git-repository-panel.test.tsx` and `resilience.test.tsx` — 23 tests passed.
+- Full frontend suite — 85 files, 1,239 tests passed.
+- `npm run typecheck`, `npm run lint`, and `npm run build` passed; all bundle-size budgets passed.
+
+These are local frontend/component and build results, not hosted exact-head or packaged-browser
+qualification. They do not close the remaining route/panel combinations or #628/#221 acceptance;
+the issue remains open.

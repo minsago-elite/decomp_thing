@@ -25,6 +25,12 @@ directory, and source file. It does not qualify every panel or every state on ev
 route-by-state acceptance remains open in #628; this focused slice is not closure evidence for that
 issue.
 
+The job overview's managed Git repository panel also classifies its read failures as session,
+denied, missing, unsupported, unverified, or server failure. A failed read keeps the refresh action
+available and does not expose repository initialization until a candidate revision is verified.
+`git-repository-panel.test.tsx` checks these distinct messages, safe reference handling, and that a
+read failure sends no initialization request.
+
 | State | Trigger | What the view shows |
 | --- | --- | --- |
 | Loading | Read in flight | A local `role="status"` line; metadata views retain same-binding verified data and label it as being refreshed. |
