@@ -2663,8 +2663,12 @@ class TraceGuidedRepairTest {
         val siblingPath = "src/modules/reconstructed_extra.c"
         val target = project.resolve(targetPath)
         val makefile = project.resolve("Makefile")
+        val moduleHeader = project.resolve("include/modules/reconstructed.h")
+        val mainSource = project.resolve("src/main.c")
         val acceptedSource = target.readBytes()
         val acceptedMakefile = makefile.readBytes()
+        val acceptedModuleHeader = moduleHeader.readBytes()
+        val acceptedMainSource = mainSource.readBytes()
         val profile = requireNotNull(GeneratedCRepairIndexProfile.reconstructionProfile())
         val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
         val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-no-change")
@@ -2778,6 +2782,8 @@ class TraceGuidedRepairTest {
         assertFalse(validationInvoked)
         assertContentEquals(acceptedSource, target.readBytes())
         assertContentEquals(acceptedMakefile, makefile.readBytes())
+        assertContentEquals(acceptedModuleHeader, moduleHeader.readBytes())
+        assertContentEquals(acceptedMainSource, mainSource.readBytes())
         assertFalse(project.resolve(siblingPath).exists())
 
         val stateBytes = project.resolve("reports/repair-revisions/graph.json").readBytes()
@@ -2803,7 +2809,7 @@ class TraceGuidedRepairTest {
             val filesystem = receipt.getValue("policyAudits").jsonObject
                 .getValue("filesystem").jsonObject
             val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
-            assertEquals(4, filesystem.getValue("recordCount").jsonPrimitive.int)
+            assertEquals(7, filesystem.getValue("recordCount").jsonPrimitive.int)
             val policyDecisions = records.map { record ->
                 val path = record.getValue("policyPath").jsonObject
                 Triple(
@@ -2814,11 +2820,17 @@ class TraceGuidedRepairTest {
             }
             val siblingHash = sha256(siblingPath.toByteArray(Charsets.UTF_8))
             val makefileHash = sha256("Makefile".toByteArray(Charsets.UTF_8))
+            val moduleHeaderHash = sha256("include/modules/reconstructed.h".toByteArray(Charsets.UTF_8))
+            val mainSourceHash = sha256("src/main.c".toByteArray(Charsets.UTF_8))
+            val repairGraphHash = sha256("reports/repair-revisions/graph.json".toByteArray(Charsets.UTF_8))
             val targetHash = sha256(targetPath.toByteArray(Charsets.UTF_8))
             assertEquals(
                 listOf(
                     Triple(siblingHash, "denied", "policy-denied"),
                     Triple(makefileHash, "denied", "policy-denied"),
+                    Triple(moduleHeaderHash, "denied", "policy-denied"),
+                    Triple(mainSourceHash, "denied", "policy-denied"),
+                    Triple(repairGraphHash, "denied", "policy-denied"),
                     Triple(targetHash, "allowed", "completed"),
                     Triple(targetHash, "allowed", "completed"),
                 ),

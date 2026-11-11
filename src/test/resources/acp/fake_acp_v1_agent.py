@@ -862,19 +862,25 @@ if MODE == "repair-active-declared-role-no-change":
     source = join_path(cwd, "src/modules/reconstructed.c")
     sibling = join_path(cwd, "src/modules/reconstructed_extra.c")
     makefile = join_path(cwd, "Makefile")
+    module_header = join_path(cwd, "include/modules/reconstructed.h")
+    main_source = join_path(cwd, "src/main.c")
+    repair_graph = join_path(cwd, "reports/repair-revisions/graph.json")
     for request_id, path, content in (
         (147, sibling, "int extra(void) { return 0; }\n"),
         (148, makefile, "all: unauthorized\n"),
+        (149, module_header, "int decomp_engine_main(void);\n"),
+        (152, main_source, "int main(void) { return 1; }\n"),
+        (153, repair_graph, "{}\n"),
     ):
         denied = try_write_workspace_file(path, content, request_id)
         if denied.get("error", {}).get("code") != -32602:
-            raise SystemExit(149)
+            raise SystemExit(154)
     write_workspace_file(
         source,
         "/* café */\nint decomp_engine_main(void) { return 1; }\n",
-        150,
+        155,
     )
-    write_workspace_file(source, "int decomp_engine_main(void) { return 0; }\n", 151)
+    write_workspace_file(source, "int decomp_engine_main(void) { return 0; }\n", 156)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-candidate":
