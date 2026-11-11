@@ -3,10 +3,13 @@ package decompengine.repair
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.ACP_CAPTURED_REPAIR_WORKSPACE
 import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentFailure
+import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentAccessPolicy
@@ -117,7 +120,20 @@ interface CapturedRepairAgentHarness : AgentHarness {
         output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit,
     ): AgentExecutionReceipt = captureAgentExecutionReceipt(request) {
-        executeCaptured(request, initialFiles, output, onEvent)
+        try {
+            executeCaptured(request, initialFiles, output, onEvent)
+        } catch (failure: RepairBudgetExceededException) {
+            // A bounded sink refusing candidate growth is a resource outcome, not an invalid
+            // provider request. Preserve that classification in the immutable invocation receipt.
+            throw AgentExecutionException(
+                AgentFailure(
+                    AgentFailureKind.RESOURCE_EXHAUSTED,
+                    "captured repair output exceeded an admitted resource budget",
+                    details = mapOf("exception" to failure.javaClass.name),
+                ),
+                failure,
+            )
+        }
     }
 
     fun executeCapturedReceipt(

@@ -70,6 +70,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -1558,6 +1559,74 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair path rejects candidate growth beyond the staging byte budget`() {
+        val project = createProject(
+            createTempDirectory("repair-active-staging-byte-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val targetPath = "src/modules/reconstructed.c"
+        val target = project.resolve(targetPath)
+        val acceptedSource = target.readBytes()
+        // The original indexed source fits in the admission limit; the candidate does not.
+        val budget = RepairResourceBudget(maximumStagingBytes = 4096)
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { it.snapshot.headId }
+        val candidate = ("/*" + "x".repeat(8192) + "*/\n").toByteArray()
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                assertTrue(initialFiles.getValue(targetPath).size < budget.maximumStagingBytes)
+                output.replace(targetPath, candidate)
+                error("oversized candidate unexpectedly passed the staging byte budget")
+            }
+        }
+
+        val failure = assertFailsWith<Exception> {
+            generatedCRepairLoop(
+                harness,
+                RepairHistory(project.resolve("reports/repair_history.json")),
+                resourceBudget = budget,
+            ).repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+        val messages = generateSequence<Throwable>(failure) { it.cause }
+            .mapNotNull { it.message }
+            .toList()
+        assertTrue(messages.any { it.contains("repair workspace contains") && it.contains("limit=4096") }, messages.toString())
+        assertContentEquals(acceptedSource, target.readBytes())
+
+        val persistedState = Json.parseToJsonElement(
+            project.resolve("reports/repair-revisions/graph.json").readText(),
+        ).jsonObject
+        assertEquals(JsonNull, persistedState.getValue("pending"))
+        assertEquals(baselineHead, persistedState.getValue("headId").jsonPrimitive.content)
+        val terminalNode = persistedState.getValue("nodes").jsonArray.last().jsonObject
+        assertEquals("rejected", terminalNode.getValue("status").jsonPrimitive.content)
+        assertEquals("agent-failure-resource-exhausted", terminalNode.getValue("evidenceKind").jsonPrimitive.content)
+        assertEquals(false, terminalNode.getValue("recoveredAfterCrash").jsonPrimitive.boolean)
+        assertEquals(JsonNull, terminalNode.getValue("repairMetadata").jsonObject.getValue("agentInvocation"))
+        assertEquals(
+            "resource_exhausted",
+            persistedState.getValue("runs").jsonArray.last().jsonObject
+                .getValue("status").jsonPrimitive.content,
+        )
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+        }
+    }
+
+    @Test
     fun `agent termination closes the pending graph and releases its root lock`() {
         val tempDir = createTempDirectory("repair-agent-termination-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
@@ -1604,13 +1673,15 @@ class TraceGuidedRepairTest {
         val budget = RepairResourceBudget(maximumPatchBytes = 1024)
         val harness = capturedReplacingHarness(ByteArray(1025) { 'x'.code.toByte() })
 
-        assertFailsWith<RepairBudgetExceededException> {
+        val failure = assertFailsWith<AgentExecutionException> {
             generatedCRepairLoop(
                 harness,
                 RepairHistory(projectDir.resolve("reports/repair_history.json")),
                 resourceBudget = budget,
             ).repairCompileError(projectDir, collectCompileFailure(projectDir), emptyList())
         }
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.failure.kind)
+        assertIs<RepairBudgetExceededException>(failure.cause)
 
         assertContentEquals(before, target.readBytes())
     }
