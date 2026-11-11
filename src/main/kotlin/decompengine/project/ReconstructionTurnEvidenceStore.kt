@@ -275,6 +275,20 @@ internal class ReconstructionTurnEvidenceStore(
     }
 
     private fun writeOnce(directory: TurnDirectory, name: String, bytes: ByteArray, maximumBytes: Int) {
+        // The workspace already owns an exclusive OS lease. Hold its object monitor across the
+        // descriptor-relative publication and any failure cleanup as well, so every writer
+        // sharing this admitted capability observes immutable-name admission serially.
+        synchronized(publicationLock) {
+            writeOnceUnderWorkspaceMonitor(directory, name, bytes, maximumBytes)
+        }
+    }
+
+    private fun writeOnceUnderWorkspaceMonitor(
+        directory: TurnDirectory,
+        name: String,
+        bytes: ByteArray,
+        maximumBytes: Int,
+    ) {
         require(bytes.size <= maximumBytes) { "turn evidence document exceeds its byte bound" }
         publicationLock.borrow(root, inputSha256)
         directory.verifyNamespace()
@@ -296,7 +310,6 @@ internal class ReconstructionTurnEvidenceStore(
             try {
                 LinuxFilesystemSyscalls.renameNoReplace(directory.descriptor.fd, temporaryName, name)
                 linked = false
-                faultInjector?.invoke(ReconstructionTurnEvidenceStorePoint.AFTER_PUBLICATION_RENAME)
             } catch (failure: LinuxSyscallException) {
                 if (failure.errno == LinuxFilesystemSyscalls.EEXIST) {
                     throw IllegalStateException("turn evidence is immutable and already exists", failure)
@@ -304,6 +317,7 @@ internal class ReconstructionTurnEvidenceStore(
                 throw failure
             }
             try {
+                faultInjector?.invoke(ReconstructionTurnEvidenceStorePoint.AFTER_PUBLICATION_RENAME)
                 LinuxFilesystemSyscalls.synchronize(directory.descriptor)
                 directory.verifyNamespace()
                 val published = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.descriptor.fd, name))
@@ -341,14 +355,34 @@ internal class ReconstructionTurnEvidenceStore(
         original: Throwable,
     ) {
         try {
-            val published = LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name) ?: return
-            published.use { actual ->
+            val quarantineName = ".turn-evidence-discard-${UUID.randomUUID()}.tmp"
+            try {
+                // Move the current entry atomically before deciding whether it belongs to this
+                // failed write. A replacement at the final name is therefore never unlinked
+                // based only on an earlier descriptor comparison.
+                LinuxFilesystemSyscalls.renameNoReplace(directory.fd, name, directory.fd, quarantineName)
+            } catch (missing: LinuxSyscallException) {
+                if (missing.errno == LinuxFilesystemSyscalls.ENOENT) return
+                throw missing
+            }
+            val published = LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, quarantineName)
+            val belongsToThisWrite = published?.use { actual ->
                 val identity = actual.identity
-                if (identity.key == expected.identity.key && identity.mountId == expected.identity.mountId &&
+                identity.key == expected.identity.key && identity.mountId == expected.identity.mountId &&
                     identity.uid == directory.identity.uid && identity.linkCount == 1 &&
-                    identity.mode.permissions == PRIVATE_FILE_MODE) {
-                    LinuxFilesystemSyscalls.unlinkIfPresent(directory.fd, name)
-                    LinuxFilesystemSyscalls.synchronize(directory)
+                    identity.mode.permissions == PRIVATE_FILE_MODE
+            } == true
+            if (belongsToThisWrite) {
+                LinuxFilesystemSyscalls.unlinkIfPresent(directory.fd, quarantineName)
+                LinuxFilesystemSyscalls.synchronize(directory)
+            } else {
+                try {
+                    LinuxFilesystemSyscalls.renameNoReplace(directory.fd, quarantineName, directory.fd, name)
+                } catch (restoreFailure: Throwable) {
+                    // Never delete an entry that did not authenticate as this call's inode. If
+                    // the final slot was concurrently reused, retain the displaced entry under
+                    // its private quarantine name for diagnosis rather than destroying it.
+                    original.addSuppressed(restoreFailure)
                 }
             }
         } catch (cleanupFailure: Throwable) {

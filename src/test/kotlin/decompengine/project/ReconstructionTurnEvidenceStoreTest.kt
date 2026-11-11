@@ -238,7 +238,12 @@ class ReconstructionTurnEvidenceStoreTest {
     @Test
     fun `turn evidence directory substitution never writes through the replacement symlink`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
-        for (point in ReconstructionTurnEvidenceStorePoint.entries) {
+        val cases = ReconstructionTurnEvidenceStorePoint.entries.flatMap { point ->
+            if (point == ReconstructionTurnEvidenceStorePoint.AFTER_PUBLICATION_RENAME) {
+                listOf(point to false, point to true)
+            } else listOf(point to false)
+        }
+        for ((point, replacePublishedName) in cases) {
             val base = Files.createTempDirectory(scratch, "turn-evidence-race-")
             val root = base.resolve("output")
             val input = base.resolve("input").also { Files.writeString(it, "input") }
@@ -261,15 +266,28 @@ class ReconstructionTurnEvidenceStoreTest {
                             Files.move(turnDirectory, detached, ATOMIC_MOVE)
                             Files.createSymbolicLink(turnDirectory, external)
                             substituted = true
+                            if (point == ReconstructionTurnEvidenceStorePoint.AFTER_PUBLICATION_RENAME) {
+                                if (replacePublishedName) {
+                                    Files.delete(detached.resolve(ReconstructionTurnEvidenceStore.INTENT_FILE))
+                                    Files.writeString(detached.resolve(ReconstructionTurnEvidenceStore.INTENT_FILE), "replacement")
+                                }
+                                throw IllegalArgumentException("injected failure after namespace detachment")
+                            }
                         }
                     }
 
                     assertFailsWith<IllegalArgumentException>(point.name) { store.persistIntent(intent) }
                     assertTrue(substituted, "the race control must replace the directory at $point")
                     assertFalse(Files.exists(external.resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)))
-                    assertFalse(Files.exists(turnDirectory.resolveSibling("detached-$turnId")
-                        .resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)),
-                        "an unacknowledged publication must not remain in a detached evidence directory at $point")
+                    val detachedIntent = turnDirectory.resolveSibling("detached-$turnId")
+                        .resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)
+                    if (replacePublishedName) {
+                        assertEquals("replacement", Files.readString(detachedIntent),
+                            "cleanup must preserve a replacement entry at $point")
+                    } else {
+                        assertFalse(Files.exists(detachedIntent),
+                            "an unacknowledged publication must not remain in a detached evidence directory at $point")
+                    }
                 }
             } finally {
                 Files.walk(base).use { paths ->
