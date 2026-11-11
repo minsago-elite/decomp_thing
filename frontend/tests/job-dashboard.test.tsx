@@ -18,8 +18,9 @@ vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/job-lossless.json'), 'utf8')) as { data: Job }).data;
 function job(index: number): Job { return { ...sample, jobId: index.toString(16).padStart(32, '0'), displayFilename: `program-${index}.elf` }; }
 function page(items: Job[], nextCursor: string | null = null) { return { data: { items, page: { nextCursor, limit: 50, snapshotVersion: 'snapshot_1' } } }; }
-function snapshotPage(items: Job[], currentCursor: string) {
-  return { data: { items, page: { currentCursor, previousCursor: null, nextCursor: null, pageNumber: 1, limit: 50, snapshotVersion: 'snapshot_1' } } };
+function snapshotPage(items: Job[], currentCursor: string, navigation: { previousCursor?: string | null; nextCursor?: string | null; pageNumber?: number } = {}) {
+  return { data: { items, page: { currentCursor, previousCursor: navigation.previousCursor ?? null,
+    nextCursor: navigation.nextCursor ?? null, pageNumber: navigation.pageNumber ?? 1, limit: 50, snapshotVersion: 'snapshot_1' } } };
 }
 beforeEach(() => { transport.get.mockReset(); });
 
@@ -444,24 +445,27 @@ it.each([
   expect(transport.get).toHaveBeenCalledTimes(3);
 });
 
-it('keeps a retained page navigable after a transient read failure', async () => {
-  transport.get.mockResolvedValueOnce(page([job(1)], 'next_page'))
+it('keeps a retained signed snapshot navigable after a transient read failure', async () => {
+  transport.get.mockResolvedValueOnce(snapshotPage([job(1)], 'cursor_before', { nextCursor: 'cursor_next' }))
     .mockRejectedValueOnce(new ApiClientError('timeout'))
-    .mockResolvedValueOnce(page([job(2)], 'later_page'));
+    .mockResolvedValueOnce(snapshotPage([job(2)], 'cursor_next', { previousCursor: 'cursor_before', pageNumber: 2 }));
   render(<Dashboard basePath="" />);
   expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  expect(location.search).toBe('?cursor=cursor_before');
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain('Jobs could not be loaded. Refresh the job library to try again.');
   expect(screen.getByText('program-1.elf')).toBeTruthy();
   expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  expect(location.search).toBe('?cursor=cursor_before');
   const next = screen.getByRole('button', { name: 'Next page' });
   expect(next).toHaveProperty('disabled', false);
   fireEvent.click(next);
   expect(await screen.findByText('program-2.elf')).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
+  expect(location.search).toBe('?cursor=cursor_next');
   expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', false);
-  expect(transport.get.mock.calls.map(call => call[1])).toEqual(['/jobs?limit=50', '/jobs?limit=50', '/jobs?limit=50&cursor=next_page']);
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual(['/jobs?limit=50', '/jobs?limit=50', '/jobs?limit=50&cursor=cursor_next']);
 });
 
 it('preserves nanosecond date ranges and compares timezone-equivalent boundaries exactly', () => {
