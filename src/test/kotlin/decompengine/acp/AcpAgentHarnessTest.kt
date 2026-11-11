@@ -10,7 +10,6 @@ import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionLimits
 import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
-import decompengine.agent.AgentHarness
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentWorkflowProgress
@@ -1160,6 +1159,7 @@ class AcpAgentHarnessTest {
             val harness: AcpAgentHarness,
             val taskCount: Int,
             val receipts: List<AgentExecutionReceipt>,
+            val requestSha256s: List<String>,
         )
 
         fun runAttempt(
@@ -1170,11 +1170,12 @@ class AcpAgentHarnessTest {
             executionLimits: AgentExecutionLimits? = null,
         ): Attempt {
             val receipts = mutableListOf<AgentExecutionReceipt>()
-            val boundedHarnessReceipts = mutableListOf<AgentExecutionReceipt>()
+            val requestSha256s = mutableListOf<String>()
             var taskCount = 0
             val progress = object : AgentWorkflowProgress {
                 override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
                     taskCount++
+                    requestSha256s += AgentExecutionRequestBinding.capture(request).requestSha256
                     return object : AgentTaskProgress {
                         override fun event(event: AgentExecutionEvent) = Unit
                         override fun complete(receipt: AgentExecutionReceipt) {
@@ -1197,33 +1198,6 @@ class AcpAgentHarnessTest {
                     timeouts(startup = 2_500, request = timeout, shutdown = 1_500)
                 } ?: timeouts(),
             )
-            val selectedHarness = executionLimits?.let { limits ->
-                object : AgentHarness {
-                    private fun bounded(request: AgentExecutionRequest) = AgentExecutionRequest(
-                        objective = request.objective,
-                        workspaceRoots = request.workspaceRoots,
-                        contextInputs = request.contextInputs,
-                        accessPolicy = request.accessPolicy,
-                        limits = limits,
-                        cancellation = request.cancellation,
-                        sessionContinuation = request.sessionContinuation,
-                    )
-
-                    override fun execute(
-                        request: AgentExecutionRequest,
-                        onEvent: (decompengine.agent.AgentExecutionEvent) -> Unit,
-                    ) = acp.execute(bounded(request), onEvent)
-
-                    override fun executeReceipt(
-                        request: AgentExecutionRequest,
-                        onEvent: (decompengine.agent.AgentExecutionEvent) -> Unit,
-                    ): AgentExecutionReceipt = acp.executeReceipt(bounded(request), onEvent).also {
-                        boundedHarnessReceipts += it
-                    }
-
-                    override fun implementationIdentifier(): String? = acp.implementationIdentifier()
-                }
-            } ?: acp
             val function = RecoveredFunction(
                 "fn_0000000000001000",
                 "decomp_engine_main",
@@ -1247,10 +1221,10 @@ class AcpAgentHarnessTest {
                     model
                 },
                 reconstructor = BoundedLlmModuleReconstructor(
-                    selectedHarness,
+                    acp,
                     harnessProvenanceDescriptor = provenance.stableDescriptor,
                     progress = progress,
-                ),
+                ).also { reconstructor -> executionLimits?.let(reconstructor::withExecutionLimitsForTesting) },
                 profile = profile,
                 progress = progress,
             )
@@ -1268,7 +1242,7 @@ class AcpAgentHarnessTest {
                     failure = caught
                 }
             }
-            return Attempt(result, failure, acp, taskCount, (receipts + boundedHarnessReceipts).toList())
+            return Attempt(result, failure, acp, taskCount, receipts.toList(), requestSha256s.toList())
         }
 
         val successful = runAttempt("reconstruction-mutation-grant", index = 1, maximumFrameBytes = 512 * 1024)
@@ -1333,6 +1307,8 @@ class AcpAgentHarnessTest {
         val wallFailure = assertNotNull(wallLimited.failure, "request wall-clock exhaustion must refuse publication")
         assertEquals(1, wallLimited.taskCount)
         val wallReceipt = wallLimited.receipts.single()
+        assertEquals(wallLimited.requestSha256s.single(), wallReceipt.requestBinding.requestSha256)
+        assertEquals(wallReceipt.requestBinding.requestSha256, wallReceipt.turnIdentity?.requestSha256)
         val wallOutcome = assertIs<AgentExecutionOutcome.Failed>(wallReceipt.outcome)
         assertEquals(AgentFailureKind.TIMEOUT, wallOutcome.failure.kind)
         assertTrue(wallOutcome.failure.message.contains("wall-clock", ignoreCase = true), wallOutcome.failure.message)
@@ -1364,6 +1340,8 @@ class AcpAgentHarnessTest {
         val idleFailure = assertNotNull(idleLimited.failure, "request idle exhaustion must refuse publication")
         assertEquals(1, idleLimited.taskCount)
         val idleReceipt = idleLimited.receipts.single()
+        assertEquals(idleLimited.requestSha256s.single(), idleReceipt.requestBinding.requestSha256)
+        assertEquals(idleReceipt.requestBinding.requestSha256, idleReceipt.turnIdentity?.requestSha256)
         val idleOutcome = assertIs<AgentExecutionOutcome.Failed>(idleReceipt.outcome)
         assertEquals(AgentFailureKind.TIMEOUT, idleOutcome.failure.kind)
         assertTrue(idleOutcome.failure.message.contains("idle", ignoreCase = true), idleOutcome.failure.message)
