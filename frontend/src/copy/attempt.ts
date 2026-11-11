@@ -69,7 +69,12 @@ export const recordedValidationCopy = {
   producerReportsComplete: 'Reported complete; not independently verified here', unverifiedCleanup: 'Unverified',
   sourceTitle: 'Source at this validation', findSource: 'Find matching source snapshot', readingSource: 'Reading retained source commitments…',
   sourceBoundary: 'A link is available only when retained workflow source metadata has this validation’s exact source commitment. Reading metadata does not verify file bytes or repair acceptance.',
-  sourceUnavailable: 'No retained source snapshot matching this validation could be verified. No source link is available.',
+  sourceSessionExpired: 'Reconnect the local session to resolve this validation source.',
+  sourceAccessDenied: 'Access to the validation source was denied. Check local permissions.',
+  sourceMissing: 'The retained source is unavailable. No link is available.',
+  sourceUnsupported: 'This interface cannot read the source response format. Update the application before retrying.',
+  sourceUnverified: 'The source could not be verified against this validation. No link is available.',
+  sourceFailed: 'The source could not be read. Retry the lookup; no link is available.',
   retainedRevision: 'Retained workflow revision', openSource: 'Open source with this validated digest',
 } as const;
 

@@ -10,6 +10,7 @@ import { bindDirectory, directoryReadRoute } from '../sources/navigation';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 /** Resolve the durable workflow candidate by its exact source commitment, without equating revision namespaces. */
 export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, sourceSha256, basePath }: {
@@ -40,7 +41,14 @@ export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, s
       setStored(current => current?.binding === binding ? { binding, data: receive({ href, revisionId: selected.revisionId }), loading: false, error: '' } : current);
     } catch (failure: unknown) {
       if (!controller.signal.aborted) setStored(current => current?.binding === binding ? { binding, data: null, loading: false,
-        error: withApiFailureReference(copy.sourceUnavailable, failure) } : current);
+        error: withApiFailureReference({
+          session: copy.sourceSessionExpired,
+          denied: copy.sourceAccessDenied,
+          missing: copy.sourceMissing,
+          unsupported: copy.sourceUnsupported,
+          unverified: copy.sourceUnverified,
+          failed: copy.sourceFailed,
+        }[metadataFailureKind(failure)], failure) } : current);
     }
   }
   return <section aria-label={copy.sourceTitle}>

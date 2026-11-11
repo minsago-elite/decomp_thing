@@ -35,6 +35,11 @@ const inspectName = /^Inspect cases:/;
 function response(document: { requestId: string }, status = 200) {
   return new Response(JSON.stringify(document), { status, headers: { 'Content-Type': 'application/json', 'X-Request-ID': document.requestId } });
 }
+function errorResponse(code: string, status: number, requestId = '0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f') {
+  return new Response(JSON.stringify({ apiVersion: 1, kind: 'error', requestId,
+    error: { code, message: 'private response detail', retryable: false, details: [], retryAfterMs: null } }),
+  { status, headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId } });
+}
 function mount() { return render(<RecordedValidationEvidence jobId={jobId} runId={runId} basePath="/nested" />); }
 async function discover() {
   fireEvent.click(screen.getByRole('button', { name: 'Read validation evidence' }));
@@ -595,6 +600,36 @@ it('clears a previously matched source link when a later explicit metadata read 
   fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
   await screen.findByRole('alert'); expect(screen.queryByRole('link')).toBeNull();
   expect(screen.queryByText('retained_workflow_revision')).toBeNull(); expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it.each([
+  ['session', () => Promise.resolve(errorResponse('SESSION_EXPIRED', 401)),
+  'Reconnect the local session to resolve this validation source.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  ['denied', () => Promise.resolve(errorResponse('ACCESS_DENIED', 403)),
+  'Access to the validation source was denied. Check local permissions.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  ['missing', () => Promise.resolve(errorResponse('NOT_FOUND', 404)),
+  'The retained source is unavailable. No link is available.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  ['unsupported', () => Promise.resolve(new Response(JSON.stringify({ apiVersion: 2, kind: 'run', requestId: 'request_example_1', data: {} }),
+    { status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })),
+  'This interface cannot read the source response format. Update the application before retrying.', null],
+  ['unverified', () => Promise.resolve(new Response('{ malformed', { status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })),
+  'The source could not be verified against this validation. No link is available.', null],
+  ['failed', () => Promise.reject(new Error('private network diagnostic')), 'The source could not be read. Retry the lookup; no link is available.', null],
+] as const)('distinguishes %s source lookup failure without exposing server diagnostics', async (_kind, outcome, message, reference) => {
+  const fetcher = vi.fn<typeof fetch>().mockImplementationOnce(outcome);
+  vi.stubGlobal('fetch', fetcher);
+  render(<ValidationSourceSnapshot jobId={jobId} runId={runId} validationRevisionId="root_validation"
+    sourceSha256={reportFixture().data.validationCases!.sourceSha256} basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(message);
+  if (reference) expect(alert.textContent).toContain(reference);
+  else expect(alert.textContent).not.toContain('Reference ID:');
+  expect(alert.textContent).not.toContain('private response detail');
+  expect(alert.textContent).not.toContain('private network diagnostic');
+  expect(screen.queryByRole('link')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Find matching source snapshot' })).toBeTruthy();
+  expect(fetcher).toHaveBeenCalledOnce();
 });
 
 it('aborts obsolete source resolution and keeps a newer matched link when the old read settles late', async () => {
