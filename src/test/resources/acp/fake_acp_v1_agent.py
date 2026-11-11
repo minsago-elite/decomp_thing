@@ -65,6 +65,8 @@ RECONSTRUCTION_MODES = {
     "reconstruction-mutation-grant",
     "reconstruction-limit-after-write",
     "reconstruction-frame-limit-after-write",
+    "reconstruction-stderr-limit-after-write",
+    "reconstruction-stdout-limit-after-write",
 }
 RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
@@ -237,6 +239,8 @@ expected_fs = {
     "reconstruction-mutation-grant": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-frame-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-stderr-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-stdout-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -1197,6 +1201,23 @@ if MODE in RECONSTRUCTION_MODES:
         sys.stdout.write("{" + ("x" * 70000))
         sys.stdout.flush()
         time.sleep(30)
+        raise SystemExit(0)
+    if MODE == "reconstruction-stderr-limit-after-write":
+        sys.stderr.write("x" * (9 * 1024 * 1024))
+        sys.stderr.flush()
+        sys.stdin.read()
+        raise SystemExit(0)
+    if MODE == "reconstruction-stdout-limit-after-write":
+        try:
+            chunk = "x" * 30000
+            for index in range(300):
+                update({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": chunk},
+                    "messageId": f"output-limit-{index}",
+                })
+        except (BrokenPipeError, OSError):
+            pass
         raise SystemExit(0)
 elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     reconstructing = "Convert the Ghidra decompiler output" in prompt_text

@@ -1299,6 +1299,38 @@ class AcpAgentHarnessTest {
         assertProcessStopped(diagnostics.pid)
         assertEquals(acceptedMetadata, capturePublishedMetadata(output))
         assertNoReconstructionPublicationResidue(output)
+
+        for ((mode, expectedMessage) in listOf(
+            "reconstruction-stderr-limit-after-write" to "execution limit",
+            "reconstruction-stdout-limit-after-write" to "execution limit",
+        )) {
+            val resourceLimited = runAttempt(mode, index = if (mode.contains("stderr")) 4 else 5)
+            val resourceFailure = assertNotNull(
+                resourceLimited.failure,
+                "$mode must refuse candidate publication after the agent writes source",
+            )
+            assertEquals(1, resourceLimited.taskCount, mode)
+            val resourceReceipt = resourceLimited.receipts.single()
+            val resourceOutcome = assertIs<AgentExecutionOutcome.Failed>(resourceReceipt.outcome)
+            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, resourceOutcome.failure.kind, mode)
+            assertTrue(
+                resourceOutcome.failure.message.contains(expectedMessage, ignoreCase = true),
+                resourceOutcome.failure.message,
+            )
+            assertNull(
+                assertIs<AcpInvocationEvidenceSnapshot>(resourceReceipt.providerEvidence).completeExecutionEvidence,
+                "$mode cannot claim a complete terminal execution",
+            )
+            assertTrue(generateSequence<Throwable>(resourceFailure) { it.cause }.any {
+                it.message.orEmpty().contains("validated source publication was refused")
+            }, mode)
+            val resourceDiagnostics = assertNotNull(resourceLimited.harness.latestDiagnostics(), mode)
+            assertTrue(resourceDiagnostics.remainingProcessIds.isEmpty(), resourceDiagnostics.toString())
+            assertTrue(resourceDiagnostics.sandboxCleanupVerified, resourceDiagnostics.toString())
+            assertProcessStopped(resourceDiagnostics.pid)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), mode)
+            assertNoReconstructionPublicationResidue(output)
+        }
     }
 
     private fun capturePublishedMetadata(output: Path): Map<String, PublicationEntryRecord> {
