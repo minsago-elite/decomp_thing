@@ -64,6 +64,7 @@ RECONSTRUCTION_MODES = {
     "reconstruction-role-policy",
     "reconstruction-mutation-grant",
     "reconstruction-exact-source-byte-boundary",
+    "reconstruction-frame-count-limit-after-write",
     "reconstruction-tool-limit-after-write",
     "reconstruction-limit-after-write",
     "reconstruction-missing-usage-after-write",
@@ -259,6 +260,7 @@ expected_fs = {
     "reconstruction-role-policy": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-mutation-grant": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-exact-source-byte-boundary": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-frame-count-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-tool-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-missing-usage-after-write": {"readTextFile": False, "writeTextFile": True},
@@ -1456,6 +1458,18 @@ if MODE in RECONSTRUCTION_MODES:
         if oversized.get("error", {}).get("code") != -32602:
             raise SystemExit(127)
     write_workspace_file(source, content, 816)
+    if MODE == "reconstruction-frame-count-limit-after-write":
+        # The authorized write is acknowledged first. These individually bounded notifications
+        # then exceed the reconstruction request's frame-count ceiling without exhausting its
+        # frame-byte or aggregate-output budgets.
+        for ordinal in range(64):
+            send({
+                "jsonrpc": "2.0",
+                "method": "contract/unknown_notification",
+                "params": {"ordinal": ordinal},
+            })
+        time.sleep(30)
+        raise SystemExit(150)
     if MODE == "reconstruction-tool-limit-after-write":
         for ordinal in range(2):
             update({

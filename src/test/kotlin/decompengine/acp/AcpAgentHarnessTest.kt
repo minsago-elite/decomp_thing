@@ -1167,6 +1167,7 @@ class AcpAgentHarnessTest {
             mode: String,
             index: Int,
             maximumFrameBytes: Int = 64 * 1024,
+            maximumProtocolFrames: Int = DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES,
             requestTimeoutMillis: Long? = null,
             executionLimits: AgentExecutionLimits? = null,
             snapshotLimits: WorkspaceSnapshotLimits? = null,
@@ -1201,6 +1202,7 @@ class AcpAgentHarnessTest {
                 mode = mode,
                 sentinel = implementationPath,
                 maximumFrameBytes = maximumFrameBytes,
+                maximumProtocolFrames = maximumProtocolFrames,
                 timeouts = requestTimeoutMillis?.let { timeout ->
                     timeouts(startup = 2_500, request = timeout, shutdown = 1_500)
                 } ?: timeouts(),
@@ -1519,6 +1521,44 @@ class AcpAgentHarnessTest {
         assertTrue(diagnostics.remainingProcessIds.isEmpty(), diagnostics.toString())
         assertTrue(diagnostics.sandboxCleanupVerified, diagnostics.toString())
         assertProcessStopped(diagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val frameCountLimited = runAttempt(
+            "reconstruction-frame-count-limit-after-write",
+            index = 19,
+            maximumProtocolFrames = 16,
+        )
+        val frameCountFailure = assertNotNull(
+            frameCountLimited.failure,
+            "protocol frame-count exhaustion must refuse a candidate after its acknowledged source write",
+        )
+        assertEquals(1, frameCountLimited.taskCount)
+        val frameCountReceipt = frameCountLimited.receipts.single()
+        assertEquals(frameCountLimited.requestSha256s.single(), frameCountReceipt.requestBinding.requestSha256)
+        val frameCountOutcome = assertIs<AgentExecutionOutcome.Failed>(frameCountReceipt.outcome)
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, frameCountOutcome.failure.kind)
+        assertTrue(
+            frameCountOutcome.failure.message.contains("16-frame protocol limit"),
+            frameCountOutcome.failure.message,
+        )
+        assertNull(
+            assertIs<AcpInvocationEvidenceSnapshot>(frameCountReceipt.providerEvidence).completeExecutionEvidence,
+            "a frame-count-exhausted invocation cannot claim complete terminal execution evidence",
+        )
+        assertTrue(generateSequence<Throwable>(frameCountFailure) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        val frameCountAudit = frameCountLimited.harness.latestFilesystemAudit()
+        assertTrue(frameCountAudit.any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        }, "the frame-count failure must occur after the authorized source write")
+        val frameCountDiagnostics = assertNotNull(frameCountLimited.harness.latestDiagnostics())
+        assertTrue(frameCountDiagnostics.remainingProcessIds.isEmpty(), frameCountDiagnostics.toString())
+        assertTrue(frameCountDiagnostics.sandboxCleanupVerified, frameCountDiagnostics.toString())
+        assertProcessStopped(frameCountDiagnostics.pid)
         assertEquals(acceptedMetadata, capturePublishedMetadata(output))
         assertNoReconstructionPublicationResidue(output)
 
