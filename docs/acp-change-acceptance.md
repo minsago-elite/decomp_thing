@@ -544,6 +544,39 @@ local fixture evidence: it does not qualify a live provider, every public
 resource-exhaustion outcome, production validation, or the complete #734
 mutation matrix. #734 remains open and dependent on #729–#733.
 
+## Public ACP reconstruction mutation-grant and limit checkpoint — 2026-11-11
+
+Commit `7d363753b` adds
+`AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and
+preserves publication on limit outcomes`, a real scripted ACP-process exercise
+through `ArchivalReconstructionService.reconstructWithWorkspace` and the
+production filesystem broker. The Make-profile fixture lowers the declared
+implementation file ceiling to 256 KiB, verifies an out-of-role sibling
+creation and an oversized implementation write are denied, then verifies the
+bounded target creation succeeds, is packaged, and builds. The recorded
+receipt contains the exact target path, `CREATED` kind and observed byte size;
+the broker audit contains all nine expected read/write decisions.
+
+The same public workflow then receives `LIMIT_EXHAUSTED` after a candidate
+write, and a separate attempt exceeds the protocol frame limit after a write.
+Both refuse publication; the second retains a typed `RESOURCE_EXHAUSTED`
+receipt and confirms process cleanup. After each failure, descriptor-bound
+source, archive, report and session-member commitments match the previously
+published output, with no publication marker, staging or previous tree left
+behind. The existing focused repair mutation test, public Make/Ninja role
+rebuild test and bytecode guard also passed in the same local run: four tests
+total, zero failures/errors/skips. The run used
+`DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1` and the repository's pinned Node/npm
+toolchain.
+
+This is local scripted-provider evidence for one reconstruction profile. It
+does not qualify a live provider, production validation under #236, every
+resource-exhaustion mode, or hosted exact-head CI. Reconstruction exposes no
+ACP delete operation and this request has no terminal mutation policy, so
+delete/move enforcement is not reachable in this path; repair delete refusal
+is covered separately. Aggregate stdout/stderr, wall-clock, idle and snapshot
+inventory limit outcomes remain separate #734 gaps. Keep #734 and #63 open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
