@@ -16,12 +16,12 @@ export const validationExportLimitations = [
 
 export const recordedValidationCopy = {
   savedSelectionInvalid: 'This saved validation selection is invalid. No validation read was made. Read validation evidence to select a current observation.',
-  savedSelectionSession: 'Reconnect the local session to restore this exact validation selection. No other observation was substituted.',
-  savedSelectionDenied: 'Access to this exact validation selection was denied. No other observation was substituted.',
-  savedSelectionMissing: 'This exact validation selection is no longer available. No other observation was substituted.',
-  savedSelectionUnsupported: 'This interface cannot restore the saved validation format. Update the application; no other observation was substituted.',
-  savedSelectionUnverified: 'This exact validation selection could not be verified. No other observation was substituted.',
-  savedSelectionFailed: 'This exact validation selection could not be restored. Retry the read; no other observation was substituted.',
+  savedSelectionSession: 'Reconnect the local session to restore this exact validation selection. No different observation was substituted.',
+  savedSelectionDenied: 'Access to this exact validation selection was denied. No different observation was substituted.',
+  savedSelectionMissing: 'This exact validation selection is no longer available. No different observation was substituted.',
+  savedSelectionUnsupported: 'This interface cannot restore the saved validation format. Update the application; no different observation was substituted.',
+  savedSelectionUnverified: 'This exact validation selection could not be verified. No different observation was substituted.',
+  savedSelectionFailed: 'This exact validation selection could not be restored. Retry the read; no different observation was substituted.',
   exportPage: 'Download this validation page JSON', exportFailure: 'Download this failure diagnostic JSON',
   exportScope: 'The download contains this selected observation only, including its snapshot commitments and bounded previews. Other pages, full output bytes and source files are not included. Saving it does not run validation.',
   exportUnavailable: 'This observation cannot be exported within the supported format and 192 KiB limit.',

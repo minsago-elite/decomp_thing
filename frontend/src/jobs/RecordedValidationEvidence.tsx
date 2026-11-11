@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner } from '../api/generated';
-import { withApiFailureReference } from '../api/errors';
+import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { recordedValidationCopy as copy } from '../copy/attempt';
 import { commonCopy } from '../copy/common';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -72,7 +72,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
   function failed(controller: AbortController, failure: unknown, restoring = false) {
     if (current(controller)) {
       setSavedBaseline(null); setComparisonPage(1);
-      const kind = metadataFailureKind(failure);
+      const kind = failure instanceof ApiClientError ? metadataFailureKind(failure) : 'unverified';
       const message = restoring ? {
         session: copy.savedSelectionSession,
         denied: copy.savedSelectionDenied,
