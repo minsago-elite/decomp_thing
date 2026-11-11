@@ -3806,7 +3806,7 @@ class AcpAgentHarnessTest {
         }
     }
 
-    private fun harness(
+    internal fun harness(
         mode: String,
         sentinel: String = "literal-argv",
         ready: Path? = null,

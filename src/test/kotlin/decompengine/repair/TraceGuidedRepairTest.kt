@@ -25,6 +25,7 @@ import decompengine.acp.AcpExecutionCleanupDisposition
 import decompengine.acp.AcpExecutionEvidenceCompleteness
 import decompengine.acp.AcpExecutionLifecyclePhase
 import decompengine.acp.AcpInvocationEvidenceSnapshot
+import decompengine.acp.AcpAgentHarnessTest
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
@@ -41,6 +42,8 @@ import com.sun.net.httpserver.HttpServer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.InetSocketAddress
@@ -1320,6 +1323,54 @@ class TraceGuidedRepairTest {
                 assertNull(graph.snapshot.pendingAttemptId, "$mutation must close or recover its pending attempt")
                 assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status, mutation)
             }
+        }
+    }
+
+    @Test
+    fun `active ACP repair retains resource-limited write refusal without changing accepted source`() {
+        val project = createProject(
+            createTempDirectory("repair-active-acp-resource-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val target = project.resolve("src/modules/reconstructed.c")
+        val acceptedSource = target.readBytes()
+        val budget = RepairResourceBudget(maximumPatchBytes = 4)
+        val harness = AcpAgentHarnessTest().harness("repair-active-oversized-only")
+
+        val failure = assertFailsWith<Exception> {
+            generatedCRepairLoop(
+                harness,
+                RepairHistory(project.resolve("reports/repair_history.json")),
+                resourceBudget = budget,
+            ).repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+        assertTrue(generateSequence<Throwable>(failure) { it.cause }.any {
+            it.message.orEmpty().contains("repair agent stopped with no_changes")
+        }, generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.toList().toString())
+
+        assertContentEquals(acceptedSource, target.readBytes())
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            val node = graph.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, node.status)
+            val binding = requireNotNull(node.repairMetadata?.agentInvocation)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+            assertEquals("returned-no-changes", binding.terminalOutcome)
+            assertFalse(binding.receiptReleaseComplete)
+            val receipt = Json.parseToJsonElement(project.resolve(binding.receiptPath).readText()).jsonObject
+            assertEquals("returned", receipt.getValue("outcome").jsonObject.getValue("type").jsonPrimitive.content)
+            val filesystemAudit = receipt.getValue("policyAudits").jsonObject
+                .getValue("filesystem").jsonObject
+            assertEquals(1, filesystemAudit.getValue("recordCount").jsonPrimitive.int)
+            val refusedWrite = filesystemAudit.getValue("records").jsonArray.single().jsonObject
+            assertEquals("denied", refusedWrite.getValue("outcome").jsonPrimitive.content)
+            assertEquals("resource-limit", refusedWrite.getValue("reason").jsonPrimitive.content)
+            val process = receipt.getValue("process").jsonObject
+            assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int)
+            assertEquals(true, process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean)
+            assertFalse(receipt.getValue("lifecycle").jsonObject
+                .getValue("releaseComplete").jsonPrimitive.boolean)
+            assertFalse(project.resolve("src/modules/created.c").exists())
         }
     }
 

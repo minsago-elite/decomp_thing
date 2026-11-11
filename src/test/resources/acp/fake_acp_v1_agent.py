@@ -69,6 +69,7 @@ RECONSTRUCTION_MODES = {
     "reconstruction-stdout-limit-after-write",
     "reconstruction-mixed-output-limit-after-write",
     "reconstruction-request-timeout-after-write",
+    "repair-active-oversized-only",
 }
 RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
@@ -245,6 +246,7 @@ expected_fs = {
     "reconstruction-stdout-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-mixed-output-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
+    "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -557,7 +559,9 @@ prompt = read_message()
 if prompt is None or prompt.get("method") != "session/prompt":
     raise SystemExit(94)
 prompt_text = prompt.get("params", {}).get("prompt", [{}])[0].get("text", "")
-if MODE in RECONSTRUCTION_MODES:
+if MODE == "repair-active-oversized-only":
+    prompt_valid = "Compile command:" in prompt_text and "Exit code:" in prompt_text
+elif MODE in RECONSTRUCTION_MODES:
     prompt_valid = SENTINEL in prompt_text and "decomp_engine_main" in prompt_text
 elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     prompt_valid = (
@@ -681,6 +685,25 @@ if MODE == "repair-quota-retry":
     if denied_response.get("error", {}).get("code") != -32602:
         raise SystemExit(141)
     write_workspace_file(source, "fit\n", 141)
+if MODE == "repair-active-oversized-only":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    send({
+        "jsonrpc": "2.0",
+        "id": 142,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": source,
+            "content": "oversized replacement\n",
+        },
+    })
+    denied_response = read_message()
+    if denied_response is None or denied_response.get("id") != 142:
+        raise SystemExit(142)
+    if denied_response.get("error", {}).get("code") != -32602:
+        raise SystemExit(143)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
 if MODE == "pipelined-callbacks":
     source = join_path(cwd, "contract/artifact.txt")
     for request_id in (130, 131):
