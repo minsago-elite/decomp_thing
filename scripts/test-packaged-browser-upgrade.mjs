@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
+import { qualifyUpgrade, qualifyUpgradeCache, rewritePackagedShellBuildIdentity } from './packaged-browser-upgrade.mjs';
 
 const previous = { buildId: 'previous', files: [{ path: 'assets/Runtime-old.js' }] };
 const current = { buildId: 'current', files: [{ path: 'assets/Runtime-new.js' }] };
@@ -22,6 +22,27 @@ test('rejects identical build identities even when supplied inventories differ',
 test('rejects missing or ambiguous Runtime inventories', () => {
   assert.throws(() => qualifyUpgrade(previous, { ...current, files: [] }), /exactly one Runtime/);
   assert.throws(() => qualifyUpgrade(previous, { ...current, files: [...current.files, ...previous.files] }), /exactly one Runtime/);
+});
+
+test('rewrites exactly the packaged UI build meta while preserving the document', () => {
+  const currentBuildId = '1'.repeat(64);
+  const staleBuildId = '2'.repeat(64);
+  const html = `<html><head><meta name="decomp-ui-build" content="${currentBuildId}"><meta name="decomp-application-version" content="1.2.3"></head></html>`;
+  assert.equal(rewritePackagedShellBuildIdentity(html, currentBuildId, staleBuildId),
+    html.replace(currentBuildId, staleBuildId));
+});
+
+test('stale-shell response rewriting rejects malformed, duplicate and unexpected identities', () => {
+  const currentBuildId = '1'.repeat(64);
+  const staleBuildId = '2'.repeat(64);
+  const tag = `<meta name="decomp-ui-build" content="${currentBuildId}">`;
+  assert.throws(() => rewritePackagedShellBuildIdentity('', currentBuildId, staleBuildId), /exactly one/);
+  assert.throws(() => rewritePackagedShellBuildIdentity(tag + tag, currentBuildId, staleBuildId), /exactly one/);
+  assert.throws(() => rewritePackagedShellBuildIdentity(tag, currentBuildId, currentBuildId), /must differ/);
+  assert.throws(() => rewritePackagedShellBuildIdentity(tag, 'invalid', staleBuildId), /canonical SHA-256/);
+  assert.throws(() => rewritePackagedShellBuildIdentity(tag, currentBuildId, 'invalid'), /canonical SHA-256/);
+  assert.throws(() => rewritePackagedShellBuildIdentity(tag, '3'.repeat(64), staleBuildId), /expected current/);
+  assert.throws(() => rewritePackagedShellBuildIdentity('<meta name="decomp-ui-build" content="short">', currentBuildId, staleBuildId), /canonical identity/);
 });
 
 const cachedPackage = { buildId: 'previous', entryScript: 'assets/index-previous.js',

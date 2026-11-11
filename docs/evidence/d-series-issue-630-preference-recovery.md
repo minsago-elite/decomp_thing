@@ -89,10 +89,13 @@ concurrent session expiry.
 
 The two-tab preference control now has exact-source hosted Chrome evidence, and a test-clock
 packaged session-expiry path passed. The retained cross-tab test double still models browser
-storage delivery; the hosted Chrome report supplies real-browser evidence for that behavior. This
-slice does not add exact-source packaged evidence for the second stale-build reload. It does not
-independently qualify Firefox/WebKit storage-event behavior, natural session expiry, or all
-version/session combinations. Dependencies #159 is closed; #167 and #179 remain open and retain
-their respective shell/version and multi-tab/session ownership. Keep #630 and #221 open until
-their original criteria and required integrated packaged evidence are satisfied. No
-production-provider, workflow-mutation or release qualification is implied.
+storage delivery; the hosted Chrome report supplies real-browser evidence for that behavior. A
+packaged session-mode stale-shell retry control has now been added locally: it rewrites only the
+UI-build metadata in two actual packaged HTML responses and checks the one-reload/manual-guidance
+transition. Its exact-source browser execution remains pending, and it does not serve a complete
+historical bundle or qualify a real CDN/proxy cache. This slice does not independently qualify
+Firefox/WebKit storage-event behavior, natural session expiry, or all version/session combinations.
+Dependencies #159 is closed; #167 and #179 remain open and retain their respective shell/version
+and multi-tab/session ownership. Keep #630 and #221 open until their original criteria and required
+integrated packaged evidence are satisfied. No production-provider, workflow-mutation or release
+qualification is implied.

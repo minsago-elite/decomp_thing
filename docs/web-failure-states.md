@@ -100,3 +100,9 @@ bounded live reads and the local session-expiry timer are separate from recovery
 `resilience.test.tsx` covers the reload-once-then-guidance sequence, convergence after a
 successful reload, the asset-recovery guard, and six concurrent expiry rejections producing a
 single transition and notice with no automatic bootstrap or exchange request.
+
+The packaged session journey also injects the same stale UI-build metadata into the actual
+packaged HTML response before and after one explicit reload. It requires the first mismatch to
+offer one reload and the repeated mismatch to expose only manual guidance, with exactly two
+document requests, no mutation, and no browser exception. This is a response-shim control for the
+guard and UI; it does not replay a complete historical bundle or qualify an actual CDN/proxy cache.
