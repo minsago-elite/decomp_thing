@@ -132,6 +132,9 @@ import kotlinx.serialization.json.JsonPrimitive
 class AcpAgentHarness(
     private val configuration: AcpProcessConfiguration,
 ) : CapturedRepairAgentHarness, AcpExecutionEvidenceSource {
+    private val workspaceSnapshotLimitsLock = Any()
+    private var configuredWorkspaceSnapshotLimits = WorkspaceSnapshotLimits()
+    private var workspaceSnapshotLimitsFrozen = false
     private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
     private val latestDiagnosticsReference = AtomicReference<AcpProcessDiagnostics?>()
@@ -140,6 +143,19 @@ class AcpAgentHarness(
     private val latestPermissionAuditReference = AtomicReference<List<AcpPermissionAuditRecord>>(emptyList())
     private val latestSandboxEvidenceReference = AtomicReference<AcpSandboxEvidence?>()
     private val latestExecutionEvidenceReference = AtomicReference<AcpExecutionEvidenceSnapshot?>()
+
+    /** Internal-only bound override for active workspace-snapshot limit tests. */
+    internal fun withWorkspaceSnapshotLimitsForTesting(limits: WorkspaceSnapshotLimits): AcpAgentHarness = apply {
+        synchronized(workspaceSnapshotLimitsLock) {
+            check(!workspaceSnapshotLimitsFrozen) { "workspace snapshot limits are already in use" }
+            configuredWorkspaceSnapshotLimits = limits
+        }
+    }
+
+    private fun freezeWorkspaceSnapshotLimits(): WorkspaceSnapshotLimits = synchronized(workspaceSnapshotLimitsLock) {
+        workspaceSnapshotLimitsFrozen = true
+        configuredWorkspaceSnapshotLimits
+    }
 
     override fun implementationIdentifier(): String = configuration.implementationId
 
@@ -282,6 +298,7 @@ class AcpAgentHarness(
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AgentExecutionReceipt {
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
+        val workspaceSnapshotLimits = freezeWorkspaceSnapshotLimits()
         val prefixObservation = createOptionalPrelaunchObservation {
             RuntimeCopyStatistics.Prefix.create(wallDeadline::observationSample)
         }
@@ -330,6 +347,7 @@ class AcpAgentHarness(
                     sessionJournal,
                     authenticationInventory,
                     prefixObservation,
+                    workspaceSnapshotLimits,
                 ),
             )
         } catch (_: WorkspaceSnapshotCancelled) {
@@ -405,6 +423,7 @@ class AcpAgentHarness(
         sessionJournal: AgentSessionJournal?,
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
         prefixObservation: RuntimeCopyStatistics.Prefix?,
+        workspaceSnapshotLimits: WorkspaceSnapshotLimits,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -424,7 +443,12 @@ class AcpAgentHarness(
             try {
                 WorkspaceSnapshot.capture(
                     request,
-                    WorkspaceSnapshotBudget(request.cancellation, wallDeadline, honorCancellation = true),
+                    WorkspaceSnapshotBudget(
+                        request.cancellation,
+                        wallDeadline,
+                        honorCancellation = true,
+                        limits = workspaceSnapshotLimits,
+                    ),
                 )
             } catch (_: WorkspaceSnapshotCancelled) {
                 return AgentExecutionResult(
@@ -780,6 +804,7 @@ class AcpAgentHarness(
                     wallDeadline,
                     // A cancellation already accepted by the prompt still needs an accurate final change set.
                     honorCancellation = finished.stopReason != AgentStopReason.CANCELLED,
+                    limits = workspaceSnapshotLimits,
                 )
                 val finalSnapshot = WorkspaceSnapshot.capture(request, finalBudget)
                 requireNotNull(before).diff(finalSnapshot, request, finalBudget, translator.sessionReference())

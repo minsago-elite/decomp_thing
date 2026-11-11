@@ -1160,6 +1160,7 @@ class AcpAgentHarnessTest {
             val taskCount: Int,
             val receipts: List<AgentExecutionReceipt>,
             val requestSha256s: List<String>,
+            val implementationExistedAtDispatch: Boolean?,
         )
 
         fun runAttempt(
@@ -1168,14 +1169,19 @@ class AcpAgentHarnessTest {
             maximumFrameBytes: Int = 64 * 1024,
             requestTimeoutMillis: Long? = null,
             executionLimits: AgentExecutionLimits? = null,
+            snapshotLimits: WorkspaceSnapshotLimits? = null,
         ): Attempt {
             val receipts = mutableListOf<AgentExecutionReceipt>()
             val requestSha256s = mutableListOf<String>()
             var taskCount = 0
+            var implementationExistedAtDispatch: Boolean? = null
             val progress = object : AgentWorkflowProgress {
                 override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
                     taskCount++
                     requestSha256s += AgentExecutionRequestBinding.capture(request).requestSha256
+                    val rule = request.accessPolicy.pathRules.single()
+                    implementationExistedAtDispatch = request.workspaceRoots.single { it.id == rule.path.rootId }
+                        .path.resolve(rule.path.relativePath).let(Files::isRegularFile)
                     return object : AgentTaskProgress {
                         override fun event(event: AgentExecutionEvent) = Unit
                         override fun complete(receipt: AgentExecutionReceipt) {
@@ -1197,6 +1203,7 @@ class AcpAgentHarnessTest {
                 timeouts = requestTimeoutMillis?.let { timeout ->
                     timeouts(startup = 2_500, request = timeout, shutdown = 1_500)
                 } ?: timeouts(),
+                workspaceSnapshotLimits = snapshotLimits,
             )
             val function = RecoveredFunction(
                 "fn_0000000000001000",
@@ -1242,7 +1249,15 @@ class AcpAgentHarnessTest {
                     failure = caught
                 }
             }
-            return Attempt(result, failure, acp, taskCount, receipts.toList(), requestSha256s.toList())
+            return Attempt(
+                result,
+                failure,
+                acp,
+                taskCount,
+                receipts.toList(),
+                requestSha256s.toList(),
+                implementationExistedAtDispatch,
+            )
         }
 
         val successful = runAttempt("reconstruction-mutation-grant", index = 1, maximumFrameBytes = 512 * 1024)
@@ -1282,6 +1297,39 @@ class AcpAgentHarnessTest {
         ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
         assertFalse(extracted.resolve("src/modules/decomp_extra.c").exists())
         val acceptedMetadata = capturePublishedMetadata(output)
+        assertEquals(false, successful.implementationExistedAtDispatch)
+
+        // The public reconstruction grant is one non-recursive target path. Its parent entries
+        // make the initial entry-count bound reachable, but the target itself is absent at dispatch,
+        // so file-count/file-bytes/total-bytes cannot be induced on this path without changing the
+        // production staging contract.
+        val snapshotLimitCases = listOf("entry-count" to WorkspaceSnapshotLimits(entries = 2))
+        for ((offset, scenario) in snapshotLimitCases.withIndex()) {
+            val (dimension, limits) = scenario
+            val limitedSnapshot = runAttempt(
+                "reconstruction-mutation-grant",
+                index = 10 + offset,
+                snapshotLimits = limits,
+            )
+            assertNotNull(limitedSnapshot.failure, "$dimension snapshot limit must refuse publication")
+            assertEquals(1, limitedSnapshot.taskCount)
+            assertEquals(false, limitedSnapshot.implementationExistedAtDispatch)
+            val snapshotReceipt = limitedSnapshot.receipts.single()
+            val snapshotFailure = assertIs<AgentExecutionOutcome.Failed>(snapshotReceipt.outcome).failure
+            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, snapshotFailure.kind)
+            assertEquals(dimension, snapshotFailure.details["limit"])
+            assertEquals("initial-workspace-snapshot", snapshotFailure.details["phase"])
+            val snapshotEvidence = assertIs<AcpInvocationEvidenceSnapshot>(snapshotReceipt.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT, snapshotEvidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, snapshotEvidence.cleanupDisposition)
+            assertNull(snapshotEvidence.diagnostics)
+            assertNull(snapshotEvidence.sandboxEvidence)
+            assertNull(snapshotEvidence.completeExecutionEvidence)
+            assertTrue(limitedSnapshot.harness.latestFilesystemAudit().isEmpty())
+            assertNull(limitedSnapshot.harness.latestDiagnostics())
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), dimension)
+            assertNoReconstructionPublicationResidue(output)
+        }
 
         val limited = runAttempt("reconstruction-limit-after-write", index = 2)
         val interruption = assertNotNull(limited.failure, "LIMIT_EXHAUSTED must refuse candidate publication")
@@ -3729,12 +3777,13 @@ class AcpAgentHarnessTest {
         maximumProtocolFrames: Int = DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES,
         terminalPolicy: AcpTerminalExecutionPolicy? = null,
         sessionPreferences: AcpSessionPreferences = AcpSessionPreferences(),
+        workspaceSnapshotLimits: WorkspaceSnapshotLimits? = null,
     ): AcpAgentHarness {
         requireLiveSandboxHost()
         val script = Path.of(requireNotNull(javaClass.getResource("/acp/fake_acp_v1_agent.py")).toURI())
         val arguments = mutableListOf("-S", AGENT_SCRIPT_DESTINATION.toString(), mode, sentinel)
         ready?.let { arguments += it.toString() }
-        return AcpAgentHarness(
+        val acp = AcpAgentHarness(
             AcpProcessConfiguration(
                 executable = PYTHON,
                 arguments = arguments,
@@ -3756,7 +3805,9 @@ class AcpAgentHarnessTest {
                 terminalPolicy = terminalPolicy,
                 sessionPreferences = sessionPreferences,
             ),
-        ).bindFactoryProvenance(
+        )
+        workspaceSnapshotLimits?.let(acp::withWorkspaceSnapshotLimitsForTesting)
+        return acp.bindFactoryProvenance(
             AcpHarnessProvenance(
                 harness = "acp",
                 implementationId = "scripted-acp-v1",
