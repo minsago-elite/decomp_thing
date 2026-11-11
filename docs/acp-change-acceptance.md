@@ -965,6 +965,31 @@ does not qualify other token or provider budgets, live-provider behavior,
 production validation under #236, or hosted exact-head CI. #734 and #63 remain
 open.
 
+## Active repair reported token-ceiling checkpoint — 2026-11-11
+
+Commit `baf60dd6b` adds active repair coverage for configured ACP input and
+output token ceilings. The scripted peer acknowledges an authorized source
+write, then returns a completed prompt with input usage 11, output usage 7,
+and cached input usage 3. Independent cases configure an input ceiling of 10
+or an output ceiling of 6. Both are classified as `LIMIT_EXHAUSTED`, persist
+`RESOURCE_EXHAUSTED` repair runs and interrupted assessments, retain the
+receipt's reported usage, and leave the accepted source and graph head intact
+with no pending attempt. Process termination and sandbox cleanup are verified.
+
+The equality control configures ceilings of 11 input and 7 output tokens. It
+reaches the active candidate-validation seam with a completed receipt and the
+same reported usage; an injected sentinel then rejects validation so the test
+does not claim compilation or publication. The existing harness comparison is
+strictly greater-than, so equality is admitted.
+
+The focused token-ceiling case and accumulated
+`TraceGuidedRepairTest.active*` selection passed locally at `baf60dd6b`: 18
+methods, zero failures, errors or skips. These scripted ACP cases qualify
+post-response enforcement of provider-reported token usage in the active
+repair path. They do not establish independent token metering, preemptive
+interruption, live-provider behavior, production validation under #236, or
+hosted exact-head CI. #734 and #63 remain open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
