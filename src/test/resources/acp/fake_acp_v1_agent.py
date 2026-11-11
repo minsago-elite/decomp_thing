@@ -75,6 +75,7 @@ RECONSTRUCTION_MODES = {
     "reconstruction-stdout-limit-after-write",
     "reconstruction-mixed-output-limit-after-write",
     "reconstruction-request-timeout-after-write",
+    "reconstruction-terminal-mutation-refusal-disabled",
 }
 ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
@@ -315,6 +316,11 @@ if MODE in (
     if actual_terminal is not True:
         respond(initialize, error={"code": -32602, "message": "terminal capability was not enabled"})
         raise SystemExit(104)
+if MODE == "reconstruction-terminal-mutation-refusal-disabled":
+    actual_terminal = initialize.get("params", {}).get("clientCapabilities", {}).get("terminal")
+    if bool(actual_terminal):
+        respond(initialize, error={"code": -32602, "message": "reconstruction must not advertise terminal capability"})
+        raise SystemExit(105)
 
 if MODE == "malformed-initialize":
     sys.stdout.write("{not-json\n")
@@ -1461,6 +1467,42 @@ if MODE in RECONSTRUCTION_MODES:
     denied_write = try_write_workspace_file(join_path(cwd, "Makefile"), "unauthorized\n", 815)
     if denied_write.get("error", {}).get("code") != -32602:
         raise SystemExit(125)
+
+    if MODE == "reconstruction-terminal-mutation-refusal-disabled":
+        terminal_requests = (
+            (830, "/usr/bin/rm", ["-f", join_path(cwd, "Makefile")]),
+            (
+                831,
+                "/usr/bin/mv",
+                [
+                    "-f",
+                    join_path(cwd, f"include/modules/{module_id}.h"),
+                    join_path(cwd, f"src/modules/{module_id}_extra.c"),
+                ],
+            ),
+        )
+        for request_id, command, arguments in terminal_requests:
+            send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "terminal/create",
+                "params": {
+                    "sessionId": "fixture-session",
+                    "command": command,
+                    "args": arguments,
+                    "cwd": cwd,
+                    "env": [],
+                    "outputByteLimit": 4096,
+                },
+            })
+            terminal_response = read_message()
+            if (
+                terminal_response is None
+                or terminal_response.get("id") != request_id
+                or terminal_response.get("error", {}).get("code") != -32602
+                or "result" in terminal_response
+            ):
+                raise SystemExit(160 + request_id - 830)
 
     source = join_path(cwd, SENTINEL)
     content = (

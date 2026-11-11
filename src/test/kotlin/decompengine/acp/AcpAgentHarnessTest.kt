@@ -1904,6 +1904,79 @@ class AcpAgentHarnessTest {
         ArchivalBundleVerifier.extractAndVerify(exactResult.bundle.archivePath, exactExtracted, profile = profile)
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactExtracted, profile).returnCode)
         assertNoReconstructionPublicationResidue(output)
+
+        val expectedCreatedSource = (
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+            ).toByteArray(Charsets.UTF_8)
+        val terminalMutation = runAttempt("reconstruction-terminal-mutation-refusal-disabled", index = 20)
+        assertNull(
+            terminalMutation.failure,
+            "terminal delete/move attempts must be refused without failing reconstruction: " +
+                "outcome=${terminalMutation.receipts.singleOrNull()?.outcome}; " +
+                "terminalAudit=${terminalMutation.harness.latestTerminalAudit()}; " +
+                "diagnostics=${terminalMutation.harness.latestDiagnostics()}",
+        )
+        assertEquals(1, terminalMutation.taskCount)
+        assertEquals(1, terminalMutation.receipts.size)
+        assertEquals(
+            terminalMutation.requestSha256s.single(),
+            terminalMutation.receipts.single().requestBinding.requestSha256,
+        )
+        val terminalResult = assertNotNull(terminalMutation.result)
+        assertEquals(0, terminalResult.build.returnCode)
+        assertTrue(requireNotNull(terminalResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        assertEquals(AgentStopReason.COMPLETED, terminalMutation.receipts.single().requireResult().stopReason)
+        val terminalChange = terminalMutation.receipts.single().requireResult().changes.single()
+        assertEquals(implementationPath, terminalChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, terminalChange.kind)
+        assertEquals(expectedCreatedSource.size.toLong(), terminalChange.sizeBytes)
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(terminalResult.projectDir.resolve(implementationPath)))
+
+        val terminalInvocation = assertIs<AcpInvocationEvidenceSnapshot>(terminalMutation.receipts.single().providerEvidence)
+        assertTrue(terminalInvocation.completeness.terminalAuditComplete)
+        assertNotNull(terminalInvocation.completeExecutionEvidence)
+        assertEquals(2, terminalInvocation.terminalAudit.size)
+        assertEquals(List(2) { "terminal/create" }, terminalInvocation.terminalAudit.map { it.method })
+        assertEquals(List(2) { AcpTerminalAuditOutcome.DENIED }, terminalInvocation.terminalAudit.map { it.outcome })
+        assertEquals(
+            List(2) { AcpTerminalAuditReason.CAPABILITY_DISABLED },
+            terminalInvocation.terminalAudit.map { it.reason },
+        )
+        assertEquals(2, terminalInvocation.terminalAudit.map { it.requestSha256 }.toSet().size)
+        assertEquals(
+            listOf(AcpSandboxLaunchPurpose.OUTER_AGENT),
+            assertNotNull(terminalInvocation.sandboxEvidence).launches.map { it.purpose },
+            "neither attempted shell command may launch",
+        )
+
+        val terminalFilesystemAudit = terminalMutation.harness.latestFilesystemAudit()
+        assertEquals(7, terminalFilesystemAudit.size, terminalFilesystemAudit.toString())
+        assertTrue(terminalFilesystemAudit.take(5).all {
+            it.method == "fs/read_text_file" &&
+                it.outcome == AcpFilesystemAuditOutcome.DENIED &&
+                it.reason == AcpFilesystemAuditReason.CAPABILITY_DISABLED
+        }, terminalFilesystemAudit.toString())
+        assertEquals("Makefile", assertNotNull(terminalFilesystemAudit[5].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, terminalFilesystemAudit[5].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, terminalFilesystemAudit[5].reason)
+        assertEquals(implementationPath, assertNotNull(terminalFilesystemAudit[6].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, terminalFilesystemAudit[6].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, terminalFilesystemAudit[6].reason)
+
+        assertTrue(Files.isRegularFile(terminalResult.projectDir.resolve("Makefile")))
+        assertTrue(Files.isRegularFile(terminalResult.projectDir.resolve("include/modules/decomp.h")))
+        assertFalse(Files.exists(terminalResult.projectDir.resolve("src/modules/decomp_extra.c")))
+        val terminalExtracted = fixture.resolve("verified-terminal-mutation-20")
+        ArchivalBundleVerifier.extractAndVerify(terminalResult.bundle.archivePath, terminalExtracted, profile = profile)
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(terminalExtracted.resolve(implementationPath)))
+        assertTrue(Files.isRegularFile(terminalExtracted.resolve("Makefile")))
+        assertTrue(Files.isRegularFile(terminalExtracted.resolve("include/modules/decomp.h")))
+        assertFalse(Files.exists(terminalExtracted.resolve("src/modules/decomp_extra.c")))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(terminalExtracted, profile).returnCode)
+        acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
     }
 
     private fun capturePublishedMetadata(output: Path): Map<String, PublicationEntryRecord> {
