@@ -79,6 +79,7 @@ describe('route failure states (#628)', () => {
     ['server', new ApiClientError('http_error', { status: 503, serverCode: 'INTERNAL_ERROR', requestId: reference })],
   ];
   const routes: [string, string, string][] = [
+    ['job library', '/nested/', 'jobs'],
     ['job overview', `/nested/jobs/${jobId}`, 'job'],
     ['attempt history', `/nested/jobs/${jobId}/runs`, 'runs'],
     ['attempt overview', `/nested/jobs/${jobId}/runs/${runId}`, 'run'],
