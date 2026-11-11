@@ -637,17 +637,26 @@ the real request reaches `RESOURCE_EXHAUSTED` with
 sandbox evidence, filesystem audit, or complete execution evidence. The test
 also verifies the target implementation file is absent when the request is
 dispatched, the accepted output metadata remains identical, and no publication
-residue is left behind. The focused live-sandbox test passed locally at this
-commit: one test method, zero failures, errors or skips.
+residue is left behind.
 
-This public reconstruction request grants one non-recursive implementation
-path, whose target is initially absent. The path's parent entries make the
-entry-count limit reachable. File-count, file-bytes, and total-bytes snapshot
-limits cannot be induced on this request without changing staging so an
-existing file is present before dispatch; those dimensions remain unqualified
-for the public reconstruction path. This does not qualify every snapshot
-limit, every resource ceiling, production validation under #236, live-provider
-behavior, or hosted exact-head CI. #734 and #63 remain open.
+Commit `a39dfd350` extends this control to the final snapshot. The same
+public-path request now runs an authorized scripted write, then separately
+exceeds the final snapshot's `file-bytes` and `total-bytes` budgets. Both
+receipts report `RESOURCE_EXHAUSTED` at
+`phase=final-workspace-snapshot`; their provider evidence reaches
+`FINAL_WORKSPACE_SNAPSHOT`, confirms process and sandbox cleanup, and omits
+complete execution evidence. The final snapshot cases also require an allowed
+target-write audit, unchanged prior output metadata, and no publication
+residue. The focused live-sandbox test passed locally at `a39dfd350`: one test
+method, zero failures, errors or skips.
+
+Together these cases exercise initial entry-count and final file-byte/total-byte
+limits through the public reconstruction workflow. The single declared file
+means the snapshot file-count ceiling is not reachable in this path, and the
+target is absent before dispatch so initial file-byte/total-byte ceilings are
+not reachable there. This does not qualify every snapshot limit, every
+resource ceiling, production validation under #236, live-provider behavior, or
+hosted exact-head CI. #734 and #63 remain open.
 
 ## Reconstruction change-claim consistency checkpoint — 2026-11-11
 
