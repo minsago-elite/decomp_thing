@@ -1628,6 +1628,38 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair path classifies per-file output limit as resource exhaustion`() {
+        val project = createProject(
+            createTempDirectory("repair-active-source-file-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val target = project.resolve("src/modules/reconstructed.c")
+        val acceptedSource = target.readBytes()
+        val budget = RepairResourceBudget(maximumSourceFileBytes = 4096)
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { it.snapshot.headId }
+        val harness = capturedReplacingHarness(ByteArray(4097) { 'x'.code.toByte() })
+
+        val failure = assertFailsWith<AgentExecutionException> {
+            generatedCRepairLoop(
+                harness,
+                RepairHistory(project.resolve("reports/repair_history.json")),
+                resourceBudget = budget,
+            ).repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.failure.kind)
+        assertIs<RepairBudgetExceededException>(failure.cause)
+        assertTrue(failure.cause?.message.orEmpty().contains("exceeds the source-file byte budget"))
+        assertContentEquals(acceptedSource, target.readBytes())
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+        }
+    }
+
+    @Test
     fun `active repair path rejects a candidate over the patch file count`() {
         val project = createProject(
             createTempDirectory("repair-active-patch-file-limit-").resolve("project"),

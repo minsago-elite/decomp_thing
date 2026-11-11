@@ -182,12 +182,18 @@ class BoundedRepairOutput internal constructor(
     fun replace(relativePath: String, bytes: ByteArray) {
         check(!closed) { "captured repair output is closed" }
         require(relativePath in writablePaths) { "captured repair output is unauthorized: $relativePath" }
-        // Replacement bytes can be caller-owned. Accept and retain one detached snapshot so a
-        // concurrent caller mutation cannot change the bytes after validation.
-        val acceptedBytes = bytes.copyOf()
         if (relativePath !in currentFiles) {
             throw IllegalArgumentException("captured repair output cannot recreate a deleted source file")
         }
+        if (bytes.size.toLong() > resourceBudget.maximumSourceFileBytes) {
+            throw RepairBudgetExceededException(
+                "captured repair output $relativePath exceeds the source-file byte budget",
+            )
+        }
+        // Replacement bytes can be caller-owned. Accept and retain one detached snapshot so a
+        // concurrent caller mutation cannot change the bytes after validation. Enforce the
+        // admitted per-file ceiling first so an oversized candidate is rejected before copying.
+        val acceptedBytes = bytes.copyOf()
         if (accessPolicy != null && !accessPolicy.allowsMutation(
                 AgentWorkspacePath(workspaceRootId, relativePath),
                 AgentOperation.WRITE_FILE,
@@ -195,11 +201,6 @@ class BoundedRepairOutput internal constructor(
                 acceptedBytes.isStrictUtf8ForMutation(),
             )) {
             throw IllegalArgumentException("captured repair output violates declared mutation authority")
-        }
-        if (acceptedBytes.size.toLong() > resourceBudget.maximumSourceFileBytes) {
-            throw RepairBudgetExceededException(
-                "captured repair output $relativePath exceeds the source-file byte budget",
-            )
         }
         val wasChanged = relativePath in replacements
         val previousReplacementBytes = replacements[relativePath]?.size?.toLong() ?: 0L

@@ -748,6 +748,14 @@ the graph with no pending attempt. This exposed and corrected a classification
 gap: captured staging budget exceptions had been recorded as
 `INVALID_REQUEST`.
 
+`TraceGuidedRepairTest.active repair path classifies per-file output limit as
+resource exhaustion` exercises a 4,097-byte replacement against a 4,096-byte
+per-file ceiling while the original source fits. The size check now runs before
+the shared mutation-policy size refusal and before copying the oversized
+candidate, so this case remains a typed resource exhaustion rather than an
+invalid request. The active loop leaves source bytes and accepted head intact,
+and persists a rejected node and resource-exhausted run.
+
 `TraceGuidedRepairTest.active repair path rejects a candidate over the patch
 file count` uses a two-file declarative profile and a one-file patch budget.
 The captured adapter replaces the first file, then the bounded sink refuses
@@ -756,15 +764,16 @@ run state, leaves both accepted files and the head unchanged, and reopens with
 no pending attempt. Its validator fails if candidate rejection reaches
 compilation or behavior checks.
 
-The focused local run passed both active staging-limit cases and the direct
-staging-byte refusal control: three methods, zero failures, errors or skips.
+The focused local run passed the per-file, staging-byte and patch-file active
+limits plus the direct staging-byte refusal control: four methods, zero
+failures, errors or skips.
 An earlier selected run passed the active repair mutation and claim-validation,
 ACP write-denial, and ACP stream-output exhaustion controls: five methods,
-zero failures, errors or skips. The staging-growth and patch-file cases use the test-only captured
-adapter and do not produce a release-complete provider receipt. They qualify
-active repair-loop enforcement and refusal classification, not production ACP
-provider behavior, #236 validation, every resource limit, or hosted exact-head
-CI. #734 and #63 remain open.
+zero failures, errors or skips. The per-file, staging-growth, and patch-file
+cases use the test-only captured adapter and do not produce a release-complete
+provider receipt. They qualify active repair-loop enforcement and refusal
+classification, not production ACP provider behavior, #236 validation, every
+resource limit, or hosted exact-head CI. #734 and #63 remain open.
 
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
