@@ -1590,3 +1590,20 @@ reconstruction and Generated C repair profile. They do not qualify live
 providers, ACP delete/move operations, successful production validation under
 #236, hosted exact-head CI, or complete #734/#63 acceptance. Keep #734 and #63
 open.
+
+## Captured repair deletion patch-count boundary — 2026-11-11
+
+Source commit `add817e0ab90be33dbc5b98a9345d7cc20b99ebf` adds a focused
+`BoundedRepairOutput` control with two authorized existing files and a
+one-file patch budget. The first deletion is retained; the second fails with
+`RepairBudgetExceededException` and does not enter the candidate change set.
+The [JUnit report](evidence/issue-734-repair-staging-deletion-patch-count-2026-11-11.xml)
+records one passing test, with zero failures, errors, or skips; its digest is
+bound in the accompanying provenance record.
+
+This exercises the lower-level captured-output quota branch only. Production
+active ACP repair grants read/write operations and exposes no delete callback,
+so this result does not qualify deletion through public ACP repair or extend
+its replacement-only mutation contract. Existing active-loop refusal tests
+remain the evidence for unsupported create/delete attempts. This local test
+does not close #734 or #63.
