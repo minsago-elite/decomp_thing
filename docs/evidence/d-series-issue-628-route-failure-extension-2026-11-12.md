@@ -193,3 +193,17 @@ Verification at this source checkpoint:
 - `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local frontend/JSDOM evidence only. It does not qualify packaged-browser or assistive-technology behavior, pin/unpin failure permutations, or full #628/#221 acceptance.
+
+## Runtime summary panel isolation — 2026-11-12
+
+Exact source checkpoint: `48eba88c0d4b806ab8b8f79d7ee0dc8760272dcf` on PR #1946.
+
+The scheduler and progress-retention summaries now have independent `PanelBoundary` instances. If either summary fails during rendering, its fixed notice replaces only that panel; the other summary, Runtime capabilities and route heading remain available. Retry rerenders only the failed panel and performs no action. Tests cover both failure directions and the retry behavior.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `panel-isolation.test.tsx` — 1 file, 4 tests passed.
+- Full frontend Vitest suite — 84 files, 1,232 tests passed.
+- `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local frontend/JSDOM evidence only. It does not qualify packaged-browser or assistive-technology behavior, API read failures within these summaries, or full #628/#221 acceptance.
