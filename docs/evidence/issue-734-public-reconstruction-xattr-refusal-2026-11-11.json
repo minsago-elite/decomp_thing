@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "cd62db149ece6a2519ce185c9e17bf886b78c359",
+  "sourceParent": "6a64662cd38d4ad09a853c17cddba36007f310de",
+  "sourceTree": "16f2de5a10906150190c365f131b48ea1c51a3fe",
+  "test": "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes",
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "environment": {
+    "java": "openjdk version 21.0.12.1",
+    "node": "v26.12.1",
+    "npm": "11.20.0",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 64.805,
+    "suiteSeconds": 64.822,
+    "timestamp": "2026-11-11T11:57:32.221Z",
+    "junitSha256": "f314e00f1db48422adc05ff8f809c1a356c0dc3119f436267847d4a5a04cb444"
+  },
+  "scope": {
+    "profile": "Generated C Make",
+    "provider": "scripted ACP process with host-side final-snapshot injection",
+    "scenario": "After the scripted ACP write acknowledgement, the host adds the user-defined xattr decomp-test to the staged implementation. Final snapshot refuses the file as WORKSPACE_VIOLATION with reason unsupported-extended-attributes.",
+    "receipt": "Request-bound receipt with non-null matching turn identity, final-workspace-snapshot phase, no complete execution evidence, and allowed/completed ACP write audit.",
+    "cleanup": "Process stopped, no owned processes remain, sandbox cleanup verified, accepted output metadata unchanged, and no publication residue.",
+    "qualificationLimits": [
+      "host-side injection is not an agent-accessible mutation",
+      "local scripted ACP fixture only",
+      "one reconstruction profile and filesystem supporting user xattrs",
+      "no live-provider behavior",
+      "no production validator qualification under #236",
+      "no publication-time revalidation under #732",
+      "no hosted exact-head CI"
+    ]
+  }
+}

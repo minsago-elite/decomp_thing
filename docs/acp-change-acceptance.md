@@ -1440,3 +1440,26 @@ This is host-side injection with a scripted ACP process for the Generated C
 Make profile; it does not qualify live-provider behavior, production
 validation under #236, publication-time revalidation under #732, other
 profiles, or hosted exact-head CI. #734 and #63 remain open.
+
+## Public reconstruction extended-attribute final-snapshot refusal — 2026-11-11
+
+Commit `cd62db149ece6a2519ce185c9e17bf886b78c359` adds a user-defined
+extended-attribute case to the public reconstruction test. After the
+scripted ACP write is acknowledged, the host adds the `decomp-test` xattr to
+the staged implementation. The final snapshot reports
+`WORKSPACE_VIOLATION` with reason `unsupported-extended-attributes`; the
+request-bound receipt has a non-null matching turn identity, no complete
+execution evidence, and the original allowed/completed write audit. Cleanup is
+verified, accepted publication metadata remains unchanged, and no transaction
+residue remains.
+
+The focused test passed locally at source commit
+`cd62db149ece6a2519ce185c9e17bf886b78c359`: one test, zero failures, errors or
+skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-xattr-refusal-2026-11-11.xml)
+and [provenance record](evidence/issue-734-public-reconstruction-xattr-refusal-2026-11-11.json)
+bind the result to the exact source, command, toolchain and report digest.
+This is a host-side injection with a scripted ACP process and a filesystem
+that supports user attributes, for the Generated C Make profile. It does not
+qualify agent-accessible xattr operations, live providers, production
+validation under #236, publication-time revalidation under #732, other
+profiles, or hosted exact-head CI. #734 and #63 remain open.
