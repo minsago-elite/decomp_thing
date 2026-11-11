@@ -1311,6 +1311,7 @@ class AcpAgentHarnessTest {
             index = 18,
             maximumFrameBytes = 1024 * 1024,
             snapshotLimits = WorkspaceSnapshotLimits(
+                entries = 3,
                 files = 1,
                 fileBytes = 256L * 1024,
                 totalBytes = 256L * 1024,
