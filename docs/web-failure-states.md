@@ -19,10 +19,11 @@ limit and expired-cursor outcomes. Only transient transport/server failures and 
 busy/limit/cursor cases retain a previously verified page; unverified collection results clear
 the old rows and page controls. Fixed dashboard copy includes only the safe request reference,
 never server text. Source views use latest-only read state rather than the metadata views'
-stale-data retention. The shared route-state matrix covers seven routes: the job library, job
-overview, attempt history, attempt overview, saved activity window, source directory, and source
-file. It does not qualify every panel or every state on every route. Full route-by-state
-acceptance remains open in #628; this focused slice is not closure evidence for that issue.
+stale-data retention. The shared route-state matrix covers eight routes: the job library, job
+overview, attempt history, attempt overview, attempt evidence, saved activity window, source
+directory, and source file. It does not qualify every panel or every state on every route. Full
+route-by-state acceptance remains open in #628; this focused slice is not closure evidence for that
+issue.
 
 | State | Trigger | What the view shows |
 | --- | --- | --- |

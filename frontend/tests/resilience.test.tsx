@@ -112,6 +112,32 @@ describe('route failure states (#628)', () => {
     });
   }
 
+  it('distinguishes every exploration report failure on attempt evidence with sanitized correlation', async () => {
+    const messages = new Map<string, string>();
+    for (const [label, failure] of failures) {
+      transport.get.mockImplementation(kind => kind === 'report' ? Promise.reject(failure)
+        : responses[kind] ? Promise.resolve(responses[kind]()) : Promise.reject(new ApiClientError('http_error', { status: 404 })));
+      const auth = await session();
+      history.replaceState(null, '', `/nested/jobs/${jobId}/runs/${runId}/evidence`);
+      const view = render(<App basePath="/nested" session={auth} />);
+      expect(await screen.findByRole('heading', { level: 1, name: 'Attempt evidence' })).toBeTruthy();
+      await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh attempt' }).disabled).toBe(false));
+      fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+      const alert = await screen.findByRole('alert');
+      const text = alert.textContent ?? '';
+      messages.set(label, text.replace(` Reference ID: ${reference}.`, ''));
+      expect(text.includes(`Reference ID: ${reference}.`)).toBe(failure.requestId !== undefined);
+      for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed'])
+        expect(text).not.toContain(leaked);
+      expect(text).not.toMatch(/\n\s+at\s/);
+      expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeTruthy();
+      expect(screen.getByRole('link', { name: 'Activity' })).toBeTruthy();
+      expect(screen.getByText('Recorded validation evidence')).toBeTruthy();
+      view.unmount();
+    }
+    expect(new Set(messages.values()).size).toBe(failures.length);
+  });
+
   it('distinguishes every storage-read failure on Runtime while retaining the page identity and capabilities', async () => {
     const messages = new Set<string>();
     for (const [, failure] of failures) {
