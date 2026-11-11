@@ -2012,17 +2012,35 @@ class TraceGuidedRepairTest {
     fun `active ACP repair enforces returned token ceilings after a write and permits exact usage`() {
         data class TokenCase(
             val label: String,
+            val mode: String,
             val limits: AgentExecutionLimits,
             val exhausted: Boolean,
+            val invalidUsageMessage: String? = null,
         )
 
         val cases = listOf(
-            TokenCase("input", AgentExecutionLimits(maxInputTokens = 10), exhausted = true),
-            TokenCase("output", AgentExecutionLimits(maxOutputTokens = 6), exhausted = true),
             TokenCase(
-                "exact",
+                "input", "repair-active-declared-role-token-limit-after-write",
+                AgentExecutionLimits(maxInputTokens = 10), exhausted = true,
+            ),
+            TokenCase(
+                "output", "repair-active-declared-role-token-limit-after-write",
+                AgentExecutionLimits(maxOutputTokens = 6), exhausted = true,
+            ),
+            TokenCase(
+                "exact", "repair-active-declared-role-token-limit-after-write",
                 AgentExecutionLimits(maxInputTokens = 11, maxOutputTokens = 7),
                 exhausted = false,
+            ),
+            TokenCase(
+                "missing-usage", "repair-active-declared-role-missing-usage-after-write",
+                AgentExecutionLimits(maxInputTokens = 10, maxOutputTokens = 6), exhausted = false,
+                invalidUsageMessage = "inputTokens,outputTokens",
+            ),
+            TokenCase(
+                "negative-usage", "repair-active-declared-role-negative-usage-after-write",
+                AgentExecutionLimits(maxInputTokens = 10), exhausted = false,
+                invalidUsageMessage = "invalid prompt usage",
             ),
         )
         cases.forEach { case ->
@@ -2036,9 +2054,7 @@ class TraceGuidedRepairTest {
             val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use {
                 it.snapshot.headId
             }
-            val harness = AcpAgentHarnessTest().harness(
-                "repair-active-declared-role-token-limit-after-write",
-            )
+            val harness = AcpAgentHarnessTest().harness(case.mode)
             val validationFailure = IllegalStateException("token usage reached candidate validation")
             var validationCalls = 0
             val validation = object : RepairValidationStrategy {
@@ -2085,7 +2101,12 @@ class TraceGuidedRepairTest {
             val failure = assertFailsWith<Exception> {
                 loop.repairCompileError(project, collectCompileFailure(project), emptyList())
             }
-            if (case.exhausted) {
+            if (case.invalidUsageMessage != null) {
+                val messages = generateSequence<Throwable>(failure) { it.cause }
+                    .mapNotNull { it.message }.toList()
+                assertTrue(messages.any { it.contains(case.invalidUsageMessage) }, messages.toString())
+                assertEquals(0, validationCalls)
+            } else if (case.exhausted) {
                 assertTrue(generateSequence<Throwable>(failure) { it.cause }.any {
                     it.message.orEmpty().contains("repair agent stopped with limit_exhausted")
                 }, "${case.label} ceiling failure: ${generateSequence<Throwable>(failure) { it.cause }
@@ -2119,27 +2140,38 @@ class TraceGuidedRepairTest {
                 assertEquals(ModuleRevisionStatus.REJECTED, rejected.status, case.label)
                 assertFalse(rejected.recoveredAfterCrash, case.label)
                 val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
-                assertEquals(
-                    if (case.exhausted) "returned-limit-exhausted" else "returned-completed",
-                    binding.terminalOutcome,
-                    case.label,
-                )
-                assertEquals(!case.exhausted, binding.receiptReleaseComplete, case.label)
+                val expectedTerminal = when {
+                    case.exhausted -> "returned-limit-exhausted"
+                    case.invalidUsageMessage != null -> "failed-protocol"
+                    else -> "returned-completed"
+                }
+                assertEquals(expectedTerminal, binding.terminalOutcome, case.label)
                 val receiptBytes = project.resolve(binding.receiptPath).readBytes()
                 assertEquals(binding.receiptSha256, sha256(receiptBytes), case.label)
                 val receipt = Json.parseToJsonElement(receiptBytes.decodeToString()).jsonObject
                 val outcome = receipt.getValue("outcome").jsonObject
-                assertEquals("returned", outcome.getValue("type").jsonPrimitive.content, case.label)
-                val result = outcome.getValue("result").jsonObject
-                assertEquals(
-                    if (case.exhausted) "limit-exhausted" else "completed",
-                    result.getValue("stopReason").jsonPrimitive.content,
-                    case.label,
-                )
-                val usage = result.getValue("usage").jsonObject
-                assertEquals(11, usage.getValue("inputTokens").jsonPrimitive.int, case.label)
-                assertEquals(7, usage.getValue("outputTokens").jsonPrimitive.int, case.label)
-                assertEquals(3, usage.getValue("cachedInputTokens").jsonPrimitive.int, case.label)
+                if (case.invalidUsageMessage != null) {
+                    assertEquals("failed", outcome.getValue("type").jsonPrimitive.content, case.label)
+                    val failed = outcome.getValue("failure").jsonObject
+                    assertEquals("protocol", failed.getValue("kind").jsonPrimitive.content, case.label)
+                    val messageCommitment = failed.getValue("message").jsonObject
+                    assertTrue(messageCommitment.getValue("encodedBytes").jsonPrimitive.content.toLong() > 0, case.label)
+                    assertEquals(64, messageCommitment.getValue("sha256").jsonPrimitive.content.length, case.label)
+                    assertFalse(binding.receiptReleaseComplete, case.label)
+                } else {
+                    assertEquals("returned", outcome.getValue("type").jsonPrimitive.content, case.label)
+                    val result = outcome.getValue("result").jsonObject
+                    assertEquals(
+                        if (case.exhausted) "limit-exhausted" else "completed",
+                        result.getValue("stopReason").jsonPrimitive.content,
+                        case.label,
+                    )
+                    val usage = result.getValue("usage").jsonObject
+                    assertEquals(11, usage.getValue("inputTokens").jsonPrimitive.int, case.label)
+                    assertEquals(7, usage.getValue("outputTokens").jsonPrimitive.int, case.label)
+                    assertEquals(3, usage.getValue("cachedInputTokens").jsonPrimitive.int, case.label)
+                    assertEquals(!case.exhausted, binding.receiptReleaseComplete, case.label)
+                }
                 val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
                 val record = filesystem.getValue("records").jsonArray.single().jsonObject
                 assertEquals(1, filesystem.getValue("recordCount").jsonPrimitive.int, case.label)
@@ -2148,12 +2180,13 @@ class TraceGuidedRepairTest {
                 val process = receipt.getValue("process").jsonObject
                 assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int, case.label)
                 assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean, case.label)
-                if (case.exhausted) {
+                if (case.exhausted || case.invalidUsageMessage != null) {
                     val assessment = decompengine.project.AcpChangeAssessment.parse(
                         project.resolve(requireNotNull(binding.assessmentPath)).readBytes(),
                     )
                     assertEquals(
-                        decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
+                        if (case.exhausted) decompengine.project.AcpChangePublicationEligibility.INTERRUPTED
+                        else decompengine.project.AcpChangePublicationEligibility.REJECTED,
                         assessment.eligibility,
                         case.label,
                     )
