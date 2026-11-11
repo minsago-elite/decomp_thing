@@ -306,6 +306,7 @@ describe('workbench display controls', () => {
     window.localStorage.setItem(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"light","motion":"system"}');
     const writes = vi.spyOn(Storage.prototype, 'setItem');
     render(<DisplayPreferences />);
+    window.localStorage.setItem(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"dark","motion":"reduce"}');
     fireEvent(window, new StorageEvent('storage', {
       key: DISPLAY_PREFERENCES_KEY,
       newValue: '{"version":1,"theme":"dark","motion":"reduce"}',
@@ -323,6 +324,21 @@ describe('workbench display controls', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
     expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
     expect(writes).not.toHaveBeenCalled();
+  });
+
+  it('merges a local field edit with the latest valid record when a storage event was missed', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    records.set(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"dark","motion":"system"}');
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'reduce' } });
+
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    expect(records.get(DISPLAY_PREFERENCES_KEY)).toBe('{"version":1,"theme":"dark","motion":"reduce"}');
   });
 
   it('applies a tab-only choice when storage fails and withholds exception details', () => {

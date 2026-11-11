@@ -22,7 +22,7 @@ export function readDisplayPreferences(storage: StorageAccess = browserStorage):
   return readStoredDisplayPreferences(storage) ?? defaults;
 }
 
-/** Return only a fully admitted persisted record; callers can retain tab-local state on storage failure. */
+/** Return only a fully admitted persisted record; absent, malformed, or inaccessible storage returns undefined. */
 function readStoredDisplayPreferences(storage: StorageAccess): DisplayPreferenceValues | undefined {
   try {
     const raw = storage().getItem(DISPLAY_PREFERENCES_KEY);
