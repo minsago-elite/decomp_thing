@@ -68,6 +68,7 @@ RECONSTRUCTION_MODES = {
     "reconstruction-stderr-limit-after-write",
     "reconstruction-stdout-limit-after-write",
     "reconstruction-mixed-output-limit-after-write",
+    "reconstruction-request-timeout-after-write",
 }
 RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
@@ -243,6 +244,7 @@ expected_fs = {
     "reconstruction-stderr-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-stdout-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-mixed-output-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -1199,6 +1201,9 @@ if MODE in RECONSTRUCTION_MODES:
         if oversized.get("error", {}).get("code") != -32602:
             raise SystemExit(127)
     write_workspace_file(source, content, 816)
+    if MODE == "reconstruction-request-timeout-after-write":
+        time.sleep(30)
+        raise SystemExit(0)
     if MODE == "reconstruction-frame-limit-after-write":
         sys.stdout.write("{" + ("x" * 70000))
         sys.stdout.flush()

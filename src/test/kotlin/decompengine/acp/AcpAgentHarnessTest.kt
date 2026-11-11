@@ -1160,7 +1160,12 @@ class AcpAgentHarnessTest {
             val receipts: List<AgentExecutionReceipt>,
         )
 
-        fun runAttempt(mode: String, index: Int, maximumFrameBytes: Int = 64 * 1024): Attempt {
+        fun runAttempt(
+            mode: String,
+            index: Int,
+            maximumFrameBytes: Int = 64 * 1024,
+            requestTimeoutMillis: Long? = null,
+        ): Attempt {
             val receipts = mutableListOf<AgentExecutionReceipt>()
             var taskCount = 0
             val progress = object : AgentWorkflowProgress {
@@ -1184,6 +1189,9 @@ class AcpAgentHarnessTest {
                 mode = mode,
                 sentinel = implementationPath,
                 maximumFrameBytes = maximumFrameBytes,
+                timeouts = requestTimeoutMillis?.let { timeout ->
+                    timeouts(startup = 2_500, request = timeout, shutdown = 1_500)
+                } ?: timeouts(),
             )
             val function = RecoveredFunction(
                 "fn_0000000000001000",
@@ -1333,6 +1341,39 @@ class AcpAgentHarnessTest {
             assertEquals(acceptedMetadata, capturePublishedMetadata(output), mode)
             assertNoReconstructionPublicationResidue(output)
         }
+
+        val requestTimedOut = runAttempt(
+            "reconstruction-request-timeout-after-write",
+            index = 7,
+            requestTimeoutMillis = 3_000,
+        )
+        val timeoutFailure = assertNotNull(
+            requestTimedOut.failure,
+            "the configured ACP prompt deadline must refuse a candidate already written to the stage",
+        )
+        assertEquals(1, requestTimedOut.taskCount)
+        val timeoutReceipt = requestTimedOut.receipts.single()
+        val timeoutOutcome = assertIs<AgentExecutionOutcome.Failed>(timeoutReceipt.outcome)
+        assertEquals(AgentFailureKind.TIMEOUT, timeoutOutcome.failure.kind)
+        assertTrue(timeoutOutcome.failure.message.contains("session/prompt"), timeoutOutcome.failure.message)
+        assertNull(assertIs<AcpInvocationEvidenceSnapshot>(timeoutReceipt.providerEvidence).completeExecutionEvidence)
+        assertTrue(
+            requestTimedOut.harness.latestFilesystemAudit().any { record ->
+                record.policyPath?.relativePath == implementationPath &&
+                    record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                    record.reason == AcpFilesystemAuditReason.COMPLETED
+            },
+            "the timeout fixture must cross the authorized candidate-write boundary",
+        )
+        assertTrue(generateSequence<Throwable>(timeoutFailure) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        val timeoutDiagnostics = assertNotNull(requestTimedOut.harness.latestDiagnostics())
+        assertTrue(timeoutDiagnostics.remainingProcessIds.isEmpty(), timeoutDiagnostics.toString())
+        assertTrue(timeoutDiagnostics.sandboxCleanupVerified, timeoutDiagnostics.toString())
+        assertProcessStopped(timeoutDiagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
     }
 
     private fun capturePublishedMetadata(output: Path): Map<String, PublicationEntryRecord> {
