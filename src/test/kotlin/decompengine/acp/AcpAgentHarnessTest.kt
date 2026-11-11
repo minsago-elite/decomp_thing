@@ -1300,11 +1300,13 @@ class AcpAgentHarnessTest {
         assertEquals(acceptedMetadata, capturePublishedMetadata(output))
         assertNoReconstructionPublicationResidue(output)
 
-        for ((mode, expectedMessage) in listOf(
+        for ((index, scenario) in listOf(
             "reconstruction-stderr-limit-after-write" to "execution limit",
             "reconstruction-stdout-limit-after-write" to "execution limit",
-        )) {
-            val resourceLimited = runAttempt(mode, index = if (mode.contains("stderr")) 4 else 5)
+            "reconstruction-mixed-output-limit-after-write" to "execution limit",
+        ).withIndex()) {
+            val (mode, expectedMessage) = scenario
+            val resourceLimited = runAttempt(mode, index = 4 + index)
             val resourceFailure = assertNotNull(
                 resourceLimited.failure,
                 "$mode must refuse candidate publication after the agent writes source",

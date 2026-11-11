@@ -67,6 +67,7 @@ RECONSTRUCTION_MODES = {
     "reconstruction-frame-limit-after-write",
     "reconstruction-stderr-limit-after-write",
     "reconstruction-stdout-limit-after-write",
+    "reconstruction-mixed-output-limit-after-write",
 }
 RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
@@ -241,6 +242,7 @@ expected_fs = {
     "reconstruction-frame-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-stderr-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-stdout-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-mixed-output-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -1215,6 +1217,22 @@ if MODE in RECONSTRUCTION_MODES:
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "text", "text": chunk},
                     "messageId": f"output-limit-{index}",
+                })
+        except (BrokenPipeError, OSError):
+            pass
+        raise SystemExit(0)
+    if MODE == "reconstruction-mixed-output-limit-after-write":
+        # Neither stream exceeds the request's 8 MiB budget by itself. The shared accountant
+        # must include both the 5 MiB stderr body and these 4.2 MiB of stdout text.
+        sys.stderr.write("s" * (5 * 1024 * 1024))
+        sys.stderr.flush()
+        try:
+            chunk = "m" * 30000
+            for index in range(140):
+                update({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": chunk},
+                    "messageId": f"mixed-output-limit-{index}",
                 })
         except (BrokenPipeError, OSError):
             pass
