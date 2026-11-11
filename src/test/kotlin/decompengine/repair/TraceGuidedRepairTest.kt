@@ -4108,6 +4108,64 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair request-byte budget refuses before dispatch and preserves the accepted head`() {
+        val project = createProject(
+            createRepairTempDirectory("repair-active-request-byte-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+        )
+        val sourcePath = "src/modules/reconstructed.c"
+        val source = project.resolve(sourcePath).readBytes()
+        val budget = RepairResourceBudget(maximumRegressionInputBytes = 1024, maximumRequestBytes = 1024)
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use {
+            it.snapshot.headId
+        }
+        val dispatches = AtomicInteger()
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                dispatches.incrementAndGet()
+                error("agent must not run when the bounded repair request exceeds its budget")
+            }
+        }
+        val loop = TraceGuidedRepairLoop.forTesting(
+            harness,
+            RepairHistory(project.resolve("reports/repair_history.json")),
+            GeneratedCRepairIndexProfile,
+            GeneratedCRepairValidationStrategy(TestOnlyGeneratedCRepairValidationBoundary),
+            CapturedRepairStagingAuthority,
+            resourceBudget = budget,
+        )
+
+        val failure = assertFailsWith<RepairBudgetExceededException> {
+            loop.repairCompileError(
+                project,
+                CompileFailure(listOf("cc"), 1, "", "$sourcePath: compiler error"),
+                emptyList(),
+            )
+        }
+        assertTrue(failure.message.orEmpty().contains("repair request requires"))
+        assertEquals(0, dispatches.get())
+        assertContentEquals(source, project.resolve(sourcePath).readBytes())
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(1, graph.snapshot.nodes.size, "request admission must not create a candidate node")
+            assertEquals(ModuleRevisionStatus.ROOT, graph.snapshot.nodes.single().status)
+            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+        }
+    }
+
+    @Test
     fun `strict captured staging closes the mutation sink against background writers`() {
         lateinit var retainedOutput: BoundedRepairOutput
         val harness = object : CapturedRepairAgentHarness {
