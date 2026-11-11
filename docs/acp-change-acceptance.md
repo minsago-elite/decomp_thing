@@ -927,6 +927,38 @@ ceilings after an acknowledged brokered write. It does not qualify other
 provider/protocol failures, production validation under #236, or hosted
 exact-head CI. #734 and #63 remain open.
 
+## Active repair immediate tool-call limit checkpoint — 2026-11-11
+
+Commit `ccf63dd21` adds an active repair control for the exact host tool-call
+boundary and fixes completion-order handling in `AcpAgentHarness.runPrompt`.
+The harness now checks an already-recorded tool-call limit failure before
+accepting a completed prompt response, and checks again after awaiting or
+draining that response. This prevents an immediate `end_turn` response from
+overriding a tool-call limit already observed by the event translator.
+
+`TraceGuidedRepairTest.active ACP repair preserves tool-call exhaustion when
+prompt completes immediately` runs the scripted ACP process through active
+repair with a one-call limit. After an acknowledged authorized source write,
+the peer sends two distinct tool-call events and immediately completes the
+prompt. The receipt records two calls and `LIMIT_EXHAUSTED`; the workflow
+rejects the candidate, retains its interrupted assessment, reopens with no
+pending attempt, and preserves the accepted source and graph head. The test
+also verifies process termination and sandbox cleanup.
+
+`TraceGuidedRepairTest.active ACP repair permits exact tool-call limit through
+candidate validation` sets the limit to two. The same two-call response reaches
+the candidate-validation seam with a completed receipt. An injected sentinel
+then refuses validation, allowing the test to verify that the exact boundary
+was admitted without claiming successful compilation or publication.
+
+Both focused tests passed locally, and the accumulated
+`TraceGuidedRepairTest.active*` selection passed 17 methods with zero failures,
+errors or skips at `ccf63dd21`. This is scripted local ACP evidence for
+tool-call exhaustion after a brokered write and the exact count boundary. It
+does not qualify other token or provider budgets, live-provider behavior,
+production validation under #236, or hosted exact-head CI. #734 and #63 remain
+open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
