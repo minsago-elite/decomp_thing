@@ -85,14 +85,54 @@ concurrent session expiry.
   its 25-second sandbox-launch deadline while preparing a large snapshot. `clang` remained in
   progress at the time of capture. These results do not constitute an all-green workflow.
 
+### Exact-head follow-up: repeated stale-shell recovery
+
+- PR source head: `01f5e330b01773bb954994d376dd459905517af7`; CI run
+  [43069616345](https://github.com/minsago-elite/decomp_thing/actions/runs/43069616345).
+  The executed merge candidate `9b26d693b1ffbbec3bbb706a49c9ac716eeeef05` has the PR base
+  `2b1121999c806d5b3f89d3723fca8a39879c49b1` and this head as parents. Both commits have tree
+  `f922781811fee5b95bb7633bc3398f6086cfb78e`.
+- In this run, the `Frontend contracts and bundle` and `Packaged web contracts and browser` jobs
+  passed, as did `Packaged cross-engine journeys`, `kotlin-live`, `kotlin-live-fulltree`,
+  `kotlin-oracle`, `clang`, `archival-ghidra`, and `bundled-ghidra`. The overall workflow concluded
+  with failure because `kotlin-core` failed the unrelated test
+  `OwnedExplorationProcessTest > a descendant its parent never reaps cannot hang cancellation()`
+  at `OwnedExplorationProcessTest.kt:103`; the shard reports 3,002 tests, one failure and 15
+  skipped. The PR diff contains no Kotlin source or test changes. Aggregate `kotlin` consequently
+  failed. These failures do not negate the passing frontend and packaged browser jobs, but the
+  overall PR check is not green.
+- The packaged artifact is
+  [13877408374](https://github.com/minsago-elite/decomp_thing/actions/runs/43069616345/artifacts/13877408374).
+  Its audit report SHA-256 is
+  `3b410efa287b21530b3c7661772b9fe85d63d49572c88c4eae0f2772443d288a`. It reports `passed`,
+  Chrome `149.0.7827.55`, build ID
+  `1ef08163318bde904d7942af41964d04920de56be55149b7e832fecc85c7f4f8`, archive SHA-256
+  `e516b35ef0005fd8040e87e51cc265cff7a083dff2ec100dfb96b44a8509b52b`, and application JAR
+  SHA-256 `37e9d27236f212ec83fb0295483455b4f49c8440866c4ab29767cf3683559a59`. The report contains
+  the two-tab preference exchange, trusted same-origin storage events, exact-record restoration,
+  peer restoration, target closure, and no cleanup failures.
+- The same artifact records the `session` journey: the stale-shell fixture rewrote exactly two
+  packaged HTML document responses to use the stale UI-build metadata. The first mismatch offered
+  one explicit reload without automatic reload; the repeated mismatch showed manual guidance and
+  no reload button. There were zero mutation and external requests. This is a metadata-only shell
+  control, not a complete historical bundle or CDN/proxy cache test. Its report SHA-256 is
+  `d2ed3235ace5707f96de9ac209469728ea0c8c792a14939cacc543092032e78d`.
+- The current-run frontend artifact is
+  [13877571562](https://github.com/minsago-elite/decomp_thing/actions/runs/43069616345/artifacts/13877571562).
+  Its component-test XML SHA-256 is
+  `cbb6e2a9673b7ff592d767621c103b5b9e92175257ce679ad2455638ff090296`; it records 1,199 tests,
+  zero failures and zero errors, including 26 display-preference tests. The packaged expiry
+  artifact is [13877343049](https://github.com/minsago-elite/decomp_thing/actions/runs/43069616345/artifacts/13877343049);
+  its JSON SHA-256 is `270b9d972341a92912c0811a232ffa6314952c01cbdea0971e73c39a12db6c1b`.
+  Natural session expiry and independent idle-versus-absolute expiry remain unqualified.
+
 ## Limits and remaining acceptance
 
-The two-tab preference control now has exact-source hosted Chrome evidence, and a test-clock
-packaged session-expiry path passed. The retained cross-tab test double still models browser
-storage delivery; the hosted Chrome report supplies real-browser evidence for that behavior. A
-packaged session-mode stale-shell retry control has now been added locally: it rewrites only the
-UI-build metadata in two actual packaged HTML responses and checks the one-reload/manual-guidance
-transition. Its exact-source browser execution remains pending, and it does not serve a complete
+The two-tab preference control, repeated stale-shell retry, and test-clock packaged session-expiry
+path have exact-source hosted Chrome evidence. The retained cross-tab test double still models
+browser storage delivery; the hosted Chrome report supplies real-browser evidence for that
+behavior. The stale-shell fixture rewrites only the UI-build metadata in two actual packaged HTML
+responses and checks the one-reload/manual-guidance transition. It does not serve a complete
 historical bundle or qualify a real CDN/proxy cache. This slice does not independently qualify
 Firefox/WebKit storage-event behavior, natural session expiry, or all version/session combinations.
 Dependencies #159 is closed; #167 and #179 remain open and retain their respective shell/version
