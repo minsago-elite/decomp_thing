@@ -800,7 +800,15 @@ if MODE == "repair-active-declared-role-tool-limit-after-write":
     completion_burst.append({
         "jsonrpc": "2.0",
         "id": prompt["id"],
-        "result": {"stopReason": "end_turn"},
+        "result": {
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 11,
+                "outputTokens": 7,
+                "totalTokens": 18,
+                "cachedReadTokens": 3,
+            },
+        },
     })
     sys.stdout.write("".join(json.dumps(message, separators=(",", ":")) + "\n"
                             for message in completion_burst))

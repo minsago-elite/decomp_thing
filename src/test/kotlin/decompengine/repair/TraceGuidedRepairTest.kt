@@ -52,6 +52,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import java.net.InetSocketAddress
 import java.net.URI
 import java.nio.file.Files
@@ -1734,7 +1735,13 @@ class TraceGuidedRepairTest {
         val acceptedSource = target.readBytes()
         val acceptedMakefile = project.resolve("Makefile").readBytes()
         val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
-        val limits = AgentExecutionLimits(maxToolCalls = 1)
+        val limits = AgentExecutionLimits(
+            maxToolCalls = 1,
+            // These exact token ceilings require the completed response to survive the
+            // adjacent tool-limit update; otherwise the active repair records PROTOCOL.
+            maxInputTokens = 11,
+            maxOutputTokens = 7,
+        )
         val harness = AcpAgentHarnessTest().harness(
             "repair-active-declared-role-tool-limit-after-write",
         ).withPromptLoopGateForTesting { promptJob -> withTimeout(5_000) { promptJob.join() } }
@@ -1781,7 +1788,10 @@ class TraceGuidedRepairTest {
             assertEquals("returned", outcome.getValue("type").jsonPrimitive.content)
             val result = outcome.getValue("result").jsonObject
             assertEquals("limit-exhausted", result.getValue("stopReason").jsonPrimitive.content)
-            assertEquals(2, result.getValue("usage").jsonObject.getValue("toolCalls").jsonPrimitive.int)
+            val usage = result.getValue("usage").jsonObject
+            assertEquals(2, usage.getValue("toolCalls").jsonPrimitive.int)
+            assertEquals(11L, usage.getValue("inputTokens").jsonPrimitive.long)
+            assertEquals(7L, usage.getValue("outputTokens").jsonPrimitive.long)
             val filesystem = receipt.getValue("policyAudits").jsonObject
                 .getValue("filesystem").jsonObject
             val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
