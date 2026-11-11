@@ -149,15 +149,21 @@ for (const originalStored of [null, '{"version":1,"theme":"system","motion":"sys
       if (expression.startsWith('localStorage.getItem(')) return stored;
       if (expression.includes('window.__displayPreferenceAudit.counting = false')) return true;
       if (expression.startsWith('(() => {\n          const key =')) {
-        const original = JSON.parse(expression.match(/const original = (.*);/)?.[1] ?? 'undefined');
-        const changed = stored !== original;
-        stored = original;
+        const beforeRestore = stored;
+        const storageModel = {
+          getItem(key) { assert.equal(key, displayPreferencesKey); return stored; },
+          setItem(key, value) { assert.equal(key, displayPreferencesKey); stored = String(value); },
+          removeItem(key) { assert.equal(key, displayPreferencesKey); stored = null; },
+        };
+        const restored = runInNewContext(expression, { localStorage: storageModel });
+        const changed = stored !== beforeRestore;
         if (changed) {
           const receiver = values.get('session-b');
-          receiver.theme = 'system'; receiver.motion = 'system';
+          const restoredValues = stored === null ? { theme: 'system', motion: 'system' } : JSON.parse(stored);
+          receiver.theme = restoredValues.theme; receiver.motion = restoredValues.motion;
           receiver.events.push({ key: displayPreferencesKey, trusted: true, storageArea: 'localStorage' });
         }
-        return true;
+        return restored;
       }
       if (expression.includes('window.__displayPreferenceAudit')) return true;
       throw new Error(`Unexpected cross-tab probe expression: ${expression}`);
