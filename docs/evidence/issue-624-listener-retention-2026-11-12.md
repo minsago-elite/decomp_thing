@@ -19,3 +19,9 @@ Result: **29 tests passed, 0 failed, 0 skipped**. The helper suite covers regist
 ## Qualification boundary
 
 This checkpoint does **not** contain a packaged-browser execution of the instrumented 20-minute soak. The hosted packaged-browser CI run must execute on the exact PR head and retain its report before these new listener and backing-storage measurements count as runtime evidence. The probe sees page-main-world `addEventListener`/`removeEventListener` registrations and renderer backing storage; it does not count `on*` property handlers, browser-internal listeners, or worker listeners. The new limits are proposed #624 qualification bounds; this checkpoint does not close #624 or its dependency #219.
+
+## Exact-head review corrections
+
+Follow-up source checkpoint: `d4f76b546c69a33caae3df6e7cd53c0f7dc412aa`, directly based on the implementation source above. It corrects delayed `AbortSignal` accounting after target collection, makes observer-cap overflow fail closed without throwing from an app's registration call, validates bounded event types and monotonic accounting in the evaluator, and retains the existing 35-second stream-drain allowance. It also reports the 24 added dashboard navigations and drain durations; this instrumented workload is not directly comparable to the earlier rapid-switch soak.
+
+At this exact source tree, Node.js `v24.20.0` passed syntax checks for `scripts/check-packaged-web-browser.mjs`, `scripts/packaged-browser-soak.mjs`, `scripts/soak626/listener-retention.mjs`, and `scripts/soak626/evaluate.mjs`, plus the full `scripts/soak626/*.test.mjs` suite: **35 passed, 0 failed, 0 skipped**. These are helper and evaluator checks, not a packaged-browser runtime measurement. The full 20-minute browser run on this exact PR head remains required.
