@@ -65,6 +65,8 @@ RECONSTRUCTION_MODES = {
     "reconstruction-mutation-grant",
     "reconstruction-tool-limit-after-write",
     "reconstruction-limit-after-write",
+    "reconstruction-missing-usage-after-write",
+    "reconstruction-negative-usage-after-write",
     "reconstruction-frame-limit-after-write",
     "reconstruction-stderr-limit-after-write",
     "reconstruction-stdout-limit-after-write",
@@ -254,6 +256,8 @@ expected_fs = {
     "reconstruction-mutation-grant": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-tool-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-missing-usage-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-negative-usage-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-frame-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-stderr-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-stdout-limit-after-write": {"readTextFile": False, "writeTextFile": True},
@@ -1483,9 +1487,9 @@ update({
 prompt_result = {"stopReason": "end_turn"}
 if MODE == "reconstruction-limit-after-write":
     prompt_result["stopReason"] = "max_tokens"
-if MODE != "missing-usage":
+if MODE not in ("missing-usage", "reconstruction-missing-usage-after-write"):
     prompt_result["usage"] = {
-        "inputTokens": -1 if MODE == "negative-usage" else 11,
+        "inputTokens": -1 if MODE in ("negative-usage", "reconstruction-negative-usage-after-write") else 11,
         "outputTokens": 7,
         "totalTokens": 18,
         "cachedReadTokens": 3,

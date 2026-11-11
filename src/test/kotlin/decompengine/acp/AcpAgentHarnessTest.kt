@@ -1605,6 +1605,59 @@ class AcpAgentHarnessTest {
             assertNoReconstructionPublicationResidue(output)
         }
 
+        data class InvalidUsageCase(
+            val name: String,
+            val mode: String,
+            val limits: AgentExecutionLimits,
+            val expectedMessage: String,
+        )
+        for ((index, invalidUsage) in listOf(
+            InvalidUsageCase(
+                "missing-required-usage",
+                "reconstruction-missing-usage-after-write",
+                AgentExecutionLimits(maxInputTokens = 10, maxOutputTokens = 6),
+                "inputTokens,outputTokens",
+            ),
+            InvalidUsageCase(
+                "negative-reported-usage",
+                "reconstruction-negative-usage-after-write",
+                AgentExecutionLimits(maxInputTokens = 10),
+                "invalid prompt usage",
+            ),
+        ).withIndex()) {
+            val invalid = runAttempt(
+                invalidUsage.mode,
+                index = 17 + index,
+                executionLimits = invalidUsage.limits,
+            )
+            val invalidFailure = assertNotNull(
+                invalid.failure,
+                "${invalidUsage.name} must refuse reconstruction after the candidate write",
+            )
+            assertEquals(1, invalid.taskCount)
+            val receipt = invalid.receipts.single()
+            assertEquals(invalid.requestSha256s.single(), receipt.requestBinding.requestSha256)
+            val outcome = assertIs<AgentExecutionOutcome.Failed>(receipt.outcome)
+            assertEquals(AgentFailureKind.PROTOCOL, outcome.failure.kind)
+            assertTrue(outcome.failure.message.contains(invalidUsage.expectedMessage), outcome.failure.message)
+            val invocationEvidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+            assertNull(invocationEvidence.completeExecutionEvidence)
+            assertTrue(invalid.harness.latestFilesystemAudit().any { record ->
+                record.policyPath?.relativePath == implementationPath &&
+                    record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                    record.reason == AcpFilesystemAuditReason.COMPLETED
+            }, invalidUsage.name)
+            assertTrue(generateSequence<Throwable>(invalidFailure) { it.cause }.any {
+                it.message.orEmpty().contains("validated source publication was refused")
+            }, invalidUsage.name)
+            val invalidDiagnostics = assertNotNull(invalid.harness.latestDiagnostics(), invalidUsage.name)
+            assertTrue(invalidDiagnostics.remainingProcessIds.isEmpty(), invalidDiagnostics.toString())
+            assertTrue(invalidDiagnostics.sandboxCleanupVerified, invalidDiagnostics.toString())
+            assertProcessStopped(invalidDiagnostics.pid)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), invalidUsage.name)
+            assertNoReconstructionPublicationResidue(output)
+        }
+
         val exactResourceBoundary = runAttempt(
             "reconstruction-tool-limit-after-write",
             index = 16,
