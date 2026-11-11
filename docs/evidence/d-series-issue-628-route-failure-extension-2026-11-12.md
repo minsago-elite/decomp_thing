@@ -74,3 +74,16 @@ Verification at this source checkpoint:
 - `npm run build` — generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
 
 These local results leave other job panels, complete route-by-state coverage, packaged-browser and assistive-technology evidence, and parent #221 acceptance open.
+
+## Queue-position read failure states — 2026-11-12
+
+Source checkpoint: `d8b5ff6703838f43887d87c7c1666080f2428eef` on PR #1946.
+
+The explicitly requested queue-position read now uses the shared failure classifier for session expiry, denied access, missing attempts, unsupported response contracts, unverified responses, and other read failures. Each category has fixed local guidance; only a validated request reference may be displayed. A failed refresh continues to discard the previous queue sample because an older position would be misleading. The read remains user-triggered and does not poll or retry automatically.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `queue-usage.test.tsx` — 1 file, 14 tests passed.
+- `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local component and build evidence only. It does not qualify packaged-browser or assistive-technology behavior, all queued-attempt route states, the remaining job panels, or full #628/#221 acceptance.
