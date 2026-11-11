@@ -66,6 +66,7 @@ jobs:
           node scripts/test-packaged-browser-audit.mjs
           node scripts/test-browser-engine-input.mjs
           node scripts/test-packaged-browser-engine-adapter.mjs
+          node --test scripts/test-packaged-browser-exception-context.mjs
           node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
