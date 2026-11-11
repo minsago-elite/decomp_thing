@@ -15,3 +15,19 @@ This checkpoint extends the focused #628 work in two areas:
 - Focused coverage: `resilience.test.tsx`, `panel-isolation.test.tsx`, `storage-summary-format.test.tsx`, `job-dashboard.test.tsx`, and `dashboard-live.test.tsx` passed.
 
 These are local source-tree results. Hosted checks for the pushed head and packaged-browser evidence are separate gates. This checkpoint does not complete #628 or #221: other routes and panels, complete route-by-state coverage, packaged-browser qualification, manual assistive-technology evidence, and parent-level integration remain open.
+
+## Saved activity-window failure states and live-region follow-up — 2026-11-12
+
+Source checkpoint: `98603e61bfb8c8d1de3ebffef0a6b7a1b13869e6` on PR #1946.
+
+The saved activity-window route now uses the shared metadata failure classifier for session expiry, denied access, missing history, unsupported response contracts, unverified/corrupt responses, and other read failures. Its existing expired-window and invalid-cursor cases remain separate. Fixed messages retain only a validated request reference, do not substitute another window, and preserve rows only for a safe transient read failure on the same binding. The route matrix now exercises the saved-window snapshot path; focused component coverage also checks event-page failure, transient retention, unsupported-contract clearing, and that the read-only saved view never starts a live stream.
+
+This checkpoint also keeps Runtime's storage loading status element mounted before and during the read, so the changing message is delivered through an existing live region. The dashboard's generic listing failure copy no longer claims every fallback was caused by an unavailable server.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `resilience.test.tsx`, `activity-navigation.test.tsx`, `storage-summary-format.test.tsx`, and `job-dashboard.test.tsx` — 4 files, 80 tests passed.
+- Full frontend Vitest suite — 84 files, 1,203 tests passed.
+- `npm run build` — generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
+
+These are local frontend results. The source does not establish packaged-browser or screen-reader evidence. Dashboard continuation after every cursor-failure permutation, remaining evidence/validation/Git panels, full panel failure matrices, and complete #628/#221 acceptance remain open. Shared `docs/web-failure-states.md` was not changed because other open D11 PRs edit it.
