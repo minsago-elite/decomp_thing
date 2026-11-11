@@ -1463,3 +1463,33 @@ that supports user attributes, for the Generated C Make profile. It does not
 qualify agent-accessible xattr operations, live providers, production
 validation under #236, publication-time revalidation under #732, other
 profiles, or hosted exact-head CI. #734 and #63 remain open.
+
+## Active repair ACP filesystem write-byte retry — 2026-11-11
+
+Source commit `f278f4d5ac15d7b23031cfdf88c1d8992dbafa7f` adds an active
+repair retry control for the ACP filesystem bridge's `maximumWriteBytes`
+limit. The existing scripted fixture writes exactly 4,096 bytes, attempts a
+4,097-byte retry, reads back the first candidate, and completes. The new test
+configures `AcpFilesystemLimits.maximumWriteBytes = 4,096` while setting
+`maximumPatchBytes = 8,192`; source-file, staging, patch-file, context, frame,
+and protocol limits have headroom. Thus the second callback is refused by the
+ACP write-byte limit before it reaches the bounded repair sink. The sibling
+patch-byte test runs the same flow with an 8 MiB ACP write ceiling and a
+4,096-byte patch budget, keeping the two limits distinct.
+
+Both tests require one exact `MODIFIED` candidate to reach the injected
+`STRICT_CONTAINED` validator, which throws its sentinel after inspecting the
+candidate. The receipt records allowed write, resource-limit refusal, and
+allowed readback; the rejected assessment binds the receipt and candidate
+digest. The accepted source and graph head remain unchanged, pending state is
+cleared, and process and sandbox cleanup are verified. The focused run passed
+at the source commit: two tests, zero failures, errors, or skips. The retained
+[JUnit report](evidence/issue-734-active-repair-acp-write-byte-retry-2026-11-11.xml)
+and [provenance record](evidence/issue-734-active-repair-acp-write-byte-retry-2026-11-11.json)
+bind the command, exact source/tree, toolchain, and report digest.
+
+This is local scripted-ACP evidence for the Generated C repair profile. The
+validator is injected and rejects after candidate inspection; this does not
+qualify successful production validation under #236, live providers, other
+profiles, hosted exact-head CI, or the full #734/#63 acceptance scope. Keep
+#734 and #63 open.

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "f278f4d5ac15d7b23031cfdf88c1d8992dbafa7f",
+  "sourceParent": "149f22ba453a86e81bd23daff0224673e4e4a705",
+  "sourceTree": "95aa1a4bd0470905e36e052dfbf253fed6f1fc21",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate'",
+  "environment": {
+    "java": "openjdk version 21.0.12.1",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 2,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 4.902,
+    "suiteSeconds": 4.914,
+    "timestamp": "2026-11-11T12:24:45.212Z",
+    "junitSha256": "3e410635a20e51007e4b8956793f5a0fb652b0e0bfd85cc908fb28761c1b3d26"
+  },
+  "scope": {
+    "profile": "Generated C repair index",
+    "provider": "scripted ACP process through AcpCapturedRepairFilesystem",
+    "scenario": "The retry fixture performs an allowed 4,096-byte replacement, refuses a 4,097-byte retry, reads back the preserved candidate, and completes. The new case sets AcpFilesystemLimits.maximumWriteBytes to 4,096 while maximumPatchBytes is 8,192 and all other applicable repair budgets have headroom, isolating the ACP filesystem callback byte ceiling. The existing sibling control instead sets maximumPatchBytes to 4,096 while the ACP filesystem write limit remains 8 MiB.",
+    "candidate": "The active validator receives the exact 4,096-byte MODIFIED candidate and then throws the expected sentinel. The durable receipt records allowed write, denied resource-limit write, and allowed readback; the rejected assessment binds the receipt and candidate digest. Accepted source and graph head remain unchanged, pending state is cleared, and process/sandbox cleanup is verified.",
+    "qualificationLimits": [
+      "scripted ACP fixture and Generated C repair profile only",
+      "injected STRICT_CONTAINED validator rejects after candidate inspection; no successful production validation is established",
+      "no live-provider behavior",
+      "no production validator qualification under #236",
+      "no hosted exact-head CI qualification"
+    ]
+  }
+}
