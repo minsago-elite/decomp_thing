@@ -952,10 +952,12 @@ the candidate-validation seam with a completed receipt. An injected sentinel
 then refuses validation, allowing the test to verify that the exact boundary
 was admitted without claiming successful compilation or publication.
 
-Follow-up commit `75242e462` makes the completion-order fixture wait for the
-host prompt loop and write both tool updates plus the terminal response in one
-flushed burst. Both focused tests passed again with that fixture, and the
-accumulated
+Follow-up commit `75242e462` pauses for 50 ms before writing both tool updates
+and the terminal response in one flushed burst, giving the host time to enter
+prompt processing. This narrows the scheduling window but does not synchronize
+with the host polling loop; the regression test remains scheduling-dependent
+and may pass through the ordinary exhaustion path. Both focused tests passed
+again with that fixture, and the accumulated
 `TraceGuidedRepairTest.active*` selection passed 17 methods with zero failures,
 errors or skips at `75242e462`. This is scripted local ACP evidence for
 tool-call exhaustion after a brokered write and the exact count boundary. It
