@@ -858,6 +858,33 @@ seam only. Production validation under #236, live-provider behavior, complete
 resource coverage, and hosted exact-head CI remain unqualified. #734 and #63
 remain open.
 
+## Active repair wall and idle timeout checkpoint — 2026-11-11
+
+Commit `4383b5f3d` adds
+`TraceGuidedRepairTest.active ACP repair deadlines retain timeout receipts
+after an acknowledged write`. It drives the active repair loop through the
+real scripted ACP process in two separate cases: a 12-second wall deadline
+with a longer idle allowance, and a 12-second idle deadline with a longer
+wall allowance. In both cases the process completes and receives acknowledgement
+for the authorized target write, then withholds its terminal prompt response.
+
+The test verifies that the distinct deadline produces a typed `TIMEOUT`, the
+request and host turn identity remain correlated, and the graph retains the
+receipt and rejected assessment with no pending attempt or recovery-derived
+terminalization. The receipt records the acknowledged write, the prompt
+dispatch phase, zero remaining processes and verified sandbox cleanup. The
+accepted source and `Makefile` remain byte-identical, and the injected
+validation strategy is never called. The focused timeout test passed locally;
+the combined `TraceGuidedRepairTest.active*` selection passed 13 methods with
+zero failures, errors or skips.
+
+These are injected 12-second deadline controls using a scripted local ACP
+provider. They establish active-workflow wall and idle timeout handling after
+a real brokered write; they do not measure the production timeout defaults,
+qualify a live provider, exercise production validation under #236, or
+complete the #734 resource and mutation matrix. Hosted exact-head
+qualification remains separate. #734 and #63 remain open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
