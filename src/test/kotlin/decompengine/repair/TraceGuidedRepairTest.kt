@@ -1227,6 +1227,87 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair path rejects create and delete mutations outside its replacement contract`() {
+        val cases = listOf(
+            "create-outside" to "captured repair output is unauthorized",
+            "delete-target" to "violates declared mutation authority",
+            "claim-created" to "repair may only modify existing project files",
+            "claim-deleted" to "repair may only modify existing project files",
+        )
+        for ((mutation, expectedReason) in cases) {
+            val project = createProject(
+                createTempDirectory("repair-mutation-contract-${mutation}-").resolve("project"),
+                reconstructedSource = "int decomp_engine_main(void) {\n",
+            )
+            val target = project.resolve("src/modules/reconstructed.c")
+            val before = target.readBytes()
+            val targetPath = AgentWorkspacePath("project", "src/modules/reconstructed.c")
+            val candidate = goodHelloSource().toByteArray()
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    when (mutation) {
+                        "create-outside" -> output.replace("src/modules/created.c", candidate)
+                        "delete-target" -> output.delete(targetPath.relativePath)
+                        else -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            val kind = when (mutation) {
+                                "claim-created" -> AgentFileChangeKind.CREATED
+                                "claim-deleted" -> AgentFileChangeKind.DELETED
+                                else -> error("unknown mutation fixture")
+                            }
+                            return AgentExecutionResult(
+                                AgentStopReason.COMPLETED,
+                                "fixture mutation claim",
+                                listOf(AgentFileChange(
+                                    targetPath,
+                                    kind,
+                                    if (kind == AgentFileChangeKind.CREATED) null
+                                        else sha256(initialFiles.getValue(targetPath.relativePath)),
+                                    if (kind == AgentFileChangeKind.DELETED) null else sha256(candidate),
+                                    if (kind == AgentFileChangeKind.DELETED) null else candidate.size.toLong(),
+                                )),
+                            )
+                        }
+                    }
+                    error("unauthorized mutation unexpectedly returned")
+                }
+            }
+
+            val refusal = assertFailsWith<Exception>(mutation) {
+                generatedCRepairLoop(
+                    harness,
+                    RepairHistory(project.resolve("reports/repair_history.json")),
+                ).repairCompileError(project, collectCompileFailure(project), emptyList())
+            }
+            val failureReasons = mutableListOf<String>()
+            var currentFailure: Throwable? = refusal
+            while (currentFailure != null) {
+                currentFailure.message?.let(failureReasons::add)
+                currentFailure = currentFailure.cause
+            }
+            assertTrue(failureReasons.any { it.contains(expectedReason) },
+                "$mutation refusal must retain its validator reason: $failureReasons")
+
+            assertContentEquals(before, target.readBytes(), "$mutation must not alter the accepted source")
+            assertFalse(project.resolve("src/modules/created.c").exists(), "$mutation must not create a source")
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId, "$mutation must close or recover its pending attempt")
+                assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status, mutation)
+            }
+        }
+    }
+
+    @Test
     fun `agent termination closes the pending graph and releases its root lock`() {
         val tempDir = createTempDirectory("repair-agent-termination-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
