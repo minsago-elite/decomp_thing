@@ -3063,6 +3063,16 @@ class TraceGuidedRepairTest {
     @Test
     @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `active ACP repair consumes a receipt-bound compile failure and rejects the candidate`() {
+        activeAcpRepairConsumesReceiptBoundValidationResult(compileValid = false)
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active ACP repair records compile-only validation as provisional without accepting the head`() {
+        activeAcpRepairConsumesReceiptBoundValidationResult(compileValid = true)
+    }
+
+    private fun activeAcpRepairConsumesReceiptBoundValidationResult(compileValid: Boolean) {
         val testRoot = java.nio.file.Path.of("build/test-tmp").createDirectories()
         val project = createProject(
             Files.createTempDirectory(testRoot, "repair-active-acp-compile-failed-result-").resolve("project"),
@@ -3074,6 +3084,7 @@ class TraceGuidedRepairTest {
         val acceptedMakefile = project.resolve("Makefile").readBytes()
         val candidateSource = "/* validated candidate */\nint decomp_engine_main(void) { return 1; }\n"
             .toByteArray(Charsets.UTF_8)
+        val outcomeName = if (compileValid) "compile-valid" else "compile-failed"
         val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
         val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-candidate")
         var dispatches = 0
@@ -3132,7 +3143,7 @@ class TraceGuidedRepairTest {
                 observedInvocation = invocation
 
                 val evidenceBytes = (
-                    "{\"schemaVersion\":1,\"outcome\":\"compile-failed\",\"sourceRevisionSha256\":\"$candidateDigest\"}\n"
+                    "{\"schemaVersion\":1,\"outcome\":\"$outcomeName\",\"sourceRevisionSha256\":\"$candidateDigest\"}\n"
                     ).toByteArray(Charsets.UTF_8)
                 request.reportsDir.createDirectories()
                 val evidencePath = request.reportsDir.resolve("${request.label}.validation.json")
@@ -3144,13 +3155,16 @@ class TraceGuidedRepairTest {
                     regressionCorpusSha256 = request.regressionCorpusSha256,
                     originalBinarySha256 = null,
                     rebuiltBinarySha256 = null,
-                    runtimeSha256 = sha256("typed-compile-failure-fixture".toByteArray(Charsets.UTF_8)),
+                    runtimeSha256 = sha256(
+                        "typed-${outcomeName}-fixture".toByteArray(Charsets.UTF_8),
+                    ),
                     evidenceSha256 = sha256(evidenceBytes),
                     cleanupVerified = true,
                     assurance = RepairValidationAssurance.STRICT_CONTAINED,
                 )
                 observedProof = proof
-                return RepairCandidateValidationOutcome.CompileFailed(
+                return if (compileValid) RepairCandidateValidationOutcome.CompileValid(proof)
+                else RepairCandidateValidationOutcome.CompileFailed(
                     CompileFailure(listOf("fixture-compiler"), 1, "", "$targetPath: fixture compile error"),
                     proof,
                 )
@@ -3167,7 +3181,7 @@ class TraceGuidedRepairTest {
                 inputs: List<ProcessInput>,
                 reportsDir: Path,
                 budget: RepairResourceBudget,
-            ): BehaviorComparisonReport = error("compile-failed candidate must not reach behavior validation")
+            ): BehaviorComparisonReport = error("compile-only candidate must not reach behavior validation")
         }
         val loop = TestRepairRuntimeAccess.openLoop(
             harness = harness,
@@ -3191,9 +3205,12 @@ class TraceGuidedRepairTest {
 
         assertEquals(1, dispatches)
         assertEquals(1, validationCalls)
-        assertEquals("compile", iteration.after?.kind)
+        assertEquals(if (compileValid) "compile-valid" else "compile", iteration.after?.kind)
         assertFalse(iteration.succeeded)
-        assertEquals(RepairAttemptDisposition.REJECTED, iteration.disposition)
+        assertEquals(
+            if (compileValid) RepairAttemptDisposition.PROVISIONAL else RepairAttemptDisposition.REJECTED,
+            iteration.disposition,
+        )
         val candidateDigest = assertNotNull(observedCandidateDigest)
         val validationInvocation = assertNotNull(observedInvocation)
         val validationProof = assertNotNull(observedProof)
@@ -3205,14 +3222,26 @@ class TraceGuidedRepairTest {
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             assertNull(graph.snapshot.pendingAttemptId)
             assertEquals(baselineHead, graph.snapshot.headId)
-            assertEquals(RepairRunStatus.REJECTED, graph.snapshot.runs.last().status)
+            assertEquals(
+                if (compileValid) RepairRunStatus.COMPILE_VALID else RepairRunStatus.REJECTED,
+                graph.snapshot.runs.last().status,
+            )
+            assertEquals(baselineHead, graph.snapshot.fullyAcceptedHeadId)
             val rejected = graph.snapshot.nodes.last()
-            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            assertEquals(
+                if (compileValid) ModuleRevisionStatus.PROVISIONAL else ModuleRevisionStatus.REJECTED,
+                rejected.status,
+            )
+            if (compileValid) assertEquals(rejected.id, graph.snapshot.provisionalHeadId)
+            else assertNull(graph.snapshot.provisionalHeadId)
             assertEquals(validationInvocation.candidateRevisionId, rejected.id)
             assertEquals(validationInvocation.runId, rejected.repairMetadata?.runId)
             val binding = assertNotNull(rejected.repairMetadata?.agentInvocation)
             assertEquals(iteration.agentInvocation?.receiptSha256, binding.receiptSha256)
-            assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+            assertEquals(
+                if (compileValid) RepairAgentAssessmentStatus.PROVISIONAL else RepairAgentAssessmentStatus.REJECTED,
+                binding.assessmentStatus,
+            )
             assertEquals("returned-completed", binding.terminalOutcome)
             val invocationReceiptBytes = project.resolve(binding.receiptPath).readBytes()
             assertEquals(binding.receiptSha256, sha256(invocationReceiptBytes))
@@ -3231,17 +3260,35 @@ class TraceGuidedRepairTest {
             )
             assertEquals(binding.receiptSha256, assessment.receiptSha256)
             assertEquals(candidateDigest, assessment.afterSha256)
-            assertEquals(decompengine.project.AcpChangePublicationEligibility.REJECTED, assessment.eligibility)
+            assertEquals(listOf(validationProof.evidenceSha256), assessment.validationProofSha256)
+            assertEquals(
+                if (compileValid) decompengine.project.AcpChangePublicationEligibility.PROVISIONAL
+                else decompengine.project.AcpChangePublicationEligibility.REJECTED,
+                assessment.eligibility,
+            )
+            assertEquals(
+                if (compileValid) emptyList() else listOf("validation-failed"),
+                assessment.reasonCodes,
+            )
+            assertEquals(
+                if (compileValid) decompengine.project.AcpChangeValidationStatus.PASSED
+                else decompengine.project.AcpChangeValidationStatus.FAILED,
+                assessment.validationStatus,
+            )
             val observation = graph.snapshot.runs.last().validationObservations.entries.single()
             assertEquals(validationInvocation, observation.invocation)
-            assertEquals(RepairValidationObservedOutcome.COMPILE_FAILED, observation.outcome)
+            assertEquals(
+                if (compileValid) RepairValidationObservedOutcome.COMPILE_VALID
+                else RepairValidationObservedOutcome.COMPILE_FAILED,
+                observation.outcome,
+            )
             assertEquals(validationProof, observation.proof)
             assertEquals(candidateDigest, observation.invocation.sourceRevisionSha256)
             assertEquals(validationProof.evidenceSha256, observation.primary.sha256)
             val retainedEvidence = project.resolve(observation.primary.path).readBytes()
             assertEquals(observation.primary.bytes, retainedEvidence.size.toLong())
             assertEquals(observation.primary.sha256, sha256(retainedEvidence))
-            assertTrue(retainedEvidence.decodeToString().contains("\"outcome\":\"compile-failed\""))
+            assertTrue(retainedEvidence.decodeToString().contains("\"outcome\":\"$outcomeName\""))
         }
     }
 
