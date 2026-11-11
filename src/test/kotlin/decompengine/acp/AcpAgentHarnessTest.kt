@@ -50,8 +50,10 @@ import decompengine.project.PublicationEntryRecord
 import decompengine.project.PublicationTreeBudget
 import decompengine.project.ReconstructionOutputTree
 import decompengine.project.budgetedAnalyzer
+import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.nio.file.Files
+import java.nio.file.attribute.UserDefinedFileAttributeView
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
@@ -1657,6 +1659,19 @@ class AcpAgentHarnessTest {
                     } finally {
                         if (mkfifo.isAlive) mkfifo.destroyForcibly()
                     }
+                },
+            ),
+            FinalSnapshotViolation(
+                label = "extended-attribute",
+                index = 27,
+                expectedReason = "unsupported-extended-attributes",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, _ ->
+                    val attributes = assertNotNull(
+                        Files.getFileAttributeView(target, UserDefinedFileAttributeView::class.java),
+                        "test filesystem must support user-defined attributes",
+                    )
+                    attributes.write("decomp-test", ByteBuffer.wrap(byteArrayOf(1, 2, 3)))
                 },
             ),
         )
