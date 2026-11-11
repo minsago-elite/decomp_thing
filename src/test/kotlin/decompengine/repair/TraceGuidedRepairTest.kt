@@ -3342,9 +3342,9 @@ class TraceGuidedRepairTest {
             targetPath,
         )
         val acceptedFiles = acceptedPaths.associateWith { project.resolve(it).readBytes() }
-        val candidateSource = ("/* exact repair patch-byte boundary: " +
+        val candidateSource = ("/* exact repair quota-byte boundary: " +
             "q".repeat(candidateBytes.toInt() -
-                "/* exact repair patch-byte boundary: ".toByteArray(Charsets.UTF_8).size -
+                "/* exact repair quota-byte boundary: ".toByteArray(Charsets.UTF_8).size -
                 " */\nint decomp_engine_main(void) { return 1; }\n".toByteArray(Charsets.UTF_8).size) +
             " */\nint decomp_engine_main(void) { return 1; }\n").toByteArray(Charsets.UTF_8)
         assertEquals(candidateBytes, candidateSource.size.toLong())
