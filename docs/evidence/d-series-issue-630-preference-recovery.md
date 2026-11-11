@@ -38,8 +38,9 @@ Using the repository-pinned Node 24.20.0/npm 11.19.0 toolchain:
 
 The focused tests cover valid cross-tab updates, malformed values, clear events, unrelated
 keys, `localStorage` versus `sessionStorage`, no write-back, a local edit after a missed event, and
-preservation of tab-only choices when a readable stale record cannot be updated. The packaged
-audit now includes a two-target browser exchange using DOM-dispatched changes
+preservation of tab-only choices across failed updates and resets, missed or delivered storage
+events, and a later recovered write. The packaged audit now includes a two-target browser exchange
+using DOM-dispatched changes
 on rendered selects, trusted `localStorage` events, rendered state, and preference-key mutation
 assertions. The scenario runs after the pre-existing audit measurements, then clears its test
 record back to the value found before the scenario and closes its targets. The select activation is
