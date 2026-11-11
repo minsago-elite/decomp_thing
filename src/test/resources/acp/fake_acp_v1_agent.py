@@ -75,6 +75,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-output-limit",
     "repair-active-declared-role-no-change",
     "repair-active-declared-role-candidate",
+    "repair-active-declared-role-timeout-after-write",
 }
 RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
@@ -255,6 +256,7 @@ expected_fs = {
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-candidate": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -754,6 +756,17 @@ if MODE == "repair-active-declared-role-candidate":
     )
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
+if MODE == "repair-active-declared-role-timeout-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* timeout candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        153,
+    )
+    # Wait until the host has acknowledged the real filesystem callback, then leave the prompt
+    # unanswered so the configured wall-clock or idle deadline owns termination.
+    time.sleep(30)
+    raise SystemExit(154)
 if MODE == "pipelined-callbacks":
     source = join_path(cwd, "contract/artifact.txt")
     for request_id in (130, 131):

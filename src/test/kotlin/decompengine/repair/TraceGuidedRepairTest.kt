@@ -25,6 +25,7 @@ import decompengine.acp.AcpExecutionCleanupDisposition
 import decompengine.acp.AcpExecutionEvidenceCompleteness
 import decompengine.acp.AcpExecutionLifecyclePhase
 import decompengine.acp.AcpInvocationEvidenceSnapshot
+import decompengine.acp.AcpLifecycleTimeouts
 import decompengine.acp.AcpAgentHarnessTest
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredFunction
@@ -2382,6 +2383,222 @@ class TraceGuidedRepairTest {
             assertEquals(decompengine.project.AcpChangeValidationStatus.FAILED, assessment.validationStatus)
             assertEquals(decompengine.project.AcpChangePublicationEligibility.REJECTED, assessment.eligibility)
             assertEquals("validation-failed", assessment.reasonCodes.single())
+        }
+    }
+
+    @Test
+    fun `active ACP repair deadlines retain timeout receipts after an acknowledged write`() {
+        data class DeadlineCase(
+            val id: String,
+            val limits: AgentExecutionLimits,
+            val expectedDiagnostic: String,
+        )
+        val cases = listOf(
+            DeadlineCase(
+                "wall",
+                AgentExecutionLimits(
+                    wallClockTimeout = Duration.ofSeconds(12),
+                    idleTimeout = Duration.ofSeconds(30),
+                ),
+                "wall-clock",
+            ),
+            DeadlineCase(
+                "idle",
+                AgentExecutionLimits(
+                    wallClockTimeout = Duration.ofSeconds(30),
+                    idleTimeout = Duration.ofSeconds(12),
+                ),
+                "idle",
+            ),
+        )
+        val testRoot = java.nio.file.Path.of("build/test-tmp").createDirectories()
+        for (case in cases) {
+            val project = createProject(
+                Files.createTempDirectory(testRoot, "repair-active-acp-${case.id}-timeout-").resolve("project"),
+                reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+            )
+            val targetPath = "src/modules/reconstructed.c"
+            val target = project.resolve(targetPath)
+            val acceptedSource = target.readBytes()
+            val acceptedMakefile = project.resolve("Makefile").readBytes()
+            val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+            val acp = AcpAgentHarnessTest().harness(
+                "repair-active-declared-role-timeout-after-write",
+                timeouts = AcpLifecycleTimeouts(request = Duration.ofSeconds(45)),
+            )
+            var dispatchedRequest: AgentExecutionRequest? = null
+            var dispatchedIdentity: decompengine.agent.AgentTurnIdentity? = null
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.execute(request, onEvent)
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatchedRequest = request
+                    dispatchedIdentity = turnIdentity
+                    assertTrue(request.limits.wallClockTimeout <= case.limits.wallClockTimeout)
+                    assertEquals(case.limits.idleTimeout, request.limits.idleTimeout)
+                    assertEquals(
+                        AgentExecutionRequestBinding.capture(request).requestSha256,
+                        turnIdentity.requestSha256,
+                    )
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                }
+            }
+            var validationCalls = 0
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    error("deadline refusal must occur before candidate validation")
+                }
+                override fun compile(projectDir: java.nio.file.Path, logPath: java.nio.file.Path,
+                                     budget: RepairResourceBudget): CompileFailure? =
+                    error("deadline refusal must not reach mutable-tree compilation")
+                override fun rebuiltProgram(projectDir: java.nio.file.Path,
+                                           budget: RepairResourceBudget): java.nio.file.Path =
+                    error("deadline refusal must not rebuild a candidate")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: java.nio.file.Path,
+                    originalBinary: java.nio.file.Path,
+                    rebuiltBinary: java.nio.file.Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: java.nio.file.Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport = error("deadline refusal must not run behavior validation")
+            }
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = RepairHistory(project.resolve("reports/repair_history.json")),
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = case.limits,
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = RepairResourceBudget(),
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+
+            val failure = assertFailsWith<Exception>(case.id) {
+                loop.repairCompileError(
+                    project,
+                    CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                    emptyList(),
+                )
+            }
+            val failureChain = generateSequence<Throwable>(failure) { it.cause }.toList()
+            val executionFailure = failureChain.filterIsInstance<AgentExecutionException>().single()
+            assertEquals(AgentFailureKind.TIMEOUT, executionFailure.failure.kind, case.id)
+            assertTrue(
+                executionFailure.failure.message.contains(case.expectedDiagnostic, ignoreCase = true),
+                executionFailure.failure.message,
+            )
+            assertTrue(failure.suppressed.isEmpty(), failure.suppressed.joinToString())
+            assertEquals(0, validationCalls, case.id)
+
+            val request = assertNotNull(dispatchedRequest, case.id)
+            val identity = assertNotNull(dispatchedIdentity, case.id)
+            val expectedRequestDigest = AgentExecutionRequestBinding.capture(request).requestSha256
+            assertEquals(expectedRequestDigest, identity.requestSha256, case.id)
+            assertContentEquals(acceptedSource, target.readBytes(), case.id)
+            assertContentEquals(acceptedMakefile, project.resolve("Makefile").readBytes(), case.id)
+
+            val graphBytes = project.resolve("reports/repair-revisions/graph.json").readBytes()
+            val rawGraph = Json.parseToJsonElement(graphBytes.decodeToString()).jsonObject
+            assertEquals(JsonNull, rawGraph.getValue("pending"), case.id)
+            assertEquals(baselineHead, rawGraph.getValue("headId").jsonPrimitive.content, case.id)
+            val rawNode = rawGraph.getValue("nodes").jsonArray.last().jsonObject
+            assertEquals("rejected", rawNode.getValue("status").jsonPrimitive.content, case.id)
+            assertFalse(rawNode.getValue("recoveredAfterCrash").jsonPrimitive.boolean, case.id)
+            assertEquals("resource_exhausted", rawGraph.getValue("runs").jsonArray.last()
+                .jsonObject.getValue("status").jsonPrimitive.content, case.id)
+
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId, case.id)
+                assertEquals(baselineHead, graph.snapshot.headId, case.id)
+                assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status, case.id)
+                val rejected = graph.snapshot.nodes.last()
+                assertEquals(ModuleRevisionStatus.REJECTED, rejected.status, case.id)
+                assertFalse(rejected.recoveredAfterCrash, case.id)
+                assertEquals(identity.taskId, rejected.id, case.id)
+                assertEquals(graph.snapshot.runs.last().id, identity.workflowRunId, case.id)
+                val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+                assertEquals(identity.turnId, binding.turnId, case.id)
+                assertEquals(expectedRequestDigest, binding.requestSha256, case.id)
+                assertEquals("failed-timeout", binding.terminalOutcome, case.id)
+                assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus, case.id)
+                assertFalse(binding.receiptReleaseComplete, case.id)
+
+                val receiptBytes = project.resolve(binding.receiptPath).readBytes()
+                assertEquals(binding.receiptSha256, sha256(receiptBytes), case.id)
+                val receipt = Json.parseToJsonElement(receiptBytes.decodeToString()).jsonObject
+                assertEquals("failed", receipt.getValue("outcome").jsonObject.getValue("type").jsonPrimitive.content, case.id)
+                val failureJson = receipt.getValue("outcome").jsonObject.getValue("failure").jsonObject
+                assertEquals("timeout", failureJson.getValue("kind").jsonPrimitive.content, case.id)
+                val messageCommitment = failureJson.getValue("message").jsonObject
+                assertTrue(messageCommitment.getValue("encodedBytes").jsonPrimitive.int > 0, case.id)
+                assertTrue(messageCommitment.getValue("sha256").jsonPrimitive.content.matches(Regex("[0-9a-f]{64}")), case.id)
+                val receiptTurn = receipt.getValue("turnIdentity").jsonObject
+                assertEquals(identity.turnId, receiptTurn.getValue("turnId").jsonPrimitive.content, case.id)
+                assertEquals(identity.taskId, receiptTurn.getValue("taskId").jsonPrimitive.content, case.id)
+                assertEquals(expectedRequestDigest, receiptTurn.getValue("requestSha256").jsonPrimitive.content, case.id)
+                val lifecycle = receipt.getValue("lifecycle").jsonObject
+                assertEquals("prompt-dispatched", lifecycle.getValue("phaseReached").jsonPrimitive.content, case.id)
+                assertFalse(lifecycle.getValue("releaseComplete").jsonPrimitive.boolean, case.id)
+                val process = receipt.getValue("process").jsonObject
+                assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int, case.id)
+                assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean, case.id)
+
+                val filesystem = receipt.getValue("policyAudits").jsonObject
+                    .getValue("filesystem").jsonObject
+                val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
+                assertEquals(1, filesystem.getValue("recordCount").jsonPrimitive.int, case.id)
+                assertEquals("allowed", records.single().getValue("outcome").jsonPrimitive.content, case.id)
+                assertEquals("completed", records.single().getValue("reason").jsonPrimitive.content, case.id)
+                assertEquals(sha256(targetPath.toByteArray(Charsets.UTF_8)), records.single()
+                    .getValue("policyPath").jsonObject.getValue("relativePath").jsonObject
+                    .getValue("sha256").jsonPrimitive.content, case.id)
+
+                val intentPath = requireNotNull(binding.intentPath)
+                val intentBytes = project.resolve(intentPath).readBytes()
+                assertEquals(binding.intentSha256, sha256(intentBytes), case.id)
+                val assessmentBytes = project.resolve(requireNotNull(binding.assessmentPath)).readBytes()
+                assertEquals(binding.assessmentSha256, sha256(assessmentBytes), case.id)
+                val assessment = decompengine.project.AcpChangeAssessment.parse(assessmentBytes)
+                assertEquals(binding.receiptSha256, assessment.receiptSha256, case.id)
+                assertEquals(identity.turnId, assessment.turnId, case.id)
+                assertEquals(decompengine.project.AcpChangePublicationEligibility.REJECTED,
+                    assessment.eligibility, case.id)
+                assertEquals(decompengine.project.AcpChangeValidationStatus.NOT_RUN,
+                    assessment.validationStatus, case.id)
+            }
         }
     }
 
