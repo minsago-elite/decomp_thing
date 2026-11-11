@@ -267,6 +267,9 @@ class ReconstructionTurnEvidenceStoreTest {
                     assertFailsWith<IllegalArgumentException>(point.name) { store.persistIntent(intent) }
                     assertTrue(substituted, "the race control must replace the directory at $point")
                     assertFalse(Files.exists(external.resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)))
+                    assertFalse(Files.exists(turnDirectory.resolveSibling("detached-$turnId")
+                        .resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)),
+                        "an unacknowledged publication must not remain in a detached evidence directory at $point")
                 }
             } finally {
                 Files.walk(base).use { paths ->

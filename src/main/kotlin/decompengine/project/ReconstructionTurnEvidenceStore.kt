@@ -303,25 +303,56 @@ internal class ReconstructionTurnEvidenceStore(
                 }
                 throw failure
             }
-            LinuxFilesystemSyscalls.synchronize(directory.descriptor)
-            directory.verifyNamespace()
-            val published = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.descriptor.fd, name))
-            published.use { actual ->
-                require(actual.identity.key == temporary.identity.key && actual.identity.mountId == temporary.identity.mountId &&
-                    actual.identity.uid == directory.descriptor.identity.uid && actual.identity.linkCount == 1 &&
-                    actual.identity.mode.permissions == PRIVATE_FILE_MODE) {
-                    "turn evidence publication identity or permissions changed"
+            try {
+                LinuxFilesystemSyscalls.synchronize(directory.descriptor)
+                directory.verifyNamespace()
+                val published = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.descriptor.fd, name))
+                published.use { actual ->
+                    require(actual.identity.key == temporary.identity.key && actual.identity.mountId == temporary.identity.mountId &&
+                        actual.identity.uid == directory.descriptor.identity.uid && actual.identity.linkCount == 1 &&
+                        actual.identity.mode.permissions == PRIVATE_FILE_MODE) {
+                        "turn evidence publication identity or permissions changed"
+                    }
                 }
+                faultInjector?.invoke(ReconstructionTurnEvidenceStorePoint.BEFORE_READBACK)
+                require(readFileAt(directory, name, maximumBytes).contentEquals(bytes)) {
+                    "turn evidence readback differs from the immutable document"
+                }
+                directory.verifyNamespace()
+                LinuxFilesystemSyscalls.synchronize(publicationLock.rootDirectoryDescriptor())
+            } catch (failure: Throwable) {
+                // The name has been exchanged but this call has not returned a durable path to
+                // its caller. If its pinned directory was detached between the preceding check
+                // and readback, remove only the exact inode we published so an unacknowledged
+                // sidecar cannot be stranded outside the admitted workspace namespace.
+                discardUnacknowledgedPublication(directory.descriptor, name, temporary, failure)
+                throw failure
             }
-            faultInjector?.invoke(ReconstructionTurnEvidenceStorePoint.BEFORE_READBACK)
-            require(readFileAt(directory, name, maximumBytes).contentEquals(bytes)) {
-                "turn evidence readback differs from the immutable document"
-            }
-            directory.verifyNamespace()
-            LinuxFilesystemSyscalls.synchronize(publicationLock.rootDirectoryDescriptor())
         } finally {
             if (linked) runCatching { LinuxFilesystemSyscalls.unlinkIfPresent(directory.descriptor.fd, temporaryName) }
             temporary.close()
+        }
+    }
+
+    private fun discardUnacknowledgedPublication(
+        directory: LinuxDescriptor,
+        name: String,
+        expected: LinuxDescriptor,
+        original: Throwable,
+    ) {
+        try {
+            val published = LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name) ?: return
+            published.use { actual ->
+                val identity = actual.identity
+                if (identity.key == expected.identity.key && identity.mountId == expected.identity.mountId &&
+                    identity.uid == directory.identity.uid && identity.linkCount == 1 &&
+                    identity.mode.permissions == PRIVATE_FILE_MODE) {
+                    LinuxFilesystemSyscalls.unlinkIfPresent(directory.fd, name)
+                    LinuxFilesystemSyscalls.synchronize(directory)
+                }
+            }
+        } catch (cleanupFailure: Throwable) {
+            original.addSuppressed(cleanupFailure)
         }
     }
 
