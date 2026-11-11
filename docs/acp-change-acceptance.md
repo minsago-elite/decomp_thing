@@ -1113,3 +1113,30 @@ behavior, production validation under #236, or the complete #734 matrix.
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
 
 These are process-death tests on the local filesystem, not power-loss tests. They cover the schema-7 repair graph and its evidence sidecars, not the end-to-end repair workflow with a live provider, every rollback/cleanup failure, the independent #732 reconstruction publication journal, or production validation under #236. The decision cases include one two-file partial roll-forward and one repeated recovery interruption; they do not establish every possible interruption point or filesystem/architecture combination. The prior local repair result at `6cd76bd30d1bec7fad81fcad6617f51248333af3` predates this matrix and is not exact-head hosted evidence.
+
+## Public reconstruction exact source-grant boundary — 2026-11-11
+
+Commit `ad2284ca9` extends
+`AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and
+preserves publication on limit outcomes` with an exact per-file source grant
+boundary case. The scripted ACP agent creates a valid C implementation whose
+UTF-8 content is exactly 256 KiB, equal to the lowered profile's
+`archiveMaximumFileBytes` grant. The public reconstruction workflow accepts
+the write, records a `CREATED` change of exactly 262,144 bytes, builds the
+candidate, creates and verifies the archive, extracts it, and rebuilds the
+extracted project. The same focused method retains the existing 256 KiB plus
+one-byte attempted write refusal and the out-of-grant sibling refusal.
+
+The focused command passed one JUnit method with zero failures, errors, or
+skips at `ad2284ca9075a22a5b045198574433e48f6f2507`:
+
+```text
+./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'
+```
+
+This is local scripted ACP evidence for the exact per-file grant boundary in
+the Generated C Make profile, with its archive file ceiling reduced from the
+profile default of 128 MiB to 256 KiB. It does not qualify other profiles,
+multibyte boundary payloads, independent providers, production validation
+under #236, the complete mutation/resource matrix, or hosted exact-head CI.
+#734 and #63 remain open.
