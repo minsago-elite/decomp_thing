@@ -134,6 +134,16 @@ required before treating the new test as hosted-qualified.
   artifact is [13877343049](https://github.com/minsago-elite/decomp_thing/actions/runs/43069616345/artifacts/13877343049);
   its JSON SHA-256 is `270b9d972341a92912c0811a232ffa6314952c01cbdea0971e73c39a12db6c1b`.
   Natural session expiry and independent idle-versus-absolute expiry remain unqualified.
+- The exact-current-head Firefox/WebKit run is
+  [43075068111](https://github.com/minsago-elite/decomp_thing/actions/runs/43075068111), artifact
+  [13882456969](https://github.com/minsago-elite/decomp_thing/actions/runs/43075068111/artifacts/13882456969).
+  It ran PR head `bf235fc424e03456804882a109205d12d99065ba`.
+  The Firefox 146.0.1 report SHA-256 is
+  `cba8bb1cabcef520c56d882ee649542dd26808d9bc887eabe55339c538d7dae7`; the WebKit 26.0 report
+  SHA-256 is `e69d8b686be3560f3fd8bac8315f3dfca89b0f459391a8bb6e9b11574622e826`. Both reports
+  use build ID `1ef08163318bde904d7942af41964d04920de56be55149b7e832fecc85c7f4f8`, show no audit
+  failures, and confirm work cleanup. The engine runner explicitly omits the Chrome-only
+  cross-tab preference audit.
 
 ## Limits and remaining acceptance
 
