@@ -212,6 +212,13 @@ class TraceGuidedRepairTest {
             "failed-protocol" to AgentExecutionOutcome.Failed(
                 AgentFailure(AgentFailureKind.PROTOCOL, "peer secret protocol failure"),
             ),
+            "failed-resource-exhausted" to AgentExecutionOutcome.Failed(
+                AgentFailure(
+                    AgentFailureKind.RESOURCE_EXHAUSTED,
+                    "ACP aggregate stdout and stderr exceeded the configured execution limit",
+                    details = mapOf("phase" to "process-output"),
+                ),
+            ),
         )
         cases.forEach { (expectedTerminal, outcome) ->
             val project = createProject(
@@ -239,6 +246,15 @@ class TraceGuidedRepairTest {
                 assertTrue(raw.exists(), expectedTerminal)
                 assertEquals(binding.receiptSha256, sha256(raw.readBytes()), expectedTerminal)
                 assertFalse(raw.readText().contains("peer secret"), expectedTerminal)
+                if (expectedTerminal == "failed-resource-exhausted") {
+                    val receipt = Json.parseToJsonElement(raw.readText()).jsonObject
+                    val outcome = receipt.getValue("outcome").jsonObject
+                    assertEquals("failed", outcome.getValue("type").jsonPrimitive.content)
+                    assertEquals(
+                        "resource-exhausted",
+                        outcome.getValue("failure").jsonObject.getValue("kind").jsonPrimitive.content,
+                    )
+                }
             }
             assertFalse(
                 project.resolve("reports/repair-revisions/graph.json").readText().contains("peer secret"),
