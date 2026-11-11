@@ -1650,3 +1650,27 @@ injected validator that rejects after inspecting the candidate. It does not
 qualify successful production validation under #236, live-provider behavior,
 other profiles, hosted exact-head CI, or complete #734/#63 acceptance. Keep
 #734 and #63 open.
+
+## Active repair required-context admission limits — 2026-11-11
+
+Source commit `ee8413bda2e2a99c2fb34475898b25c14e215586` adds active-loop
+refusal cases for both required repair-context ceilings. A declarative repair
+profile selects two owned source files. The file-count case allows one file
+while keeping the byte ceiling at the exact two-file total; the byte case
+allows both files while setting the byte ceiling one byte below their combined
+size. Each case requires refusal during context selection before harness
+dispatch, unchanged accepted source/head, no pending attempt, and a durable
+`RESOURCE_EXHAUSTED` run.
+
+The focused local run passed this two-dimension admission case together with
+the active ACP patch-slot reuse regression: two tests, zero failures, errors,
+or skips. See the retained [JUnit
+report](evidence/issue-734-active-repair-context-admission-2026-11-11.xml) and
+[provenance record](evidence/issue-734-active-repair-context-admission-2026-11-11.json).
+
+The context cases exercise the active repair loop with a strict captured test
+harness and prove rejection before ACP dispatch; they do not claim an ACP
+process was launched for a request that failed admission. This local evidence
+does not qualify successful production validation under #236, live-provider
+behavior, other profiles, hosted exact-head CI, or complete #734/#63
+acceptance. Keep #734 and #63 open.
