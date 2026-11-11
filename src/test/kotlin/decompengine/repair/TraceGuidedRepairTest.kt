@@ -28,6 +28,7 @@ import decompengine.acp.AcpExecutionLifecyclePhase
 import decompengine.acp.AcpInvocationEvidenceSnapshot
 import decompengine.acp.AcpLifecycleTimeouts
 import decompengine.acp.AcpAgentHarnessTest
+import decompengine.acp.AcpFilesystemLimits
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
@@ -3052,9 +3053,23 @@ class TraceGuidedRepairTest {
     @Test
     @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `active ACP repair preserves an exact patch candidate after refusing an oversized retry`() {
+        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(enforceAcpWriteLimit = false)
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active ACP repair enforces the filesystem write limit after retaining an exact candidate`() {
+        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(enforceAcpWriteLimit = true)
+    }
+
+    private fun activeAcpRepairPreservesExactCandidateAfterRefusedRetry(enforceAcpWriteLimit: Boolean) {
         val testRoot = Path.of("build/test-tmp").createDirectories()
         val project = createProject(
-            Files.createTempDirectory(testRoot, "repair-active-acp-patch-quota-retry-").resolve("project"),
+            Files.createTempDirectory(
+                testRoot,
+                if (enforceAcpWriteLimit) "repair-active-acp-write-quota-retry-" else
+                    "repair-active-acp-patch-quota-retry-",
+            ).resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
         )
         val targetPath = "src/modules/reconstructed.c"
@@ -3062,7 +3077,7 @@ class TraceGuidedRepairTest {
         val acceptedSource = target.readBytes()
         val acceptedMakefile = project.resolve("Makefile").readBytes()
         val patchLimit = 4096L
-        val prefix = "/* exact repair patch-byte boundary: "
+        val prefix = "/* exact repair quota-byte boundary: "
         val suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
         val candidateSource = (prefix + "q".repeat(
             patchLimit.toInt() - prefix.toByteArray(Charsets.UTF_8).size - suffix.toByteArray(Charsets.UTF_8).size,
@@ -3070,16 +3085,26 @@ class TraceGuidedRepairTest {
         assertEquals(patchLimit, candidateSource.size.toLong())
         val budget = RepairResourceBudget(
             maximumSourceFileBytes = 64L * 1024,
-            maximumPatchBytes = patchLimit,
+            maximumPatchBytes = if (enforceAcpWriteLimit) 8L * 1024 else patchLimit,
+        )
+        val filesystemLimits = AcpFilesystemLimits(
+            maximumReadBytes = 8 * 1024 * 1024,
+            maximumWriteBytes = if (enforceAcpWriteLimit) patchLimit.toInt() else 8 * 1024 * 1024,
         )
         assertTrue(budget.maximumSourceFileBytes > patchLimit + 1)
         assertTrue(budget.maximumStagingBytes > patchLimit + 1)
         assertTrue(budget.maximumContextBytes > patchLimit + 1)
+        assertTrue(budget.maximumPatchFiles > 1)
+        if (enforceAcpWriteLimit) assertTrue(budget.maximumPatchBytes > patchLimit + 1)
+        else assertEquals(patchLimit, budget.maximumPatchBytes)
         val profile = requireNotNull(GeneratedCRepairIndexProfile.reconstructionProfile())
         val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use {
             it.snapshot.headId
         }
-        val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-quota-retry")
+        val acp = AcpAgentHarnessTest().harness(
+            "repair-active-declared-role-quota-retry",
+            filesystemLimits = filesystemLimits,
+        )
         var dispatches = 0
         val harness = object : CapturedRepairAgentHarness {
             override fun execute(
@@ -3122,7 +3147,10 @@ class TraceGuidedRepairTest {
         var validationCalls = 0
         var observedInvocation: RepairValidationInvocation? = null
         var observedCandidateDigest: String? = null
-        val validationStop = IllegalStateException("quota-preserved candidate reached validator")
+        val validationStop = IllegalStateException(
+            if (enforceAcpWriteLimit) "filesystem-write-limit-preserved candidate reached validator"
+            else "patch-byte-limit-preserved candidate reached validator",
+        )
         val validation = object : RepairValidationStrategy {
             override val assurance = RepairValidationAssurance.STRICT_CONTAINED
             override fun requireAvailable() = Unit

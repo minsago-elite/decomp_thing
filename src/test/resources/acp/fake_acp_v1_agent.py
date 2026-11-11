@@ -922,7 +922,7 @@ if MODE == "repair-active-declared-role-candidate":
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-quota-retry":
     source = join_path(cwd, "src/modules/reconstructed.c")
-    prefix = "/* exact repair patch-byte boundary: "
+    prefix = "/* exact repair quota-byte boundary: "
     suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
     candidate = prefix + ("q" * (REPAIR_QUOTA_BOUNDARY_BYTES - len(prefix.encode()) - len(suffix.encode()))) + suffix
     if len(candidate.encode()) != REPAIR_QUOTA_BOUNDARY_BYTES:

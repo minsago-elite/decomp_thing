@@ -1528,9 +1528,9 @@ class AcpAgentHarnessTest {
         acceptedMetadata = capturePublishedMetadata(output)
         assertNoReconstructionPublicationResidue(output)
 
-        // The public reconstruction grant is one non-recursive target path. Its parent entries
-        // make initial entry-count reachable. The target itself is absent at dispatch, so byte
-        // ceilings are exercised by the final snapshot after the scripted agent creates it.
+        // The public reconstruction grant is one non-recursive target path. Its rule and two
+        // parents make initial entry-count refusal reachable. The target itself is absent at
+        // dispatch, so byte ceilings are exercised by the final snapshot after creation.
         data class SnapshotLimitCase(
             val dimension: String,
             val limits: WorkspaceSnapshotLimits,
@@ -4495,6 +4495,7 @@ class AcpAgentHarnessTest {
         terminalPolicy: AcpTerminalExecutionPolicy? = null,
         sessionPreferences: AcpSessionPreferences = AcpSessionPreferences(),
         workspaceSnapshotLimits: WorkspaceSnapshotLimits? = null,
+        filesystemLimits: AcpFilesystemLimits = AcpFilesystemLimits(),
     ): AcpAgentHarness {
         requireLiveSandboxHost()
         val script = Path.of(requireNotNull(javaClass.getResource("/acp/fake_acp_v1_agent.py")).toURI())
@@ -4509,6 +4510,7 @@ class AcpAgentHarnessTest {
                 maximumFrameBytes = maximumFrameBytes,
                 maximumProtocolFrames = maximumProtocolFrames,
                 maximumStderrBytes = 64 * 1024,
+                filesystemLimits = filesystemLimits,
                 implementationId = "scripted-acp-v1",
                 sandboxBoundary = liveSandboxConfiguration(
                     listOf(
