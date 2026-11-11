@@ -130,7 +130,7 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
     await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').focus()`);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
-    await ready(tab, `document.querySelector('[role="alert"]')?.textContent.includes('Jobs could not be loaded.') &&
+    await ready(tab, `document.querySelector('[role="alert"]')?.textContent.includes('Jobs could not be loaded') &&
       document.activeElement === document.querySelector('[role="alert"]')`, 'failed continuation focus recovery');
     assert.equal(failedContinuations, 1);
     assert.deepEqual(interceptionErrors, []);
