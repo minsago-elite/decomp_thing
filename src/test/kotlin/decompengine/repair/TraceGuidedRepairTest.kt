@@ -4175,6 +4175,122 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair required context file and byte budgets refuse before dispatch`() {
+        data class ContextLimitCase(
+            val id: String,
+            val maximumFiles: Int,
+            val maximumBytes: Long,
+            val expectedDiagnostic: String,
+        )
+
+        val targetPath = "src/modules/reconstructed.c"
+        val contextPath = "src/modules/secondary.c"
+        val targetBytes = "int decomp_engine_main(void) { return 0; }\n".toByteArray(Charsets.UTF_8)
+        val contextBytes = "int secondary(void) { return 0; }\n".toByteArray(Charsets.UTF_8)
+        val requiredBytes = targetBytes.size.toLong() + contextBytes.size
+        val cases = listOf(
+            ContextLimitCase("files", 1, requiredBytes, "required repair context has 2 files; limit=1"),
+            ContextLimitCase("bytes", 2, requiredBytes - 1, "required repair context has $requiredBytes bytes; limit=${requiredBytes - 1}"),
+        )
+
+        for (case in cases) {
+            val project = createProject(
+                createRepairTempDirectory("repair-active-context-${case.id}-limit-").resolve("project"),
+                reconstructedSource = targetBytes.toString(Charsets.UTF_8),
+            )
+            project.resolve(contextPath).writeBytes(contextBytes)
+            val profile = DeclarativeRepairIndexProfile(
+                "active-context-${case.id}-limit-v1",
+                RepairIndexLayout(
+                    sourcePaths = listOf(targetPath, contextPath).sorted(),
+                    editablePaths = listOf(targetPath),
+                    modules = listOf(RepairModuleEvidence("main", listOf(targetPath, contextPath).sorted())),
+                ),
+            )
+            val acceptedFiles = mapOf(targetPath to targetBytes, contextPath to contextBytes)
+            val budget = RepairResourceBudget(
+                maximumContextFiles = case.maximumFiles,
+                maximumContextBytes = case.maximumBytes,
+                maximumPatchFiles = case.maximumFiles,
+                maximumPatchBytes = case.maximumBytes,
+            )
+            assertEquals(requiredBytes, acceptedFiles.values.sumOf { it.size.toLong() }, case.id)
+            val baselineHead = ModuleRevisionGraph.open(project, profile, budget).use { it.snapshot.headId }
+            val dispatches = AtomicInteger()
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    dispatches.incrementAndGet()
+                    error("agent must not run after required repair context exceeds its admission budget")
+                }
+            }
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome = error("validation must not run without an admitted context")
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("validation must not run without an admitted context")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("validation must not run without an admitted context")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport = error("validation must not run without an admitted context")
+            }
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = RepairHistory(project.resolve("reports/repair_history.json")),
+                profile = profile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = budget,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+
+            val failure = assertFailsWith<RepairBudgetExceededException>(case.id) {
+                loop.repairCompileError(
+                    project,
+                    CompileFailure(listOf("cc"), 2, "", "$targetPath: compiler error"),
+                    emptyList(),
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains(case.expectedDiagnostic), case.id)
+            assertEquals(0, dispatches.get(), case.id)
+            acceptedFiles.forEach { (path, bytes) ->
+                assertContentEquals(bytes, project.resolve(path).readBytes(), "${case.id}: $path")
+            }
+
+            ModuleRevisionGraph.open(project, profile, budget).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId, case.id)
+                assertEquals(baselineHead, graph.snapshot.headId, case.id)
+                assertEquals(1, graph.snapshot.nodes.size, case.id)
+                assertEquals(ModuleRevisionStatus.ROOT, graph.snapshot.nodes.single().status, case.id)
+                assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status, case.id)
+            }
+        }
+    }
+
+    @Test
     fun `strict captured staging closes the mutation sink against background writers`() {
         lateinit var retainedOutput: BoundedRepairOutput
         val harness = object : CapturedRepairAgentHarness {
