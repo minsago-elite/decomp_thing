@@ -1862,6 +1862,63 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair path records staging directory admission refusal as resource exhaustion`() {
+        val project = createTempDirectory("repair-active-directory-entry-limit-").resolve("project")
+        val sourcePath = "a/b/c/program.c"
+        project.resolve(sourcePath).parent.createDirectories()
+        val source = "int program(void) { return 1; }\n".toByteArray()
+        project.resolve(sourcePath).writeBytes(source)
+        val profile = DeclarativeRepairIndexProfile(
+            "deep-staging-path-v1",
+            RepairIndexLayout(sourcePaths = listOf(sourcePath), editablePaths = listOf(sourcePath)),
+        )
+        val budget = RepairResourceBudget(maximumStagingDirectories = 3)
+        val baselineHead = ModuleRevisionGraph.open(project, profile, budget).use { it.snapshot.headId }
+        val dispatches = AtomicInteger()
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                dispatches.incrementAndGet()
+                error("agent must not run when the staged directory count exceeds budget")
+            }
+        }
+        val loop = TraceGuidedRepairLoop.forTesting(
+            harness,
+            RepairHistory(project.resolve("reports/repair_history.json")),
+            profile,
+            GeneratedCRepairValidationStrategy(TestOnlyGeneratedCRepairValidationBoundary),
+            CapturedRepairStagingAuthority,
+            resourceBudget = budget,
+        )
+
+        assertFailsWith<RepairBudgetExceededException> {
+            loop.repairCompileError(
+                project,
+                CompileFailure(listOf("cc"), 1, "", "$sourcePath: compiler error"),
+                emptyList(),
+            )
+        }
+        assertEquals(0, dispatches.get())
+        assertContentEquals(source, project.resolve(sourcePath).readBytes())
+
+        ModuleRevisionGraph.open(project, profile, budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+        }
+    }
+
+    @Test
     fun `strict captured staging closes the mutation sink against background writers`() {
         lateinit var retainedOutput: BoundedRepairOutput
         val harness = object : CapturedRepairAgentHarness {

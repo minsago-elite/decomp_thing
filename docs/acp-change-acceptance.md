@@ -738,6 +738,15 @@ validation under #236, all resource limits, or hosted exact-head behavior.
 
 ## Active captured-repair staging-byte budget checkpoint — 2026-11-11
 
+`TraceGuidedRepairTest.active repair path records staging directory admission
+refusal as resource exhaustion` stages a source under three nested directories
+with a three-directory limit. The staging authority counts the virtual root
+and all nested directories before invoking the adapter; the limit is refused
+as `RESOURCE_EXHAUSTED`, the adapter is not dispatched, the accepted source
+and head remain unchanged, and the run reopens with a rejected attempt and no
+pending state. File-count and directory-count admission now use the same typed
+budget failure.
+
 `TraceGuidedRepairTest.active repair path rejects candidate growth beyond the
 staging byte budget` starts with an indexed source tree below a 4,096-byte
 staging limit, then has the captured adapter propose an 8 KiB replacement.
@@ -764,9 +773,9 @@ run state, leaves both accepted files and the head unchanged, and reopens with
 no pending attempt. Its validator fails if candidate rejection reaches
 compilation or behavior checks.
 
-The focused local run passed the per-file, staging-byte and patch-file active
-limits plus the direct staging-byte refusal control: four methods, zero
-failures, errors or skips.
+The focused local run passed the directory-admission, per-file, staging-byte
+and patch-file active limits plus the direct file/directory-count admission
+control: five methods, zero failures, errors or skips.
 An earlier selected run passed the active repair mutation and claim-validation,
 ACP write-denial, and ACP stream-output exhaustion controls: five methods,
 zero failures, errors or skips. The per-file, staging-growth, and patch-file

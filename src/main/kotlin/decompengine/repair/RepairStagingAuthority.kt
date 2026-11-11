@@ -305,7 +305,9 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
             )
         require(initialFiles.keys == initialFiles.keys.map(::normalizedCapturedPath).distinct().toSet())
         require(writablePaths.all { it in initialFiles }) { "repair writable paths must be staged source inputs" }
-        require(initialFiles.size <= budget.maximumContextFiles) { "repair staging exceeds the file-entry budget" }
+        if (initialFiles.size > budget.maximumContextFiles) {
+            throw RepairBudgetExceededException("repair staging exceeds the file-entry budget")
+        }
         val directories = buildSet {
             add("") // The virtual root itself is an inode/entry in a filesystem-backed authority.
             initialFiles.keys.forEach { relative ->
@@ -313,8 +315,10 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
                 components.indices.forEach { index -> add(components.take(index + 1).joinToString("/")) }
             }
         }
-        require(directories.size <= budget.maximumStagingDirectories) {
-            "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}"
+        if (directories.size > budget.maximumStagingDirectories) {
+            throw RepairBudgetExceededException(
+                "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}",
+            )
         }
         val initialBytes = initialFiles.values.fold(0L) { total, bytes -> Math.addExact(total, bytes.size.toLong()) }
         if (initialBytes > budget.maximumStagingBytes) {
@@ -357,7 +361,9 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
             )
         require(initialFiles.keys == initialFiles.keys.map(::normalizedCapturedPath).distinct().toSet())
         require(writablePaths.all { it in initialFiles }) { "repair writable paths must be staged source inputs" }
-        require(initialFiles.size <= budget.maximumContextFiles) { "repair staging exceeds the file-entry budget" }
+        if (initialFiles.size > budget.maximumContextFiles) {
+            throw RepairBudgetExceededException("repair staging exceeds the file-entry budget")
+        }
         val directories = buildSet {
             add("")
             initialFiles.keys.forEach { relative ->
@@ -365,8 +371,10 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
                 components.indices.forEach { index -> add(components.take(index + 1).joinToString("/")) }
             }
         }
-        require(directories.size <= budget.maximumStagingDirectories) {
-            "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}"
+        if (directories.size > budget.maximumStagingDirectories) {
+            throw RepairBudgetExceededException(
+                "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}",
+            )
         }
         val initialBytes = initialFiles.values.fold(0L) { total, bytes -> Math.addExact(total, bytes.size.toLong()) }
         if (initialBytes > budget.maximumStagingBytes) {
