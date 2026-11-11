@@ -773,16 +773,26 @@ run state, leaves both accepted files and the head unchanged, and reopens with
 no pending attempt. Its validator fails if candidate rejection reaches
 compilation or behavior checks.
 
-The focused local run passed the directory-admission, per-file, staging-byte
-and patch-file active limits plus the direct file/directory-count admission
-control: five methods, zero failures, errors or skips.
+`TraceGuidedRepairTest.active repair path enforces aggregate patch bytes and
+permits the exact boundary` is covered by commit
+`cbea368d55c4b09214c974495140b926e4072480`. Two individually admissible
+2,048-byte replacements exceed the aggregate 4,096-byte patch ceiling by one
+byte; the second replacement is refused before validation. A 2,048+2,048-byte
+control reaches validation, where a sentinel exception verifies that capture
+accepted the exact boundary; rollback then retains the original source and
+head. The focused local run at that commit passed this test with the directory-
+admission, per-file, staging-byte and patch-file active-limit cases: five
+methods, zero failures, errors or skips. The direct file/directory-count
+admission control passed in an earlier focused run.
+
 An earlier selected run passed the active repair mutation and claim-validation,
 ACP write-denial, and ACP stream-output exhaustion controls: five methods,
 zero failures, errors or skips. The per-file, staging-growth, and patch-file
 cases use the test-only captured adapter and do not produce a release-complete
 provider receipt. They qualify active repair-loop enforcement and refusal
 classification, not production ACP provider behavior, #236 validation, every
-resource limit, or hosted exact-head CI. #734 and #63 remain open.
+resource limit, or hosted exact-head CI. The aggregate-byte case also uses a
+test-only captured adapter. #734 and #63 remain open.
 
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
