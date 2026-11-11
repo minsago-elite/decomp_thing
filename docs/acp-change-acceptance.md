@@ -1124,19 +1124,23 @@ UTF-8 content is exactly 256 KiB, equal to the lowered profile's
 `archiveMaximumFileBytes` grant. The public reconstruction workflow accepts
 the write, records a `CREATED` change of exactly 262,144 bytes, builds the
 candidate, creates and verifies the archive, extracts it, and rebuilds the
-extracted project. The same focused method retains the existing 256 KiB plus
-one-byte attempted write refusal and the out-of-grant sibling refusal.
+extracted project. Commit `ebf6ee35b` additionally sets final snapshot
+per-file and aggregate byte budgets to exactly 256 KiB for that successful
+write, and corrects the negative fixture to send exactly 262,145 UTF-8 bytes
+(including its C comment delimiters) against the 262,144-byte mutation grant.
+The out-of-grant sibling refusal remains in the same method.
 
 The focused command passed one JUnit method with zero failures, errors, or
-skips at `ad2284ca9075a22a5b045198574433e48f6f2507`:
+skips at `ebf6ee35b3d4b3d5042bbf4355521fea89cac0a2`:
 
 ```text
 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'
 ```
 
-This is local scripted ACP evidence for the exact per-file grant boundary in
-the Generated C Make profile, with its archive file ceiling reduced from the
-profile default of 128 MiB to 256 KiB. It does not qualify other profiles,
-multibyte boundary payloads, independent providers, production validation
-under #236, the complete mutation/resource matrix, or hosted exact-head CI.
-#734 and #63 remain open.
+This is local scripted ACP evidence for exact equality at the mutation-grant
+and final snapshot per-file/aggregate byte ceilings in the Generated C Make
+profile, with its archive file ceiling reduced from the profile default of
+128 MiB to 256 KiB. It does not qualify other profiles, multibyte boundary
+payloads, independent providers, production validation under #236, the
+complete mutation/resource matrix, or hosted exact-head CI. #734 and #63
+remain open.
