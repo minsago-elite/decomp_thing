@@ -589,11 +589,21 @@ errors or skips. This covers aggregate stream output only; wall-clock, idle,
 snapshot inventory and other limits remain unqualified.
 
 Commit `314566269` adds a cross-stream control: 5 MiB of stderr followed by
-4.2 MiB of stdout text. Each stream stays below 8 MiB independently, but their
+4.2 MB of stdout text. Each stream stays below 8 MiB independently, but their
 combined output exceeds the shared allowance and must still fail with
 `RESOURCE_EXHAUSTED`. The same focused test passed at this commit with the
 cross-stream scenario included. This does not qualify wall-clock, idle or
 snapshot inventory limits.
+
+Commit `3f7932107` adds a separate configured ACP request-timeout case. The
+fake agent completes the authorized source write, then withholds the terminal
+prompt response until a 3-second `session/prompt` deadline expires. The test
+checks the completed write audit, typed `TIMEOUT` receipt, incomplete terminal
+evidence, process and sandbox cleanup, publication refusal, and unchanged
+previous output. The focused public reconstruction test passed at this
+commit. This is request-phase timeout evidence; it does not exercise the
+reconstruction request's 20-minute wall or 2-minute idle budgets. Those and
+snapshot inventory limits remain unqualified.
 
 ## Reconstruction change-claim consistency checkpoint — 2026-11-11
 
