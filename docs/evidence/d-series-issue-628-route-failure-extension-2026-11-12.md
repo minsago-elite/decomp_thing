@@ -165,3 +165,17 @@ Verification at this source checkpoint:
 - `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local frontend/JSDOM evidence only. It does not qualify packaged-browser behavior, screen-reader announcements, or full #628/#221 route and panel acceptance.
+
+## Attempt action read failure states — 2026-11-12
+
+Exact source checkpoint: `b703043d77184b57f3337a1387c613f12258177d` on PR #1946.
+
+The explicit read of available attempt actions now distinguishes expired session, denied access, missing route, unsupported response, unverified response, and general read failure. The control remains available for an explicit retry; no command is sent on mount or after a failed read. The six-case component test checks distinct fixed status copy, validated request-reference handling, diagnostic redaction, and that no mutation request is sent.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `attempt-controls.test.tsx` — 1 file, 11 tests passed.
+- Full frontend Vitest suite — 84 files, 1,229 tests passed.
+- `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local frontend/JSDOM evidence only. It does not qualify packaged-browser or assistive-technology behavior, command failure categories, or full #628/#221 acceptance.
