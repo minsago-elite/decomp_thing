@@ -149,7 +149,9 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     }
     if (!retainPrevious) {
       firstPage.current = null;
-      entryPin.current = null;
+      // The URL may still carry the cursor for this first-page snapshot. Keep
+      // its binding so an explicit refresh can validate that URL before
+      // replacing it with the newly received snapshot cursor.
       setData(null); setDisplayedPageIndex(null);
     }
     setError(withApiFailureReference(message, failure));

@@ -18,6 +18,9 @@ vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/job-lossless.json'), 'utf8')) as { data: Job }).data;
 function job(index: number): Job { return { ...sample, jobId: index.toString(16).padStart(32, '0'), displayFilename: `program-${index}.elf` }; }
 function page(items: Job[], nextCursor: string | null = null) { return { data: { items, page: { nextCursor, limit: 50, snapshotVersion: 'snapshot_1' } } }; }
+function snapshotPage(items: Job[], currentCursor: string) {
+  return { data: { items, page: { currentCursor, previousCursor: null, nextCursor: null, pageNumber: 1, limit: 50, snapshotVersion: 'snapshot_1' } } };
+}
 beforeEach(() => { transport.get.mockReset(); });
 
 it('renders only a bounded page of a 10000-job library and navigates without background reorder', async () => {
@@ -500,6 +503,29 @@ it('does not revive a retained first page after a continuation denies access', a
   expect(await screen.findByText('program-2.elf')).toBeTruthy();
   expect(screen.getByText('Page 1')).toBeTruthy();
   expect(transport.get).toHaveBeenCalledTimes(3);
+});
+
+it('refreshes a signed first-page route after a non-retainable read clears its rows', async () => {
+  transport.get.mockResolvedValueOnce(snapshotPage([job(1)], 'cursor_before'))
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 403 }))
+    .mockResolvedValueOnce(snapshotPage([job(2)], 'cursor_after'));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  expect(location.search).toBe('?cursor=cursor_before');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByRole('alert')).toBeTruthy();
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(location.search).toBe('?cursor=cursor_before');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(location.search).toBe('?cursor=cursor_after');
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual([
+    '/jobs?limit=50', '/jobs?limit=50', '/jobs?limit=50',
+  ]);
 });
 
 it('identifies and focuses invalid dates without changing the current result snapshot', async () => {
