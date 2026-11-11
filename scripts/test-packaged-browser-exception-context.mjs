@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { attachExceptionContext, exceptionContextLimits, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
+import { attachExceptionContext, exceptionContextLimits, exceptionContextSummaryLimit, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
 
 const runner = resolve(dirname(fileURLToPath(import.meta.url)), 'packaged-browser-engines.mjs');
 function setup() {
@@ -119,6 +119,19 @@ test('bounds pages and request records and reports incomplete observation', () =
   assert.equal(capped.requestEvents.length, exceptionContextLimits.requests);
   assert.equal(capped.truncatedRequests, 1);
   assert.equal(capped.countsIncomplete, true);
+});
+
+test('summary omits clean contexts before the diagnostic cap so a late failing context is retained', () => {
+  const clean = () => ({ exceptions: [], countsIncomplete: false, requestEvents: [] });
+  const snapshots = Array.from({ length: exceptionContextSummaryLimit + 4 }, clean);
+  snapshots[exceptionContextSummaryLimit + 1] = { exceptions: [], countsIncomplete: false,
+    requestEvents: [{ outcome: 'failed', status: null, sequence: 1 }] };
+  const summary = summarizeExceptionContexts(snapshots);
+  assert.equal(summary.contexts, exceptionContextSummaryLimit + 4);
+  assert.equal(summary.truncatedContexts, 0);
+  assert.equal(summary.unscannedContexts, 0);
+  assert.equal(summary.observed.length, 1);
+  assert.equal(summary.observed[0].contextOrdinal, exceptionContextSummaryLimit + 1);
 });
 
 test('cross-engine runner call site records actual page errors and retains the original failure gate', async () => {

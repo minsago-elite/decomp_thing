@@ -181,7 +181,7 @@ export function summarizeExceptionContexts(snapshots) {
   for (let contextOrdinal = 0; contextOrdinal < scanned; contextOrdinal += 1) {
     const snapshot = snapshots[contextOrdinal];
     const hasFailure = snapshot.requestEvents.some(event => event.outcome === 'failed' || (event.status !== null && event.status >= 400));
-    if (!snapshot.exceptions && !snapshot.countsIncomplete && !hasFailure) continue;
+    if (snapshot.exceptions.length === 0 && !snapshot.countsIncomplete && !hasFailure) continue;
     if (observed.length < exceptionContextSummaryLimit) observed.push({ contextOrdinal, ...snapshot });
     else omitted += 1;
   }
