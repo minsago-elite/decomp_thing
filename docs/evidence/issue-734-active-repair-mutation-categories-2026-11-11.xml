@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-11-11T13:01:59.430Z" hostname="whatsername" time="6.482">
+  <properties/>
+  <testcase name="active repair path rejects create and delete mutations outside its replacement contract()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.668"/>
+  <testcase name="active repair path rejects change claims that disagree with captured bytes()" classname="decompengine.repair.TraceGuidedRepairTest" time="4.812"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

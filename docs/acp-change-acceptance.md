@@ -1565,3 +1565,28 @@ process/sandbox cleanup. This remains local scripted-ACP evidence for the
 Generated C repair profile. It does not establish successful production
 validation under #236, live-provider behavior, other profiles, hosted
 exact-head CI, or complete #734/#63 acceptance. Keep #734 and #63 open.
+
+## Active public reconstruction and repair mutation categories — 2026-11-11
+
+The composed source at `19251d1e15072b8d3a0329605c4b3ea2321d375a` passes the
+public ACP reconstruction mutation/limit scenario and the active repair
+create/delete and change-claim refusal scenarios. The public Make
+reconstruction test runs scripted ACP attempts covering allowed and denied
+mutation grants, exact source-byte equality, final-snapshot refusals, and
+preservation of existing publication across failure and interruption. The
+repair tests exercise the active loop's replacement-only contract: attempted
+create/delete operations and change claims inconsistent with captured bytes
+are refused while accepted source and graph head remain unchanged.
+
+The focused run passed three JUnit methods across two suites, with zero
+failures, errors, or skips. The retained [provenance record](evidence/issue-734-public-active-mutation-categories-2026-11-11.json)
+binds the command, source tree, environment, and both report digests; separate
+[public reconstruction](evidence/issue-734-public-reconstruction-active-mutations-2026-11-11.xml)
+and [active repair](evidence/issue-734-active-repair-mutation-categories-2026-11-11.xml)
+reports preserve the results.
+
+These are local scripted/captured-fixture results for the Generated C Make
+reconstruction and Generated C repair profile. They do not qualify live
+providers, ACP delete/move operations, successful production validation under
+#236, hosted exact-head CI, or complete #734/#63 acceptance. Keep #734 and #63
+open.

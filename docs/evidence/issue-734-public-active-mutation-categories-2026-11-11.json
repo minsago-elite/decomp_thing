@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "19251d1e15072b8d3a0329605c4b3ea2321d375a",
+  "sourceParent": "84a1f11871443e4b62064827c45ce1a06e51d9eb",
+  "sourceTree": "4dfb4d1eaa2f49562ff9ccdb8e0afa8d23dd3f19",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes",
+    "decompengine.repair.TraceGuidedRepairTest.active repair path rejects create and delete mutations outside its replacement contract",
+    "decompengine.repair.TraceGuidedRepairTest.active repair path rejects change claims that disagree with captured bytes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair path rejects create and delete mutations outside its replacement contract' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair path rejects change claims that disagree with captured bytes'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "results": [
+    {
+      "report": "issue-734-public-reconstruction-active-mutations-2026-11-11.xml",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "testSeconds": 64.369,
+      "timestamp": "2026-11-11T13:00:55.054Z",
+      "sha256": "9921069171fee4bc0b9ffc6edac7481c132986ee2560a79a4cef62c38b85032c"
+    },
+    {
+      "report": "issue-734-active-repair-mutation-categories-2026-11-11.xml",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "testSeconds": 6.482,
+      "timestamp": "2026-11-11T13:01:59.430Z",
+      "sha256": "ec74e35834283c3708198054153082723cf7b10933088d20321a518c061a7075"
+    }
+  ],
+  "scope": {
+    "reconstruction": "Scripted ACP public Make reconstruction exercises grant denials, exact source-file size equality, final workspace snapshot refusals, cancellation/timeouts and preservation of previously published output. This artifact is the one selected public integration test, which internally runs its listed scenarios.",
+    "repair": "Active repair loop rejects create/delete attempts outside its replacement contract and rejects change claims that disagree with captured workspace bytes; accepted source and graph state remain intact.",
+    "qualificationLimits": [
+      "local scripted ACP and captured-adapter fixtures only",
+      "Generated C Make reconstruction and Generated C repair profile scope only",
+      "injected repair validator and no successful production validation under #236",
+      "does not qualify live providers or prove ACP delete/move operations are available",
+      "does not replace hosted exact-head CI or complete #734/#63 acceptance"
+    ]
+  }
+}
