@@ -73,6 +73,7 @@ RECONSTRUCTION_MODES = {
 ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
     "repair-active-output-limit",
+    "repair-active-declared-role-tool-limit-after-write",
     "repair-active-declared-role-frame-limit-after-write",
     "repair-active-declared-role-frame-size-after-write",
     "repair-active-declared-role-no-change",
@@ -256,6 +257,7 @@ expected_fs = {
     "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-tool-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-frame-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-frame-size-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
@@ -732,6 +734,25 @@ if MODE == "repair-active-output-limit":
         pass
     time.sleep(30)
     raise SystemExit(144)
+if MODE == "repair-active-declared-role-tool-limit-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* tool-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        148,
+    )
+    for ordinal in range(2):
+        update({
+            "sessionUpdate": "tool_call",
+            "toolCallId": f"tool-after-write-{ordinal}",
+            "title": f"Tool call {ordinal} after target write",
+            "kind": "other",
+            "status": "completed",
+        })
+    # End the prompt immediately after exceeding the single-call request budget. The host must
+    # preserve the recorded limit even if prompt completion is already visible to its wait loop.
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
 if MODE == "repair-active-declared-role-frame-limit-after-write":
     source = join_path(cwd, "src/modules/reconstructed.c")
     write_workspace_file(

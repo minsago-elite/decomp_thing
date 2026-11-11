@@ -1495,6 +1495,10 @@ class AcpAgentHarness(
             promptResponse.get() ?: throw AcpProtocolFailure("ACP session/prompt ended without a stop reason")
         }
 
+        fun exhaustedOutcome(): PromptOutcome? = translator.limitFailure.get()?.let { limitSummary ->
+            PromptOutcome(AgentStopReason.LIMIT_EXHAUSTED, null, limitSummary)
+        }
+
         while (true) {
             try {
                 terminal.throwIfFailed()
@@ -1504,21 +1508,22 @@ class AcpAgentHarness(
                 cancelPrompt(session, promptJob, operationScope)
                 throw failure
             }
+            translator.callbackFailure.get()?.let { callbackFailure ->
+                cancelPrompt(session, promptJob, operationScope)
+                throw callbackFailure
+            }
+            exhaustedOutcome()?.let { exhausted ->
+                cancelPrompt(session, promptJob, operationScope)
+                return exhausted
+            }
             if (promptJob.isCompleted) {
                 val response = promptJob.await()
+                exhaustedOutcome()?.let { return it }
                 terminal.throwIfFailed()
                 filesystemAudit.failure()?.let { throw it }
                 permissionAudit.failure()?.let { throw it }
                 evidenceState.reach(AcpExecutionLifecyclePhase.PROMPT_COMPLETED)
                 return PromptOutcome(response.stopReason.toContractStopReason(), response)
-            }
-            translator.callbackFailure.get()?.let { callbackFailure ->
-                cancelPrompt(session, promptJob, operationScope)
-                throw callbackFailure
-            }
-            translator.limitFailure.get()?.let { limitSummary ->
-                cancelPrompt(session, promptJob, operationScope)
-                return PromptOutcome(AgentStopReason.LIMIT_EXHAUSTED, null, limitSummary)
             }
             if (request.cancellation.isCancellationRequested()) {
                 cancelPrompt(session, promptJob, operationScope)
@@ -1535,6 +1540,7 @@ class AcpAgentHarness(
                 }
                 if (drained != null) {
                     val response = drained.value
+                    exhaustedOutcome()?.let { return it }
                     terminal.throwIfFailed()
                     filesystemAudit.failure()?.let { throw it }
                     permissionAudit.failure()?.let { throw it }
