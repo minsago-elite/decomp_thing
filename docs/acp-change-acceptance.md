@@ -571,6 +571,18 @@ method, zero failures, errors or skips. This exercises the active repair
 workflow's file-write limit, not ACP stream-output exhaustion, a live provider,
 production validation under #236, or hosted exact-head qualification.
 
+Commit `0a20206ec` adds
+`TraceGuidedRepairTest.active ACP repair retains real stream output exhaustion
+and rejects the candidate`. The scripted ACP child sends valid, bounded
+message frames until it exceeds the active request's 64 KiB aggregate output
+limit. The active repair loop retains a rejected, non-release-complete
+`RESOURCE_EXHAUSTED` receipt; its process evidence records the exceeded limit,
+zero surviving processes, and verified sandbox cleanup. The test reopens the
+repair graph and confirms the accepted source bytes are unchanged. Both active
+repair resource-limit tests passed together locally: two test methods, zero
+failures, errors or skips. This is scripted local ACP evidence, not production
+provider qualification, #236 validation, or hosted exact-head evidence.
+
 ## Public ACP reconstruction mutation-grant and limit checkpoint — 2026-11-11
 
 Commit `7d363753b` adds
