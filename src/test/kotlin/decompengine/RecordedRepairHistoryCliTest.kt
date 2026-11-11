@@ -87,6 +87,43 @@ class RecordedRepairHistoryCliTest {
     }
 
     @Test
+    fun `repair runtime preflight failure leaves no repair mutation marker`() {
+        val base = root()
+        val reports = Files.createDirectories(base.resolve("reports"))
+        val input = base.resolve("input.elf").apply { writeText("input") }
+        ReconstructionOutputWorkspace.open(reports, input).use { }
+        val sourceTree = Files.createDirectories(reports.resolve("source-tree"))
+        val repairMarker = reports.resolve(".reconstruction-repair-in-progress")
+        val runtimeOpened = AtomicInteger()
+        val actionCalled = AtomicInteger()
+
+        val failure = assertFailsWith<IllegalStateException> {
+            withRepairRuntimeUnderPublicationLease(
+                projectDirectory = sourceTree,
+                beforeRepairMarker = { admittedProject ->
+                    assertEquals(sourceTree.toRealPath(), admittedProject)
+                    assertFalse(Files.exists(repairMarker), "configuration preflight must precede the durable mutation marker")
+                    throw IllegalStateException("invalid inert repair configuration")
+                },
+                openRuntime = { _ ->
+                    runtimeOpened.incrementAndGet()
+                    AutoCloseable {}
+                },
+                canRetireRepairMarker = { true },
+                action = { _, _ ->
+                    actionCalled.incrementAndGet()
+                    Unit
+                },
+            )
+        }
+
+        assertEquals("invalid inert repair configuration", failure.message)
+        assertEquals(0, runtimeOpened.get(), "invalid configuration must not construct the runtime")
+        assertEquals(0, actionCalled.get(), "invalid configuration must not enter repair")
+        assertFalse(Files.exists(repairMarker), "failed nonmutating preflight must leave the published generation readable")
+    }
+
+    @Test
     fun `repair history reports unavailable when publication recovery is required`() {
         val base = root()
         val reports = base.resolve("reports")

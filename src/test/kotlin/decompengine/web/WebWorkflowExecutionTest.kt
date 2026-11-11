@@ -50,6 +50,30 @@ class WebWorkflowExecutionTest {
     }
 
     @Test
+    fun `output metering preserves source directory access times`() {
+        val reports = Files.createDirectories(root.resolve("reports/source-tree/reports"))
+        Files.writeString(reports.resolve("repair-history.json"), "retained")
+        val directories = listOf(reports.parent, reports)
+        val oldAccessTime = java.nio.file.attribute.FileTime.from(java.time.Instant.parse("2001-01-01T00:00:00Z"))
+        directories.forEach { directory ->
+            Files.getFileAttributeView(directory, java.nio.file.attribute.BasicFileAttributeView::class.java)
+                .setTimes(null, null, oldAccessTime)
+        }
+        val before = directories.map { directory ->
+            Files.readAttributes(directory, java.nio.file.attribute.BasicFileAttributes::class.java)
+                .lastAccessTime()
+        }
+
+        assertEquals("retained".toByteArray().size.toLong(), meter(root.resolve("reports")).outputBytes())
+
+        val after = directories.map { directory ->
+            Files.readAttributes(directory, java.nio.file.attribute.BasicFileAttributes::class.java)
+                .lastAccessTime()
+        }
+        assertEquals(before, after, "output metering must not mutate the source metadata witness")
+    }
+
+    @Test
     fun `completion cannot accept output whose report root was replaced`() {
         val reports = Files.createDirectory(root.resolve("replaced"))
         val (result, _) = BoundedWorkflowExecutor().run(

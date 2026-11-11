@@ -388,6 +388,36 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `repair reads a clean historical source root without publication markers`() = withRoot { root ->
+        val selectedRoot = root.resolve("historical-reports").createDirectories()
+        val input = selectedRoot.resolve("source-tree")
+        writeSourceTree(input, "historical source")
+        val original = input.resolve("code.c").readBytes()
+        val markerNames = listOf(
+            ".reconstruction.lock",
+            ".reconstruction-active-input.json",
+            ".reconstruction-publication.json",
+            ".reconstruction-switch.json",
+            ".reconstruction-repair-in-progress",
+        )
+        markerNames.forEach { assertFalse(selectedRoot.resolve(it).exists(), "fixture must start markerless: $it") }
+
+        val reports = root.resolve("repair-attempt").createDirectories()
+        val workflowContext = context(root, reports,
+            WorkflowExecutionLimits(30_000uL, 30_000uL, 64uL * 1024uL * 1024uL, 10uL))
+        val engines = FakeEngines()
+        val result = RepairWorkflowAdapter(engines, FAST, "agent-acp")
+            .execute(workflowContext.copy(inputSourceTree = input))
+
+        assertIs<DurableWebWorkflowOutcome.Completed>(result)
+        assertEquals(1, engines.calls.get(), "the historical source tree should reach repair")
+        assertContentEquals(original, input.resolve("code.c").readBytes(),
+            "repair must copy the historical input into its private staged generation")
+        markerNames.forEach { assertFalse(selectedRoot.resolve(it).exists(), "read must not activate the historical root: $it") }
+        assertEquals("repaired", reports.resolve("source-tree/code.c").readText())
+    }
+
+    @Test
     fun `failed web repair copy preserves stale source file and directory access times`() = withRoot { root ->
         val selectedRoot = root.resolve("selected-input").createDirectories()
         val reports = root.resolve("repair-attempt").createDirectories()
