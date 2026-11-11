@@ -1010,6 +1010,23 @@ repair path. They do not establish independent token metering, preemptive
 interruption, live-provider behavior, production validation under #236, or
 hosted exact-head CI. #734 and #63 remain open.
 
+Commit `8581a44e9` extends
+`TraceGuidedRepairTest.active ACP repair enforces returned token ceilings after
+a write and permits exact usage` with two malformed-usage cases. The scripted
+ACP peer first receives acknowledgement for the authorized candidate write,
+then omits both token counts or reports a negative input count while ceilings
+are configured. The loop persists a failed `PROTOCOL` receipt and a rejected
+assessment, does not call candidate validation, leaves the accepted source,
+Makefile and graph head unchanged, records no pending attempt, and verifies
+process and sandbox cleanup. The retained receipt contains a commitment to the
+failure message rather than exposing it as clear text.
+
+The focused test passed one JUnit method with zero failures, errors or skips
+at this commit. This covers rejection of missing and malformed
+provider-reported usage in the active scripted repair path. It does not
+establish independent token metering, live-provider behavior, production
+validation under #236, or hosted exact-head CI.
+
 ## Active public reconstruction tool and token limits — 2026-11-11
 
 Commit `de6709862` extends
