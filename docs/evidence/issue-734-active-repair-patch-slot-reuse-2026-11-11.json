@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "574670c26dbaab2ad7618182614244c2a69a647f",
+  "sourceParent": "8b7df54605135b07f7a818e01cc60aedd5f10a16",
+  "sourceTree": "c0b1311908c34b761c43ad4006d2d858fc1ff7fa",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair reuses a patch slot after restoring the first file",
+    "decompengine.repair.TraceGuidedRepairTest.active repair path rejects a candidate over the patch file count"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair reuses a patch slot after restoring the first file' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair path rejects a candidate over the patch file count'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1"
+  },
+  "result": {
+    "report": "issue-734-active-repair-patch-slot-reuse-2026-11-11.xml",
+    "tests": 2,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.329,
+    "timestamp": "2026-11-11T13:33:23.631Z",
+    "sha256": "6833d84334c196bc3c963f9ca50f694b34a94aebac90a88df3219b979e68bdd3"
+  },
+  "scope": {
+    "claim": "With maximumPatchFiles=1, the scripted ACP peer modifies the first file, observes refusal for a distinct second-file modification, reads both files back, restores the first file to its original bytes, then successfully modifies and reads back the second file. The completed receipt contains only the second file as MODIFIED and preserves the ordered eight-operation filesystem audit. The injected validator verifies the final candidate and intentionally rejects it; accepted source and graph head remain unchanged.",
+    "limitations": [
+      "Local scripted-ACP evidence for the Generated C repair profile; the validator is an injected sentinel and does not establish successful production validation under #236.",
+      "Does not qualify live providers, other profiles, hosted exact-head CI, or complete #734/#63 acceptance."
+    ]
+  }
+}

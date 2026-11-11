@@ -1624,3 +1624,29 @@ uses a 1 KiB regression-input ceiling to satisfy the budget invariant and
 proves only request-admission refusal for an empty regression input. The
 deletion result remains lower-level captured-output coverage, not ACP delete
 qualification. Both are local fixture evidence and leave #734/#63 open.
+
+## Active ACP repair patch-slot reuse — 2026-11-11
+
+Source commit `574670c26dbaab2ad7618182614244c2a69a647f` extends the active
+scripted patch-count case to exercise slot reuse. With `maximumPatchFiles = 1`,
+the peer changes the first implementation, observes refusal for a second
+distinct change, reads both candidates back, restores the first implementation
+to its exact original bytes, and then changes the second file. Its final reads
+confirm the restored first file and retained second candidate. The persisted
+receipt records only the second file as modified and retains the ordered
+write/read audit, including the refused attempt. The injected validator checks
+that exact final candidate before intentionally rejecting it; accepted source
+and graph head remain unchanged and no attempt remains pending.
+
+The focused run also re-ran the existing active patch-file-count refusal
+control: two tests passed, with zero failures, errors, or skips. The retained
+[JUnit report](evidence/issue-734-active-repair-patch-slot-reuse-2026-11-11.xml)
+is SHA-256 `6833d84334c196bc3c963f9ca50f694b34a94aebac90a88df3219b979e68bdd3`;
+the [provenance record](evidence/issue-734-active-repair-patch-slot-reuse-2026-11-11.json)
+binds it to the source tree and command.
+
+This is local scripted-ACP coverage for the Generated C repair profile with an
+injected validator that rejects after inspecting the candidate. It does not
+qualify successful production validation under #236, live-provider behavior,
+other profiles, hosted exact-head CI, or complete #734/#63 acceptance. Keep
+#734 and #63 open.

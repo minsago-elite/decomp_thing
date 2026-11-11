@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-11-11T13:34:50.504Z" hostname="whatsername" time="3.156">
+  <properties/>
+  <testcase name="active repair path rejects a candidate over the patch file count()" classname="decompengine.repair.TraceGuidedRepairTest" time="0.918"/>
+  <testcase name="active ACP repair reuses a patch slot after restoring the first file()" classname="decompengine.repair.TraceGuidedRepairTest" time="2.225"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
