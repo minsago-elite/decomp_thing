@@ -606,19 +606,28 @@ reconstruction request's 20-minute wall or 2-minute idle budgets. Those and
 snapshot inventory limits remain unqualified.
 
 Commit `609175b54` extends the same public reconstruction test with separate
-wall-clock and idle deadline controls. A test-only `AgentHarness` decorator
-passes shortened `AgentExecutionLimits` into the real ACP harness: the wall
-case uses a 12-second wall budget with a 20-second idle budget, and the idle
-case uses a 20-second wall budget with a 12-second idle budget. In both cases
-the scripted agent completes the authorized candidate write and then withholds
-its terminal prompt response. Assertions require a typed `TIMEOUT`, incomplete
-execution evidence, the completed write audit, verified process and sandbox
-cleanup, refusal of the candidate, and unchanged prior publication metadata.
-The focused live-sandbox test passed locally: one test method, zero failures,
-errors or skips (42.2 seconds). These injected limits exercise the active
-reconstruction path; they do not wait for or measure the production 20-minute
-wall or 2-minute idle defaults. Snapshot inventory limits and other resource
-limits remain unqualified.
+wall-clock and idle deadline controls. Its first test-only harness decorator
+changed request limits after reconstruction created the turn identity. Exact
+review identified that receipt-correlation defect; that earlier test pass did
+not qualify the reconstruction workflow result. Commit `5f37ab05e` moves the
+test-only limits seam into `BoundedLlmModuleReconstructor`, before it creates
+the bound request and turn identity, and includes overridden limits in its
+test cache identity. The test requires the workflow progress callback to
+deliver the receipt and compares its request digest with both the request
+captured at task start and the receipt turn identity.
+
+The corrected test passes through the real ACP harness. The wall case uses a
+12-second wall budget with a 20-second idle budget; the idle case uses a
+20-second wall budget with a 12-second idle budget. In both cases the scripted
+agent completes the authorized candidate write and then withholds its terminal
+prompt response. Assertions require a typed `TIMEOUT`, incomplete execution
+evidence, the completed write audit, verified process and sandbox cleanup,
+refusal of the candidate, and unchanged prior publication metadata. The
+focused live-sandbox test passed locally after the correction: one test method,
+zero failures, errors or skips (38.3 seconds). These injected limits exercise
+the active reconstruction path; they do not wait for or measure the production
+20-minute wall or 2-minute idle defaults. Snapshot inventory limits and other
+resource limits remain unqualified.
 
 ## Reconstruction change-claim consistency checkpoint — 2026-11-11
 
