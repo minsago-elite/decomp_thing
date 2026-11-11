@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "issue": 734,
   "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
-  "sourceCommit": "6b4ba12ab6f5cd11681888374603b0c570ee86ab",
-  "sourceParent": "fa6e0847ce8f2954a7bb37c823c2f4a5dc9435d4",
-  "sourceTree": "20e7064a850cd279c60498e5f2807694f1ca3654",
+  "sourceCommit": "5869c936a5923e5a957431f0d7ccbada440cce33",
+  "sourceParent": "08360eb8c945c5f635f2b81d9a241d3a2cdf0039",
+  "sourceTree": "4d6e2079547bae43daaee9a22f0e2030003bf0bf",
   "test": "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes",
   "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
   "environment": {
@@ -24,25 +24,38 @@
     "failures": 0,
     "errors": 0,
     "skipped": 0,
-    "testSeconds": 56.992,
-    "suiteSeconds": 57.008,
-    "timestamp": "2026-11-11T10:50:50.769Z",
-    "junitSha256": "2e342074831c293332e4cd305c8611d9e23a1fc9f8e5e42a30f864a3abf9bed1"
+    "testSeconds": 52.518,
+    "suiteSeconds": 52.546,
+    "timestamp": "2026-11-11T11:25:18.888Z",
+    "junitSha256": "f61914bdb8312ebfde1acf478cd6d096113c2480799739fcc2b88bf5dd5b5a0f"
   },
   "scope": {
     "profile": "Generated C Make",
     "provider": "scripted ACP process",
     "terminalRequests": [
-      {"attemptedOperation": "delete Makefile through /usr/bin/rm", "result": "-32602", "auditReason": "CAPABILITY_DISABLED"},
-      {"attemptedOperation": "move declared interface header to undeclared source path through /usr/bin/mv", "result": "-32602", "auditReason": "CAPABILITY_DISABLED"}
+      {
+        "attemptedOperation": "delete Makefile through /usr/bin/rm",
+        "result": "-32602",
+        "auditReason": "CAPABILITY_DISABLED"
+      },
+      {
+        "attemptedOperation": "move declared interface header to undeclared source path through /usr/bin/mv",
+        "result": "-32602",
+        "auditReason": "CAPABILITY_DISABLED"
+      }
     ],
     "terminalCapabilityAdvertised": false,
     "terminalAuditRequestsDistinct": true,
-    "terminalSandboxLaunches": ["OUTER_AGENT"],
+    "terminalSandboxLaunches": [
+      "OUTER_AGENT"
+    ],
     "publication": "authorized source creation completed, built, archived, extracted and rebuilt; Makefile and declared header remained; attempted move destination remained absent",
     "workflowPolicyDeniedBranchExercised": false,
     "workflowPolicyDeniedBranchLimit": "The harness filters terminal authority when EXECUTE_COMMAND is absent, so only the active production CAPABILITY_DISABLED boundary is reached.",
     "productionRepairValidatorQualified": false,
-    "hostedExactHeadCiQualified": false
+    "hostedExactHeadCiQualified": false,
+    "preservedFiles": [
+      "Makefile and declared interface header bytes equal the immediately prior published source-tree in both published and extracted trees"
+    ]
   }
 }

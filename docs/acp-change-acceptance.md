@@ -1253,7 +1253,7 @@ resource-limit matrix, or hosted exact-head CI. #734 and #63 remain open.
 
 ## Public reconstruction terminal delete/move refusal — 2026-11-11
 
-Commit `6b4ba12ab6f5cd11681888374603b0c570ee86ab` extends
+Commit `5869c936a5923e5a957431f0d7ccbada440cce33` extends
 `AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and
 preserves publication on limit outcomes` with scripted `terminal/create`
 requests for `rm Makefile` and `mv` of the declared interface header to an
@@ -1266,9 +1266,9 @@ ledger contains only the outer ACP agent.
 
 The same attempt continues through an authorized source creation, successful
 build and archive extraction. Assertions verify the Makefile and interface
-header remain present in both published and extracted trees, the attempted
-move destination is absent, the generated source bytes match, and the
-extracted project rebuilds. This demonstrates refusal of terminal-mediated
+header bytes match the immediately prior published output in both published
+and extracted trees, the attempted move destination is absent, the generated
+source bytes match, and the extracted project rebuilds. This demonstrates refusal of terminal-mediated
 delete and move attempts in the active public reconstruction configuration;
 it adds no delete/move capability. It does not exercise
 `WORKFLOW_POLICY_DENIED`, which is unreachable here because the harness
@@ -1285,7 +1285,7 @@ open.
 
 ## Public reconstruction caller interruption after acknowledged write — 2026-11-11
 
-Commit `87450266c5ec69ce3ad041e9fb67653435d8ed03` maps an `InterruptedException`
+Commit `5869c936a5923e5a957431f0d7ccbada440cce33` maps an `InterruptedException`
 from the ACP prompt's `runBlocking` boundary to the harness's existing caller
 cancellation outcome. Previously, `runBlocking` cleared the worker's interrupt,
 and the exception became an `INTERNAL` agent failure; reconstruction reported an

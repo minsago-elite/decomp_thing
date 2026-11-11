@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "issue": 734,
   "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
-  "sourceCommit": "87450266c5ec69ce3ad041e9fb67653435d8ed03",
-  "sourceParent": "eb095606a9d89758a0223a82536358b43526a001",
-  "sourceTree": "a3f4ff69878d0d7aa02b988e538d27016650727f",
+  "sourceCommit": "5869c936a5923e5a957431f0d7ccbada440cce33",
+  "sourceParent": "08360eb8c945c5f635f2b81d9a241d3a2cdf0039",
+  "sourceTree": "4d6e2079547bae43daaee9a22f0e2030003bf0bf",
   "test": "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes",
   "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
   "environment": {
@@ -24,10 +24,10 @@
     "failures": 0,
     "errors": 0,
     "skipped": 0,
-    "testSeconds": 56.871,
-    "suiteSeconds": 56.889,
-    "timestamp": "2026-11-11T11:18:12.903Z",
-    "junitSha256": "b454ce1d88bcc2170ffe9adbaaf98b0174879a77409473b6259fb7f63952830f"
+    "testSeconds": 52.518,
+    "suiteSeconds": 52.546,
+    "timestamp": "2026-11-11T11:25:18.888Z",
+    "junitSha256": "f61914bdb8312ebfde1acf478cd6d096113c2480799739fcc2b88bf5dd5b5a0f"
   },
   "scope": {
     "profile": "Generated C Make",
