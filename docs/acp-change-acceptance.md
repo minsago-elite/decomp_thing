@@ -488,6 +488,25 @@ Final ordinary snapshot diff failures retain the ACP session reference and the `
 
 This is process-death evidence for the reconstruction evidence store only. It does not prove power-loss durability, every end-to-end workflow crash boundary, repair graph recovery, or crashes around the #732 publication decision. Exact-head hosted qualification, those remaining decision/recovery cases, and production-validator evidence from #236 are still required.
 
+At implementation commit `42d58a55aaf49b43b0ac9305e6071f5a92083fb0`,
+`ReconstructionTurnEvidenceStoreTest.turn evidence directory substitution
+never writes through the replacement symlink` additionally checks cleanup after
+the publication directory is detached. Cleanup quarantines the final-name entry
+before authenticating its file identity, preserves an entry that is not the
+current write's inode, and includes a throwing post-rename hook in the cleanup
+guard. These writer races are serialized for operations using the same
+workspace publication capability; they do not establish protection from a
+hostile same-UID process that bypasses that capability.
+
+At the same exact commit, one local Gradle run passed four focused suites with
+no failures, errors, or skips: `ReconstructionTurnEvidenceStoreTest` (6),
+`ReconstructionAcpEvidenceArchiveVerifierTest` (21),
+`ModuleRevisionGraphTest` (209), and `TraceGuidedRepairTest` (40), for 276
+tests total. The command selected only these suites and excluded frontend
+toolchain/build/install tasks. This is exact-source local evidence; hosted
+qualification, production-provider acceptance, power-loss behavior, and
+hostile same-UID interference remain unqualified.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
