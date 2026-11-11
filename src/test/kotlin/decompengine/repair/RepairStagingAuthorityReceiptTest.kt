@@ -26,9 +26,36 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 
 class RepairStagingAuthorityReceiptTest {
+    @Test
+    fun `deletion patch-count refusal retains the first deletion without charging the refused one`() {
+        val initial = mapOf(
+            "src/modules/first.c" to "int first(void) { return 0; }\n".toByteArray(),
+            "src/modules/second.c" to "int second(void) { return 0; }\n".toByteArray(),
+        )
+        val output = BoundedRepairOutput(
+            initialFiles = initial,
+            writablePaths = initial.keys,
+            resourceBudget = RepairResourceBudget(maximumPatchFiles = 1),
+        )
+
+        output.delete("src/modules/first.c")
+        assertFailsWith<RepairBudgetExceededException> {
+            output.delete("src/modules/second.c")
+        }
+
+        val changes = output.finish()
+        assertEquals(
+            setOf("src/modules/first.c"),
+            changes.keys,
+            "the refused second deletion must not enter the candidate change set",
+        )
+        assertEquals(null, changes.getValue("src/modules/first.c"))
+    }
+
     @Test
     fun `invocation-correlated staging preserves the workflow task identity`() {
         val harness = object : CapturedRepairAgentHarness {
