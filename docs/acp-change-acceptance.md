@@ -891,16 +891,19 @@ Commit `119cb9b6a` adds
 `TraceGuidedRepairTest.active ACP repair frame-count exhaustion retains
 completed write receipt and rejects the candidate`. The scripted ACP process
 first writes and receives acknowledgement for the authorized generated-C
-target, then sends bounded protocol notifications beyond a configured
-16-frame ceiling. The active repair loop retains a typed
+target, then sends bounded JSON-RPC notifications beyond a configured
+16-frame ceiling. Follow-up commit `1a777f8d3` uses the valid
+`contract/unknown_notification` method shape from the harness-level frame
+flood fixture. The active repair loop retains a typed
 `RESOURCE_EXHAUSTED` receipt and rejected assessment, verifies zero remaining
 processes and sandbox cleanup, and leaves the accepted source, `Makefile`,
 head and pending-attempt state unchanged.
 
-The focused frame-count test passed locally, and the combined active-repair
-selection passed 14 methods with zero failures, errors or skips. This is
-scripted local ACP evidence for protocol frame-count exhaustion after an
-acknowledged candidate write; it does not qualify all ACP frame shapes,
+The focused frame-count test passed locally before and after the fixture
+correction; the combined active-repair selection passed 14 methods with zero
+failures, errors or skips at `119cb9b6a`. This is scripted local ACP evidence
+for protocol frame-count exhaustion after an acknowledged candidate write; it
+does not qualify all ACP frame shapes,
 provider behavior, production validation under #236, or hosted exact-head CI.
 The complete #734 mutation and resource matrix remains open.
 
