@@ -885,6 +885,25 @@ qualify a live provider, exercise production validation under #236, or
 complete the #734 resource and mutation matrix. Hosted exact-head
 qualification remains separate. #734 and #63 remain open.
 
+## Active repair protocol frame-count checkpoint — 2026-11-11
+
+Commit `119cb9b6a` adds
+`TraceGuidedRepairTest.active ACP repair frame-count exhaustion retains
+completed write receipt and rejects the candidate`. The scripted ACP process
+first writes and receives acknowledgement for the authorized generated-C
+target, then sends bounded protocol notifications beyond a configured
+16-frame ceiling. The active repair loop retains a typed
+`RESOURCE_EXHAUSTED` receipt and rejected assessment, verifies zero remaining
+processes and sandbox cleanup, and leaves the accepted source, `Makefile`,
+head and pending-attempt state unchanged.
+
+The focused frame-count test passed locally, and the combined active-repair
+selection passed 14 methods with zero failures, errors or skips. This is
+scripted local ACP evidence for protocol frame-count exhaustion after an
+acknowledged candidate write; it does not qualify all ACP frame shapes,
+provider behavior, production validation under #236, or hosted exact-head CI.
+The complete #734 mutation and resource matrix remains open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
