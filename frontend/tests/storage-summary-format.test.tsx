@@ -39,7 +39,11 @@ it.each([
 ])('renders %s omitted plus %i listed protected jobs exactly as %s', async (omitted, listed, expected) => {
   current = preview(omitted, listed);
   render(<StorageSummary basePath="/nested" />);
+  const status = screen.getByRole('status');
+  expect(status.textContent).toBe('');
   fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+  expect(screen.getByRole('status')).toBe(status);
+  expect(status.textContent).toBe('Reading storage…');
   const line = await screen.findByText(/jobs are protected from deletion now/);
   expect(line.textContent).toBe(`${expected} jobs are protected from deletion now (active work, pins, downloads or holds).`);
   expect(transport.get.mock.calls.map(([kind, path]) => [kind, path])).toEqual([

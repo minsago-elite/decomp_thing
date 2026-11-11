@@ -195,7 +195,7 @@ it.each([
   await act(async () => { rejectRefresh(failure); await Promise.resolve(); });
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain(stale);
-  expect(alert.textContent).toContain('server is unavailable');
+  expect(alert.textContent).toContain('Refresh the job library to try again');
   expect(screen.queryByText(empty)).toBeNull();
   expect(screen.getByRole('status').textContent).not.toContain('0 jobs on this page');
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
@@ -211,7 +211,7 @@ it.each([
   ['corrupt stored entry', new ApiClientError('http_error', { status: 503, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'CORRUPT_LEGACY_JOB' }), 'Stored jobs could not be listed completely', true],
   ['unavailable listing', new ApiClientError('http_error', { status: 503, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'LISTING_UNAVAILABLE' }), 'Stored jobs could not be listed completely', true],
   ['malformed response', new ApiClientError('invalid_response', { serverCode: 'SECRET_DIAGNOSTIC' }), 'Stored jobs could not be listed completely', false],
-  ['non-transient request refusal', new ApiClientError('http_error', { status: 422, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'SECRET_DIAGNOSTIC' }), 'Jobs could not be loaded because the server is unavailable', true],
+  ['non-transient request refusal', new ApiClientError('http_error', { status: 422, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'SECRET_DIAGNOSTIC' }), 'Jobs could not be loaded. Refresh the job library to try again.', true],
 ] as const)('classifies %s and removes unverified prior rows and page navigation', async (_name, failure, expected, hasReference) => {
   const requestId = '123e4567-e89b-42d3-a456-426614174000';
   transport.get.mockResolvedValueOnce(page([job(1)], 'next_page')).mockRejectedValueOnce(failure);
@@ -257,7 +257,7 @@ it('rejects invalid saved filters without fetching and has a visible reset', asy
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
   transport.get.mockRejectedValueOnce(new ApiClientError('timeout'));
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
-  expect((await screen.findByRole('alert')).textContent).toContain('server is unavailable');
+  expect((await screen.findByRole('alert')).textContent).toContain('Refresh the job library to try again');
   history.back();
   await waitFor(() => {
     expect(location.search).toBe('?limit=10000');
@@ -418,7 +418,7 @@ it('distinguishes a partial storage failure from server unavailability', async (
   render(<Dashboard basePath="" />);
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.');
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
-  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('server is unavailable'));
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Refresh the job library to try again'));
 });
 
 it.each([

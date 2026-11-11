@@ -143,7 +143,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
         missing: copy.jobLibraryRouteUnavailableCheckServerVersion,
         unsupported: copy.jobLibraryResponseUnsupportedUpdateApplication,
         unverified: copy.storedJobsCouldNotBeListedCompletelyTheServerHas,
-        failed: copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable,
+        failed: copy.jobsCouldNotBeLoadedRefreshToTryAgain,
       }[category];
       retainPrevious = canRetainMetadata(failure);
     }

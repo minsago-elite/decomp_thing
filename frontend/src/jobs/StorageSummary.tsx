@@ -53,7 +53,7 @@ export function StorageSummary({ basePath }: { basePath: string }) {
     <h3 id="storage-summary-title">{copy.storage}</h3>
     <p>{copy.explanation}</p>
     <button type="button" disabled={busy} onClick={() => { void read(); }}>{copy.read}</button>
-    {notice && <p role="status">{notice}</p>}
+    <p role="status">{notice}</p>
     {error && <p role="alert">{error}</p>}
     {summary && <>
       {!summary.complete && <p>{copy.partial}</p>}

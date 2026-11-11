@@ -4,7 +4,7 @@ import { ApiClientError, withApiFailureReference } from '../api/client';
 import { runViewPath } from '../app/paths';
 import { activityHistoryCopy as copy, activityCopy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
-import { canRetainMetadata } from '../shared/retainMetadata';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ActivityRow } from './ActivityRow';
 import { ActivityStages } from './ActivityStages';
@@ -54,10 +54,15 @@ export function ActivityHistory({ jobId, runId, basePath, navigation, window }: 
         return invalidActivityWindow();
       } catch (failure: unknown) {
         if (!current()) return;
-        const message = failure instanceof ApiClientError && failure.status === 401 ? copy.session
-          : failure instanceof ApiClientError && failure.status === 403 ? copy.denied
-          : failure instanceof ApiClientError && (failure.status === 410 || failure.serverCode === 'INVALID_CURSOR') ? copy.expired
-          : copy.unavailable;
+        const message = failure instanceof ApiClientError && (failure.status === 410 || failure.serverCode === 'INVALID_CURSOR')
+          ? copy.expired : {
+            session: copy.session,
+            denied: copy.denied,
+            missing: copy.missing,
+            unsupported: copy.unsupported,
+            unverified: copy.unverified,
+            failed: copy.unavailable,
+          }[metadataFailureKind(failure)];
         setStored(previous => ({ binding,
           rows: previous.binding === binding && canRetainMetadata(failure) ? previous.rows : [],
           snapshot: previous.binding === binding && canRetainMetadata(failure) ? previous.snapshot : null,

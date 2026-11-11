@@ -10,6 +10,7 @@ import { createAssetRecovery } from '../src/app/assetRecovery';
 import { createReloadGuard } from '../src/app/reloadGuard';
 import { createBrowserSession } from '../src/session/session';
 import type { SessionState } from '../src/session/session';
+import { activityWindowSearch } from '../src/jobs/activityNavigation';
 
 // Route/panel failure states (#628), retry safety and form context (#629), and convergent
 // session/version recovery (#630), against the same contract fixtures as the axe gate.
@@ -81,6 +82,7 @@ describe('route failure states (#628)', () => {
     ['job overview', `/nested/jobs/${jobId}`, 'job'],
     ['attempt history', `/nested/jobs/${jobId}/runs`, 'runs'],
     ['attempt overview', `/nested/jobs/${jobId}/runs/${runId}`, 'run'],
+    ['saved activity window', `/nested/jobs/${jobId}/runs/${runId}/activity${activityWindowSearch({ after: 'cursor_before', through: 'cursor_after', event: null })}`, 'snapshot'],
     ['source directory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`, 'revisionDirectory'],
     ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/file_0_${'a'.repeat(64)}`, 'revisionFile'],
   ];
@@ -97,8 +99,9 @@ describe('route failure states (#628)', () => {
         const text = alert.textContent ?? '';
         messages.set(label, text.replace(` Reference ID: ${reference}.`, ''));
         expect(text.includes(`Reference ID: ${reference}.`)).toBe(failure.requestId !== undefined);
-        for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed', ' at '])
+        for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed'])
           expect(text).not.toContain(leaked);
+        expect(text).not.toMatch(/\n\s+at\s/);
         // The route stays navigable: heading, breadcrumbs and main navigation remain.
         expect(screen.getByRole('heading', { level: 1 })).toBeTruthy();
         expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeTruthy();
