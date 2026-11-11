@@ -39,6 +39,14 @@ Source checkpoint: `c21aac825798f53ad9fca3ea4cd86b5e2983cf41` on PR #1946.
 
 Explicit retained-case reads now distinguish session, denied, missing artifact, unsupported contract, unverified content, and other read failures using fixed copy and only a validated request reference. Parser/format failures are classified as unverified rather than as a generic transport failure. The new component matrix checks message distinctness, reference-ID behavior and exclusion of server codes/exception details. The existing malformed legacy artifact case now expects the unverified state. This remains an explicitly activated, read-only artifact view; it does not execute cases or start a workflow.
 
+## Attempt-evidence failure matrix extension — 2026-11-12
+
+Source checkpoint: `b072992d4fe1526db8e8a623dc568a107180a51c`, directly based on PR #1946 head `9556839c1e2c82d6c7186dd50eac73eaca9edd20`.
+
+The app-level resilience matrix now covers the explicit exploration-report read on the attempt-evidence route for session expiry, denied access, missing evidence, unsupported contract, corrupt/unverified response, and server failure. It checks distinct fixed messages, safe request-reference behavior, absence of raw codes/exception diagnostics, and that the attempt route, Activity navigation, validation evidence panel, and main navigation remain available. The shared route-state matrix now documents eight routes. This is mock/JSDOM route evidence, not packaged-browser or screen-reader qualification.
+
+On Node.js `v24.20.0`, the exact source tree passed the focused `resilience.test.tsx` suite (18 tests), the full frontend suite (85 files, 1,238 tests, no failures), and `npm run build` (generated API check, TypeScript, ESLint, production Vite bundle, and all bundle-size budgets). The change does not establish every failure class on every panel or close #628/#221; exact-head hosted and packaged-browser evidence plus manual assistive-technology qualification remain outstanding.
+
 Verification at this source checkpoint:
 
 - Focused Vitest: `exploration-cases.test.tsx`, `exploration-failure-cases.test.tsx`, and `resilience.test.tsx` — 3 files, 49 tests passed.
