@@ -73,6 +73,7 @@ RECONSTRUCTION_MODES = {
 ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
     "repair-active-output-limit",
+    "repair-active-declared-role-no-change",
 }
 RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
@@ -251,6 +252,7 @@ expected_fs = {
     "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -722,6 +724,25 @@ if MODE == "repair-active-output-limit":
         pass
     time.sleep(30)
     raise SystemExit(144)
+if MODE == "repair-active-declared-role-no-change":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    sibling = join_path(cwd, "src/modules/reconstructed_extra.c")
+    makefile = join_path(cwd, "Makefile")
+    for request_id, path, content in (
+        (147, sibling, "int extra(void) { return 0; }\n"),
+        (148, makefile, "all: unauthorized\n"),
+    ):
+        denied = try_write_workspace_file(path, content, request_id)
+        if denied.get("error", {}).get("code") != -32602:
+            raise SystemExit(149)
+    write_workspace_file(
+        source,
+        "/* café */\nint decomp_engine_main(void) { return 1; }\n",
+        150,
+    )
+    write_workspace_file(source, "int decomp_engine_main(void) { return 0; }\n", 151)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
 if MODE == "pipelined-callbacks":
     source = join_path(cwd, "contract/artifact.txt")
     for request_id in (130, 131):
