@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { sampleProcessTree } from './soak626/resources.mjs';
 import { waitForSuccessfulStreamOpen } from './soak626/stream-renewal.mjs';
 import { routeFeedbackExpression } from './soak626/route-feedback.mjs';
+import { LIMITS } from './soak626/evaluate.mjs';
 import { sampleRetention } from './soak626/listener-retention.mjs';
 
 const RUN_PREFIX = 'run_fixture_soak_';
@@ -198,7 +199,8 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     coverage: { activityRows: activityRowsDelivered, fourJobs: delivered.size === 4, slots: selectedJobs.length,
       reconnects, reconnectDeliveries, visibilityTransitions, naturalLeaseRenewals: leaseRenewals.length,
       retentionGapRecovered, sourceReads, streamLimitResponses, successfulStreamOpens,
-      listenerRetentionSamples: retentionSamples.length, finalCleanup: openStreams.size === 0 } });
+      listenerRetentionSamples: retentionSamples.length, retentionNavigations: retentionSamples.length,
+      finalCleanup: openStreams.size === 0 } });
   const sampleTask = (async () => {
     const observedIdentities = new Map(Object.entries(baseline.pids).map(([pid, start]) => [Number(pid), start]));
     while (sampling) {
@@ -225,7 +227,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     await clickHref(tab, evaluate, '/nested/runtime');
     await ready(tab, `location.pathname === '/nested/runtime' && document.querySelector('#server-runtime-title')`, `Runtime checkpoint ${label}`);
     const start = Date.now();
-    while (openStreams.size > 0 && Date.now() - start < 35_000) await delay(100);
+    while (openStreams.size > 0 && Date.now() - start < LIMITS.drainSeconds * 1000) await delay(100);
     const elapsed = (Date.now() - start) / 1000;
     drainSeconds = Math.max(drainSeconds, elapsed);
     assert.equal(openStreams.size, 0, `Activity stream did not drain within the 35-second budget at ${label}`);
@@ -410,13 +412,18 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     activeScheduleMs += slotMs;
     if ((slot + 1) % 5 === 0) {
       stage = `retention-sample-${slot + 1}-dashboard`;
+      const dashboardNavigationStartedAt = Date.now();
       await clickHref(tab, evaluate, '/nested/');
       await ready(tab, `location.pathname === '/nested/'`, `dashboard for retention sample ${slot + 1}`);
+      const dashboardNavigationMs = Date.now() - dashboardNavigationStartedAt;
       const drainStarted = Date.now();
-      while (openStreams.size > 0 && Date.now() - drainStarted < 5000) await delay(50);
-      assert.equal(openStreams.size, 0, `Activity stream did not unsubscribe within five seconds before retention sample ${slot + 1}`);
+      while (openStreams.size > 0 && Date.now() - drainStarted < LIMITS.drainSeconds * 1000) await delay(100);
+      const streamDrainMs = Date.now() - drainStarted;
+      assert.equal(openStreams.size, 0, `Activity stream request did not close within ${LIMITS.drainSeconds} seconds before retention sample ${slot + 1}`);
       const retention = await sampleRetention({ cdp, tab, evaluate, index: slot + 1, settledRoute: '/nested/' });
       retention.openStreamCount = openStreams.size;
+      retention.dashboardNavigationMs = dashboardNavigationMs;
+      retention.streamDrainMs = streamDrainMs;
       retentionSamples.push(retention);
       assert.ok(retentionSamples.length <= Math.ceil(slots / 5), 'Listener-retention observations exceeded the bounded sample envelope');
       publishPartial();
@@ -528,6 +535,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     coverage: { activityRows: activityRowsDelivered, fourJobs: delivered.size === 4, slots, reconnects, visibilityTransitions,
       reconnectDeliveries, naturalLeaseRenewals: leaseRenewals.length, retentionGapRecovered, sourceReads,
       streamLimitResponses, successfulStreamOpens, listenerRetentionSamples: retentionSamples.length,
+      retentionNavigations: retentionSamples.length,
       finalCleanup: openStreams.size === 0 },
-    note: 'Each slot reads the bounded 200-row activity page. The initial slot and every reconnect slot continue to the tail; other rapid job switches avoid creating unnecessary leased streams. Source complexity is one inert Makefile per job.' };
+    note: 'Each slot reads the bounded 200-row activity page. The initial slot and every reconnect slot continue to the tail; other rapid job switches avoid creating unnecessary leased streams. Every fifth slot adds one in-app dashboard navigation and waits for the Activity stream request to close before its post-GC retention sample; this instrumented workload is distinct from earlier soak measurements. Source complexity is one inert Makefile per job.' };
 }

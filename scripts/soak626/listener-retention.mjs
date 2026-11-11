@@ -1,5 +1,8 @@
 /** Install a bounded observer for live EventTarget registrations in the page's main world. */
-export function installListenerRetentionProbe() {
+export function installListenerRetentionProbe(maximumTrackedTargets = 50_000) {
+  if (!Number.isSafeInteger(maximumTrackedTargets) || maximumTrackedTargets < 1) {
+    throw new TypeError('Listener-retention tracking bound must be a positive safe integer');
+  }
   if (globalThis.__workbenchListenerRetention?.version === 1) return;
   const nativeAdd = EventTarget.prototype.addEventListener;
   const nativeRemove = EventTarget.prototype.removeEventListener;
@@ -10,19 +13,25 @@ export function installListenerRetentionProbe() {
   let automaticRemovals = 0;
   let collectedTargets = 0;
   let collectedListeners = 0;
+  let trackingOverflow = false;
   const safeTypes = new Set(['abort', 'blur', 'change', 'click', 'error', 'focus', 'input', 'keydown', 'keyup',
     'load', 'message', 'offline', 'online', 'pointerdown', 'pointerup', 'submit', 'visibilitychange']);
   const reportType = type => safeTypes.has(type) ? type : 'other';
-  const maximumTrackedTargets = 50_000;
 
   function tokenFor(target) {
-    let token = recordsByTarget.get(target)?.token;
+    const state = recordsByTarget.get(target);
+    let token = state?.token;
     if (!token) {
+      if (liveTargets.size >= maximumTrackedTargets) {
+        trackingOverflow = true;
+        return null;
+      }
       token = { target: new WeakRef(target), count: 0, byType: new Map() };
       recordsByTarget.set(target, { token, byType: new Map() });
     }
     if (!liveTargets.has(token) && liveTargets.size >= maximumTrackedTargets) {
-      throw new Error('Listener-retention observer exceeded its bounded live-target allowance');
+      trackingOverflow = true;
+      return null;
     }
     liveTargets.add(token);
     return token;
@@ -53,19 +62,29 @@ export function installListenerRetentionProbe() {
     return true;
   }
 
-  EventTarget.prototype.addEventListener = function(typeValue, listener, options) {
+  EventTarget.prototype.addEventListener = new Proxy(nativeAdd, { apply(_native, target, args) {
+    const [typeValue, listener, options] = args;
     if (typeof listener !== 'function' && (typeof listener !== 'object' || listener === null)) {
-      return nativeAdd.call(this, typeValue, listener, options);
+      return nativeAdd.call(target, typeValue, listener, options);
     }
-    const type = String(typeValue);
+    const type = `${typeValue}`;
     const capture = options === true || (typeof options === 'object' && options !== null && Boolean(options.capture));
     const once = typeof options === 'object' && options !== null && Boolean(options.once);
-    const signal = typeof options === 'object' && options !== null ? options.signal : null;
-    if (signal?.aborted) return nativeAdd.call(this, typeValue, listener, options);
-    const existing = listenerRecord(this, type, listener, capture);
-    if (existing) return nativeAdd.call(this, typeValue, existing.wrapper, options);
+    let signal = null;
+    let nativeOptions = options;
+    if (typeof options === 'object' && options !== null) {
+      const passive = Boolean(options.passive);
+      signal = options.signal ?? null;
+      // Preserve the native dictionary conversion while reading page-owned getters once.
+      nativeOptions = { capture, once, passive };
+      if (signal != null) nativeOptions.signal = signal;
+    }
+    if (signal?.aborted) return nativeAdd.call(target, type, listener, nativeOptions);
+    const existing = listenerRecord(target, type, listener, capture);
+    if (existing) return nativeAdd.call(target, type, existing.wrapper, nativeOptions);
 
-    const token = tokenFor(this);
+    const token = tokenFor(target);
+    if (!token) return nativeAdd.call(target, type, listener, nativeOptions);
     const record = { type, listener, capture, once, signal, abortHandler: null, wrapper: null, token };
     record.wrapper = function(...args) {
       if (record.once) removeRecord(this, record, 'automatic');
@@ -74,7 +93,7 @@ export function installListenerRetentionProbe() {
       if (typeof handleEvent === 'function') return handleEvent.apply(listener, args);
     };
     if (signal && typeof signal.addEventListener === 'function') {
-      const weakTarget = new WeakRef(this);
+      const weakTarget = new WeakRef(target);
       const weakListener = new WeakRef(listener);
       record.abortHandler = () => {
         const target = weakTarget.deref();
@@ -82,7 +101,7 @@ export function installListenerRetentionProbe() {
         if (target && currentListener) {
           const current = listenerRecord(target, type, currentListener, capture);
           if (current) removeRecord(target, current, 'automatic');
-        } else if (token.count > 0) {
+        } else if (!token.collected && token.count > 0) {
           token.count--;
           const safeType = reportType(type);
           token.byType.set(safeType, (token.byType.get(safeType) ?? 1) - 1);
@@ -94,16 +113,16 @@ export function installListenerRetentionProbe() {
       nativeAdd.call(signal, 'abort', record.abortHandler, { once: true });
     }
     try {
-      nativeAdd.call(this, typeValue, record.wrapper, options);
+      nativeAdd.call(target, type, record.wrapper, nativeOptions);
     } catch (error) {
       if (record.abortHandler) nativeRemove.call(signal, 'abort', record.abortHandler);
       if (token.count === 0) liveTargets.delete(token);
       throw error;
     }
-    let state = recordsByTarget.get(this);
+    let state = recordsByTarget.get(target);
     if (!state) {
       state = { token, byType: new Map() };
-      recordsByTarget.set(this, state);
+      recordsByTarget.set(target, state);
     }
     let byListener = state.byType.get(type);
     if (!byListener) state.byType.set(type, byListener = new Map());
@@ -114,16 +133,18 @@ export function installListenerRetentionProbe() {
     const safeType = reportType(type);
     token.byType.set(safeType, (token.byType.get(safeType) ?? 0) + 1);
     registrations++;
-  };
+  } });
 
-  EventTarget.prototype.removeEventListener = function(typeValue, listener, options) {
-    const type = String(typeValue);
+  EventTarget.prototype.removeEventListener = new Proxy(nativeRemove, { apply(_native, target, args) {
+    const [typeValue, listener, options] = args;
+    const type = `${typeValue}`;
     const capture = options === true || (typeof options === 'object' && options !== null && Boolean(options.capture));
-    const record = listener && listenerRecord(this, type, listener, capture);
-    if (!record) return nativeRemove.call(this, typeValue, listener, options);
-    nativeRemove.call(this, typeValue, record.wrapper, options);
-    removeRecord(this, record, 'explicit');
-  };
+    const nativeOptions = typeof options === 'object' && options !== null ? capture : options;
+    const record = listener && listenerRecord(target, type, listener, capture);
+    if (!record) return nativeRemove.call(target, type, listener, nativeOptions);
+    nativeRemove.call(target, type, record.wrapper, nativeOptions);
+    removeRecord(target, record, 'explicit');
+  } });
 
   const probe = {
     version: 1,
@@ -139,6 +160,9 @@ export function installListenerRetentionProbe() {
           gcPrunedListeners += token.count;
           collectedTargets++;
           collectedListeners += token.count;
+          token.count = 0;
+          token.byType.clear();
+          token.collected = true;
           liveTargets.delete(token);
           continue;
         }
@@ -159,6 +183,7 @@ export function installListenerRetentionProbe() {
         collectedListeners,
         gcPrunedTargets,
         gcPrunedListeners,
+        trackingOverflow,
       };
     },
   };
@@ -172,7 +197,8 @@ export async function sampleRetention({ cdp, tab, evaluate, index, settledRoute 
   const listener = await evaluate(tab, 'window.__workbenchListenerRetention?.snapshot() ?? null');
   if (!listener || listener.version !== 1 || !Number.isSafeInteger(listener.activeListeners) ||
       !Number.isSafeInteger(listener.activeTargets) || !Number.isSafeInteger(listener.registrations) ||
-      !Number.isSafeInteger(listener.explicitRemovals) || !Number.isSafeInteger(listener.automaticRemovals)) {
+      !Number.isSafeInteger(listener.explicitRemovals) || !Number.isSafeInteger(listener.automaticRemovals) ||
+      typeof listener.trackingOverflow !== 'boolean') {
     throw new Error('Listener-retention probe is missing or malformed');
   }
   const heap = await cdp.call('Runtime.getHeapUsage', {}, tab.sessionId);
@@ -192,6 +218,7 @@ export async function sampleRetention({ cdp, tab, evaluate, index, settledRoute 
     collectedListeners: listener.collectedListeners,
     gcPrunedTargets: listener.gcPrunedTargets,
     gcPrunedListeners: listener.gcPrunedListeners,
+    trackingOverflow: listener.trackingOverflow,
     rendererHeapBytesAfterGc: heap.usedSize,
     rendererBackingStorageBytesAfterGc: heap.backingStorageSize,
   };

@@ -5,6 +5,7 @@ import { evaluate } from './evaluate.mjs';
 function listenerRetention() { return { version: 1, sampleEverySlots: 5, complete: true, samples: Array.from({ length: 24 }, (_, index) => ({
   index: (index + 1) * 5, settledRoute: '/nested/', openStreamCount: 0,
   activeListeners: 12, activeListenerTargets: 6, activeListenersByType: { click: 5, keydown: 2, input: 5 },
+  trackingOverflow: false, dashboardNavigationMs: 10, streamDrainMs: 0,
   registrations: 100 + index * 100, explicitRemovals: 88 + index * 100, automaticRemovals: 0,
   collectedTargets: 0, collectedListeners: 0, gcPrunedTargets: 0, gcPrunedListeners: 0,
   rendererHeapBytesAfterGc: 8_000_000, rendererBackingStorageBytesAfterGc: 4_000_000,
@@ -12,7 +13,7 @@ function listenerRetention() { return { version: 1, sampleEverySlots: 5, complet
 
 function good() { return { coverage: { activityRows: 120 * 205, fourJobs: true, slots: 120, reconnects: 20, reconnectDeliveries: 20, visibilityTransitions: 10,
   naturalLeaseRenewals: 4, retentionGapRecovered: true, sourceReads: 240, finalCleanup: true,
-  successfulStreamOpens: 8, streamLimitResponses: 0, listenerRetentionSamples: 24 }, jobSwitches: 119, sameDocument: true,
+  successfulStreamOpens: 8, streamLimitResponses: 0, listenerRetentionSamples: 24, retentionNavigations: 24 }, jobSwitches: 119, sameDocument: true,
   retention: listenerRetention(),
   applicationJvmProfile: 'default', applicationJvmOptions: [],
   packagedJvmDefaultOptions: ['-Xms64m'],
@@ -59,10 +60,36 @@ test('requires complete quiescent listener and backing-storage samples', () => {
     r => { r.retention.samples[2].openStreamCount = 1; },
     r => { r.retention.samples[2].activeListeners++; },
     r => { r.retention.samples[2].activeListenersByType.click++; },
+    r => { r.retention.samples[2].activeListenersByType.secret_event = 1; },
+    r => { r.retention.samples[2].activeListenersByType.click = -1; },
+    r => { r.retention.samples[2].trackingOverflow = true; },
+    r => { r.retention.samples[2].activeListenerTargets = r.retention.samples[2].activeListeners + 1; },
+    r => { r.retention.samples[2].streamDrainMs = 35_001; },
     r => { r.retention.samples[2].registrations++; },
+    r => { r.retention.samples[2].explicitRemovals = -1; },
+    r => { r.retention.samples[2].activeListenersByType.click = Number.MAX_SAFE_INTEGER; },
+    r => { r.retention.samples[2].registrations = r.retention.samples[1].registrations - 1; },
+    r => { r.retention.samples[2].collectedTargets++; },
     r => { r.retention.samples[2].rendererBackingStorageBytesAfterGc += 16 * 1024 * 1024 + 1; },
     r => { r.retention.samples.at(-1).rendererBackingStorageBytesAfterGc += 1024 * 1024 + 1; },
   ]) {
     const candidate = good(); mutate(candidate); assert.throws(() => evaluate(candidate), /retention|listener|backing.storage/);
   }
+});
+
+test('retention samples report their extra navigation cadence and bounded stream drain', () => {
+  const report = good();
+  report.coverage.retentionNavigations = 0;
+  assert.throws(() => evaluate(report), /sampling coverage/);
+  const overDrain = good();
+  overDrain.retention.samples[0].streamDrainMs = 35_001;
+  assert.throws(() => evaluate(overDrain), /retention/);
+});
+
+test('permits collected-target counts to exceed collected-listener counts', () => {
+  const report = good();
+  report.retention.samples[0].collectedTargets = 1;
+  report.retention.samples[0].gcPrunedTargets = 1;
+  for (const sample of report.retention.samples.slice(1)) sample.collectedTargets = 1;
+  assert.equal(evaluate(report).passed, true);
 });
