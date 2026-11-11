@@ -74,6 +74,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
     "repair-active-output-limit",
     "repair-active-declared-role-frame-limit-after-write",
+    "repair-active-declared-role-frame-size-after-write",
     "repair-active-declared-role-no-change",
     "repair-active-declared-role-candidate",
     "repair-active-declared-role-timeout-after-write",
@@ -256,6 +257,7 @@ expected_fs = {
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-frame-limit-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-frame-size-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-candidate": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
@@ -747,6 +749,22 @@ if MODE == "repair-active-declared-role-frame-limit-after-write":
         })
     time.sleep(30)
     raise SystemExit(150)
+if MODE == "repair-active-declared-role-frame-size-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* frame-size candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        151,
+    )
+    # One otherwise valid notification exceeds the configured frame-byte ceiling after the
+    # broker has acknowledged the candidate write. The frame stays below aggregate output.
+    send({
+        "jsonrpc": "2.0",
+        "method": "contract/oversized_notification",
+        "params": {"padding": "x" * 20000},
+    })
+    time.sleep(30)
+    raise SystemExit(152)
 if MODE == "repair-active-declared-role-no-change":
     source = join_path(cwd, "src/modules/reconstructed.c")
     sibling = join_path(cwd, "src/modules/reconstructed_extra.c")
