@@ -4175,11 +4175,13 @@ class TraceGuidedRepairTest {
     }
 
     @Test
-    fun `active repair required context file and byte budgets refuse before dispatch`() {
+    fun `active repair required context module file and byte budgets refuse before dispatch`() {
         data class ContextLimitCase(
             val id: String,
+            val maximumModules: Int,
             val maximumFiles: Int,
             val maximumBytes: Long,
+            val seedBothPaths: Boolean,
             val expectedDiagnostic: String,
         )
 
@@ -4189,8 +4191,30 @@ class TraceGuidedRepairTest {
         val contextBytes = "int secondary(void) { return 0; }\n".toByteArray(Charsets.UTF_8)
         val requiredBytes = targetBytes.size.toLong() + contextBytes.size
         val cases = listOf(
-            ContextLimitCase("files", 1, requiredBytes, "required repair context has 2 files; limit=1"),
-            ContextLimitCase("bytes", 2, requiredBytes - 1, "required repair context has $requiredBytes bytes; limit=${requiredBytes - 1}"),
+            ContextLimitCase(
+                "modules",
+                maximumModules = 1,
+                maximumFiles = 2,
+                maximumBytes = requiredBytes,
+                seedBothPaths = true,
+                expectedDiagnostic = "repair identifies 2 required modules; context module limit=1",
+            ),
+            ContextLimitCase(
+                "files",
+                maximumModules = 64,
+                maximumFiles = 1,
+                maximumBytes = requiredBytes,
+                seedBothPaths = false,
+                expectedDiagnostic = "required repair context has 2 files; limit=1",
+            ),
+            ContextLimitCase(
+                "bytes",
+                maximumModules = 64,
+                maximumFiles = 2,
+                maximumBytes = requiredBytes - 1,
+                seedBothPaths = false,
+                expectedDiagnostic = "required repair context has $requiredBytes bytes; limit=${requiredBytes - 1}",
+            ),
         )
 
         for (case in cases) {
@@ -4204,11 +4228,19 @@ class TraceGuidedRepairTest {
                 RepairIndexLayout(
                     sourcePaths = listOf(targetPath, contextPath).sorted(),
                     editablePaths = listOf(targetPath),
-                    modules = listOf(RepairModuleEvidence("main", listOf(targetPath, contextPath).sorted())),
+                    modules = if (case.id == "modules") {
+                        listOf(
+                            RepairModuleEvidence("main", listOf(targetPath)),
+                            RepairModuleEvidence("secondary", listOf(contextPath)),
+                        )
+                    } else {
+                        listOf(RepairModuleEvidence("main", listOf(targetPath, contextPath).sorted()))
+                    },
                 ),
             )
             val acceptedFiles = mapOf(targetPath to targetBytes, contextPath to contextBytes)
             val budget = RepairResourceBudget(
+                maximumContextModules = case.maximumModules,
                 maximumContextFiles = case.maximumFiles,
                 maximumContextBytes = case.maximumBytes,
                 maximumPatchFiles = case.maximumFiles,
@@ -4270,7 +4302,15 @@ class TraceGuidedRepairTest {
             val failure = assertFailsWith<RepairBudgetExceededException>(case.id) {
                 loop.repairCompileError(
                     project,
-                    CompileFailure(listOf("cc"), 2, "", "$targetPath: compiler error"),
+                    CompileFailure(
+                        listOf("cc"),
+                        2,
+                        "",
+                        buildString {
+                            append("$targetPath: compiler error")
+                            if (case.seedBothPaths) append("\n$contextPath: compiler error")
+                        },
+                    ),
                     emptyList(),
                 )
             }
