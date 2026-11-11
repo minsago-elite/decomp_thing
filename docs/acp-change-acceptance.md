@@ -839,6 +839,16 @@ The focused test passed one JUnit method with zero failures, errors, or skips
 at this commit. These are representative protected-role and non-owner
 destinations, not an exhaustive matrix for every profile role or path race.
 
+Commit `d5bdbb8cd` configures the active repair source-file budget and declared
+grant to 4,096 bytes. The scripted peer's one-byte-over write is rejected with
+`POLICY_DENIED`; a 4,096-byte UTF-8 write is acknowledged, followed by the
+ordinary candidate and restoration writes. The durable receipt records this
+denial and the three allowed operations, and the workflow still ends with
+`NO_CHANGES`, preserving accepted source bytes and graph head. The focused
+denial and token-usage tests passed together at this commit: two JUnit
+methods, zero failures, errors, or skips. This is one active Make repair
+grant-boundary check, not the full per-file/content/resource matrix.
+
 The accumulated focused active-repair run at `875bd07530f34e3bc40fd47ebba9ff45e3142044`
 passed seven methods with zero failures, errors, or skips: directory admission,
 per-file output, staging growth, patch-file count, aggregate patch bytes,
@@ -1021,7 +1031,7 @@ repair path. They do not establish independent token metering, preemptive
 interruption, live-provider behavior, production validation under #236, or
 hosted exact-head CI. #734 and #63 remain open.
 
-Commit `8581a44e9` extends
+Commit `42c97dbc2` extends
 `TraceGuidedRepairTest.active ACP repair enforces returned token ceilings after
 a write and permits exact usage` with two malformed-usage cases. The scripted
 ACP peer first receives acknowledgement for the authorized candidate write,
