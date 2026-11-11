@@ -7,11 +7,13 @@ import decompengine.agent.AgentExecutionException;
 import decompengine.agent.AgentExecutionOutcome;
 import decompengine.agent.AgentExecutionReceipt;
 import decompengine.agent.AgentExecutionRequestBinding;
+import decompengine.agent.AgentTurnIdentity;
 import decompengine.agent.AgentFailure;
 import decompengine.agent.AgentFailureKind;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /** Authored data only: tests ordinary-log disclosure without invoking an ACP harness. */
 public final class AcpCompatibilityFailureSummaryControls {
@@ -126,8 +128,10 @@ public final class AcpCompatibilityFailureSummaryControls {
             List.of(), List.of(), List.of(), null, new AcpExecutionEvidenceCompleteness(true, true, true), null);
         var failure = new AgentFailure(AgentFailureKind.TIMEOUT, "PRIVATE-failure", false, null,
             Map.of("PRIVATE-key", "PRIVATE-value"));
-        return new AgentExecutionReceipt(new AgentExecutionRequestBinding(1, "a".repeat(64), "b".repeat(64)),
-            new AgentExecutionOutcome.Failed(failure), evidence, cause);
+        var binding = new AgentExecutionRequestBinding(1, "a".repeat(64), "b".repeat(64));
+        var identity = new AgentTurnIdentity(UUID.randomUUID().toString(), "failure-summary-control",
+            binding.getRequestSha256(), null);
+        return new AgentExecutionReceipt(binding, new AgentExecutionOutcome.Failed(failure), evidence, cause, identity);
     }
 
     private static String summary(AgentExecutionReceipt receipt, Throwable failure) {
