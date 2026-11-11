@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "5f7973639faae6a186359585509ccd50908795b2",
+  "sourceParent": "cdcf0a6a3055f7c6b24a6a56da9d13d959afa01a",
+  "sourceTree": "fd3f823958ba431ad69a92b91df79318bca82228",
+  "tests": [
+    "decompengine.repair.RepairStagingAuthorityReceiptTest.deletion patch-count refusal retains the first deletion without charging the refused one",
+    "decompengine.repair.TraceGuidedRepairTest.active repair request-byte budget refuses before dispatch and preserves the accepted head"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.RepairStagingAuthorityReceiptTest.deletion patch-count refusal retains the first deletion without charging the refused one' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair request-byte budget refuses before dispatch and preserves the accepted head'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1"
+  },
+  "results": [
+    {
+      "report": "issue-734-repair-staging-deletion-patch-count-combined-2026-11-11.xml",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "testSeconds": 0.114,
+      "timestamp": "2026-11-11T13:23:43.372Z",
+      "sha256": "42833360e2f077a1df1c11879d95f7e6f1f21500ec14554ed1b90ab6181c0e6f"
+    },
+    {
+      "report": "issue-734-active-repair-request-byte-preflight-2026-11-11.xml",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "testSeconds": 0.693,
+      "timestamp": "2026-11-11T13:23:43.490Z",
+      "sha256": "f1dd442da0583315f1eff18ef34eccfd0ba82d062ef21cfa519a11372a9db784"
+    }
+  ],
+  "scope": {
+    "activeRequestBudget": "The repair loop rejects an over-budget request with a bounded diagnostic before agent dispatch; the accepted source/head remain unchanged, no candidate node or pending attempt is created, and the run is recorded RESOURCE_EXHAUSTED.",
+    "deletionPatchCount": "The lower-level BoundedRepairOutput sink retains the first authorized deletion and refuses a second distinct deletion under maximumPatchFiles=1 without recording that second change.",
+    "limitations": [
+      "The deletion test is lower-level captured-output coverage, not public ACP repair; active ACP repair authorizes only READ_FILE and WRITE_FILE and exposes no delete callback.",
+      "Local tests only; no hosted exact-head qualification, live provider, successful production repair validation under #236, or complete #734/#63 acceptance."
+    ]
+  }
+}

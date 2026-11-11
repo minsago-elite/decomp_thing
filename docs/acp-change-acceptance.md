@@ -1607,3 +1607,20 @@ so this result does not qualify deletion through public ACP repair or extend
 its replacement-only mutation contract. Existing active-loop refusal tests
 remain the evidence for unsupported create/delete attempts. This local test
 does not close #734 or #63.
+
+## Active repair request admission budget — 2026-11-11
+
+Source commit `5f7973639faae6a186359585509ccd50908795b2` adds an active
+repair-loop case with a 1 KiB request ceiling. It requires a bounded
+`repair request requires …; limit=1024` refusal before agent dispatch, no
+candidate node or pending attempt, unchanged accepted source/head, and a
+persisted `RESOURCE_EXHAUSTED` run outcome. The same focused invocation
+re-ran the lower-level deletion patch-count control. Both JUnit reports pass
+with zero failures, errors, or skips; the [provenance record](evidence/issue-734-active-repair-request-and-delete-quota-2026-11-11.json)
+binds their hashes, selectors, source tree, and command.
+
+The request ceiling also bounds persisted repair evidence fields, so the test
+uses a 1 KiB regression-input ceiling to satisfy the budget invariant and
+proves only request-admission refusal for an empty regression input. The
+deletion result remains lower-level captured-output coverage, not ACP delete
+qualification. Both are local fixture evidence and leave #734/#63 open.
