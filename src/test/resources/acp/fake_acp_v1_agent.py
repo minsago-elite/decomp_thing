@@ -75,6 +75,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-output-limit",
     "repair-active-declared-role-token-limit-after-write",
     "repair-active-declared-role-tool-limit-after-write",
+    "repair-active-declared-role-cancel-after-write",
     "repair-active-declared-role-frame-limit-after-write",
     "repair-active-declared-role-frame-size-after-write",
     "repair-active-declared-role-no-change",
@@ -260,6 +261,7 @@ expected_fs = {
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-token-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-tool-limit-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-cancel-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-frame-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-frame-size-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
@@ -772,6 +774,25 @@ if MODE == "repair-active-declared-role-tool-limit-after-write":
                             for message in completion_burst))
     sys.stdout.flush()
     raise SystemExit(0)
+if MODE == "repair-active-declared-role-cancel-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* cancellation candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        151,
+    )
+    update({
+        "sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": "repair-cancel-after-ack-ready"},
+        "messageId": "repair-cancel-after-ack-ready",
+    })
+    while True:
+        message = read_message()
+        if message is None:
+            raise SystemExit(0)
+        if message.get("method") == "session/cancel":
+            respond(prompt, {"stopReason": "cancelled"})
+            raise SystemExit(0)
 if MODE == "repair-active-declared-role-token-limit-after-write":
     source = join_path(cwd, "src/modules/reconstructed.c")
     write_workspace_file(

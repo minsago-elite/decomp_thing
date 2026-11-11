@@ -135,6 +135,7 @@ class AcpAgentHarness(
     private val workspaceSnapshotLimitsLock = Any()
     private var configuredWorkspaceSnapshotLimits = WorkspaceSnapshotLimits()
     private var workspaceSnapshotLimitsFrozen = false
+    private val promptLoopGateForTesting = AtomicReference<(suspend (Job) -> Unit)?>(null)
     private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
     private val latestDiagnosticsReference = AtomicReference<AcpProcessDiagnostics?>()
@@ -150,6 +151,11 @@ class AcpAgentHarness(
             check(!workspaceSnapshotLimitsFrozen) { "workspace snapshot limits are already in use" }
             configuredWorkspaceSnapshotLimits = limits
         }
+    }
+
+    /** Internal-only barrier for deterministic prompt-completion ordering tests. */
+    internal fun withPromptLoopGateForTesting(gate: suspend (Job) -> Unit): AcpAgentHarness = apply {
+        check(promptLoopGateForTesting.compareAndSet(null, gate)) { "prompt loop test gate is already configured" }
     }
 
     private fun freezeWorkspaceSnapshotLimits(): WorkspaceSnapshotLimits = synchronized(workspaceSnapshotLimitsLock) {
@@ -1498,6 +1504,8 @@ class AcpAgentHarness(
         fun exhaustedOutcome(): PromptOutcome? = translator.limitFailure.get()?.let { limitSummary ->
             PromptOutcome(AgentStopReason.LIMIT_EXHAUSTED, null, limitSummary)
         }
+
+        promptLoopGateForTesting.getAndSet(null)?.invoke(promptJob)
 
         while (true) {
             try {

@@ -12,6 +12,7 @@ import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentMessageEvent
 import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentFileChange
@@ -41,6 +42,7 @@ import decompengine.validation.BehaviorOutputLimitException
 import decompengine.validation.ProcessInput
 import decompengine.validation.ProcessOutput
 import com.sun.net.httpserver.HttpServer
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -80,6 +82,11 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TraceGuidedRepairTest {
+    private fun createRepairTempDirectory(prefix: String): Path {
+        val testRoot = Path.of("build/test-tmp").createDirectories()
+        return Files.createTempDirectory(testRoot, prefix)
+    }
+
     @Test
     fun `repair caller never terminalizes an unresolved acceptance decision`() {
         val unexpectedAfterDecision = IllegalStateException("decision write outcome was ambiguous")
@@ -1260,7 +1267,7 @@ class TraceGuidedRepairTest {
         )
         for ((mutation, expectedReason) in cases) {
             val project = createProject(
-                createTempDirectory("repair-mutation-contract-${mutation}-").resolve("project"),
+                createRepairTempDirectory("repair-mutation-contract-${mutation}-").resolve("project"),
                 reconstructedSource = "int decomp_engine_main(void) {\n",
             )
             val target = project.resolve("src/modules/reconstructed.c")
@@ -1348,7 +1355,7 @@ class TraceGuidedRepairTest {
         )
         for ((variant, expectedReason) in cases) {
             val project = createProject(
-                createTempDirectory("repair-change-claim-${variant}-").resolve("project"),
+                createRepairTempDirectory("repair-change-claim-${variant}-").resolve("project"),
                 reconstructedSource = "int decomp_engine_main(void) {\n",
             )
             val target = project.resolve("src/modules/reconstructed.c")
@@ -1468,7 +1475,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active ACP repair retains resource-limited write refusal without changing accepted source`() {
         val project = createProject(
-            createTempDirectory("repair-active-acp-resource-limit-").resolve("project"),
+            createRepairTempDirectory("repair-active-acp-resource-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val target = project.resolve("src/modules/reconstructed.c")
@@ -1516,7 +1523,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active ACP repair retains real stream output exhaustion and rejects the candidate`() {
         val project = createProject(
-            createTempDirectory("repair-active-acp-output-limit-").resolve("project"),
+            createRepairTempDirectory("repair-active-acp-output-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val target = project.resolve("src/modules/reconstructed.c")
@@ -1564,7 +1571,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active ACP repair frame-count exhaustion retains completed write receipt and rejects the candidate`() {
         val project = createProject(
-            createTempDirectory("repair-active-acp-frame-limit-").resolve("project"),
+            createRepairTempDirectory("repair-active-acp-frame-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val target = project.resolve("src/modules/reconstructed.c")
@@ -1642,7 +1649,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active ACP repair frame-size exhaustion retains completed write receipt and rejects the candidate`() {
         val project = createProject(
-            createTempDirectory("repair-active-acp-frame-size-").resolve("project"),
+            createRepairTempDirectory("repair-active-acp-frame-size-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val target = project.resolve("src/modules/reconstructed.c")
@@ -1719,7 +1726,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active ACP repair preserves tool-call exhaustion when prompt completes immediately`() {
         val project = createProject(
-            createTempDirectory("repair-active-acp-tool-limit-").resolve("project"),
+            createRepairTempDirectory("repair-active-acp-tool-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val target = project.resolve("src/modules/reconstructed.c")
@@ -1729,7 +1736,7 @@ class TraceGuidedRepairTest {
         val limits = AgentExecutionLimits(maxToolCalls = 1)
         val harness = AcpAgentHarnessTest().harness(
             "repair-active-declared-role-tool-limit-after-write",
-        )
+        ).withPromptLoopGateForTesting { promptJob -> withTimeout(5_000) { promptJob.join() } }
 
         val failure = assertFailsWith<Exception> {
             generatedCRepairLoop(
@@ -1795,7 +1802,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active ACP repair permits exact tool-call limit through candidate validation`() {
         val project = createProject(
-            createTempDirectory("repair-active-acp-tool-limit-boundary-").resolve("project"),
+            createRepairTempDirectory("repair-active-acp-tool-limit-boundary-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val target = project.resolve("src/modules/reconstructed.c")
@@ -1893,6 +1900,115 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active ACP repair cancellation after acknowledged write preserves accepted state`() {
+        val project = createProject(
+            createRepairTempDirectory("repair-active-acp-cancel-after-write-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+        )
+        val target = project.resolve("src/modules/reconstructed.c")
+        val acceptedSource = target.readBytes()
+        val acceptedMakefile = project.resolve("Makefile").readBytes()
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+        val harness = AcpAgentHarnessTest().harness("repair-active-declared-role-cancel-after-write")
+        val cancellation = AgentCancellationSource()
+        val ready = java.util.concurrent.CountDownLatch(1)
+        var validationCalls = 0
+        val validation = object : RepairValidationStrategy {
+            override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+            override fun requireAvailable() = Unit
+            override fun validateCandidate(
+                request: RepairCandidateValidationRequest,
+            ): RepairCandidateValidationOutcome {
+                validationCalls++
+                error("cancelled candidate must not reach validation")
+            }
+            override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                error("cancelled candidate must not compile")
+            override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                error("cancelled candidate must not rebuild")
+            override fun evaluateBehavior(
+                id: String,
+                projectDir: Path,
+                originalBinary: Path,
+                rebuiltBinary: Path,
+                inputs: List<ProcessInput>,
+                reportsDir: Path,
+                budget: RepairResourceBudget,
+            ): BehaviorComparisonReport = error("cancelled candidate must not run behavior validation")
+        }
+        val loop = TestRepairRuntimeAccess.openLoop(
+            harness = harness,
+            history = RepairHistory(project.resolve("reports/repair_history.json")),
+            profile = GeneratedCRepairIndexProfile,
+            validationStrategy = validation,
+            stagingAuthority = CapturedRepairStagingAuthority,
+            limits = AgentExecutionLimits(),
+            cancellation = cancellation.cancellation,
+            onAgentEvent = { event ->
+                if (event is AgentMessageEvent && event.textDelta == "repair-cancel-after-ack-ready") {
+                    ready.countDown()
+                    cancellation.cancel()
+                }
+            },
+            resourceBudget = RepairResourceBudget(),
+            allowTestOnlyValidation = false,
+            faultInjector = null,
+        )
+
+        val failure = assertFailsWith<Exception> {
+            loop.repairCompileError(
+                project,
+                CompileFailure(listOf("make"), 2, "", "src/modules/reconstructed.c: compiler error"),
+                emptyList(),
+            )
+        }
+        assertTrue(ready.await(1, TimeUnit.SECONDS), "agent must acknowledge the target write before cancellation")
+        val messages = generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.toList()
+        assertTrue(messages.any { it.contains("cancelled") }, messages.toString())
+        assertEquals(0, validationCalls)
+        assertContentEquals(acceptedSource, target.readBytes())
+        assertContentEquals(acceptedMakefile, project.resolve("Makefile").readBytes())
+
+        val rawGraph = Json.parseToJsonElement(
+            project.resolve("reports/repair-revisions/graph.json").readText(),
+        ).jsonObject
+        assertEquals(JsonNull, rawGraph.getValue("pending"))
+        assertEquals(baselineHead, rawGraph.getValue("headId").jsonPrimitive.content)
+        val rawNode = rawGraph.getValue("nodes").jsonArray.last().jsonObject
+        assertEquals("rejected", rawNode.getValue("status").jsonPrimitive.content)
+        val rawBinding = rawNode.getValue("repairMetadata").jsonObject
+            .getValue("agentInvocation").jsonObject
+        val receipt = Json.parseToJsonElement(project.resolve(
+            rawBinding.getValue("receiptPath").jsonPrimitive.content,
+        ).readText()).jsonObject
+        val process = receipt.getValue("process").jsonObject
+        assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int)
+        assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean)
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(RepairRunStatus.CANCELLED, graph.snapshot.runs.last().status)
+            val rejected = graph.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+            assertEquals("returned-cancelled", binding.terminalOutcome)
+            val receipt = Json.parseToJsonElement(project.resolve(binding.receiptPath).readText()).jsonObject
+            val result = receipt.getValue("outcome").jsonObject.getValue("result").jsonObject
+            assertEquals("cancelled", result.getValue("stopReason").jsonPrimitive.content)
+            val records = receipt.getValue("policyAudits").jsonObject
+                .getValue("filesystem").jsonObject.getValue("records").jsonArray.map { it.jsonObject }
+            assertEquals(1, records.size)
+            assertEquals("allowed", records.single().getValue("outcome").jsonPrimitive.content)
+            val assessment = decompengine.project.AcpChangeAssessment.parse(
+                project.resolve(requireNotNull(binding.assessmentPath)).readBytes(),
+            )
+            assertEquals(decompengine.project.AcpChangePublicationEligibility.INTERRUPTED, assessment.eligibility)
+            assertEquals(AgentStopReason.CANCELLED, assessment.normalizedStopReason)
+        }
+    }
+
+    @Test
     fun `active ACP repair enforces returned token ceilings after a write and permits exact usage`() {
         data class TokenCase(
             val label: String,
@@ -1911,7 +2027,7 @@ class TraceGuidedRepairTest {
         )
         cases.forEach { case ->
             val project = createProject(
-                createTempDirectory("repair-active-acp-token-limit-${case.label}-").resolve("project"),
+                createRepairTempDirectory("repair-active-acp-token-limit-${case.label}-").resolve("project"),
                 reconstructedSource = "int decomp_engine_main(void) {\n",
             )
             val target = project.resolve("src/modules/reconstructed.c")
@@ -2049,7 +2165,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active repair path rejects candidate growth beyond the staging byte budget`() {
         val project = createProject(
-            createTempDirectory("repair-active-staging-byte-limit-").resolve("project"),
+            createRepairTempDirectory("repair-active-staging-byte-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val targetPath = "src/modules/reconstructed.c"
@@ -2117,7 +2233,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active repair path classifies per-file output limit as resource exhaustion`() {
         val project = createProject(
-            createTempDirectory("repair-active-source-file-limit-").resolve("project"),
+            createRepairTempDirectory("repair-active-source-file-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val target = project.resolve("src/modules/reconstructed.c")
@@ -2149,7 +2265,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active repair path rejects a candidate over the patch file count`() {
         val project = createProject(
-            createTempDirectory("repair-active-patch-file-limit-").resolve("project"),
+            createRepairTempDirectory("repair-active-patch-file-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val firstPath = "src/modules/reconstructed.c"
@@ -2244,7 +2360,7 @@ class TraceGuidedRepairTest {
     @Test
     fun `active repair path enforces aggregate patch bytes and permits the exact boundary`() {
         val project = createProject(
-            createTempDirectory("repair-active-patch-byte-limit-").resolve("project"),
+            createRepairTempDirectory("repair-active-patch-byte-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
         val firstPath = "src/modules/reconstructed.c"
@@ -3197,7 +3313,7 @@ class TraceGuidedRepairTest {
 
     @Test
     fun `active repair path records staging directory admission refusal as resource exhaustion`() {
-        val project = createTempDirectory("repair-active-directory-entry-limit-").resolve("project")
+        val project = createRepairTempDirectory("repair-active-directory-entry-limit-").resolve("project")
         val sourcePath = "a/b/c/program.c"
         project.resolve(sourcePath).parent.createDirectories()
         val source = "int program(void) { return 1; }\n".toByteArray()
