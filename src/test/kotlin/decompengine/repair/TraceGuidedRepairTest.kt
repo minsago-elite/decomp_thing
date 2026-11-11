@@ -4153,6 +4153,7 @@ class TraceGuidedRepairTest {
             )
         }
         assertTrue(failure.message.orEmpty().contains("repair request requires"))
+        assertTrue(failure.message.orEmpty().contains("limit=${budget.maximumRequestBytes}"))
         assertEquals(0, dispatches.get())
         assertContentEquals(source, project.resolve(sourcePath).readBytes())
 
