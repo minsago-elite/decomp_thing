@@ -582,6 +582,11 @@ class AcpAgentHarness(
                         authenticationInventory = authenticationInventory,
                     )
                 }
+            } catch (failure: InterruptedException) {
+                // runBlocking clears the worker's interrupt flag when it throws. Preserve the
+                // caller-cancellation meaning through ACP result handling so reconstruction can
+                // persist an interrupted attempt and roll back instead of reporting unresolved.
+                recordPrimaryFailure(RequestedAcpCancellation("caller interruption"))
             } catch (failure: Throwable) {
                 recordPrimaryFailure(failure)
             }

@@ -76,6 +76,7 @@ RECONSTRUCTION_MODES = {
     "reconstruction-mixed-output-limit-after-write",
     "reconstruction-request-timeout-after-write",
     "reconstruction-terminal-mutation-refusal-disabled",
+    "reconstruction-cancel-after-write",
 }
 ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
@@ -276,6 +277,7 @@ expected_fs = {
     "reconstruction-stdout-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-mixed-output-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-cancel-after-write": {"readTextFile": False, "writeTextFile": True},
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-token-limit-after-write": {"readTextFile": True, "writeTextFile": True},
@@ -1547,6 +1549,20 @@ if MODE in RECONSTRUCTION_MODES:
         if oversized.get("error", {}).get("code") != -32602:
             raise SystemExit(127)
     write_workspace_file(source, content, 816)
+    if MODE == "reconstruction-cancel-after-write":
+        # This update follows the successful filesystem callback acknowledgement.
+        update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "reconstruction-cancel-after-ack-ready"},
+            "messageId": "reconstruction-cancel-after-ack-ready",
+        })
+        while True:
+            message = read_message()
+            if message is None:
+                raise SystemExit(0)
+            if message.get("method") == "session/cancel":
+                respond(prompt, {"stopReason": "cancelled"})
+                raise SystemExit(0)
     if MODE == "reconstruction-frame-count-limit-after-write":
         # The authorized write is acknowledged first. These individually bounded notifications
         # then exceed the reconstruction request's frame-count ceiling without exhausting its

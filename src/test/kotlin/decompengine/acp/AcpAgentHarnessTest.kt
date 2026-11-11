@@ -1293,6 +1293,9 @@ class AcpAgentHarnessTest {
             val receipts: List<AgentExecutionReceipt>,
             val requestSha256s: List<String>,
             val implementationExistedAtDispatch: Boolean?,
+            val cancellationReadyObserved: Boolean,
+            val workerInterruptFlagAtExit: Boolean?,
+            val phases: List<decompengine.agent.AgentWorkflowPhase>,
         )
 
         fun runAttempt(
@@ -1304,9 +1307,12 @@ class AcpAgentHarnessTest {
             executionLimits: AgentExecutionLimits? = null,
             snapshotLimits: WorkspaceSnapshotLimits? = null,
             gatePromptCompletion: Boolean = false,
+            cancelAfterAcknowledgedMessage: String? = null,
         ): Attempt {
             val receipts = mutableListOf<AgentExecutionReceipt>()
             val requestSha256s = mutableListOf<String>()
+            val phases = mutableListOf<decompengine.agent.AgentWorkflowPhase>()
+            val cancellationReady = cancelAfterAcknowledgedMessage?.let { CountDownLatch(1) }
             var taskCount = 0
             var implementationExistedAtDispatch: Boolean? = null
             val progress = object : AgentWorkflowProgress {
@@ -1317,7 +1323,11 @@ class AcpAgentHarnessTest {
                     implementationExistedAtDispatch = request.workspaceRoots.single { it.id == rule.path.rootId }
                         .path.resolve(rule.path.relativePath).let(Files::isRegularFile)
                     return object : AgentTaskProgress {
-                        override fun event(event: AgentExecutionEvent) = Unit
+                        override fun event(event: AgentExecutionEvent) {
+                            if (event is AgentMessageEvent && event.textDelta == cancelAfterAcknowledgedMessage) {
+                                cancellationReady?.countDown()
+                            }
+                        }
                         override fun complete(receipt: AgentExecutionReceipt) {
                             receipts += receipt
                         }
@@ -1328,7 +1338,7 @@ class AcpAgentHarnessTest {
                     phase: decompengine.agent.AgentWorkflowPhase,
                     taskId: String?,
                     acceptedRevisionSha256: String?,
-                ) = Unit
+                ) { phases += phase }
             }
             val acp = harness(
                 mode = mode,
@@ -1378,17 +1388,37 @@ class AcpAgentHarnessTest {
             )
             var result: ArchivalReconstructionResult? = null
             var failure: Exception? = null
-            ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
-                try {
-                    result = service.reconstructWithWorkspace(
-                        binary,
-                        output,
-                        workspace,
-                        workflowRunId = "public-reconstruction-mutation-$index",
-                    )
-                } catch (caught: Exception) {
-                    failure = caught
+            var workerInterruptFlagAtExit: Boolean? = null
+            fun reconstructOnCurrentThread() {
+                ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+                    try {
+                        result = service.reconstructWithWorkspace(
+                            binary,
+                            output,
+                            workspace,
+                            workflowRunId = "public-reconstruction-mutation-$index",
+                        )
+                    } catch (caught: Exception) {
+                        failure = caught
+                    }
                 }
+            }
+            if (cancelAfterAcknowledgedMessage == null) {
+                reconstructOnCurrentThread()
+            } else {
+                val worker = Thread({
+                    try {
+                        reconstructOnCurrentThread()
+                    } finally {
+                        workerInterruptFlagAtExit = Thread.currentThread().isInterrupted
+                    }
+                }, "public-reconstruction-cancel-$index")
+                worker.start()
+                val acknowledged = requireNotNull(cancellationReady).await(10, TimeUnit.SECONDS)
+                if (acknowledged) worker.interrupt()
+                worker.join(30_000)
+                assertFalse(worker.isAlive, "public reconstruction worker did not stop after its single interrupt")
+                assertTrue(acknowledged, "the candidate-write acknowledgement event did not arrive before the guard timeout")
             }
             return Attempt(
                 result,
@@ -1398,6 +1428,9 @@ class AcpAgentHarnessTest {
                 receipts.toList(),
                 requestSha256s.toList(),
                 implementationExistedAtDispatch,
+                cancellationReady?.count == 0L,
+                workerInterruptFlagAtExit,
+                phases.toList(),
             )
         }
 
@@ -1976,6 +2009,49 @@ class AcpAgentHarnessTest {
         assertFalse(Files.exists(terminalExtracted.resolve("src/modules/decomp_extra.c")))
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(terminalExtracted, profile).returnCode)
         acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
+
+        val interrupted = runAttempt(
+            "reconstruction-cancel-after-write",
+            index = 21,
+            requestTimeoutMillis = 25_000,
+            cancelAfterAcknowledgedMessage = "reconstruction-cancel-after-ack-ready",
+        )
+        assertTrue(interrupted.cancellationReadyObserved, "the fixture must acknowledge its candidate write first")
+        assertNull(interrupted.result)
+        val interruptionFailure = assertNotNull(interrupted.failure)
+        assertEquals(1, interrupted.taskCount)
+        assertEquals(1, interrupted.receipts.size)
+        val interruptedReceipt = interrupted.receipts.single()
+        assertEquals(interrupted.requestSha256s.single(), interruptedReceipt.requestBinding.requestSha256)
+        assertEquals(interrupted.requestSha256s.single(), interruptedReceipt.turnIdentity?.requestSha256)
+        val interruptedOutcome = assertIs<AgentExecutionOutcome.Returned>(interruptedReceipt.outcome)
+        assertEquals(AgentStopReason.CANCELLED, interruptedOutcome.result.stopReason)
+        val interruptedEvidence = assertIs<AcpInvocationEvidenceSnapshot>(interruptedReceipt.providerEvidence)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, interruptedEvidence.cleanupDisposition)
+        assertTrue(interrupted.harness.latestFilesystemAudit().any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        }, "the acknowledged candidate write must precede caller interruption")
+        val interruptedTurn = generateSequence<Throwable>(interruptionFailure) { it.cause }
+            .filterIsInstance<decompengine.project.ModuleReconstructionInterruptedException>()
+            .single()
+        assertEquals(AgentStopReason.CANCELLED, interruptedTurn.stopReason)
+        assertFalse(interrupted.workerInterruptFlagAtExit ?: true,
+            "runBlocking consumes the interrupt while the harness converts it to a typed cancellation")
+        assertTrue(interrupted.phases.none {
+            it in setOf(
+                decompengine.agent.AgentWorkflowPhase.ACCEPTED,
+                decompengine.agent.AgentWorkflowPhase.COMPLETED,
+                decompengine.agent.AgentWorkflowPhase.UNRESOLVED,
+            )
+        }, interrupted.phases.toString())
+        val interruptDiagnostics = assertNotNull(interrupted.harness.latestDiagnostics())
+        assertTrue(interruptDiagnostics.remainingProcessIds.isEmpty(), interruptDiagnostics.toString())
+        assertTrue(interruptDiagnostics.sandboxCleanupVerified, interruptDiagnostics.toString())
+        assertProcessStopped(interruptDiagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output), "caller interruption must preserve accepted output")
         assertNoReconstructionPublicationResidue(output)
     }
 
