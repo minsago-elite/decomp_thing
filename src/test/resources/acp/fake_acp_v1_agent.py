@@ -740,7 +740,11 @@ if MODE == "repair-active-declared-role-frame-limit-after-write":
     # The target write is acknowledged before these individually bounded frames exceed the
     # configured protocol-frame count. If the host does not stop the stream, fail closed.
     for ordinal in range(64):
-        update({"notification": "contract/unknown", "ordinal": ordinal})
+        send({
+            "jsonrpc": "2.0",
+            "method": "contract/unknown_notification",
+            "params": {"ordinal": ordinal},
+        })
     time.sleep(30)
     raise SystemExit(150)
 if MODE == "repair-active-declared-role-no-change":
