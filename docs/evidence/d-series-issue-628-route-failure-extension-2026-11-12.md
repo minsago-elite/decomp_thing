@@ -179,3 +179,17 @@ Verification at this source checkpoint:
 - `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local frontend/JSDOM evidence only. It does not qualify packaged-browser or assistive-technology behavior, command failure categories, or full #628/#221 acceptance.
+
+## Progress-retention policy read failure states — 2026-11-12
+
+Exact source checkpoint: `5bbc13e5df4298ce845f8499801d450d256266af` on PR #1946.
+
+The explicit progress-retention policy read now distinguishes expired session, denied access, missing route, unsupported response, unverified response, and general read failure. Unverified job/run binding is typed as an invalid response. The policy remains unavailable for changes after any failed read; pin/unpin mutation handling and conflict semantics are unchanged. The six-case test verifies category-distinct fixed status copy, safe request references, diagnostic redaction, and no mutation request.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `progress-pin.test.tsx` — 1 file, 10 tests passed.
+- Full frontend Vitest suite — 84 files, 1,230 tests passed.
+- `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local frontend/JSDOM evidence only. It does not qualify packaged-browser or assistive-technology behavior, pin/unpin failure permutations, or full #628/#221 acceptance.
