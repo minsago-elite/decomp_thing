@@ -1131,18 +1131,21 @@ write, and corrects the negative fixture to send exactly 262,145 UTF-8 bytes
 Commit `819d72246` changes the accepted boundary payload to contain multi-byte
 `é` text while keeping the encoded source at exactly 262,144 bytes; its test
 frame ceiling is raised to 1 MiB to accommodate JSON wire escaping. The
-out-of-grant sibling refusal remains in the same method.
+commit also sets the final snapshot's file-count limit to one. Commit
+`b4fff63ec` independently constructs the expected UTF-8 bytes in Kotlin and
+requires byte-for-byte equality with both the published source and extracted
+archive member. The out-of-grant sibling refusal remains in the same method.
 
 The focused command passed one JUnit method with zero failures, errors, or
-skips at `819d72246be7e48382feb8511818d78e5086cb55`:
+skips at `b4fff63ecd27751c98ea4e557bec662f3bb75ba9`:
 
 ```text
 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'
 ```
 
 This is local scripted ACP evidence for exact equality at the mutation-grant
-and final snapshot per-file/aggregate byte ceilings in the Generated C Make
-profile, with its archive file ceiling reduced from the profile default of
-128 MiB to 256 KiB. It does not qualify other profiles, independent providers,
-production validation under #236, the complete mutation/resource matrix, or
-hosted exact-head CI. #734 and #63 remain open.
+and final snapshot file-count, per-file-byte and aggregate-byte ceilings in
+the Generated C Make profile, with its archive file ceiling reduced from the
+profile default of 128 MiB to 256 KiB. It does not qualify other profiles,
+independent providers, production validation under #236, the complete
+mutation/resource matrix, or hosted exact-head CI. #734 and #63 remain open.
