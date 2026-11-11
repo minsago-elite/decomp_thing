@@ -264,3 +264,25 @@ Verification on a repository-local archive snapshot reconstructed from the exact
 - `node --check scripts/packaged-browser-scale.mjs` — passed.
 
 The source-level tests cover legacy peers without cursor metadata; the packaged retry journey exercises the signed-cursor browser fixture. Hosted checks for this checkpoint remain authoritative. This evidence does not establish all dashboard failure classes, every route or panel, packaged accessibility beyond the existing gates, assistive-technology behavior, or full #628/#221 acceptance. #628 remains OPEN.
+
+
+## Exact-head review reconciliation — 2026-11-12
+
+The review of earlier checkpoint `f92769613` identified a conditionally mounted Runtime storage
+status paragraph and dashboard wording that implied every unclassified failure came from server
+unavailability. These findings do not apply to the current PR source checkpoint `8af0f15e9`:
+
+- `StorageSummary` keeps one `<p role="status">` mounted while its text changes from empty to
+  “Reading storage…”. The `storage-summary-format.test.tsx` loading case asserts the same DOM
+  node is still present after the update. This is component evidence for the live-region structure;
+  it is not screen-reader announcement evidence.
+- The dashboard's fallback is the fixed, generic “Jobs could not be loaded. Refresh the job
+  library to try again.” message. The route tests include a non-transient 422 refusal and assert
+  that copy, without attributing the failure to a server outage.
+- The shared route matrix and wrapped-panel inventory in `docs/web-failure-states.md` now match
+  the current seven-route matrix and Runtime panel boundaries.
+
+The conditionally mounted status paragraph was corrected in source checkpoint
+`df3c37d8ae3f5de62346e258c52ef00ff9b5ae36`. This remains local component evidence; packaged
+browser and assistive-technology qualification, remaining panels, and full #628/#221 acceptance
+remain outstanding.
