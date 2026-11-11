@@ -1507,7 +1507,10 @@ class AcpAgentHarness(
         }
 
         fun exhaustedOutcome(): PromptOutcome? = translator.limitFailure.get()?.let { limitSummary ->
-            PromptOutcome(AgentStopReason.LIMIT_EXHAUSTED, null, limitSummary)
+            // Preserve a prompt response that completed alongside an exhausted tool update.
+            // Its reported usage is still required to classify configured token ceilings;
+            // discarding it would turn bounded exhaustion into a protocol failure.
+            PromptOutcome(AgentStopReason.LIMIT_EXHAUSTED, promptResponse.get(), limitSummary)
         }
 
         promptLoopGateForTesting.getAndSet(null)?.invoke(promptJob)

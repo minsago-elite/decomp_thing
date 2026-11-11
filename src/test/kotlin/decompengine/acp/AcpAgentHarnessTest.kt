@@ -1942,14 +1942,21 @@ class AcpAgentHarnessTest {
         val toolLimited = runAttempt(
             "reconstruction-tool-limit-after-write",
             index = 13,
-            executionLimits = AgentExecutionLimits(maxToolCalls = 2),
+            executionLimits = AgentExecutionLimits(
+                maxToolCalls = 2,
+                maxInputTokens = 11,
+                maxOutputTokens = 7,
+            ),
             gatePromptCompletion = true,
         )
         val toolFailure = assertNotNull(toolLimited.failure, "tool-call exhaustion must refuse publication")
         assertEquals(1, toolLimited.taskCount)
         val toolResult = toolLimited.receipts.single().requireResult()
         assertEquals(AgentStopReason.LIMIT_EXHAUSTED, toolResult.stopReason)
-        assertEquals(3, assertNotNull(assertNotNull(toolResult.usage).toolCalls))
+        val toolUsage = assertNotNull(toolResult.usage)
+        assertEquals(3, assertNotNull(toolUsage.toolCalls))
+        assertEquals(11L, assertNotNull(toolUsage.inputTokens))
+        assertEquals(7L, assertNotNull(toolUsage.outputTokens))
         val toolReceipt = toolLimited.receipts.single()
         assertEquals(toolLimited.requestSha256s.single(), toolReceipt.requestBinding.requestSha256)
         val toolEvidence = assertIs<AcpInvocationEvidenceSnapshot>(toolReceipt.providerEvidence)
