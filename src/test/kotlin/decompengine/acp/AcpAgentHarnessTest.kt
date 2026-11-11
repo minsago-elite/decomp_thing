@@ -1641,6 +1641,24 @@ class AcpAgentHarnessTest {
                 expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
                 inject = { target, outside -> Files.createLink(outside, target) },
             ),
+            FinalSnapshotViolation(
+                label = "fifo",
+                index = 26,
+                expectedReason = "special-file",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, _ ->
+                    Files.delete(target)
+                    val mkfifo = ProcessBuilder("/usr/bin/mkfifo", target.toString())
+                        .redirectErrorStream(true)
+                        .start()
+                    try {
+                        assertTrue(mkfifo.waitFor(5, TimeUnit.SECONDS), "mkfifo fixture timed out")
+                        assertEquals(0, mkfifo.exitValue(), "mkfifo fixture failed")
+                    } finally {
+                        if (mkfifo.isAlive) mkfifo.destroyForcibly()
+                    }
+                },
+            ),
         )
         for (scenario in finalSnapshotViolations) {
             val outside = fixture.resolve("final-snapshot-${scenario.label}-outside.c")
