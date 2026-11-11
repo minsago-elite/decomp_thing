@@ -960,6 +960,8 @@ if MODE == "repair-active-declared-role-patch-count-retry":
     second = join_path(cwd, "src/modules/secondary.c")
     first_candidate = "/* retained one-file patch */\nint decomp_engine_main(void) { return 1; }\n"
     second_candidate = "int secondary(void) { return 1; }\n"
+    first_original = "int decomp_engine_main(void) { return 0; }\n"
+    second_original = "int secondary(void) { return 0; }\n"
     write_workspace_file(first, first_candidate, 170)
 
     refused = try_write_workspace_file(second, second_candidate, 171)
@@ -971,8 +973,19 @@ if MODE == "repair-active-declared-role-patch-count-retry":
         raise SystemExit(173)
     second_readback = read_workspace_file(second, 174)
     if "error" in second_readback or second_readback.get("result", {}).get("content") != \
-            "int secondary(void) { return 0; }\n":
+            second_original:
         raise SystemExit(174)
+
+    # Returning the first file to its initial bytes removes it from the distinct
+    # patch set and must release the single patch slot for the second file.
+    write_workspace_file(first, first_original, 175)
+    write_workspace_file(second, second_candidate, 176)
+    restored_first = read_workspace_file(first, 177)
+    if "error" in restored_first or restored_first.get("result", {}).get("content") != first_original:
+        raise SystemExit(177)
+    accepted_second = read_workspace_file(second, 178)
+    if "error" in accepted_second or accepted_second.get("result", {}).get("content") != second_candidate:
+        raise SystemExit(178)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-timeout-after-write":

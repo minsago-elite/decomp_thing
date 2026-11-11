@@ -3523,7 +3523,7 @@ class TraceGuidedRepairTest {
 
     @Test
     @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
-    fun `active ACP repair keeps the first patch when the second file exceeds patch count`() {
+    fun `active ACP repair reuses a patch slot after restoring the first file`() {
         val testRoot = Path.of("build/test-tmp").createDirectories()
         val project = createProject(
             Files.createTempDirectory(testRoot, "repair-active-acp-patch-count-retry-").resolve("project"),
@@ -3534,7 +3534,7 @@ class TraceGuidedRepairTest {
         val secondBefore = "int secondary(void) { return 0; }\n".toByteArray(Charsets.UTF_8)
         project.resolve(secondPath).writeBytes(secondBefore)
         val failureText = "$firstPath: compiler error\n$secondPath: compiler error"
-        val candidateSource = "/* retained one-file patch */\nint decomp_engine_main(void) { return 1; }\n"
+        val firstCandidate = "/* retained one-file patch */\nint decomp_engine_main(void) { return 1; }\n"
             .toByteArray(Charsets.UTF_8)
         val secondCandidate = "int secondary(void) { return 1; }\n".toByteArray(Charsets.UTF_8)
         val acceptedPaths = listOf(
@@ -3546,9 +3546,9 @@ class TraceGuidedRepairTest {
         )
         val acceptedFiles = acceptedPaths.associateWith { project.resolve(it).readBytes() }
         val budget = RepairResourceBudget(maximumPatchFiles = 1)
-        assertTrue(budget.maximumSourceFileBytes > maxOf(candidateSource.size, secondCandidate.size))
-        assertTrue(budget.maximumPatchBytes > candidateSource.size + secondCandidate.size)
-        assertTrue(budget.maximumStagingBytes > candidateSource.size + secondCandidate.size)
+        assertTrue(budget.maximumSourceFileBytes > maxOf(firstCandidate.size, secondCandidate.size))
+        assertTrue(budget.maximumPatchBytes > firstCandidate.size + secondCandidate.size)
+        assertTrue(budget.maximumStagingBytes > firstCandidate.size + secondCandidate.size)
         val graphAdmission = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
             val context = graph.selectContext("compile", failureText)
             assertEquals(setOf(firstPath, secondPath), context.writablePaths.toSet())
@@ -3603,7 +3603,7 @@ class TraceGuidedRepairTest {
         var validationCalls = 0
         var observedInvocation: RepairValidationInvocation? = null
         var observedCandidateDigest: String? = null
-        val validationStop = IllegalStateException("one-file patch candidate reached validator")
+        val validationStop = IllegalStateException("reused one-file patch candidate reached validator")
         val validation = object : RepairValidationStrategy {
             override val assurance = RepairValidationAssurance.STRICT_CONTAINED
             override fun requireAvailable() = Unit
@@ -3612,11 +3612,10 @@ class TraceGuidedRepairTest {
             ): RepairCandidateValidationOutcome {
                 validationCalls++
                 assertEquals(acceptedFiles.keys, request.candidateSourcePaths.toSet())
-                acceptedFiles.filterKeys { it != firstPath }.forEach { (path, bytes) ->
+                acceptedFiles.filterKeys { it != secondPath }.forEach { (path, bytes) ->
                     assertContentEquals(bytes, request.candidateSources.getValue(path), path)
                 }
-                assertContentEquals(candidateSource, request.candidateSources.getValue(firstPath))
-                assertContentEquals(secondBefore, request.candidateSources.getValue(secondPath))
+                assertContentEquals(secondCandidate, request.candidateSources.getValue(secondPath))
                 val candidateDigest = decompengine.repair.repairCandidateSourceSha256(request.candidateSources)
                 assertEquals(candidateDigest, request.sourceRevisionSha256)
                 observedCandidateDigest = candidateDigest
@@ -3691,23 +3690,32 @@ class TraceGuidedRepairTest {
             assertEquals(1, changes.getValue("observedCount").jsonPrimitive.int)
             val change = changes.getValue("records").jsonArray.single().jsonObject
             assertEquals("modified", change.getValue("kind").jsonPrimitive.content)
-            val relativePath = firstPath.encodeToByteArray()
+            val relativePath = secondPath.encodeToByteArray()
             val relativePathCommitment = change.getValue("relativePath").jsonObject
             assertEquals(sha256(relativePath), relativePathCommitment.getValue("sha256").jsonPrimitive.content)
             assertEquals(relativePath.size, relativePathCommitment.getValue("encodedBytes").jsonPrimitive.int)
             assertEquals("utf-8", relativePathCommitment.getValue("encoding").jsonPrimitive.content)
-            assertEquals(sha256(acceptedFiles.getValue(firstPath)), change.getValue("beforeSha256").jsonPrimitive.content)
-            assertEquals(sha256(candidateSource), change.getValue("afterSha256").jsonPrimitive.content)
+            assertEquals(sha256(secondBefore), change.getValue("beforeSha256").jsonPrimitive.content)
+            assertEquals(sha256(secondCandidate), change.getValue("afterSha256").jsonPrimitive.content)
+            assertEquals(secondCandidate.size.toLong(), change.getValue("sizeBytes").jsonPrimitive.content.toLong())
             val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
-            assertEquals(4, filesystem.getValue("recordCount").jsonPrimitive.int)
+            assertEquals(8, filesystem.getValue("recordCount").jsonPrimitive.int)
             val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
-            assertEquals(listOf("allowed", "denied", "allowed", "allowed"), records.map {
+            assertEquals(
+                listOf("write", "write", "read", "read", "write", "write", "read", "read").map {
+                    sha256("fs/${it}_text_file".toByteArray(Charsets.UTF_8))
+                },
+                records.map {
+                    it.getValue("method").jsonObject.getValue("sha256").jsonPrimitive.content
+                },
+            )
+            assertEquals(listOf("allowed", "denied", "allowed", "allowed", "allowed", "allowed", "allowed", "allowed"), records.map {
                 it.getValue("outcome").jsonPrimitive.content
             })
-            assertEquals(listOf("completed", "resource-limit", "completed", "completed"), records.map {
+            assertEquals(listOf("completed", "resource-limit", "completed", "completed", "completed", "completed", "completed", "completed"), records.map {
                 it.getValue("reason").jsonPrimitive.content
             })
-            assertEquals(listOf(firstPath, secondPath, firstPath, secondPath), records.map {
+            assertEquals(listOf(firstPath, secondPath, firstPath, secondPath, firstPath, secondPath, firstPath, secondPath), records.map {
                 it.getValue("policyPath").jsonObject.getValue("relativePath").jsonObject
                     .getValue("sha256").jsonPrimitive.content.let { pathDigest ->
                         mapOf(
