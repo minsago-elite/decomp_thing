@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, crossTabPreferenceFailures, displayPreferencesKey, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -35,6 +35,21 @@ function clean() {
     workers: { highlightedTokens: 12, targets: [{ url: `${base}assets/highlight.worker-a.js`, responses: [{ url: `${base}assets/highlight.worker-a.js`, status: 200 }] }] },
     timing: timingEvidence(),
     connectionNotice: connectionEvidence(),
+    crossTabPreferences: crossTabPreferenceEvidence(),
+  };
+}
+function crossTabPreferenceEvidence() {
+  const values = (storageEvents, writes) => ({ theme: 'dark', motion: 'reduce', dataTheme: 'dark', dataMotion: 'reduce', storageEvents, writes });
+  return {
+    sameOrigin: true, targetIds: ['target-a', 'target-b'],
+    initial: { theme: 'system', motion: 'system' },
+    initialTabs: [{ theme: 'system', motion: 'system' }, { theme: 'system', motion: 'system' }],
+    steps: [
+      { writer: 0, receiver: 1, key: displayPreferencesKey, state: { ...values(1, 0), motion: 'system', dataMotion: 'system' }, trusted: true, storageArea: 'localStorage' },
+      { writer: 1, receiver: 0, key: displayPreferencesKey, state: values(1, 1), trusted: true, storageArea: 'localStorage' },
+    ],
+    finalTabs: [values(1, 1), values(1, 1)],
+    storage: '{"version":1,"theme":"dark","motion":"reduce"}',
   };
 }
 function connectionEvidence() {
@@ -57,6 +72,27 @@ test('a clean audit with every packaged asset and the worker has no failures', (
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
   assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [120, 48, 24]);
   assert.deepEqual(verdict(audit), []);
+});
+
+test('packaged audit requires two real tabs to converge without echo writes', () => {
+  const audit = clean();
+  assert.deepEqual(crossTabPreferenceFailures(audit.crossTabPreferences), []);
+  for (const mutate of [
+    evidence => { evidence.sameOrigin = false; },
+    evidence => { evidence.targetIds[1] = evidence.targetIds[0]; },
+    evidence => { evidence.steps[0].trusted = false; },
+    evidence => { evidence.steps[1].storageArea = 'sessionStorage'; },
+    evidence => { evidence.steps[0].state.writes = 1; },
+    evidence => { evidence.finalTabs[1].motion = 'system'; },
+    evidence => { evidence.initialTabs[1].theme = 'dark'; },
+    evidence => { evidence.storage = null; },
+  ]) {
+    const invalid = structuredClone(audit.crossTabPreferences);
+    mutate(invalid);
+    assert.ok(crossTabPreferenceFailures(invalid).length > 0, JSON.stringify(invalid));
+  }
+  const missing = clean(); delete missing.crossTabPreferences;
+  assert.match(verdict(missing).join('\n'), /cross-tab preferences: missing evidence/);
 });
 
 test('rejects absent, empty, partial, duplicate and unexpected measurement matrices', () => {
@@ -267,13 +303,23 @@ test('preparation refuses missing rendered content or unused read fixtures', asy
 test('qualifyAudit prepares every fresh layout/contrast/focus navigation before measuring', async () => {
   const fixtures = auditFixtures(repo, manifest.buildId);
   let current, page, onRequest;
+  const preferenceTabs = new Map();
+  let targetNumber = 0;
   const counts = { layout: 0, contrast: 0, focus: 0, navigations: 0 };
   const completed = new Error('stop before worker/browser qualification');
   const cdp = {
     on(event, callback) { if (event === 'Fetch.requestPaused') onRequest = callback; },
-    async call(method, params) {
+    async call(method, params, sessionId) {
       if (method === 'Target.setAutoAttach') throw completed;
+      if (method === 'Target.createTarget') return { targetId: `preference-target-${++targetNumber}` };
+      if (method === 'Target.attachToTarget') {
+        const attached = `preference-session-${targetNumber}`;
+        preferenceTabs.set(attached, { theme: 'system', motion: 'system', events: 0, writes: 0 });
+        return { sessionId: attached };
+      }
+      if (method === 'Fetch.enable') return {};
       if (method === 'Page.navigate') {
+        if (params.url === `${origin}/nested/` && sessionId?.startsWith('preference-session-')) { counts.navigations++; return {}; }
         page = fixtures.pages.find(candidate => origin + candidate.path === params.url);
         assert.ok(page, params.url);
         counts.navigations++;
@@ -285,9 +331,45 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
     },
   };
   await assert.rejects(qualifyAudit({ origin, repo, manifest, evidenceDirectory: repo, cdp,
-    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => {},
-    ready: async (tab, expression, label) => current.ready(tab, expression, label),
+    delay: async () => {}, capture: async () => {},
+    makeTarget: async () => {
+      if (targetNumber >= 2) return { sessionId: 'modeled' };
+      const targetId = `preference-target-${++targetNumber}`;
+      const sessionId = `preference-session-${targetNumber}`;
+      preferenceTabs.set(sessionId, { theme: 'system', motion: 'system', events: 0, writes: 0 });
+      return { targetId, sessionId };
+    },
+    ready: async (tab, expression, label) => {
+      if (label === 'display preferences in packaged workspace') return true;
+      const receiver = preferenceTabs.get(tab.sessionId);
+      if (label === 'second packaged tab receives first preference update') return receiver.theme === 'dark' && receiver.events === 1;
+      if (label === 'first packaged tab receives second preference update') return receiver.motion === 'reduce' && receiver.events === 1;
+      return current.ready(tab, expression, label);
+    },
     evaluate: async (tab, expression) => {
+      const preference = preferenceTabs.get(tab.sessionId);
+      if (expression === 'location.origin') return new URL(origin).origin;
+      if (expression.startsWith('(() => {\n    const controls = [...document.querySelectorAll')) return {
+        theme: preference.theme, motion: preference.motion, dataTheme: preference.theme, dataMotion: preference.motion,
+        storageEvents: preference.events, writes: preference.writes,
+        lastStorageEventTrusted: preference.events ? true : null,
+        lastStorageEventArea: preference.events ? 'localStorage' : null,
+      };
+      if (expression.startsWith('(() => {\n        const key =')) return true;
+      if (expression.includes("document.querySelector('.display-preferences > button')")) return true;
+      if (expression.startsWith('(() => {\n    const control = document.querySelectorAll')) {
+        const index = Number(expression.match(/\[(\d+)\]/)?.[1]);
+        const value = JSON.parse(expression.match(/control.value = (.*);/)?.[1] ?? 'null');
+        preference[['theme', 'motion'][index]] = value;
+        preference.writes++;
+        for (const other of preferenceTabs.values()) if (other !== preference) {
+          other[['theme', 'motion'][index]] = value;
+          other.events++;
+        }
+        return true;
+      }
+      if (expression.startsWith('localStorage.getItem(')) return '{"version":1,"theme":"dark","motion":"reduce"}';
+      if (expression.startsWith('(() => {\n        const audit = window.__displayPreferenceAudit;')) return true;
       let kind = null;
       if (expression === measurePage) kind = 'layout';
       else if (expression === measureContrast) kind = 'contrast';
@@ -301,7 +383,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
+  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 86 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {

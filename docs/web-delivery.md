@@ -147,6 +147,14 @@ cold load, a server-latency measurement or a cross-engine result. A local run on
 host measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI
 retains its own numbers.
 
+The audit also opens two targets in the same packaged Chromium profile and origin. It dispatches
+change events on each rendered preference select; the other tab must receive a trusted
+`localStorage` storage event, update its select and document theme/motion attributes, and make
+no echo write. The select change is DOM-dispatched rather than a trusted keyboard/mouse gesture.
+The report retains target identities, initial/final states, event trust/storage area, write counts
+and the shared serialized preference record. This is browser evidence for cross-tab preference
+convergence; it does not qualify session expiry or version-reload recovery.
+
 Heavy browser work is bounded rather than deferred: source previews read at most one
 64 KiB chunk and mount at most 200 rows, and syntax highlighting is an explicit action that runs
 in a dedicated module worker with a one-second deadline and is cancelled whenever the row window,

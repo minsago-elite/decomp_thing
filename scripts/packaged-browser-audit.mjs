@@ -12,6 +12,7 @@ import { join } from 'node:path';
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
   'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
+export const displayPreferencesKey = 'decomp.display-preferences.v1';
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
 const longFilename = `${'reconstructed-firmware-image-with-an-unbroken-very-long-name-'.repeat(4)}0123456789abcdef.elf`.slice(0, 255);
@@ -548,6 +549,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   };
   const theme = async (tab, scheme) => cdp.call('Emulation.setEmulatedMedia', { features: [
     { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
+  const crossTabPreferences = await qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, evaluate, ready, capture });
   const tab = await makeTarget();
   await intercept(tab);
   const layout = []; const contrast = []; const focus = [];
@@ -726,8 +728,136 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     feedback.push(timing.focused); data.push(timing.populated);
   }
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
-    workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
+    workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice, crossTabPreferences,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
+}
+
+async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, evaluate, ready, capture }) {
+  const tabs = [await makeTarget(), await makeTarget()];
+  const failures = [];
+  const installed = [];
+  const state = (tab) => evaluate(tab, `(() => {
+    const controls = [...document.querySelectorAll('.display-preference-fields select')];
+    return { theme: controls[0]?.value ?? null, motion: controls[1]?.value ?? null,
+      dataTheme: document.documentElement.getAttribute('data-theme'), dataMotion: document.documentElement.getAttribute('data-motion'),
+      storageEvents: window.__displayPreferenceAudit?.events.length ?? null,
+      writes: window.__displayPreferenceAudit?.writes ?? null,
+      lastStorageEventTrusted: window.__displayPreferenceAudit?.events.at(-1)?.trusted ?? null,
+      lastStorageEventArea: window.__displayPreferenceAudit?.events.at(-1)?.storageArea ?? null };
+  })()`);
+  const setField = async (tab, index, value) => evaluate(tab, `(() => {
+    const control = document.querySelectorAll('.display-preference-fields select')[${index}];
+    if (!control) return false;
+    control.value = ${JSON.stringify(value)};
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+  const result = { sameOrigin: true, targetIds: tabs.map((tab) => tab.targetId), initial: null, initialTabs: [], steps: [], finalTabs: [] };
+  try {
+    for (const tab of tabs) {
+      await intercept(tab);
+      await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
+      await ready(tab, `document.querySelectorAll('.display-preference-fields select').length === 2`, 'display preferences in packaged workspace');
+    }
+    result.sameOrigin = await Promise.all(tabs.map((tab) => evaluate(tab, 'location.origin')))
+      .then((origins) => origins.length === 2 && origins[0] === origins[1] && origins[0] === new URL(origin).origin);
+    assert.ok(result.sameOrigin, 'Preference tabs must share the packaged origin');
+    result.initialTabs = await Promise.all(tabs.map(state));
+    result.initial = result.initialTabs[0];
+    assert.ok(result.initialTabs.every(initial => initial.theme === 'system' && initial.motion === 'system'),
+      'Fresh audit profile must start with default preferences in both tabs');
+    for (const tab of tabs) {
+      const installedHandler = await evaluate(tab, `(() => {
+        const key = ${JSON.stringify(displayPreferencesKey)};
+        const audit = { events: [], writes: 0 };
+        window.__displayPreferenceAudit = audit;
+        audit.onStorage = (event) => {
+          if (event.key === key || event.key === null) audit.events.push({ key: event.key, trusted: event.isTrusted,
+            storageArea: event.storageArea === window.localStorage ? 'localStorage' : 'other' });
+        };
+        window.addEventListener('storage', audit.onStorage);
+        audit.originalSetItem = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (name, value) {
+          if (name === key) audit.writes += 1;
+          return audit.originalSetItem.call(this, name, value);
+        };
+        return true;
+      })()`);
+      assert.equal(installedHandler, true, 'Could not install bounded preference event observation');
+      installed.push(tab);
+      await evaluate(tab, `document.querySelector('.display-preferences > button')?.click()`);
+    }
+    assert.equal(await setField(tabs[0], 0, 'dark'), true, 'First tab theme control is missing');
+    await ready(tabs[1], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === 'dark' && s[1]?.value === 'system' && window.__displayPreferenceAudit.events.length === 1; })()`,
+      'second packaged tab receives first preference update');
+    const firstDelivery = await state(tabs[1]);
+    result.steps.push({ writer: 0, receiver: 1, key: displayPreferencesKey, state: firstDelivery,
+      trusted: firstDelivery.lastStorageEventTrusted, storageArea: firstDelivery.lastStorageEventArea });
+
+    assert.equal(await setField(tabs[1], 1, 'reduce'), true, 'Second tab motion control is missing');
+    await ready(tabs[0], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === 'dark' && s[1]?.value === 'reduce' && window.__displayPreferenceAudit.events.length === 1; })()`,
+      'first packaged tab receives second preference update');
+    const secondDelivery = await state(tabs[0]);
+    result.steps.push({ writer: 1, receiver: 0, key: displayPreferencesKey, state: secondDelivery,
+      trusted: secondDelivery.lastStorageEventTrusted, storageArea: secondDelivery.lastStorageEventArea });
+    await Promise.all(tabs.map((tab, index) => capture(tab, `audit-preferences-tab-${index + 1}.png`)));
+    result.finalTabs = await Promise.all(tabs.map(state));
+    result.storage = await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)})`);
+  } finally {
+    for (const tab of installed) {
+      await evaluate(tab, `(() => {
+        const audit = window.__displayPreferenceAudit;
+        if (!audit) return true;
+        window.removeEventListener('storage', audit.onStorage);
+        Storage.prototype.setItem = audit.originalSetItem;
+        delete window.__displayPreferenceAudit;
+        return true;
+      })()`).catch((error) => failures.push(String(error)));
+    }
+  }
+  if (failures.length) throw new Error(`Preference audit cleanup failed: ${failures.join('; ')}`);
+  return result;
+}
+
+/** Fails closed unless two real packaged tabs exchange both admitted preference fields once. */
+export function crossTabPreferenceFailures(evidence) {
+  const failures = [];
+  const fail = (message) => failures.push(`cross-tab preferences: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing evidence'); return failures; }
+  if (evidence.sameOrigin !== true) fail('tabs did not prove a shared packaged origin');
+  const targets = Array.isArray(evidence.targetIds) ? evidence.targetIds : [];
+  if (targets.length !== 2 || targets.some((value) => typeof value !== 'string' || !value) || new Set(targets).size !== 2)
+    fail(`expected two distinct browser targets, got ${JSON.stringify(targets)}`);
+  const initial = evidence.initial ?? {};
+  if (initial.theme !== 'system' || initial.motion !== 'system') fail(`unexpected initial state ${JSON.stringify(initial)}`);
+  const initialTabs = Array.isArray(evidence.initialTabs) ? evidence.initialTabs : [];
+  if (initialTabs.length !== 2 || initialTabs.some(tab => tab.theme !== 'system' || tab.motion !== 'system'))
+    fail(`both tabs must start with defaults ${JSON.stringify(initialTabs)}`);
+  const steps = Array.isArray(evidence.steps) ? evidence.steps : [];
+  const expected = [
+    { writer: 0, receiver: 1, theme: 'dark', motion: 'system' },
+    { writer: 1, receiver: 0, theme: 'dark', motion: 'reduce' },
+  ];
+  if (steps.length !== expected.length) fail(`expected two update deliveries, got ${steps.length}`);
+  expected.forEach((want, index) => {
+    const step = steps[index] ?? {};
+    const state = step.state ?? {};
+    if (step.writer !== want.writer || step.receiver !== want.receiver || step.key !== displayPreferencesKey)
+      fail(`step ${index + 1} identity ${JSON.stringify(step)}`);
+    if (step.trusted !== true || step.storageArea !== 'localStorage') fail(`step ${index + 1} is not a real localStorage event`);
+    if (state.theme !== want.theme || state.motion !== want.motion || state.dataTheme !== want.theme || state.dataMotion !== want.motion)
+      fail(`step ${index + 1} rendered state ${JSON.stringify(state)}`);
+    if (state.storageEvents !== 1 || state.writes !== index) fail(`step ${index + 1} echoed a remote write ${JSON.stringify(state)}`);
+  });
+  const finalTabs = Array.isArray(evidence.finalTabs) ? evidence.finalTabs : [];
+  if (finalTabs.length !== 2) fail(`expected two final tab states, got ${finalTabs.length}`);
+  for (const [index, tab] of finalTabs.entries()) {
+    if (tab.theme !== 'dark' || tab.motion !== 'reduce' || tab.dataTheme !== 'dark' || tab.dataMotion !== 'reduce')
+      fail(`final tab ${index + 1} diverged ${JSON.stringify(tab)}`);
+    if (tab.storageEvents !== 1 || tab.writes !== 1) fail(`final tab ${index + 1} event/write counts ${JSON.stringify(tab)}`);
+  }
+  if (evidence.storage !== '{"version":1,"theme":"dark","motion":"reduce"}') fail('shared persisted record does not match the final controls');
+  return failures;
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
@@ -793,6 +923,7 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   }
   // Chrome-DevTools-only evidence; the Playwright cross-engine runner opts out explicitly.
   if (connectionNotice !== false) failures.push(...connectionNoticeFailures(audit.connectionNotice));
+  failures.push(...crossTabPreferenceFailures(audit.crossTabPreferences));
   if (audit.unmapped.length) failures.push(`unmapped API reads: ${[...new Set(audit.unmapped)].join(', ')}`);
   // Every packaged script, style, worker and font must resolve under the deployment base.
   const assetBase = `${origin}/nested/assets/ui/`;
