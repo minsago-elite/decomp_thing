@@ -1152,3 +1152,32 @@ reduced from the profile default of 128 MiB to 256 KiB. It does not qualify
 other profiles, independent providers, production validation under #236, the
 complete mutation/resource matrix, or hosted exact-head CI. #734 and #63
 remain open.
+
+## Public reconstruction protocol frame-count refusal — 2026-11-11
+
+Commit `b34fe29f88c8ad7ea713966e60e64923280dbb2e` extends the same public
+reconstruction test with a protocol frame-count exhaustion after the scripted
+agent's acknowledged, authorized source write. The invocation uses a
+16-frame limit; the fixture then sends 64 individually bounded JSON-RPC
+notifications, keeping the case distinct from the existing oversized-frame,
+aggregate-output and request-timeout cases. The test requires a request-bound
+`RESOURCE_EXHAUSTED` receipt identifying the 16-frame limit, absent complete
+terminal execution evidence, verified process and sandbox cleanup, refusal
+to publish, byte-and-metadata equality with the prior accepted publication,
+and no publication transaction residue.
+
+The focused method passed locally at that source commit: one JUnit test, zero
+failures, errors or skips. The retained XML was timestamped
+`2026-11-11T08:57:32.675Z` and reports 57.377 seconds for the test. The run
+used the pinned Node 24.20.0/npm 11.19.0 toolchain, built the frontend asset
+manifest, and ran with the live ACP contract requirement enabled. This is
+local scripted evidence that the active reconstruction path preserves its
+accepted publication when its independent protocol frame-count budget is
+exhausted after mutation. It does not qualify independent providers, every
+host limit, other reconstruction profiles, production validation under #236,
+or hosted exact-head CI. #734 and #63 remain open.
+
+The [JUnit report](evidence/issue-734-public-reconstruction-frame-count-2026-11-11.xml)
+and its [provenance record](evidence/issue-734-public-reconstruction-frame-count-2026-11-11.json)
+retain the result counts, command, toolchain versions, source commit, and report
+digest.
