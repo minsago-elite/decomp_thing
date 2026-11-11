@@ -812,6 +812,30 @@ The accumulated six-case local run at
 UTF-8 policy, staging-growth, per-file, patch-count, and directory-admission
 controls with zero failures, errors, or skips.
 
+`TraceGuidedRepairTest.active ACP repair persists declared-role denials and a
+no-change receipt` passed locally at
+`875bd07530f34e3bc40fd47ebba9ff45e3142044`. The test launches the scripted ACP
+process through the active repair loop with test-only validation disabled. It
+checks the dispatched generated-C declared-role grant against the attempt,
+profile, declared target, write-only UTF-8 role, and effective size ceiling.
+The peer's sibling-file creation and `Makefile` replacement are denied by the
+live filesystem broker; two allowed target writes then restore the original
+bytes, yielding `NO_CHANGES`. The loop retains the schema-v3 receipt and a
+correlated rejected assessment, including the four audited policy outcomes,
+while preserving the source bytes, graph head, and empty sibling path. The
+receipt is deliberately not release-complete for this `NO_CHANGES` outcome.
+This proves receipt-backed scripted ACP policy refusal and no-change handling;
+it does not exercise candidate validation, a production provider, #236
+validation, or hosted exact-head qualification.
+
+The accumulated focused active-repair run at `875bd07530f34e3bc40fd47ebba9ff45e3142044`
+passed seven methods with zero failures, errors, or skips: directory admission,
+per-file output, staging growth, patch-file count, aggregate patch bytes,
+malformed UTF-8 declared-role enforcement, and the new receipt-backed ACP
+no-change case. These selected cases do not exhaust the resource-limit matrix
+or prove that a validated candidate reaches the production validator. #734 and
+#63 remain open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
