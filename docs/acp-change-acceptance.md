@@ -629,6 +629,26 @@ the active reconstruction path; they do not wait for or measure the production
 20-minute wall or 2-minute idle defaults. Snapshot inventory limits and other
 resource limits remain unqualified.
 
+Commit `c7839780e` adds a reachable initial-snapshot inventory refusal to the
+same public ACP reconstruction test. With the snapshot entry budget set to 2,
+the real request reaches `RESOURCE_EXHAUSTED` with
+`phase=initial-workspace-snapshot` and `limit=entry-count`. The receipt reports
+`WORKSPACE_SNAPSHOT` and `NOT_REQUIRED` cleanup, with no process diagnostics,
+sandbox evidence, filesystem audit, or complete execution evidence. The test
+also verifies the target implementation file is absent when the request is
+dispatched, the accepted output metadata remains identical, and no publication
+residue is left behind. The focused live-sandbox test passed locally at this
+commit: one test method, zero failures, errors or skips.
+
+This public reconstruction request grants one non-recursive implementation
+path, whose target is initially absent. The path's parent entries make the
+entry-count limit reachable. File-count, file-bytes, and total-bytes snapshot
+limits cannot be induced on this request without changing staging so an
+existing file is present before dispatch; those dimensions remain unqualified
+for the public reconstruction path. This does not qualify every snapshot
+limit, every resource ceiling, production validation under #236, live-provider
+behavior, or hosted exact-head CI. #734 and #63 remain open.
+
 ## Reconstruction change-claim consistency checkpoint — 2026-11-11
 
 Commit `6a195ace9` adds
