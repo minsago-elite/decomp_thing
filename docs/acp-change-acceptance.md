@@ -574,8 +574,19 @@ does not qualify a live provider, production validation under #236, every
 resource-exhaustion mode, or hosted exact-head CI. Reconstruction exposes no
 ACP delete operation and this request has no terminal mutation policy, so
 delete/move enforcement is not reachable in this path; repair delete refusal
-is covered separately. Aggregate stdout/stderr, wall-clock, idle and snapshot
-inventory limit outcomes remain separate #734 gaps. Keep #734 and #63 open.
+is covered separately. Wall-clock, idle and snapshot inventory limit outcomes
+remain separate #734 gaps. Keep #734 and #63 open.
+
+Commit `6ec4967d4` extends that same public-workflow test with aggregate output
+limits after a valid candidate write. One fixture emits 9 MiB on stderr; a
+separate fixture emits 300 bounded 30,000-character protocol updates on stdout,
+exceeding the default 8 MiB combined execution-output allowance without
+exceeding the per-frame limit. Both return typed `RESOURCE_EXHAUSTED` receipts
+with incomplete execution evidence, confirm sandbox/process cleanup, refuse
+publication, and preserve the prior descriptor-bound output commitments. The
+focused test passed locally at this commit: one test method, zero failures,
+errors or skips. This covers aggregate stream output only; wall-clock, idle,
+snapshot inventory and other limits remain unqualified.
 
 ## Reconstruction change-claim consistency checkpoint — 2026-11-11
 
