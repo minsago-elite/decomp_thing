@@ -1875,6 +1875,148 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair production policy rejects malformed UTF-8 before candidate installation`() {
+        val testRoot = java.nio.file.Path.of("build/test-tmp").createDirectories()
+        val project = createProject(
+            Files.createTempDirectory(testRoot, "repair-active-declared-utf8-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+        )
+        val targetPath = "src/modules/reconstructed.c"
+        val target = project.resolve(targetPath)
+        val acceptedSource = target.readBytes()
+        val profile = requireNotNull(GeneratedCRepairIndexProfile.reconstructionProfile())
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+        var dispatches = 0
+        var validReplacementReachedSink = false
+        var malformedReplacementFailure: IllegalArgumentException? = null
+        var validationInvoked = false
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                dispatches++
+                assertTrue(initialFiles.getValue(targetPath).size < RepairResourceBudget().maximumSourceFileBytes)
+                val authority = assertNotNull(request.accessPolicy.mutationAuthority)
+                assertEquals("declared-role-generated-c-repair-v1", authority.policyId)
+                val attemptId = Json.parseToJsonElement(
+                    request.contextInputs.single { it.id == "repair-attempt-authority" }.content,
+                ).jsonObject.getValue("attemptId").jsonPrimitive.content
+                assertEquals("repair:$attemptId", authority.ownerId)
+                assertEquals(profile.sha256, authority.profileSha256)
+                assertEquals(profile.sha256, authority.grants.single().profileSha256)
+                val grant = authority.grants.single()
+                assertEquals(request.workspaceRoots.single().id, grant.path.rootId)
+                assertEquals(targetPath, grant.path.relativePath)
+                assertEquals(AgentOperation.WRITE_FILE, grant.operations.single())
+                assertEquals(decompengine.agent.AgentMutationContentKind.UTF8_TEXT, grant.contentKind)
+                assertEquals(profile.layout.declarationForPath(targetPath).id, grant.declarationId)
+                assertEquals(
+                    profile.layout.declarationForPath(targetPath).roles
+                        .map(decompengine.project.ProjectFileRole::wireName).toSet(),
+                    grant.roles,
+                )
+                assertEquals(
+                    minOf(RepairResourceBudget().maximumSourceFileBytes, profile.budgets.archiveMaximumFileBytes),
+                    grant.maximumBytes,
+                )
+
+                val validText = "/* café */\nint decomp_engine_main(void) { return 1; }\n"
+                val validBytes = validText.toByteArray(Charsets.UTF_8)
+                assertTrue(validBytes.size < RepairResourceBudget().maximumSourceFileBytes)
+                output.replace(targetPath, validBytes)
+                validReplacementReachedSink = true
+                val malformed = byteArrayOf(0xc3.toByte(), 0x28)
+                val malformedFailure = assertFailsWith<IllegalArgumentException> {
+                    output.replace(targetPath, malformed)
+                }
+                malformedReplacementFailure = malformedFailure
+                assertEquals(
+                    "captured repair output violates declared mutation authority",
+                    malformedFailure.message,
+                )
+                throw malformedFailure
+            }
+        }
+        val validation = object : RepairValidationStrategy {
+            override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+            override fun requireAvailable() = Unit
+            override fun validateCandidate(
+                request: RepairCandidateValidationRequest,
+            ): RepairCandidateValidationOutcome {
+                validationInvoked = true
+                error("candidate validation must not run after mutation-policy refusal")
+            }
+            override fun compile(projectDir: java.nio.file.Path, logPath: java.nio.file.Path,
+                                 budget: RepairResourceBudget): CompileFailure? {
+                validationInvoked = true
+                error("candidate compilation must not run after mutation-policy refusal")
+            }
+            override fun rebuiltProgram(projectDir: java.nio.file.Path, budget: RepairResourceBudget): java.nio.file.Path =
+                error("candidate validation must not run after mutation-policy refusal")
+            override fun evaluateBehavior(
+                id: String,
+                projectDir: java.nio.file.Path,
+                originalBinary: java.nio.file.Path,
+                rebuiltBinary: java.nio.file.Path,
+                inputs: List<ProcessInput>,
+                reportsDir: java.nio.file.Path,
+                budget: RepairResourceBudget,
+            ): BehaviorComparisonReport = error("candidate validation must not run after mutation-policy refusal")
+        }
+        val loop = TestRepairRuntimeAccess.openLoop(
+            harness = harness,
+            history = RepairHistory(project.resolve("reports/repair_history.json")),
+            profile = GeneratedCRepairIndexProfile,
+            validationStrategy = validation,
+            stagingAuthority = CapturedRepairStagingAuthority,
+            limits = AgentExecutionLimits(),
+            cancellation = AgentCancellation.NONE,
+            onAgentEvent = {},
+            resourceBudget = RepairResourceBudget(),
+            allowTestOnlyValidation = false,
+            faultInjector = null,
+        )
+
+        val failure = assertFailsWith<IllegalStateException> {
+            loop.repairCompileError(
+                project,
+                CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                emptyList(),
+            )
+        }
+        assertTrue(failure.message.orEmpty().contains("lacks schema-v2 ACP provider evidence"))
+        assertEquals(1, dispatches)
+        assertTrue(validReplacementReachedSink)
+        assertEquals(
+            "captured repair output violates declared mutation authority",
+            malformedReplacementFailure?.message,
+        )
+        assertFalse(validationInvoked)
+        assertContentEquals(acceptedSource, target.readBytes())
+
+        val persisted = Json.parseToJsonElement(
+            project.resolve("reports/repair-revisions/graph.json").readText(),
+        ).jsonObject
+        assertEquals(JsonNull, persisted.getValue("pending"))
+        assertEquals(baselineHead, persisted.getValue("headId").jsonPrimitive.content)
+        assertEquals("rejected", persisted.getValue("nodes").jsonArray.last().jsonObject
+            .getValue("status").jsonPrimitive.content)
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+        }
+    }
+
+    @Test
     fun `agent termination closes the pending graph and releases its root lock`() {
         val tempDir = createTempDirectory("repair-agent-termination-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
