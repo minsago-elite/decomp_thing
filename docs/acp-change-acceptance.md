@@ -939,8 +939,9 @@ overriding a tool-call limit already observed by the event translator.
 `TraceGuidedRepairTest.active ACP repair preserves tool-call exhaustion when
 prompt completes immediately` runs the scripted ACP process through active
 repair with a one-call limit. After an acknowledged authorized source write,
-the peer sends two distinct tool-call events and immediately completes the
-prompt. The receipt records two calls and `LIMIT_EXHAUSTED`; the workflow
+the peer waits for the host prompt loop, then sends two distinct tool-call
+events and the `end_turn` response in one flushed protocol burst. The receipt
+records two calls and `LIMIT_EXHAUSTED`; the workflow
 rejects the candidate, retains its interrupted assessment, reopens with no
 pending attempt, and preserves the accepted source and graph head. The test
 also verifies process termination and sandbox cleanup.
@@ -951,9 +952,12 @@ the candidate-validation seam with a completed receipt. An injected sentinel
 then refuses validation, allowing the test to verify that the exact boundary
 was admitted without claiming successful compilation or publication.
 
-Both focused tests passed locally, and the accumulated
+Follow-up commit `75242e462` makes the completion-order fixture wait for the
+host prompt loop and write both tool updates plus the terminal response in one
+flushed burst. Both focused tests passed again with that fixture, and the
+accumulated
 `TraceGuidedRepairTest.active*` selection passed 17 methods with zero failures,
-errors or skips at `ccf63dd21`. This is scripted local ACP evidence for
+errors or skips at `75242e462`. This is scripted local ACP evidence for
 tool-call exhaustion after a brokered write and the exact count boundary. It
 does not qualify other token or provider budgets, live-provider behavior,
 production validation under #236, or hosted exact-head CI. #734 and #63 remain
