@@ -1130,14 +1130,13 @@ write, and corrects the negative fixture to send exactly 262,145 UTF-8 bytes
 (including its C comment delimiters) against the 262,144-byte mutation grant.
 Commit `819d72246` changes the accepted boundary payload to contain multi-byte
 `é` text while keeping the encoded source at exactly 262,144 bytes; its test
-frame ceiling is raised to 1 MiB to accommodate JSON wire escaping. The
-commit also sets the final snapshot's file-count limit to one and entry-count
-limit to three (one path rule plus the target's two parent directories).
-Commit `b4fff63ec` independently constructs the expected UTF-8 bytes in Kotlin
-and requires byte-for-byte equality with both the published source and
-extracted archive member. Commit `0ae559004` records the exact entry-count
-equality in the active test. The out-of-grant sibling refusal remains in the
-same method.
+frame ceiling is raised to 1 MiB to accommodate JSON wire escaping. Commit
+`b4fff63ec` sets the final snapshot file-count limit to one, independently
+constructs the expected UTF-8 bytes in Kotlin, and requires byte-for-byte
+equality with both the published source and extracted archive member. Commit
+`0ae559004` sets the entry-count limit to exactly three (one path rule plus
+the target's two parent directories). The out-of-grant sibling refusal
+remains in the same method.
 
 The focused command passed one JUnit method with zero failures, errors, or
 skips at `0ae559004555eef65bc995cc8e6ae6a656f8deec`:
