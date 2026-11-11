@@ -151,3 +151,17 @@ The combined changes were verified together after correcting internal validation
 - Focused validation regression suites: `validation-navigation.test.tsx` and `recorded-validation.test.tsx` — 2 files, 56 tests passed.
 
 This remains local frontend/JSDOM evidence. Hosted checks on the pushed head, packaged-browser qualification, manual assistive-technology evidence, remaining panel states and complete #628/#221 acceptance are separate and outstanding.
+
+## Runtime storage partial-read preservation — 2026-11-12
+
+Exact source checkpoint: `df3c37d8ae3f5de62346e258c52ef00ff9b5ae36` on PR #1946.
+
+The Runtime storage panel reads storage totals and the maintenance preview independently. If one endpoint fails, its data is omitted while the successful endpoint remains visible. The fixed categorized alert identifies which read failed, includes only a validated request reference, and states when the displayed information is partial. Tests cover both directions: storage totals succeed while the preview is denied, and the preview succeeds while storage totals fail.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `storage-summary-format.test.tsx` — 1 file, 8 tests passed.
+- Full frontend Vitest suite — 84 files, 1,228 tests passed.
+- `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local frontend/JSDOM evidence only. It does not qualify packaged-browser behavior, screen-reader announcements, or full #628/#221 route and panel acceptance.
