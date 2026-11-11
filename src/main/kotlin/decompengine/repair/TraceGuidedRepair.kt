@@ -729,7 +729,8 @@ internal fun repairAttemptCanBeRejected(
     finalized: Boolean,
     assessmentPersisted: Boolean,
     failure: Exception,
-): Boolean = !finalized && !assessmentPersisted &&
+    assessmentPersistenceFailed: Boolean = false,
+): Boolean = !finalized && !assessmentPersisted && !assessmentPersistenceFailed &&
     failure !is RepairAcceptancePendingException && failure !is RepairAgentEvidencePersistenceException
 
 internal fun RepairIteration.deepFrozenCopy(): RepairIteration = RepairIteration(
@@ -1160,6 +1161,7 @@ class TraceGuidedRepairLoop private constructor(
     onAgentEventCandidate: ((AgentExecutionEvent) -> Unit)?,
     resourceBudgetCandidate: RepairResourceBudget?,
     allowTestOnlyValidationCandidate: Boolean,
+    graphFaultInjectorCandidate: ModuleRevisionFaultInjector?,
 ) : AutoCloseable {
     private val harness: AgentHarness
     private val history: RepairHistory
@@ -1171,6 +1173,7 @@ class TraceGuidedRepairLoop private constructor(
     private val onAgentEvent: (AgentExecutionEvent) -> Unit
     private val resourceBudget: RepairResourceBudget
     private val allowTestOnlyValidation: Boolean
+    private val graphFaultInjector: ModuleRevisionFaultInjector?
 
     @Volatile
     private var closed: Boolean
@@ -1190,6 +1193,7 @@ class TraceGuidedRepairLoop private constructor(
         onAgentEvent = onAgentEventCandidate ?: {}
         resourceBudget = resourceBudgetCandidate ?: RepairResourceBudget()
         allowTestOnlyValidation = allowTestOnlyValidationCandidate
+        graphFaultInjector = graphFaultInjectorCandidate
         require(stagingAuthority.assurance == RepairStagingAssurance.STRICT_CAPTURED) {
             "public repair execution requires a strict captured/quota staging authority"
         }
@@ -1214,8 +1218,42 @@ class TraceGuidedRepairLoop private constructor(
             onAgentEvent: ((AgentExecutionEvent) -> Unit)?,
             resourceBudget: RepairResourceBudget?,
             allowTestOnlyValidation: Boolean,
+        ): TraceGuidedRepairLoop = openAuthorized(
+            runtimeIdentity,
+            harness,
+            history,
+            registeredProfile,
+            validationStrategy,
+            stagingAuthority,
+            limits,
+            cancellation,
+            onAgentEvent,
+            resourceBudget,
+            allowTestOnlyValidation,
+            null,
+        )
+
+        /** Authenticated overload used by the test bridge to inject graph persistence failures. */
+        @JvmSynthetic
+        fun openAuthorized(
+            runtimeIdentity: Any?,
+            harness: AgentHarness?,
+            history: RepairHistory?,
+            registeredProfile: Any?,
+            validationStrategy: RepairValidationStrategy?,
+            stagingAuthority: RepairStagingAuthority?,
+            limits: AgentExecutionLimits?,
+            cancellation: AgentCancellation?,
+            onAgentEvent: ((AgentExecutionEvent) -> Unit)?,
+            resourceBudget: RepairResourceBudget?,
+            allowTestOnlyValidation: Boolean,
+            graphFaultInjectorCandidate: Any?,
         ): TraceGuidedRepairLoop {
             SecureRepairRuntime.requireRuntimeIdentity(runtimeIdentity)
+            val graphFaultInjector = graphFaultInjectorCandidate?.let { candidate ->
+                candidate as? ModuleRevisionFaultInjector
+                    ?: throw SecurityException("repair graph fault-injector authority is invalid")
+            }
             return try {
                 SecureRepairRuntime.authorizeLoopConstruction(registeredProfile)
                 TraceGuidedRepairLoop(
@@ -1229,6 +1267,7 @@ class TraceGuidedRepairLoop private constructor(
                     onAgentEvent,
                     resourceBudget,
                     allowTestOnlyValidation,
+                    graphFaultInjector,
                 )
             } finally {
                 SecureRepairRuntime.clearConstructionAuthorization()
@@ -1283,7 +1322,9 @@ class TraceGuidedRepairLoop private constructor(
                     }
                 }
             } catch (failure: Exception) {
-                finishFailedRun(graph, failure)
+                if (repairFailureCanBeFinalized(failure, graph.snapshot.pendingAttemptId)) {
+                    finishFailedRun(graph, failure)
+                }
                 throw failure
             } finally {
                 activeDeadlineNanos = Long.MAX_VALUE
@@ -1541,6 +1582,7 @@ class TraceGuidedRepairLoop private constructor(
         private var finalized = false
         private var closed = false
         private var assessmentPersisted = false
+        private var assessmentPersistenceFailed = false
 
         fun accept(evidence: RepairEvidence?, proof: RepairValidationProof): ModuleRevisionNode {
             persistAssessment(
@@ -1616,7 +1658,16 @@ class TraceGuidedRepairLoop private constructor(
 
         fun reject(evidence: RepairEvidence?): ModuleRevisionNode {
             if (turnIntent != null && !assessmentPersisted) {
-                persistAssessment(AcpChangePublicationEligibility.REJECTED, AcpChangeValidationStatus.FAILED, null)
+                try {
+                    persistAssessment(AcpChangePublicationEligibility.REJECTED, AcpChangeValidationStatus.FAILED, null)
+                } catch (failure: Exception) {
+                    assessmentPersistenceFailed = true
+                    throw failure as? RepairAgentEvidencePersistenceException
+                        ?: RepairAgentEvidencePersistenceException(
+                            "repair rejection assessment could not be persisted; attempt remains pending",
+                            failure,
+                        )
+                }
             }
             return graph.reject(attempt, evidence).also {
                 finalized = true
@@ -1630,7 +1681,7 @@ class TraceGuidedRepairLoop private constructor(
             // ordinary rejection. Leave the attempt pending so startup recovery can bind a
             // conservative interrupted disposition. Ambiguous acceptance writes likewise stay
             // pending for roll-forward; neither case may be terminalized here.
-            if (repairAttemptCanBeRejected(finalized, assessmentPersisted, original)) {
+            if (repairAttemptCanBeRejected(finalized, assessmentPersisted, original, assessmentPersistenceFailed)) {
                 runCatching {
                     reject(repairFailureEvidence(evidenceKind, original))
                     reconcile()
@@ -2138,7 +2189,7 @@ class TraceGuidedRepairLoop private constructor(
     }
 
     private fun openGraph(projectDir: Path): ModuleRevisionGraph =
-        SecureRepairRuntime.openGraph(registeredProfile, projectDir, resourceBudget)
+        SecureRepairRuntime.openGraph(registeredProfile, projectDir, resourceBudget, graphFaultInjector)
 
     private fun checkOpen() = check(!closed) { "secure repair loop is closed" }
 

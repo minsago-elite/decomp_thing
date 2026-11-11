@@ -758,6 +758,13 @@ class ModuleRevisionGraphTest {
             updatesSha256 = verified.updatesSha256,
         )
         failAssessmentPublication = true
+        val pendingGraphBytes = project.resolve("reports/repair-revisions/graph.json").readBytes()
+        val rejectedWithoutAssessment = assertFailsWith<RepairAgentEvidencePersistenceException> {
+            graph.reject(attempt, RepairEvidence("rejected", "assessment required"))
+        }
+        assertTrue(rejectedWithoutAssessment.message.orEmpty().contains("durable assessment"))
+        assertContentEquals(pendingGraphBytes, project.resolve("reports/repair-revisions/graph.json").readBytes())
+        assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
         assertFailsWith<RepairAgentEvidencePersistenceException> {
             graph.persistAndBindAgentAssessment(attempt, rejected)
         }

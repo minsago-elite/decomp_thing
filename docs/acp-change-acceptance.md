@@ -402,10 +402,13 @@ bypass its recovery lease.
 If repair recovery finds a schema-7 intent and receipt but no assessment, it
 first persists and authenticates a conservative `INTERRUPTED` assessment before
 terminalizing the attempt. If that write or its readback fails, graph opening
-fails closed and retains the pending recovery state. The focused regression
-also verifies that a candidate-rejection assessment persistence failure does
-not finalize the attempt in-process; startup recovery supplies the interrupted
-assessment instead.
+fails closed and retains the pending recovery state. A focused workflow test
+injects a graph-binding failure after the immutable rejected-assessment sidecar
+is written, then verifies startup reconciles that exact assessment and retains
+the original source bytes. A graph-level control also verifies that a
+receipt-bound schema-7 attempt cannot be rejected without a bound assessment.
+These are deterministic failure-injection checks, not process-death
+qualification of the entire repair workflow.
 
 After a `PROVISIONAL` or `VALIDATED_FOR_PUBLICATION` assessment is durable, an
 exception before the graph disposition also leaves the attempt pending. The

@@ -4416,6 +4416,14 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun reject(attempt: ModuleRevisionAttempt, evidence: RepairEvidence? = null): ModuleRevisionNode = graphOperation {
         val pending = requirePending(attempt)
+        val invocation = pending.repairMetadata?.agentInvocation
+        if (state.schemaVersion >= 7 && pending.repairMetadata?.turnIntent != null &&
+            invocation?.receiptPath != null && invocation.assessmentPath == null
+        ) {
+            throw RepairAgentEvidencePersistenceException(
+                "schema-7 repair rejection requires a durable assessment; attempt remains pending",
+            )
+        }
         if (pending.acceptanceDecision != null) {
             throw RepairAcceptancePendingException(
                 "repair acceptance decision is durable; rejection and rollback are forbidden",
