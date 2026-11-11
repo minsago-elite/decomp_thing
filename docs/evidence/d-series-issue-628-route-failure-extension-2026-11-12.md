@@ -32,3 +32,17 @@ Verification at this source checkpoint:
 - `npm run build` — generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
 
 These are local frontend results. The source does not establish packaged-browser or screen-reader evidence. Dashboard continuation after every cursor-failure permutation, remaining evidence/validation/Git panels, full panel failure matrices, and complete #628/#221 acceptance remain open. Shared `docs/web-failure-states.md` was not changed because other open D11 PRs edit it.
+
+## Retained exploration artifact failure states — 2026-11-12
+
+Source checkpoint: `c21aac825798f53ad9fca3ea4cd86b5e2983cf41` on PR #1946.
+
+Explicit retained-case reads now distinguish session, denied, missing artifact, unsupported contract, unverified content, and other read failures using fixed copy and only a validated request reference. Parser/format failures are classified as unverified rather than as a generic transport failure. The new component matrix checks message distinctness, reference-ID behavior and exclusion of server codes/exception details. The existing malformed legacy artifact case now expects the unverified state. This remains an explicitly activated, read-only artifact view; it does not execute cases or start a workflow.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `exploration-cases.test.tsx`, `exploration-failure-cases.test.tsx`, and `resilience.test.tsx` — 3 files, 49 tests passed.
+- Full frontend Vitest suite — 84 files, 1,204 tests passed.
+- `npm run build` — generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
+
+These local results do not qualify all exploration/report failures or the remaining validation, Git, activity and other job panels. Packaged-browser and assistive-technology evidence, full #628/#221 acceptance, and hosted exact-head checks remain separate.
