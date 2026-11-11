@@ -185,6 +185,7 @@ jobs:
           node --test scripts/packaged-browser-restart.test.mjs
           node --check scripts/packaged-browser-soak.mjs
           node --check scripts/soak626/resources.mjs
+          node --check scripts/soak626/listener-retention.mjs
           node --test scripts/soak626/*.test.mjs
           node --check scripts/packaged-browser-cdp-diagnostics.mjs
           node --test scripts/packaged-browser-cdp-diagnostics.test.mjs

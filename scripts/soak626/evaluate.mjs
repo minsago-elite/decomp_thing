@@ -1,6 +1,7 @@
 // Heap/RSS limits are inherited from D0. FD ceilings and drain allowance are proposed #626 values,
 // not an existing delivery-contract commitment; keep that distinction in every retained report.
-export const LIMITS = Object.freeze({ initialHeapMiB: 128, finalHeapMiB: 192, retainedMiB: 16, jvmGrowthMiB: 256, fdPeak: 64, fdQuiescent: 8, drainSeconds: 35 });
+export const LIMITS = Object.freeze({ initialHeapMiB: 128, finalHeapMiB: 192, retainedMiB: 16,
+  retainedBackingStorageGrowthBytes: 1024 * 1024, jvmGrowthMiB: 256, fdPeak: 64, fdQuiescent: 8, drainSeconds: 35 });
 
 const fail = (message) => { throw new Error(message); };
 const percentile95 = (values) => {
@@ -23,6 +24,33 @@ export function evaluate(report, baseline = {}) {
       !Number.isSafeInteger(report.coverage.streamLimitResponses) || report.coverage.streamLimitResponses < 0) fail('workload coverage incomplete');
   if (report.coverage.activityRows < report.coverage.slots * 200 || report.coverage.sourceReads < report.coverage.slots * 2 ||
       report.jobSwitches !== 119 || report.sameDocument !== true) fail('workload volume or document continuity is incomplete');
+  const retention = report.retention;
+  if (retention?.version !== 1 || retention.complete !== true || retention.sampleEverySlots !== 5 ||
+      !Array.isArray(retention.samples) || retention.samples.length !== 24 || report.coverage.listenerRetentionSamples !== 24) {
+    fail('listener-retention sampling coverage incomplete');
+  }
+  const firstRetention = retention.samples[0];
+  for (const [index, sample] of retention.samples.entries()) {
+    if (sample.index !== (index + 1) * 5 || sample.settledRoute !== '/nested/' || sample.openStreamCount !== 0 ||
+        ![sample.activeListeners, sample.activeListenerTargets, sample.registrations, sample.explicitRemovals,
+          sample.automaticRemovals, sample.collectedTargets, sample.collectedListeners, sample.gcPrunedTargets,
+          sample.gcPrunedListeners, sample.rendererHeapBytesAfterGc, sample.rendererBackingStorageBytesAfterGc].every(Number.isSafeInteger) ||
+        sample.activeListeners < 0 || sample.activeListenerTargets < 0 || sample.rendererHeapBytesAfterGc < 0 ||
+        sample.rendererBackingStorageBytesAfterGc < 0 || !sample.activeListenersByType || typeof sample.activeListenersByType !== 'object') {
+      fail('malformed or non-quiescent listener-retention sample');
+    }
+    const typeCount = Object.values(sample.activeListenersByType).reduce((sum, count) => sum + count, 0);
+    if (typeCount !== sample.activeListeners ||
+        sample.registrations - sample.explicitRemovals - sample.automaticRemovals - sample.collectedListeners !== sample.activeListeners) {
+      fail('listener-retention counts do not reconcile');
+    }
+    if (sample.activeListeners > firstRetention.activeListeners) fail('active listener registrations accumulated after warm-up');
+    if (sample.rendererBackingStorageBytesAfterGc - firstRetention.rendererBackingStorageBytesAfterGc > LIMITS.retainedMiB * 1024 * 1024) {
+      fail('retained renderer backing-storage growth exceeded the inherited 16 MiB ceiling');
+    }
+  }
+  if (retention.samples.at(-1).rendererBackingStorageBytesAfterGc - firstRetention.rendererBackingStorageBytesAfterGc >
+      LIMITS.retainedBackingStorageGrowthBytes) fail('renderer backing storage did not return to its stable post-warm-up range');
   if (report.identityViolation) fail('cross-job stale result');
   if (report.cleanupHeldLease && report.cleanupCharged !== true) fail('cleanup-held stream lease was not charged');
   const checkpoints = report.checkpoints;
