@@ -1311,6 +1311,7 @@ class AcpAgentHarnessTest {
             index = 18,
             maximumFrameBytes = 1024 * 1024,
             snapshotLimits = WorkspaceSnapshotLimits(
+                files = 1,
                 fileBytes = 256L * 1024,
                 totalBytes = 256L * 1024,
             ),
@@ -1325,6 +1326,19 @@ class AcpAgentHarnessTest {
         assertEquals(AgentStopReason.COMPLETED, exactBoundaryReceipt.stopReason)
         assertEquals(AgentFileChangeKind.CREATED, exactBoundaryReceipt.changes.single().kind)
         assertEquals(256L * 1024, exactBoundaryReceipt.changes.single().sizeBytes)
+        val expectedSourcePrefix =
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+        val expectedPaddingBytes =
+            256 * 1024 - expectedSourcePrefix.toByteArray(Charsets.UTF_8).size - 2 - "*/\n".length
+        assertTrue(expectedPaddingBytes >= 0)
+        val expectedPadding = "é".repeat(expectedPaddingBytes / 2) +
+            if (expectedPaddingBytes % 2 == 1) "x" else ""
+        val expectedSource = (expectedSourcePrefix + "/*" + expectedPadding + "*/\n")
+            .toByteArray(Charsets.UTF_8)
+        assertEquals(256 * 1024, expectedSource.size)
+        assertContentEquals(expectedSource, Files.readAllBytes(exactBoundaryResult.projectDir.resolve(implementationPath)))
         val exactBoundaryAudit = exactSourceBoundary.harness.latestFilesystemAudit().last()
         assertEquals(implementationPath, assertNotNull(exactBoundaryAudit.policyPath).relativePath)
         assertEquals(AcpFilesystemAuditOutcome.ALLOWED, exactBoundaryAudit.outcome)
@@ -1335,6 +1349,7 @@ class AcpAgentHarnessTest {
             exactBoundaryExtracted,
             profile = profile,
         )
+        assertContentEquals(expectedSource, Files.readAllBytes(exactBoundaryExtracted.resolve(implementationPath)))
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactBoundaryExtracted, profile).returnCode)
         acceptedMetadata = capturePublishedMetadata(output)
         assertNoReconstructionPublicationResidue(output)
