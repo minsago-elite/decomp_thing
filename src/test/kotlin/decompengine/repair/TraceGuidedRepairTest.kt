@@ -1561,6 +1561,84 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active ACP repair frame-count exhaustion retains completed write receipt and rejects the candidate`() {
+        val project = createProject(
+            createTempDirectory("repair-active-acp-frame-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val target = project.resolve("src/modules/reconstructed.c")
+        val acceptedSource = target.readBytes()
+        val acceptedMakefile = project.resolve("Makefile").readBytes()
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+        val harness = AcpAgentHarnessTest().harness(
+            "repair-active-declared-role-frame-limit-after-write",
+            maximumProtocolFrames = 16,
+        )
+
+        val failure = assertFailsWith<Exception> {
+            generatedCRepairLoop(
+                harness,
+                RepairHistory(project.resolve("reports/repair_history.json")),
+            ).repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+        val failureChain = generateSequence<Throwable>(failure) { it.cause }.toList()
+        val executionFailure = failureChain.filterIsInstance<AgentExecutionException>().single()
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, executionFailure.failure.kind)
+        assertTrue(executionFailure.failure.message.contains("16-frame protocol limit"), executionFailure.failure.message)
+        assertTrue(failure.suppressed.isEmpty(), failure.suppressed.joinToString())
+        assertContentEquals(acceptedSource, target.readBytes())
+        assertContentEquals(acceptedMakefile, project.resolve("Makefile").readBytes())
+
+        val persistedGraph = Json.parseToJsonElement(
+            project.resolve("reports/repair-revisions/graph.json").readText(),
+        ).jsonObject
+        assertEquals(JsonNull, persistedGraph.getValue("pending"))
+        assertEquals(baselineHead, persistedGraph.getValue("headId").jsonPrimitive.content)
+        assertEquals("resource_exhausted", persistedGraph.getValue("runs").jsonArray.last()
+            .jsonObject.getValue("status").jsonPrimitive.content)
+        val rawNode = persistedGraph.getValue("nodes").jsonArray.last().jsonObject
+        assertEquals("rejected", rawNode.getValue("status").jsonPrimitive.content)
+        assertFalse(rawNode.getValue("recoveredAfterCrash").jsonPrimitive.boolean)
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+            val rejected = graph.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            assertFalse(rejected.recoveredAfterCrash)
+            val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+            assertEquals("failed-resource-exhausted", binding.terminalOutcome)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+            assertFalse(binding.receiptReleaseComplete)
+
+            val receiptBytes = project.resolve(binding.receiptPath).readBytes()
+            assertEquals(binding.receiptSha256, sha256(receiptBytes))
+            val receipt = Json.parseToJsonElement(receiptBytes.decodeToString()).jsonObject
+            val outcome = receipt.getValue("outcome").jsonObject
+            assertEquals("failed", outcome.getValue("type").jsonPrimitive.content)
+            assertEquals("resource-exhausted", outcome.getValue("failure").jsonObject
+                .getValue("kind").jsonPrimitive.content)
+            assertEquals(0, receipt.getValue("process").jsonObject
+                .getValue("remainingProcessCount").jsonPrimitive.int)
+            assertTrue(receipt.getValue("process").jsonObject
+                .getValue("sandboxCleanupVerified").jsonPrimitive.boolean)
+            assertFalse(receipt.getValue("lifecycle").jsonObject
+                .getValue("releaseComplete").jsonPrimitive.boolean)
+
+            val filesystem = receipt.getValue("policyAudits").jsonObject
+                .getValue("filesystem").jsonObject
+            val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
+            assertEquals(1, filesystem.getValue("recordCount").jsonPrimitive.int)
+            assertEquals("allowed", records.single().getValue("outcome").jsonPrimitive.content)
+            assertEquals("completed", records.single().getValue("reason").jsonPrimitive.content)
+            assertEquals(sha256("src/modules/reconstructed.c".toByteArray(Charsets.UTF_8)), records.single()
+                .getValue("policyPath").jsonObject.getValue("relativePath").jsonObject
+                .getValue("sha256").jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `active repair path rejects candidate growth beyond the staging byte budget`() {
         val project = createProject(
             createTempDirectory("repair-active-staging-byte-limit-").resolve("project"),

@@ -73,6 +73,7 @@ RECONSTRUCTION_MODES = {
 ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
     "repair-active-output-limit",
+    "repair-active-declared-role-frame-limit-after-write",
     "repair-active-declared-role-no-change",
     "repair-active-declared-role-candidate",
     "repair-active-declared-role-timeout-after-write",
@@ -254,6 +255,7 @@ expected_fs = {
     "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-frame-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-candidate": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
@@ -728,6 +730,19 @@ if MODE == "repair-active-output-limit":
         pass
     time.sleep(30)
     raise SystemExit(144)
+if MODE == "repair-active-declared-role-frame-limit-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* frame-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        149,
+    )
+    # The target write is acknowledged before these individually bounded frames exceed the
+    # configured protocol-frame count. If the host does not stop the stream, fail closed.
+    for ordinal in range(64):
+        update({"notification": "contract/unknown", "ordinal": ordinal})
+    time.sleep(30)
+    raise SystemExit(150)
 if MODE == "repair-active-declared-role-no-change":
     source = join_path(cwd, "src/modules/reconstructed.c")
     sibling = join_path(cwd, "src/modules/reconstructed_extra.c")
