@@ -113,3 +113,16 @@ Verification at this source checkpoint:
 - `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 These are local component/build results. The full route-state matrix, packaged-browser and assistive-technology behavior, and complete #628/#221 acceptance remain outstanding.
+
+## Retained dashboard page navigation after transient failure — 2026-11-12
+
+Source checkpoint: `6fa21635ede9678315867749be16f5eafb0a88be` on PR #1946.
+
+When a network, timeout, or retryable server failure leaves previously verified dashboard data visible, its available page cursors remain enabled after the failure alert is shown. Cursor-expiry, listing-busy, listing-limit, and unverified/non-retainable failures continue to require refresh or clear the old page. The check is explicit and does not add background reads or retries.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `job-dashboard.test.tsx` — 1 file, 51 tests passed, including retained-page navigation after timeout and the existing disabled-navigation controls for cursor-expiry and listing capacity/busy outcomes.
+- `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local component/build evidence only. Packaged-browser behavior, all signed-cursor failure permutations, and full #628/#221 acceptance remain open.
