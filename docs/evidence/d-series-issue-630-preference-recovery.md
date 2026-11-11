@@ -4,6 +4,7 @@
 
 - Base: `2b1121999c806d5b3f89d3723fca8a39879c49b1` (master at implementation start)
 - Implementation: `5bf13187f1a498706961d5788e0c5e5462153724`
+- Audit-control follow-up: `7cb077910aff5e9b4c508693e175fa2215d60446` (test-only)
 - Scope: cross-tab display-preference convergence in the browser shell
 - Related contract: [#630](https://github.com/minsago-elite/decomp_thing/issues/630), child of [#221](https://github.com/minsago-elite/decomp_thing/issues/221)
 
@@ -38,12 +39,20 @@ toolchain identity are retained with it (details below).
 The focused tests cover valid cross-tab updates, malformed values, clear events, unrelated
 keys, `localStorage` versus `sessionStorage`, no write-back, a local edit after a missed event, and
 preservation of tab-only choices across failed updates and resets, missed or delivered storage
-events, and a later recovered write. The packaged audit includes a two-target browser exchange
+events, and a later recovered write. The audit-driver tests execute the actual cleanup expression
+against a modeled `localStorage` for both an initially absent key and a pre-existing record; they
+do not assign the expected value unconditionally in the mock. The packaged audit includes a two-target browser exchange
 using DOM-dispatched changes on rendered selects, trusted `localStorage` events, rendered state,
 and preference-key mutation assertions. The scenario runs after the pre-existing audit
 measurements, restores the exact preference record found before the scenario, verifies peer
 restoration, and closes both targets. Existing tests cover reload-once version recovery and
 concurrent session expiry.
+
+The audit-control follow-up ran `node --check scripts/test-packaged-browser-audit.mjs` and
+`node --test scripts/test-packaged-browser-audit.mjs` locally: 32 passed, 0 failed. It changes
+only the test model; it does not alter the packaged browser implementation. Hosted browser evidence
+below remains bound to the preceding production/driver tree, and CI for the follow-up source is
+required before treating the new test as hosted-qualified.
 
 ## Hosted evidence and source binding
 
