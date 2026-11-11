@@ -828,6 +828,17 @@ This proves receipt-backed scripted ACP policy refusal and no-change handling;
 it does not exercise candidate validation, a production provider, #236
 validation, or hosted exact-head qualification.
 
+Commit `9dd723006` extends that receipt-backed denial case with active writes
+to the generated module header, primary `src/main.c`, and protected repair
+graph, alongside the existing sibling-module and `Makefile` attempts. The
+receipt binds all five `POLICY_DENIED` audit records; the test verifies the
+existing protected files remain byte-identical, the sibling remains absent,
+the allowed target writes restore the original source, the rejected
+no-change assessment is retained, and the accepted graph head is unchanged.
+The focused test passed one JUnit method with zero failures, errors, or skips
+at this commit. These are representative protected-role and non-owner
+destinations, not an exhaustive matrix for every profile role or path race.
+
 The accumulated focused active-repair run at `875bd07530f34e3bc40fd47ebba9ff45e3142044`
 passed seven methods with zero failures, errors, or skips: directory admission,
 per-file output, staging growth, patch-file count, aggregate patch bytes,
