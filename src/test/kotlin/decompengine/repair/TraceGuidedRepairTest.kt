@@ -1755,6 +1755,126 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair path enforces aggregate patch bytes and permits the exact boundary`() {
+        val project = createProject(
+            createTempDirectory("repair-active-patch-byte-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val firstPath = "src/modules/reconstructed.c"
+        val secondPath = "src/modules/secondary.c"
+        project.resolve(secondPath).writeText("int secondary(void) { return 1; }\n")
+        val paths = listOf(firstPath, secondPath).sorted()
+        val before = paths.associateWith { project.resolve(it).readBytes() }
+        val profile = DeclarativeRepairIndexProfile(
+            "two-file-patch-bytes-v1",
+            RepairIndexLayout(sourcePaths = paths, editablePaths = paths),
+        )
+        val budget = RepairResourceBudget(maximumPatchFiles = 2, maximumPatchBytes = 4096)
+        val baselineHead = ModuleRevisionGraph.open(project, profile, budget).use { it.snapshot.headId }
+        val failureText = paths.joinToString("\n") { "$it: compiler error" }
+        val tooLarge = mapOf(
+            paths[0] to ByteArray(2048) { 'a'.code.toByte() },
+            paths[1] to ByteArray(2049) { 'b'.code.toByte() },
+        )
+        val exactBoundary = paths.associateWith { path ->
+            ByteArray(2048) { if (path == paths[0]) 'c'.code.toByte() else 'd'.code.toByte() }
+        }
+        fun harness(replacements: Map<String, ByteArray>, exceedBudget: Boolean): CapturedRepairAgentHarness =
+            object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    paths.forEach { path -> output.replace(path, replacements.getValue(path)) }
+                    if (exceedBudget) error("aggregate patch byte refusal should precede result construction")
+                    return AgentExecutionResult(
+                        AgentStopReason.COMPLETED,
+                        "exact aggregate patch boundary",
+                        paths.map { path ->
+                            AgentFileChange(
+                                AgentWorkspacePath("project", path),
+                                AgentFileChangeKind.MODIFIED,
+                                sha256(before.getValue(path)),
+                                sha256(replacements.getValue(path)),
+                                replacements.getValue(path).size.toLong(),
+                            )
+                        },
+                    )
+                }
+            }
+        val exactBoundaryValidationFailure = IllegalStateException("exact patch-byte boundary reached validation")
+        val validation = object : RepairValidationStrategy {
+            override val assurance = RepairValidationAssurance.TEST_ONLY_HOST_PROCESS
+            override fun requireAvailable() = Unit
+            override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? {
+                paths.forEach { path ->
+                    assertContentEquals(exactBoundary.getValue(path), projectDir.resolve(path).readBytes(), path)
+                }
+                throw exactBoundaryValidationFailure
+            }
+            override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                error("compile exception prevents rebuild")
+            override fun evaluateBehavior(
+                id: String,
+                projectDir: Path,
+                originalBinary: Path,
+                rebuiltBinary: Path,
+                inputs: List<ProcessInput>,
+                reportsDir: Path,
+                budget: RepairResourceBudget,
+            ): BehaviorComparisonReport = error("compile exception prevents behavior validation")
+        }
+        fun loop(adapter: CapturedRepairAgentHarness) = TraceGuidedRepairLoop.forTesting(
+            adapter,
+            RepairHistory(project.resolve("reports/repair_history.json")),
+            profile,
+            validation,
+            CapturedRepairStagingAuthority,
+            resourceBudget = budget,
+        )
+
+        val refusal = assertFailsWith<AgentExecutionException> {
+            loop(harness(tooLarge, exceedBudget = true)).repairCompileError(
+                project,
+                CompileFailure(listOf("cc"), 1, "", failureText),
+                emptyList(),
+            )
+        }
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, refusal.failure.kind)
+        assertIs<RepairBudgetExceededException>(refusal.cause)
+        assertTrue(refusal.cause?.message.orEmpty().contains("contains 4097 bytes"))
+        before.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes(), path) }
+        ModuleRevisionGraph.open(project, profile, budget).use { graph ->
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+            assertNull(graph.snapshot.pendingAttemptId)
+        }
+
+        assertFailsWith<IllegalStateException> {
+            loop(harness(exactBoundary, exceedBudget = false)).repairCompileError(
+                project,
+                CompileFailure(listOf("cc"), 1, "", failureText),
+                emptyList(),
+            )
+        }.also { assertTrue(it === exactBoundaryValidationFailure) }
+        before.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes(), path) }
+        ModuleRevisionGraph.open(project, profile, budget).use { graph ->
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            assertEquals(RepairRunStatus.VALIDATION_FAILED, graph.snapshot.runs.last().status)
+            assertNull(graph.snapshot.pendingAttemptId)
+        }
+    }
+
+    @Test
     fun `agent termination closes the pending graph and releases its root lock`() {
         val tempDir = createTempDirectory("repair-agent-termination-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
