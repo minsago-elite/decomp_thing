@@ -60,7 +60,13 @@ GENERIC_CONTRACT_MODES = {
     "session-preferences-pipelined-update",
     "session-preferences-pipelined-work",
 }
-RECONSTRUCTION_MODES = {"reconstruction-role-policy"}
+RECONSTRUCTION_MODES = {
+    "reconstruction-role-policy",
+    "reconstruction-mutation-grant",
+    "reconstruction-limit-after-write",
+    "reconstruction-frame-limit-after-write",
+}
+RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
 int main(void) {
     char badge[8];
@@ -228,6 +234,9 @@ expected_fs = {
     "fs-cap-write-only": {"readTextFile": False, "writeTextFile": True},
     "fs-cap-none": None,
     "reconstruction-role-policy": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-mutation-grant": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-frame-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -1171,7 +1180,24 @@ if MODE in RECONSTRUCTION_MODES:
         "/* fn_0000000000001000 */\n"
         "int decomp_engine_main(void) { return 0; }\n"
     )
+    if MODE == "reconstruction-mutation-grant":
+        outside_path = join_path(cwd, f"src/modules/{module_id}_extra.c")
+        outside = try_write_workspace_file(outside_path, "unauthorized sibling\n", 817)
+        if outside.get("error", {}).get("code") != -32602:
+            raise SystemExit(126)
+        oversized = try_write_workspace_file(
+            source,
+            "/*" + ("a" * RECONSTRUCTION_OVERSIZED_BYTES) + "*/\n",
+            818,
+        )
+        if oversized.get("error", {}).get("code") != -32602:
+            raise SystemExit(127)
     write_workspace_file(source, content, 816)
+    if MODE == "reconstruction-frame-limit-after-write":
+        sys.stdout.write("{" + ("x" * 70000))
+        sys.stdout.flush()
+        time.sleep(30)
+        raise SystemExit(0)
 elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     reconstructing = "Convert the Ghidra decompiler output" in prompt_text
     source = join_path(cwd, "decompiled.c" if reconstructing else "patched.c")
@@ -1198,6 +1224,8 @@ update({
     "status": "completed",
 })
 prompt_result = {"stopReason": "end_turn"}
+if MODE == "reconstruction-limit-after-write":
+    prompt_result["stopReason"] = "max_tokens"
 if MODE != "missing-usage":
     prompt_result["usage"] = {
         "inputTokens": -1 if MODE == "negative-usage" else 11,

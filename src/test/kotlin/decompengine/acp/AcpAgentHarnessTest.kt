@@ -12,6 +12,8 @@ import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentTaskProgress
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFileChangeEvent
@@ -33,14 +35,20 @@ import decompengine.agent.executeReceipt
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
 import decompengine.project.ArchivalBundleVerifier
+import decompengine.project.ArchivalReconstructionResult
 import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
+import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
+import decompengine.project.ReconstructionProfile
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionOutputWorkspace
+import decompengine.project.PublicationEntryRecord
+import decompengine.project.PublicationTreeBudget
+import decompengine.project.ReconstructionOutputTree
 import decompengine.project.budgetedAnalyzer
 import java.nio.file.Path
 import java.nio.file.Files
@@ -1125,6 +1133,194 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val maximumSourceBytes = 256L * 1024
+        val profile = ReconstructionProfile(
+            base.schemaVersion,
+            base.id,
+            base.layout,
+            base.budgets.copy(archiveMaximumFileBytes = maximumSourceBytes),
+            base.adapterConfiguration,
+        )
+        val buildRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        val fixture = createTempDirectory(buildRoot, "acp-public-reconstruction-mutation-")
+        val binary = fixture.resolve("input.elf")
+        val binaryBytes = byteArrayOf(9, 8, 7, 6)
+        Files.write(binary, binaryBytes)
+        val output = fixture.resolve("output")
+        val implementationPath = profile.layout.declaration("module-implementation")
+            .materialize(mapOf("module" to "decomp"))
+
+        data class Attempt(
+            val result: ArchivalReconstructionResult?,
+            val failure: Exception?,
+            val harness: AcpAgentHarness,
+            val taskCount: Int,
+            val receipts: List<AgentExecutionReceipt>,
+        )
+
+        fun runAttempt(mode: String, index: Int, maximumFrameBytes: Int = 64 * 1024): Attempt {
+            val receipts = mutableListOf<AgentExecutionReceipt>()
+            var taskCount = 0
+            val progress = object : AgentWorkflowProgress {
+                override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
+                    taskCount++
+                    return object : AgentTaskProgress {
+                        override fun event(event: AgentExecutionEvent) = Unit
+                        override fun complete(receipt: AgentExecutionReceipt) {
+                            receipts += receipt
+                        }
+                    }
+                }
+
+                override fun phase(
+                    phase: decompengine.agent.AgentWorkflowPhase,
+                    taskId: String?,
+                    acceptedRevisionSha256: String?,
+                ) = Unit
+            }
+            val acp = harness(
+                mode = mode,
+                sentinel = implementationPath,
+                maximumFrameBytes = maximumFrameBytes,
+            )
+            val function = RecoveredFunction(
+                "fn_0000000000001000",
+                "decomp_engine_main",
+                0x1000UL,
+                "int decomp_engine_main(void)",
+                "int decomp_engine_main(void) { return 0; } /* scenario-$index */",
+            )
+            val model = RecoveredProgramModel(inputSha256 = sha256(binaryBytes), functions = listOf(function))
+            val provenance = AcpHarnessProvenance(
+                harness = "acp",
+                implementationId = "scripted-acp-v1",
+                agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+                acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+                acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+                configurationSha256 = "0".repeat(64),
+                deprecated = false,
+            )
+            val service = ArchivalReconstructionService(
+                analyzer = budgetedAnalyzer { supplied, _ ->
+                    assertEquals(binary, supplied)
+                    model
+                },
+                reconstructor = BoundedLlmModuleReconstructor(
+                    acp,
+                    harnessProvenanceDescriptor = provenance.stableDescriptor,
+                    progress = progress,
+                ),
+                profile = profile,
+                progress = progress,
+            )
+            var result: ArchivalReconstructionResult? = null
+            var failure: Exception? = null
+            ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+                try {
+                    result = service.reconstructWithWorkspace(
+                        binary,
+                        output,
+                        workspace,
+                        workflowRunId = "public-reconstruction-mutation-$index",
+                    )
+                } catch (caught: Exception) {
+                    failure = caught
+                }
+            }
+            return Attempt(result, failure, acp, taskCount, receipts.toList())
+        }
+
+        val successful = runAttempt("reconstruction-mutation-grant", index = 1, maximumFrameBytes = 512 * 1024)
+        assertNull(successful.failure)
+        val result = assertNotNull(successful.result)
+        assertEquals(1, successful.taskCount)
+        assertEquals(1, successful.receipts.size)
+        assertEquals(0, result.build.returnCode)
+        assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
+        val execution = successful.receipts.single().requireResult()
+        assertEquals(AgentStopReason.COMPLETED, execution.stopReason)
+        val change = execution.changes.single()
+        assertEquals(implementationPath, change.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, change.kind)
+        assertEquals(Files.size(result.projectDir.resolve(implementationPath)), change.sizeBytes)
+
+        val audit = successful.harness.latestFilesystemAudit()
+        assertEquals(9, audit.size, audit.toString())
+        assertTrue(audit.take(5).all {
+            it.method == "fs/read_text_file" && it.outcome == AcpFilesystemAuditOutcome.DENIED &&
+                it.reason == AcpFilesystemAuditReason.CAPABILITY_DISABLED
+        }, audit.toString())
+        assertEquals("Makefile", assertNotNull(audit[5].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[5].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[5].reason)
+        assertEquals("src/modules/decomp_extra.c", assertNotNull(audit[6].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[6].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[6].reason)
+        assertEquals(implementationPath, assertNotNull(audit[7].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[7].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[7].reason)
+        assertEquals(implementationPath, assertNotNull(audit[8].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, audit[8].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, audit[8].reason)
+        assertFalse(result.projectDir.resolve("src/modules/decomp_extra.c").exists())
+        val extracted = fixture.resolve("verified-success")
+        ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
+        assertFalse(extracted.resolve("src/modules/decomp_extra.c").exists())
+        val acceptedMetadata = capturePublishedMetadata(output)
+
+        val limited = runAttempt("reconstruction-limit-after-write", index = 2)
+        val interruption = assertNotNull(limited.failure, "LIMIT_EXHAUSTED must refuse candidate publication")
+        assertEquals(1, limited.taskCount)
+        val interruptionInChain = generateSequence<Throwable>(interruption) { it.cause }
+            .filterIsInstance<decompengine.project.ModuleReconstructionInterruptedException>()
+            .single()
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, interruptionInChain.stopReason)
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, limited.receipts.single().requireResult().stopReason)
+        assertEquals(AgentFileChangeKind.CREATED, limited.receipts.single().requireResult().changes.single().kind)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val frameLimited = runAttempt("reconstruction-frame-limit-after-write", index = 3)
+        val refusal = assertNotNull(frameLimited.failure, "oversized protocol frame must refuse candidate publication")
+        assertTrue(generateSequence<Throwable>(refusal) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        assertEquals(1, frameLimited.taskCount)
+        val failedReceipt = frameLimited.receipts.single()
+        val failedOutcome = assertIs<AgentExecutionOutcome.Failed>(failedReceipt.outcome)
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failedOutcome.failure.kind)
+        assertTrue(failedOutcome.failure.message.contains("frame limit"), failedOutcome.failure.message)
+        assertNull(assertIs<AcpInvocationEvidenceSnapshot>(failedReceipt.providerEvidence).completeExecutionEvidence)
+        val diagnostics = assertNotNull(frameLimited.harness.latestDiagnostics())
+        assertTrue(diagnostics.remainingProcessIds.isEmpty(), diagnostics.toString())
+        assertTrue(diagnostics.sandboxCleanupVerified, diagnostics.toString())
+        assertProcessStopped(diagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+    }
+
+    private fun capturePublishedMetadata(output: Path): Map<String, PublicationEntryRecord> {
+        val budget = PublicationTreeBudget()
+        return LinuxFilesystemSyscalls.openRoot(output).use { root ->
+            listOf("source-tree", "source-tree.zip", "reconstruction.json", ".decomp-agent-sessions")
+                .associateWith { relative -> ReconstructionOutputTree.recordAt(root, Path.of(relative), budget) }
+        }
+    }
+
+    private fun assertNoReconstructionPublicationResidue(output: Path) {
+        assertFalse(Files.exists(output.resolve(ReconstructionOutputWorkspace.PUBLICATION)))
+        Files.list(output).use { entries ->
+            assertTrue(entries.noneMatch { path ->
+                val name = path.fileName.toString()
+                name.startsWith(".reconstruction-stage-") || name.startsWith(".reconstruction-previous-") ||
+                    name.startsWith(".publication-")
+            })
+        }
+    }
+
+    @Test
     fun `public harness fails closed before launch when the outer sandbox is absent`() {
         val fixture = fixture()
         val harness = AcpAgentHarness(
@@ -1198,7 +1394,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(103, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(104, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
