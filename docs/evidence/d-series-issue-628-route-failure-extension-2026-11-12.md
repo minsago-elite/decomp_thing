@@ -139,3 +139,15 @@ Verification at test checkpoint `840c9893e`:
 - `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local component/build evidence only. It does not qualify packaged-browser or assistive-technology behavior, the complete panel matrix, or full #628/#221 acceptance.
+
+## Combined frontend verification after route and panel extensions — 2026-11-12
+
+Exact source checkpoint: `b4d62334f8872b4a0b1d5f266993e8528ff99038` on PR #1946.
+
+The combined changes were verified together after correcting internal validation binding errors to use the unverified-evidence message while preserving the saved-selection no-substitution wording.
+
+- Full frontend Vitest suite: **84 files, 1,226 tests passed**.
+- `npm run build` with pinned Node 24.20.0/npm 11.19.0: generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
+- Focused validation regression suites: `validation-navigation.test.tsx` and `recorded-validation.test.tsx` — 2 files, 56 tests passed.
+
+This remains local frontend/JSDOM evidence. Hosted checks on the pushed head, packaged-browser qualification, manual assistive-technology evidence, remaining panel states and complete #628/#221 acceptance are separate and outstanding.
