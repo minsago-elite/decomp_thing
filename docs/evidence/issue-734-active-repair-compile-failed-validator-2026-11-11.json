@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "639081191a73ec92fc3445979f60739584d4dd91",
+  "sourceParent": "3840a002d818fbd0eaf879e26866b635261dd1f5",
+  "sourceTree": "8e0815e0c34aca9a0bd26bf3a19aa1a3fbe2d50a",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair consumes a receipt-bound compile failure and rejects the candidate"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair consumes a receipt-bound compile failure and rejects the candidate'",
+  "environment": {
+    "gradleWrapper": "9.6.1",
+    "java": "OpenJDK Temurin 21.0.12.1"
+  },
+  "result": {
+    "report": "issue-734-active-repair-compile-failed-validator-2026-11-11.xml",
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.885,
+    "timestamp": "2026-11-11T14:15:28.857Z",
+    "sha256": "4ce79cb396a1bf52cc0788bc86dc320eac56b56f7240fabd5ce38b9419cedcea"
+  },
+  "scope": {
+    "claim": "The active repair loop consumes a typed CompileFailed validator result after one scripted ACP candidate mutation. The returned iteration is rejected; the accepted source and graph head remain unchanged; the graph has no pending attempt and retains a COMPILE_FAILED validation observation bound to the candidate invocation, proof, and retained validation artifact.",
+    "limitations": [
+      "The validator is an injected fixture that returns a typed unsuccessful result; this does not qualify a real compiler execution or successful production validation under #236.",
+      "Local focused test only; no live provider, hosted exact-head CI, other profile, or complete #734/#63 qualification."
+    ]
+  }
+}

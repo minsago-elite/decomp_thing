@@ -1696,3 +1696,22 @@ This remains pre-dispatch active-loop coverage with a strict captured test
 harness, not an ACP launch, live provider, production validator result under
 #236, hosted exact-head CI, or complete #734/#63 qualification. Keep #734 and
 #63 open.
+
+## Active repair consumes a typed compile-failure result — 2026-11-11
+
+Source commit `639081191a73ec92fc3445979f60739584d4dd91` adds an active
+scripted-ACP repair case where the validator returns `CompileFailed` with a
+candidate-, profile-, index-, and regression-corpus-bound proof and a matching
+validation artifact. The repair loop records a `COMPILE_FAILED` validation
+observation, rejects the candidate, returns the rejected iteration, and leaves
+the accepted source and graph head unchanged with no pending attempt. The test
+reopens the graph and checks the retained observation and artifact digest.
+
+The focused local run passed one test with zero failures, errors, or skips; see
+the retained [JUnit report](evidence/issue-734-active-repair-compile-failed-validator-2026-11-11.xml)
+and [provenance record](evidence/issue-734-active-repair-compile-failed-validator-2026-11-11.json).
+The validator is an injected fixture that supplies a typed unsuccessful result;
+this proves active-path result consumption and evidence retention, not a real
+compiler execution or successful production validation under #236. It does
+not qualify live-provider behavior, hosted exact-head CI, or complete #734/#63
+acceptance. Keep #734 and #63 open.
