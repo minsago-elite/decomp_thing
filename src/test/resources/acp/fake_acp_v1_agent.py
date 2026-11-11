@@ -69,7 +69,10 @@ RECONSTRUCTION_MODES = {
     "reconstruction-stdout-limit-after-write",
     "reconstruction-mixed-output-limit-after-write",
     "reconstruction-request-timeout-after-write",
+}
+ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
+    "repair-active-output-limit",
 }
 RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
@@ -247,6 +250,7 @@ expected_fs = {
     "reconstruction-mixed-output-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -559,7 +563,7 @@ prompt = read_message()
 if prompt is None or prompt.get("method") != "session/prompt":
     raise SystemExit(94)
 prompt_text = prompt.get("params", {}).get("prompt", [{}])[0].get("text", "")
-if MODE == "repair-active-oversized-only":
+if MODE in ACTIVE_REPAIR_MODES:
     prompt_valid = "Compile command:" in prompt_text and "Exit code:" in prompt_text
 elif MODE in RECONSTRUCTION_MODES:
     prompt_valid = SENTINEL in prompt_text and "decomp_engine_main" in prompt_text
@@ -704,6 +708,20 @@ if MODE == "repair-active-oversized-only":
         raise SystemExit(143)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
+if MODE == "repair-active-output-limit":
+    # Cross the request's aggregate output allowance using valid, individually bounded ACP
+    # notifications. If the host does not enforce the limit, the fixture fails closed below.
+    try:
+        for index in range(20):
+            update({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "o" * 30000},
+                "messageId": f"repair-output-limit-{index}",
+            })
+    except (BrokenPipeError, OSError):
+        pass
+    time.sleep(30)
+    raise SystemExit(144)
 if MODE == "pipelined-callbacks":
     source = join_path(cwd, "contract/artifact.txt")
     for request_id in (130, 131):

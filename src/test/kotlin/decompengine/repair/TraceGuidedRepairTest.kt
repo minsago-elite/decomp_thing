@@ -1375,6 +1375,54 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active ACP repair retains real stream output exhaustion and rejects the candidate`() {
+        val project = createProject(
+            createTempDirectory("repair-active-acp-output-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val target = project.resolve("src/modules/reconstructed.c")
+        val acceptedSource = target.readBytes()
+        val harness = AcpAgentHarnessTest().harness("repair-active-output-limit")
+        val limits = AgentExecutionLimits(maxOutputBytes = 64L * 1024)
+
+        val failure = assertFailsWith<Exception> {
+            generatedCRepairLoop(
+                harness,
+                RepairHistory(project.resolve("reports/repair_history.json")),
+                limits = limits,
+            ).repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+        assertTrue(generateSequence<Throwable>(failure) { it.cause }.any {
+            it.message.orEmpty().contains("ACP aggregate stdout and stderr exceeded")
+        }, generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.toList().toString())
+        assertContentEquals(acceptedSource, target.readBytes())
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            val node = graph.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, node.status)
+            val binding = requireNotNull(node.repairMetadata?.agentInvocation)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+            assertEquals("failed-resource-exhausted", binding.terminalOutcome)
+            assertFalse(binding.receiptReleaseComplete)
+            val receipt = Json.parseToJsonElement(project.resolve(binding.receiptPath).readText()).jsonObject
+            val outcome = receipt.getValue("outcome").jsonObject
+            assertEquals("failed", outcome.getValue("type").jsonPrimitive.content)
+            assertEquals(
+                "resource-exhausted",
+                outcome.getValue("failure").jsonObject.getValue("kind").jsonPrimitive.content,
+            )
+            val process = receipt.getValue("process").jsonObject
+            assertTrue(process.getValue("outputLimitExceeded").jsonPrimitive.boolean)
+            assertEquals(64 * 1024, process.getValue("producedOutputLimitBytes").jsonPrimitive.int)
+            assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int)
+            assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean)
+            assertFalse(receipt.getValue("lifecycle").jsonObject
+                .getValue("releaseComplete").jsonPrimitive.boolean)
+        }
+    }
+
+    @Test
     fun `agent termination closes the pending graph and releases its root lock`() {
         val tempDir = createTempDirectory("repair-agent-termination-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
