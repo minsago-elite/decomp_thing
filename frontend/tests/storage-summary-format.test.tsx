@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { decodeContract } from '../src/api/decode';
+import { ApiClientError } from '../src/api/errors';
 import { StorageSummary } from '../src/jobs/StorageSummary';
 
 // #621: the protected-job count is an exact uint64 sum and must not round through Number.
@@ -49,4 +50,44 @@ it.each([
   expect(transport.get.mock.calls.map(([kind, path]) => [kind, path])).toEqual([
     ['storageSummary', '/storage'], ['maintenancePreview', '/storage/maintenance-preview'],
   ]);
+});
+
+it('keeps valid storage totals when the maintenance preview fails', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockImplementation(kind => kind === 'storageSummary'
+    ? Promise.resolve(fixture('storage-summary'))
+    : Promise.reject(new ApiClientError('http_error', { status: 403, requestId, serverCode: 'ACCESS_DENIED' })));
+  render(<StorageSummary basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+  const alert = screen.getByRole('alert');
+  expect(screen.getByText('Total')).toBeTruthy();
+  expect(screen.getByText('Jobs')).toBeTruthy();
+  expect(screen.queryByRole('heading', { name: 'Maintenance preview (dry run)' })).toBeNull();
+  expect(screen.getByText('Some storage information was unavailable; the displayed results include only successful reads.')).toBeTruthy();
+  expect(alert.textContent).toContain('Maintenance preview: This session cannot read storage information. Check local permissions.');
+  expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+  expect(alert.textContent).not.toContain('ACCESS_DENIED');
+  expect(transport.get).toHaveBeenCalledTimes(2);
+});
+
+it('keeps the maintenance preview when storage totals fail', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  current = preview('0', 0);
+  transport.get.mockImplementation(kind => kind === 'storageSummary'
+    ? Promise.reject(new ApiClientError('http_error', { status: 503, requestId, serverCode: 'INTERNAL_ERROR' }))
+    : Promise.resolve(current));
+  render(<StorageSummary basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+
+  expect(await screen.findByText('Jobs are never deleted automatically. Maintenance only shortens old unpinned progress history and finishes interrupted deletions.')).toBeTruthy();
+  expect(screen.queryByText('Total')).toBeNull();
+  expect(screen.getByText('Some storage information was unavailable; the displayed results include only successful reads.')).toBeTruthy();
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('Storage totals: Storage could not be read. Nothing was changed.');
+  expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+  expect(alert.textContent).not.toContain('INTERNAL_ERROR');
+  expect(transport.get).toHaveBeenCalledTimes(2);
 });

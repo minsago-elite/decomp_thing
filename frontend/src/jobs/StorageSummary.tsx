@@ -21,29 +21,37 @@ export function StorageSummary({ basePath }: { basePath: string }) {
   const [preview, setPreview] = useState<MaintenancePreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
-  const [error, setError] = useState('');
+  const [errors, setErrors] = useState<string[]>([]);
   const active = useRef<AbortController | null>(null);
   async function read() {
     if (active.current) return;
     const controller = new AbortController(); active.current = controller;
-    setBusy(true); setNotice(copy.reading); setError('');
+    setBusy(true); setNotice(copy.reading); setErrors([]);
     try {
-      const [storage, maintenance] = await Promise.all([
+      const [storage, maintenance] = await Promise.allSettled([
         client.get('storageSummary', '/storage', { signal: controller.signal }),
         client.get('maintenancePreview', '/storage/maintenance-preview', { signal: controller.signal }),
       ]);
-      setSummary(storage.data); setPreview(maintenance.data); setNotice('');
-    } catch (failure: unknown) {
       if (!controller.signal.aborted) {
-        const message = {
-          session: copy.sessionExpired,
-          denied: copy.accessDenied,
-          missing: copy.missing,
-          unsupported: copy.unsupported,
-          unverified: copy.unverified,
-          failed: copy.failed,
-        }[metadataFailureKind(failure)];
-        setSummary(null); setPreview(null); setNotice(''); setError(withApiFailureReference(message, failure));
+        setSummary(storage.status === 'fulfilled' ? storage.value.data : null);
+        setPreview(maintenance.status === 'fulfilled' ? maintenance.value.data : null);
+        const describe = (failure: unknown) => {
+          const message = {
+            session: copy.sessionExpired,
+            denied: copy.accessDenied,
+            missing: copy.missing,
+            unsupported: copy.unsupported,
+            unverified: copy.unverified,
+            failed: copy.failed,
+          }[metadataFailureKind(failure)];
+          return withApiFailureReference(message, failure);
+        };
+        const nextErrors = [
+          ...(storage.status === 'rejected' ? [`${copy.storageTotals}: ${describe(storage.reason)}`] : []),
+          ...(maintenance.status === 'rejected' ? [`${copy.maintenancePreviewData}: ${describe(maintenance.reason)}`] : []),
+        ];
+        setErrors(nextErrors);
+        setNotice('');
       }
     } finally {
       active.current = null; setBusy(false);
@@ -54,7 +62,10 @@ export function StorageSummary({ basePath }: { basePath: string }) {
     <p>{copy.explanation}</p>
     <button type="button" disabled={busy} onClick={() => { void read(); }}>{copy.read}</button>
     <p role="status">{notice}</p>
-    {error && <p role="alert">{error}</p>}
+    {errors.length > 0 && <div role="alert">
+      {errors.length === 1 ? <p>{errors[0]}</p> : <ul>{errors.map((error, index) => <li key={index}>{error}</li>)}</ul>}
+    </div>}
+    {errors.length > 0 && (summary || preview) && <p>{copy.someStorageInformationWasUnavailable}</p>}
     {summary && <>
       {!summary.complete && <p>{copy.partial}</p>}
       <dl class="job-facts">
