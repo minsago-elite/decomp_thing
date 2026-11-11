@@ -3068,11 +3068,23 @@ class TraceGuidedRepairTest {
         activeAcpRepairPreservesExactCandidateAfterRefusedRetry(ActiveAcpRepairQuota.FILESYSTEM_READ_BYTES)
     }
 
-    private enum class ActiveAcpRepairQuota { PATCH_BYTES, FILESYSTEM_READ_BYTES, FILESYSTEM_WRITE_BYTES }
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active ACP repair enforces the declared source-file byte grant after an acknowledged candidate`() {
+        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(ActiveAcpRepairQuota.SOURCE_FILE_BYTES)
+    }
+
+    private enum class ActiveAcpRepairQuota {
+        PATCH_BYTES,
+        FILESYSTEM_READ_BYTES,
+        FILESYSTEM_WRITE_BYTES,
+        SOURCE_FILE_BYTES,
+    }
 
     private fun activeAcpRepairPreservesExactCandidateAfterRefusedRetry(quota: ActiveAcpRepairQuota) {
         val readQuota = quota == ActiveAcpRepairQuota.FILESYSTEM_READ_BYTES
         val enforceAcpWriteLimit = quota == ActiveAcpRepairQuota.FILESYSTEM_WRITE_BYTES
+        val sourceFileQuota = quota == ActiveAcpRepairQuota.SOURCE_FILE_BYTES
         val testRoot = Path.of("build/test-tmp").createDirectories()
         val project = createProject(
             Files.createTempDirectory(
@@ -3095,20 +3107,21 @@ class TraceGuidedRepairTest {
         ) + suffix).toByteArray(Charsets.UTF_8)
         assertEquals(candidateLimit, candidateSource.size.toLong())
         val budget = RepairResourceBudget(
-            maximumSourceFileBytes = 64L * 1024,
+            maximumSourceFileBytes = if (sourceFileQuota) patchLimit else 64L * 1024,
             maximumPatchBytes = if (quota == ActiveAcpRepairQuota.PATCH_BYTES) patchLimit else 8L * 1024,
         )
         val filesystemLimits = AcpFilesystemLimits(
-            maximumReadBytes = if (readQuota) patchLimit.toInt() else 8 * 1024 * 1024,
+            maximumReadBytes = if (readQuota || sourceFileQuota) patchLimit.toInt() else 8 * 1024 * 1024,
             maximumWriteBytes = if (enforceAcpWriteLimit) patchLimit.toInt() else 8 * 1024 * 1024,
         )
-        assertTrue(budget.maximumSourceFileBytes > candidateLimit)
+        if (sourceFileQuota) assertEquals(candidateLimit, budget.maximumSourceFileBytes)
+        else assertTrue(budget.maximumSourceFileBytes > candidateLimit)
         assertTrue(budget.maximumStagingBytes > candidateLimit)
         assertTrue(budget.maximumContextBytes > candidateLimit)
         assertTrue(budget.maximumPatchFiles > 1)
         if (quota == ActiveAcpRepairQuota.PATCH_BYTES) assertEquals(patchLimit, budget.maximumPatchBytes)
         else assertTrue(budget.maximumPatchBytes > candidateLimit)
-        if (readQuota) assertEquals(patchLimit.toInt(), filesystemLimits.maximumReadBytes)
+        if (readQuota || sourceFileQuota) assertEquals(patchLimit.toInt(), filesystemLimits.maximumReadBytes)
         else assertTrue(filesystemLimits.maximumReadBytes > candidateLimit)
         val profile = requireNotNull(GeneratedCRepairIndexProfile.reconstructionProfile())
         val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use {
@@ -3155,7 +3168,9 @@ class TraceGuidedRepairTest {
                 assertEquals(targetPath, grant.path.relativePath)
                 assertEquals(setOf(AgentOperation.WRITE_FILE), grant.operations)
                 assertEquals(budget.maximumSourceFileBytes, grant.maximumBytes)
-                if (readQuota) assertTrue(initialFiles.values.all { it.size <= filesystemLimits.maximumReadBytes })
+                if (readQuota || sourceFileQuota) {
+                    assertTrue(initialFiles.values.all { it.size <= filesystemLimits.maximumReadBytes })
+                }
                 return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
             }
         }
@@ -3167,6 +3182,7 @@ class TraceGuidedRepairTest {
                 ActiveAcpRepairQuota.PATCH_BYTES -> "patch-byte-limit-preserved candidate reached validator"
                 ActiveAcpRepairQuota.FILESYSTEM_READ_BYTES -> "filesystem-read-limit-preserved candidate reached validator"
                 ActiveAcpRepairQuota.FILESYSTEM_WRITE_BYTES -> "filesystem-write-limit-preserved candidate reached validator"
+                ActiveAcpRepairQuota.SOURCE_FILE_BYTES -> "source-file-grant-preserved candidate reached validator"
             },
         )
         val validation = object : RepairValidationStrategy {
@@ -3265,7 +3281,8 @@ class TraceGuidedRepairTest {
             assertEquals(candidateLimit, change.getValue("sizeBytes").jsonPrimitive.content.toLong())
             val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
             val expectedOutcomes = if (readQuota) listOf("allowed", "denied") else listOf("allowed", "denied", "allowed")
-            val expectedReasons = if (readQuota) listOf("completed", "resource-limit") else
+            val expectedReasons = if (readQuota) listOf("completed", "resource-limit") else if (sourceFileQuota)
+                listOf("completed", "policy-denied", "completed") else
                 listOf("completed", "resource-limit", "completed")
             assertEquals(expectedOutcomes.size, filesystem.getValue("recordCount").jsonPrimitive.int)
             val auditRecords = filesystem.getValue("records").jsonArray.map { it.jsonObject }
