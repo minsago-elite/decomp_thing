@@ -46,3 +46,17 @@ Verification at this source checkpoint:
 - `npm run build` — generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
 
 These local results do not qualify all exploration/report failures or the remaining validation, Git, activity and other job panels. Packaged-browser and assistive-technology evidence, full #628/#221 acceptance, and hosted exact-head checks remain separate.
+
+## Exploration report read failure states — 2026-11-12
+
+Source checkpoint: `8762fc5b225572f47bae757a22c4594fe6e154ae` on PR #1946.
+
+Explicit reads of the exploration report now distinguish session, denied access, missing route, unsupported response, unverified content, and general read failure. The component matrix verifies six distinct fixed alerts, reference-ID filtering, suppression of server codes and exception diagnostics, and preservation of the report panel controls after failure.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `run.test.tsx`, `exploration-cases.test.tsx`, `exploration-failure-cases.test.tsx`, and `exploration-breadth.test.tsx` — 4 files, 109 tests passed.
+- Full frontend Vitest suite — 84 files, 1,205 tests passed.
+- `npm run build` — generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
+
+These are local frontend results. Remaining job panels, full route/panel-state acceptance, packaged-browser evidence, screen-reader evidence, and parent #221 qualification remain open.
