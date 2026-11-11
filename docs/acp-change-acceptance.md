@@ -1181,3 +1181,36 @@ The [JUnit report](evidence/issue-734-public-reconstruction-frame-count-2026-11-
 and its [provenance record](evidence/issue-734-public-reconstruction-frame-count-2026-11-11.json)
 retain the result counts, command, toolchain versions, source commit, and report
 digest.
+
+## Transactional reconstruction of an existing implementation — 2026-11-11
+
+Commit `0aac7a9989bf1488035e2105b726efe324fe5750` adds
+`AcpAgentHarnessTest.transactional ACP source generation accepts a bounded
+modification of an existing owned implementation`. The test seeds the owned
+implementation inside the private publication stage, then runs
+`SourceTreeGenerator.generateWithCompilerFeedback` under the workspace's real
+publication lock with a scripted ACP process and the Generated C Make profile.
+The test records that the target existed when the task was dispatched and
+requires one completed, request-bound `MODIFIED` receipt with exact before and
+after SHA-256 values and byte count. It also verifies the broker's allowed
+write, successful compilation, archive verification and extraction, byte-for-
+byte equality of the published and extracted implementation, a successful
+rebuild of the extracted tree, and absence of publication residue.
+
+The local focused run covered this scenario, the public reconstruction
+mutation/limit case, and the production-bytecode guard: three tests, zero
+failures, errors, or skips. The retained JUnit report records 46.657 seconds
+total, including 0.874 seconds for the modification scenario. It was run with
+the pinned Java 21.0.12.1, Node 24.20.0 and npm 11.19.0 toolchain, with the
+live ACP contract requirement enabled and the frontend asset build passing.
+The exact command, report digest and result are in the linked
+[JUnit report](evidence/issue-734-transactional-reconstruction-modification-2026-11-11.xml)
+and [provenance record](evidence/issue-734-transactional-reconstruction-modification-2026-11-11.json).
+
+This qualifies a bounded modification through the active transactional source
+generator while it runs under the reconstruction publication lease. It does
+not claim that `ArchivalReconstructionService` itself starts from an existing
+published project: that service creates a fresh private stage. The case uses a
+scripted ACP peer and one reconstruction profile; it does not qualify an
+independent provider, production validation under #236, all mutation
+categories or limits, or hosted exact-head CI. #734 and #63 remain open.

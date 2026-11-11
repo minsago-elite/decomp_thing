@@ -1,0 +1,50 @@
+{
+  "schema": "issue-734-focused-junit-evidence-v1",
+  "sourceCommit": "0aac7a9989bf1488035e2105b726efe324fe5750",
+  "sourceParent": "b9b00cf70d911b7f4b1dc5982d0e983f960e67a9",
+  "command": [
+    "./gradlew",
+    "--no-daemon",
+    "--offline",
+    "test",
+    "--console=plain",
+    "-x",
+    "frontendInstall",
+    "--tests",
+    "decompengine.acp.AcpAgentHarnessTest.transactional ACP source generation accepts a bounded modification of an existing owned implementation",
+    "--tests",
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes",
+    "--tests",
+    "decompengine.acp.AcpAgentHarnessTest.production bytecode exposes no launcher boundary or test mode bypass"
+  ],
+  "environment": {
+    "liveAcpContractRequired": true,
+    "java": "21.0.12.1",
+    "node": "24.20.0",
+    "npm": "11.19.0",
+    "frontendAssetBuild": "passed"
+  },
+  "result": {
+    "tests": 3,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testStartedAtUtc": "2026-11-11T09:22:21.157Z",
+    "testDurationSeconds": 46.657,
+    "testcaseDurationsSeconds": {
+      "transactional ACP source generation accepts a bounded modification of an existing owned implementation": 0.874,
+      "public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes": 45.364,
+      "production bytecode exposes no launcher boundary or test mode bypass": 0.394
+    },
+    "reportPath": "docs/evidence/issue-734-transactional-reconstruction-modification-2026-11-11.xml",
+    "reportSha256": "39bbed27ed8d7ac0fce37cda125e441f8250864c18d8cad65c1e63d2d58623ea"
+  },
+  "scopeLimits": [
+    "local scripted ACP peer only",
+    "Generated C Make profile only",
+    "active transactional SourceTreeGenerator path under publication lease; not an ArchivalReconstructionService existing-publication seed",
+    "no independent provider or production validator qualification",
+    "no hosted exact-head result for this commit",
+    "does not complete the #734 mutation/resource matrix"
+  ]
+}
