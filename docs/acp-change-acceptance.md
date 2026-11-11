@@ -530,10 +530,19 @@ creates no extra source, and leaves no pending graph attempt. This confirms
 that the active repair path applies its modification-only contract rather than
 relying only on standalone policy helpers.
 
-The focused test passed locally at the implementation preceding this note
-(one test, no failures/errors/skips); this does not qualify a live ACP provider,
-the public reconstruction path, all resource limits, production validation, or
-the complete #734 mutation matrix. #734 remains open and dependent on #729–#733.
+At implementation commit `7767e6074ce31d7b6680a18e797f481c212b7cfd`, a focused
+Gradle run passed 35 tests with no failures, errors, or skips:
+`WorkspaceSnapshotLimitsTest` (31), three selected `AcpAgentHarnessTest` cases,
+and the new `TraceGuidedRepairTest` case. The ACP cases include public Make and
+Ninja reconstruction through role enforcement and verified rebuild, captured
+repair writes through ACP, and oversized captured-write refusal with bounded
+retry. The snapshot suite covers create/modify/delete observations, move
+source/destination authorization, text/binary content policy, filesystem entry
+rejection, and per-snapshot entry/file/byte limits. The repair test proves the
+active repair path refuses create/delete operations and claims. This remains
+local fixture evidence: it does not qualify a live provider, every public
+resource-exhaustion outcome, production validation, or the complete #734
+mutation matrix. #734 remains open and dependent on #729–#733.
 
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
