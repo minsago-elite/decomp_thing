@@ -63,6 +63,7 @@ GENERIC_CONTRACT_MODES = {
 RECONSTRUCTION_MODES = {
     "reconstruction-role-policy",
     "reconstruction-mutation-grant",
+    "reconstruction-tool-limit-after-write",
     "reconstruction-limit-after-write",
     "reconstruction-frame-limit-after-write",
     "reconstruction-stderr-limit-after-write",
@@ -251,6 +252,7 @@ expected_fs = {
     "fs-cap-none": None,
     "reconstruction-role-policy": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-mutation-grant": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-tool-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-frame-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-stderr-limit-after-write": {"readTextFile": False, "writeTextFile": True},
@@ -1403,6 +1405,15 @@ if MODE in RECONSTRUCTION_MODES:
         if oversized.get("error", {}).get("code") != -32602:
             raise SystemExit(127)
     write_workspace_file(source, content, 816)
+    if MODE == "reconstruction-tool-limit-after-write":
+        for ordinal in range(2):
+            update({
+                "sessionUpdate": "tool_call",
+                "toolCallId": f"reconstruction-tool-after-write-{ordinal}",
+                "title": f"Tool call {ordinal} after reconstruction write",
+                "kind": "other",
+                "status": "completed",
+            })
     if MODE == "reconstruction-request-timeout-after-write":
         time.sleep(30)
         raise SystemExit(0)

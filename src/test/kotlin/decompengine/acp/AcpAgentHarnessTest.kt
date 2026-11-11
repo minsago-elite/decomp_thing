@@ -1170,6 +1170,7 @@ class AcpAgentHarnessTest {
             requestTimeoutMillis: Long? = null,
             executionLimits: AgentExecutionLimits? = null,
             snapshotLimits: WorkspaceSnapshotLimits? = null,
+            gatePromptCompletion: Boolean = false,
         ): Attempt {
             val receipts = mutableListOf<AgentExecutionReceipt>()
             val requestSha256s = mutableListOf<String>()
@@ -1204,7 +1205,13 @@ class AcpAgentHarnessTest {
                     timeouts(startup = 2_500, request = timeout, shutdown = 1_500)
                 } ?: timeouts(),
                 workspaceSnapshotLimits = snapshotLimits,
-            )
+            ).also { configured ->
+                if (gatePromptCompletion) {
+                    configured.withPromptLoopGateForTesting { promptJob ->
+                        kotlinx.coroutines.withTimeout(5_000) { promptJob.join() }
+                    }
+                }
+            }
             val function = RecoveredFunction(
                 "fn_0000000000001000",
                 "decomp_engine_main",
@@ -1531,6 +1538,97 @@ class AcpAgentHarnessTest {
         assertTrue(timeoutDiagnostics.sandboxCleanupVerified, timeoutDiagnostics.toString())
         assertProcessStopped(timeoutDiagnostics.pid)
         assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val toolLimited = runAttempt(
+            "reconstruction-tool-limit-after-write",
+            index = 13,
+            executionLimits = AgentExecutionLimits(maxToolCalls = 2),
+            gatePromptCompletion = true,
+        )
+        val toolFailure = assertNotNull(toolLimited.failure, "tool-call exhaustion must refuse publication")
+        assertEquals(1, toolLimited.taskCount)
+        val toolResult = toolLimited.receipts.single().requireResult()
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, toolResult.stopReason)
+        assertEquals(3, assertNotNull(assertNotNull(toolResult.usage).toolCalls))
+        val toolReceipt = toolLimited.receipts.single()
+        assertEquals(toolLimited.requestSha256s.single(), toolReceipt.requestBinding.requestSha256)
+        val toolEvidence = assertIs<AcpInvocationEvidenceSnapshot>(toolReceipt.providerEvidence)
+        assertNotNull(toolEvidence.completeExecutionEvidence)
+        val toolDiagnostics = assertNotNull(toolLimited.harness.latestDiagnostics())
+        assertTrue(toolDiagnostics.remainingProcessIds.isEmpty(), toolDiagnostics.toString())
+        assertTrue(toolDiagnostics.sandboxCleanupVerified, toolDiagnostics.toString())
+        assertProcessStopped(toolDiagnostics.pid)
+        assertEquals(1, toolLimited.harness.latestFilesystemAudit().count {
+            it.policyPath?.relativePath == implementationPath &&
+                it.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                it.reason == AcpFilesystemAuditReason.COMPLETED
+        })
+        assertTrue(generateSequence<Throwable>(toolFailure) { it.cause }.any {
+            it is decompengine.project.ModuleReconstructionInterruptedException &&
+                it.stopReason == AgentStopReason.LIMIT_EXHAUSTED
+        })
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        for ((index, limit) in listOf(
+            "input" to AgentExecutionLimits(maxInputTokens = 10),
+            "output" to AgentExecutionLimits(maxOutputTokens = 6),
+        ).withIndex()) {
+            val (dimension, limits) = limit
+            val limitedTokens = runAttempt(
+                "reconstruction-role-policy",
+                index = 14 + index,
+                executionLimits = limits,
+            )
+            val tokenFailure = assertNotNull(limitedTokens.failure, "$dimension token limit must refuse publication")
+            assertEquals(1, limitedTokens.taskCount)
+            val tokenResult = limitedTokens.receipts.single().requireResult()
+            assertEquals(AgentStopReason.LIMIT_EXHAUSTED, tokenResult.stopReason)
+            val tokenUsage = assertNotNull(tokenResult.usage)
+            assertEquals(11L, assertNotNull(tokenUsage.inputTokens))
+            assertEquals(7L, assertNotNull(tokenUsage.outputTokens))
+            assertEquals(1, limitedTokens.harness.latestFilesystemAudit().count {
+                it.policyPath?.relativePath == implementationPath &&
+                    it.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                    it.reason == AcpFilesystemAuditReason.COMPLETED
+            })
+            assertTrue(generateSequence<Throwable>(tokenFailure) { it.cause }.any {
+                it is decompengine.project.ModuleReconstructionInterruptedException &&
+                    it.stopReason == AgentStopReason.LIMIT_EXHAUSTED
+            })
+            val tokenDiagnostics = assertNotNull(limitedTokens.harness.latestDiagnostics())
+            assertTrue(tokenDiagnostics.remainingProcessIds.isEmpty(), tokenDiagnostics.toString())
+            assertTrue(tokenDiagnostics.sandboxCleanupVerified, tokenDiagnostics.toString())
+            assertProcessStopped(tokenDiagnostics.pid)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), dimension)
+            assertNoReconstructionPublicationResidue(output)
+        }
+
+        val exactResourceBoundary = runAttempt(
+            "reconstruction-tool-limit-after-write",
+            index = 16,
+            executionLimits = AgentExecutionLimits(
+                maxToolCalls = 3,
+                maxInputTokens = 11,
+                maxOutputTokens = 7,
+            ),
+            gatePromptCompletion = true,
+        )
+        assertNull(exactResourceBoundary.failure)
+        assertEquals(1, exactResourceBoundary.taskCount)
+        assertEquals(false, exactResourceBoundary.implementationExistedAtDispatch)
+        val exactResult = assertNotNull(exactResourceBoundary.result)
+        assertEquals(0, exactResult.build.returnCode)
+        assertEquals(AgentStopReason.COMPLETED,
+            exactResourceBoundary.receipts.single().requireResult().stopReason)
+        val exactUsage = assertNotNull(exactResourceBoundary.receipts.single().requireResult().usage)
+        assertEquals(3, assertNotNull(exactUsage.toolCalls))
+        assertEquals(11L, assertNotNull(exactUsage.inputTokens))
+        assertEquals(7L, assertNotNull(exactUsage.outputTokens))
+        val exactExtracted = fixture.resolve("verified-exact-resource-boundary")
+        ArchivalBundleVerifier.extractAndVerify(exactResult.bundle.archivePath, exactExtracted, profile = profile)
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactExtracted, profile).returnCode)
         assertNoReconstructionPublicationResidue(output)
     }
 

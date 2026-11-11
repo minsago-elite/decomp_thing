@@ -227,14 +227,13 @@ class BoundedLlmModuleReconstructor(
     // v5 additionally binds the declared-role mutation authority into the execution receipt.
     private fun cacheIdentity(contextCharacters: Int): String =
         "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
-            "factory-${harnessProvenanceSha256 ?: "unbound"}:v5" +
-            testExecutionLimitsOverride?.let { limits ->
-                ":test-limits-${limits.wallClockTimeout.toNanos()}-${limits.idleTimeout.toNanos()}-" +
-                    "${limits.maxTurns}-${limits.maxToolCalls}-${limits.maxOutputBytes}-" +
-                    "${limits.maxInputTokens ?: "none"}-${limits.maxOutputTokens ?: "none"}"
-            }.orEmpty()
+            "factory-${harnessProvenanceSha256 ?: "unbound"}:v5"
 
-    /** Internal-only deadline seam for active reconstruction boundary tests. */
+    /**
+     * Internal-only per-turn limits seam for active reconstruction boundary tests. The test
+     * override is execution evidence, not a distinct reconstructor implementation/profile
+     * identity. Callers must use an isolated output or a distinct input/model fingerprint.
+     */
     internal fun withExecutionLimitsForTesting(limits: AgentExecutionLimits): BoundedLlmModuleReconstructor = apply {
         check(testExecutionLimitsOverride == null) { "test execution limits are already configured" }
         testExecutionLimitsOverride = limits
