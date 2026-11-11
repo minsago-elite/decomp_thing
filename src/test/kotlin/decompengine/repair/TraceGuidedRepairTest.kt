@@ -1327,6 +1327,130 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active repair path rejects change claims that disagree with captured bytes`() {
+        val cases = listOf(
+            "duplicate-relative-path" to "reported a source path more than once",
+            "non-canonical-order" to "changes must use canonical path order",
+            "foreign-root" to "unauthorized file change: other:src/modules/reconstructed.c",
+            "read-only-path" to "unauthorized file change: project:src/main.c",
+            "omitted-claim" to "change report does not match workspace changes",
+            "phantom-claim" to "change report does not match workspace changes",
+            "reverted-write" to "change report does not match workspace changes",
+            "wrong-before" to "digests do not match workspace file",
+            "wrong-after" to "digests do not match workspace file",
+            "wrong-size" to "size does not match workspace file",
+            "null-size" to "size does not match workspace file",
+        )
+        for ((variant, expectedReason) in cases) {
+            val project = createProject(
+                createTempDirectory("repair-change-claim-${variant}-").resolve("project"),
+                reconstructedSource = "int decomp_engine_main(void) {\n",
+            )
+            val target = project.resolve("src/modules/reconstructed.c")
+            val before = target.readBytes()
+            val beforeDigest = sha256(before)
+            val candidate = goodHelloSource().toByteArray()
+            val afterDigest = sha256(candidate)
+            val targetPath = AgentWorkspacePath("project", "src/modules/reconstructed.c")
+            val targetChange = AgentFileChange(
+                targetPath,
+                AgentFileChangeKind.MODIFIED,
+                beforeDigest,
+                afterDigest,
+                candidate.size.toLong(),
+            )
+            val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    val changes = when (variant) {
+                        "duplicate-relative-path" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            listOf(targetChange, targetChange.copy(
+                                path = AgentWorkspacePath("other", targetPath.relativePath),
+                            ))
+                        }
+                        "non-canonical-order" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            listOf(
+                                targetChange,
+                                targetChange.copy(path = AgentWorkspacePath("project", "a.c")),
+                            )
+                        }
+                        "foreign-root" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            listOf(targetChange.copy(path = AgentWorkspacePath("other", targetPath.relativePath)))
+                        }
+                        "read-only-path" -> listOf(AgentFileChange(
+                            AgentWorkspacePath("project", "src/main.c"),
+                            AgentFileChangeKind.MODIFIED,
+                            sha256("before".toByteArray()),
+                            sha256("after".toByteArray()),
+                            5,
+                        ))
+                        "omitted-claim" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            emptyList()
+                        }
+                        "phantom-claim" -> listOf(targetChange)
+                        "reverted-write" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            output.replace(targetPath.relativePath, before)
+                            listOf(targetChange)
+                        }
+                        "wrong-before" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            listOf(targetChange.copy(beforeSha256 = sha256("wrong-before".toByteArray())))
+                        }
+                        "wrong-after" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            listOf(targetChange.copy(afterSha256 = sha256("wrong-after".toByteArray())))
+                        }
+                        "wrong-size" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            listOf(targetChange.copy(sizeBytes = candidate.size + 1L))
+                        }
+                        "null-size" -> {
+                            output.replace(targetPath.relativePath, candidate)
+                            listOf(targetChange.copy(sizeBytes = null))
+                        }
+                        else -> error("unknown change-claim fixture: $variant")
+                    }
+                    return AgentExecutionResult(AgentStopReason.COMPLETED, "untrusted fixture claim", changes)
+                }
+            }
+
+            val failure = assertFailsWith<Exception>(variant) {
+                generatedCRepairLoop(
+                    harness,
+                    RepairHistory(project.resolve("reports/repair_history.json")),
+                ).repairCompileError(project, collectCompileFailure(project), emptyList())
+            }
+            val messages = generateSequence<Throwable>(failure) { it.cause }
+                .mapNotNull { it.message }
+                .toList()
+            assertTrue(messages.any { it.contains(expectedReason) }, "$variant: $messages")
+            assertContentEquals(before, target.readBytes(), "$variant must leave the accepted source unchanged")
+            assertFalse(project.resolve("src/modules/created.c").exists(), "$variant must not create a source")
+
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId, variant)
+                assertEquals(baselineHead, graph.snapshot.headId, variant)
+                assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status, variant)
+            }
+        }
+    }
+
+    @Test
     fun `active ACP repair retains resource-limited write refusal without changing accepted source`() {
         val project = createProject(
             createTempDirectory("repair-active-acp-resource-limit-").resolve("project"),

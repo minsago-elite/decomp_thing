@@ -716,6 +716,25 @@ filesystem broker and publication refusal path. Neither checkpoint covers all
 resource ceilings or proves production validation, live-provider behavior, or
 hosted exact-head CI. #734 and #63 remain open.
 
+## Active repair change-claim validation checkpoint — 2026-11-11
+
+`TraceGuidedRepairTest.active repair path rejects change claims that disagree
+with captured bytes` passed locally with 11 malformed-claim variants. It drives
+the active `TraceGuidedRepairLoop` through `CapturedRepairStagingAuthority` and
+checks duplicate relative paths, non-canonical ordering, foreign and read-only
+paths, omitted and phantom claims, a write reverted to its original bytes,
+incorrect before/after digests, and incorrect or missing size. Every refusal
+leaves the accepted source bytes and graph head unchanged and closes the
+pending attempt as rejected. The existing `repair loop can patch compile
+errors` case is the valid-change control.
+
+These are fake captured-adapter results at the active loop boundary. Production
+ACP adapters derive change claims from host-observed snapshots, so a peer cannot
+directly forge these fields; the test protects the loop's adapter contract and
+defense in depth. It does not qualify the live ACP process, production
+validation under #236, all resource limits, or hosted exact-head behavior.
+#734 and #63 remain open.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
