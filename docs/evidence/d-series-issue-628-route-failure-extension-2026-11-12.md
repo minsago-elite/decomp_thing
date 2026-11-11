@@ -207,3 +207,17 @@ Verification at this source checkpoint:
 - `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local frontend/JSDOM evidence only. It does not qualify packaged-browser or assistive-technology behavior, API read failures within these summaries, or full #628/#221 acceptance.
+
+## Deleted-job attempt-history refusal — 2026-11-12
+
+Exact test checkpoint: `c412169882e476f95a7a94055491b4cb2da46cd0` on PR #1946. The production source is unchanged from the previously verified `48eba88c0d4b806ab8b8f79d7ee0dc8760272dcf` checkpoint.
+
+The attempt-history failure matrix now distinguishes a deleted job (`410/RESOURCE_GONE`) from an expired signed cursor. A deleted job clears retained rows, does not offer a retry for the removed history, and displays the fixed deletion explanation.
+
+Verification:
+
+- Focused Vitest: the `deleted-job` case in `run.test.tsx` — 1 test passed.
+- Full frontend Vitest suite at this test checkpoint — 84 files, 1,233 tests passed.
+- The production build passed at the unchanged source checkpoint `48eba88c0d4b806ab8b8f79d7ee0dc8760272dcf` (recorded above).
+
+This is local JSDOM evidence only. Packaged-browser, assistive-technology, and full #628/#221 acceptance remain open.
