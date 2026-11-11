@@ -87,3 +87,16 @@ Verification at this source checkpoint:
 - `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local component and build evidence only. It does not qualify packaged-browser or assistive-technology behavior, all queued-attempt route states, the remaining job panels, or full #628/#221 acceptance.
+
+## Validation source lookup failure states — 2026-11-12
+
+Source checkpoint: `2e28e8a10a8c37727bddf6c968b70df3c69f86c7` on PR #1946.
+
+The validation source resolver now distinguishes session expiry, denied access, missing retained source, unsupported response format, unverified source commitment, and other read failure. Fixed messages retain only validated request references. The resolver still withholds the link on every failure and only publishes it after both run and source-directory identity/commitment checks succeed.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `recorded-validation.test.tsx` — 1 file, 45 tests passed.
+- `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local component and build evidence only. It does not qualify packaged-browser or assistive-technology behavior, every validation route state, all remaining job panels, or full #628/#221 acceptance.
