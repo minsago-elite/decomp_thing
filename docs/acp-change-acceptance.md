@@ -544,6 +544,19 @@ local fixture evidence: it does not qualify a live provider, every public
 resource-exhaustion outcome, production validation, or the complete #734
 mutation matrix. #734 remains open and dependent on #729–#733.
 
+Commit `d48118758` extends
+`TraceGuidedRepairTest.ordinary ACP terminal outcomes persist immutable
+receipts before rejected repair history` with a failed
+`RESOURCE_EXHAUSTED` receipt. The active repair loop persists the receipt and
+assessment, terminalizes the candidate as rejected, retains the typed
+`resource-exhausted` outcome in the receipt and history, and does not mark it
+release-complete. The focused test passed locally at this commit: one test
+method, zero failures, errors or skips. This is an active-workflow integration
+control using a scripted failure receipt; it does not itself cause an ACP
+process to exceed an output budget. The separate live ACP reconstruction and
+captured-repair controls exercise actual process/filesystem limits. Production
+provider and complete #734 qualification remain outstanding.
+
 ## Public ACP reconstruction mutation-grant and limit checkpoint — 2026-11-11
 
 Commit `7d363753b` adds
