@@ -100,3 +100,16 @@ Verification at this source checkpoint:
 - `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
 
 This is local component and build evidence only. It does not qualify packaged-browser or assistive-technology behavior, every validation route state, all remaining job panels, or full #628/#221 acceptance.
+
+## Retained validation history and selection failure states — 2026-11-12
+
+Source checkpoint: `60c372ef3e25f0540d463d6bc3258a1eeb191dfe` on PR #1946.
+
+The retained validation panel now distinguishes session expiry, denied access, unavailable history, unsupported response formats, unverified evidence, and other read failures. Restoring a saved selection keeps its exact-identity warning in each category and never substitutes another observation. Failures remain bounded alerts with only validated request references; the panel keeps its explicit history-read control available.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `recorded-validation.test.tsx` — 1 file, 51 tests passed.
+- `npm run build` with the repository-pinned Node 24.20.0/npm 11.19.0 toolchain — generated API drift check, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+These are local component/build results. The full route-state matrix, packaged-browser and assistive-technology behavior, and complete #628/#221 acceptance remain outstanding.
