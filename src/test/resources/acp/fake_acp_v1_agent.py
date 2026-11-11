@@ -63,6 +63,7 @@ GENERIC_CONTRACT_MODES = {
 RECONSTRUCTION_MODES = {
     "reconstruction-role-policy",
     "reconstruction-mutation-grant",
+    "reconstruction-modify-existing-source",
     "reconstruction-exact-source-byte-boundary",
     "reconstruction-frame-count-limit-after-write",
     "reconstruction-tool-limit-after-write",
@@ -259,6 +260,7 @@ expected_fs = {
     "fs-cap-none": None,
     "reconstruction-role-policy": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-mutation-grant": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-modify-existing-source": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-exact-source-byte-boundary": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-frame-count-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-tool-limit-after-write": {"readTextFile": False, "writeTextFile": True},
@@ -1440,6 +1442,8 @@ if MODE in RECONSTRUCTION_MODES:
         content += opening + padding + suffix
         if len(content.encode("utf-8")) != RECONSTRUCTION_MAXIMUM_SOURCE_BYTES:
             raise SystemExit(136)
+    if MODE == "reconstruction-modify-existing-source":
+        content = content.replace("return 0;", "return 1;")
     if MODE == "reconstruction-mutation-grant":
         outside_path = join_path(cwd, f"src/modules/{module_id}_extra.c")
         outside = try_write_workspace_file(outside_path, "unauthorized sibling\n", 817)

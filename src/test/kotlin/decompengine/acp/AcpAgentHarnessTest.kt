@@ -1134,6 +1134,138 @@ class AcpAgentHarnessTest {
 
     @Test
     @Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `transactional ACP source generation accepts a bounded modification of an existing owned implementation`() {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val buildRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        val fixture = createTempDirectory(buildRoot, "acp-public-reconstruction-modify-")
+        val input = fixture.resolve("input.elf").also { Files.write(it, byteArrayOf(4, 2, 1)) }
+        val output = fixture.resolve("output")
+        val implementationPath = profile.layout.declaration("module-implementation")
+            .materialize(mapOf("module" to "decomp"))
+        val priorSource = (
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+            ).toByteArray(Charsets.UTF_8)
+        val expectedSource = priorSource.decodeToString().replace("return 0;", "return 1;")
+            .toByteArray(Charsets.UTF_8)
+        val harness = harness("reconstruction-modify-existing-source", sentinel = implementationPath)
+        val factoryProvenance = AcpHarnessProvenance(
+            harness = "acp",
+            implementationId = "scripted-acp-v1",
+            agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+            acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "0".repeat(64),
+            deprecated = false,
+        )
+        var taskCount = 0
+        var taskRequestSha256: String? = null
+        var implementationExistedAtDispatch: Boolean? = null
+        val receipts = mutableListOf<AgentExecutionReceipt>()
+        val progress = object : AgentWorkflowProgress {
+            override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
+                taskCount++
+                taskRequestSha256 = AgentExecutionRequestBinding.capture(request).requestSha256
+                val rule = request.accessPolicy.pathRules.single()
+                val root = request.workspaceRoots.single { it.id == rule.path.rootId }
+                implementationExistedAtDispatch = Files.isRegularFile(root.path.resolve(rule.path.relativePath))
+                return object : AgentTaskProgress {
+                    override fun event(event: AgentExecutionEvent) = Unit
+                    override fun complete(receipt: AgentExecutionReceipt) {
+                        receipts += receipt
+                    }
+                }
+            }
+
+            override fun phase(
+                phase: decompengine.agent.AgentWorkflowPhase,
+                taskId: String?,
+                acceptedRevisionSha256: String?,
+            ) = Unit
+        }
+        var generation: decompengine.project.ReconstructionGenerationResult? = null
+        var buildReturnCode: Int? = null
+        var publication = decompengine.project.PublicationResult.REJECTED
+
+        ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+            val model = RecoveredProgramModel(
+                inputSha256 = workspace.inputSha256,
+                functions = listOf(
+                    RecoveredFunction(
+                        "fn_0000000000001000",
+                        "decomp_engine_main",
+                        0x1000UL,
+                        "int decomp_engine_main(void)",
+                        "int decomp_engine_main(void) { return 1; }",
+                    ),
+                ),
+            )
+            publication = workspace.publish(
+                setOf("source-tree", "source-tree.zip", ".decomp-agent-sessions"),
+                buildStage = { stage ->
+                    val project = stage.resolve("source-tree")
+                    val implementation = project.resolve(implementationPath)
+                    implementation.parent.createDirectories()
+                    Files.write(implementation, priorSource)
+                    generation = decompengine.project.SourceTreeGenerator.generateWithCompilerFeedback(
+                        model = model,
+                        projectDir = project,
+                        hostSafetyLimits = decompengine.project.ReconstructionHostSafetyLimits.DEFAULT,
+                        reconstructor = BoundedLlmModuleReconstructor(
+                            harness,
+                            harnessProvenanceDescriptor = factoryProvenance.stableDescriptor,
+                            progress = progress,
+                        ),
+                        profile = profile,
+                        progress = progress,
+                        publicationLock = workspace.publicationLock,
+                        workflowRunId = "public-reconstruction-existing-source-modification",
+                    )
+                    buildReturnCode = ReconstructionAdapters.resolve(profile).build(project, profile).returnCode
+                    decompengine.project.ArchivalPackager.create(
+                        project,
+                        stage.resolve("source-tree.zip"),
+                        profile = profile,
+                    )
+                },
+            )
+        }
+
+        assertEquals(decompengine.project.PublicationResult.PUBLISHED, publication)
+        assertEquals(1, taskCount)
+        assertEquals(true, implementationExistedAtDispatch)
+        assertEquals(0, buildReturnCode)
+        val generated = assertNotNull(generation)
+        assertTrue(generated.disposition.committable)
+        assertTrue(generated.manifest.unresolvedImplementationIds.isEmpty())
+        val invocationReceipt = receipts.single()
+        assertEquals(taskRequestSha256, invocationReceipt.requestBinding.requestSha256)
+        val receipt = invocationReceipt.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, receipt.stopReason)
+        val change = receipt.changes.single()
+        assertEquals(implementationPath, change.path.relativePath)
+        assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+        assertEquals(sha256(priorSource), change.beforeSha256)
+        assertEquals(sha256(expectedSource), change.afterSha256)
+        assertEquals(expectedSource.size.toLong(), change.sizeBytes)
+        val target = output.resolve("source-tree").resolve(implementationPath)
+        assertContentEquals(expectedSource, Files.readAllBytes(target))
+        val audit = harness.latestFilesystemAudit()
+        assertEquals(7, audit.size, audit.toString())
+        val write = audit.last()
+        assertEquals(implementationPath, assertNotNull(write.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, write.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, write.reason)
+        val extracted = fixture.resolve("verified-modified-source")
+        ArchivalBundleVerifier.extractAndVerify(output.resolve("source-tree.zip"), extracted, profile = profile)
+        assertContentEquals(expectedSource, Files.readAllBytes(extracted.resolve(implementationPath)))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(extracted, profile).returnCode)
+        assertNoReconstructionPublicationResidue(output)
+    }
+
+    @Test
+    @Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val maximumSourceBytes = 256L * 1024
@@ -1867,7 +1999,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(104, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(105, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
