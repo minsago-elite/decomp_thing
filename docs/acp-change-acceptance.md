@@ -794,6 +794,24 @@ classification, not production ACP provider behavior, #236 validation, every
 resource limit, or hosted exact-head CI. The aggregate-byte case also uses a
 test-only captured adapter. #734 and #63 remain open.
 
+`TraceGuidedRepairTest.active repair production policy rejects malformed UTF-8
+before candidate installation` passed locally at commit
+`af2b18515a34605645945662a6d268f8360f65f7`. It opens the active repair loop
+with test-only validation disabled and verifies the generated-C declared-role
+policy, attempt owner, profile digest, editable declaration, UTF-8 grant, and
+write-only operation at the dispatched request. The sink accepts a bounded
+multibyte UTF-8 replacement and refuses malformed bytes with the declared
+authority error; accepted source and graph head remain unchanged, and the
+rejected attempt has no pending state. The scripted captured harness provides
+no schema-v2 ACP provider evidence, so outer workflow rejection follows the
+missing-provider-evidence guard. This qualifies policy selection and sink
+enforcement through active repair dispatch only; it does not qualify receipt-
+backed ACP refusal, real provider behavior, candidate validation, or #236.
+The accumulated six-case local run at
+`af2b18515a34605645945662a6d268f8360f65f7` passed the aggregate-boundary,
+UTF-8 policy, staging-growth, per-file, patch-count, and directory-admission
+controls with zero failures, errors, or skips.
+
 ## Repair turn-evidence process-death matrix — 2026-11-11
 
 `ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
