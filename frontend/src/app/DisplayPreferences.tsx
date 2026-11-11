@@ -61,6 +61,7 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
   const [saved, setSaved] = useState<'idle' | 'saved' | 'memory'>('idle');
   const trigger = useRef<HTMLButtonElement>(null);
   const currentValues = useRef(values);
+  const unsavedValues = useRef<Partial<DisplayPreferenceValues>>({});
 
   useLayoutEffect(() => {
     function onStorage(event: StorageEvent) {
@@ -72,6 +73,7 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
       if (event.key !== null && event.key !== DISPLAY_PREFERENCES_KEY) return;
       const next = readDisplayPreferences(storage);
       currentValues.current = next;
+      unsavedValues.current = {};
       setValues(next);
       setSaved('idle');
     }
@@ -93,13 +95,28 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
     };
   }, [values.theme, values.motion]);
 
+  function rememberUnsavedValues(next: DisplayPreferenceValues, persisted: DisplayPreferenceValues | undefined,
+    patch: Partial<DisplayPreferenceValues>) {
+    const pending = { ...unsavedValues.current };
+    for (const field of Object.keys(patch) as (keyof DisplayPreferenceValues)[]) {
+      if (persisted && next[field] === persisted[field]) delete pending[field];
+      else if (field === 'theme') pending.theme = next.theme;
+      else pending.motion = next.motion;
+    }
+    unsavedValues.current = pending;
+  }
+
   function update(patch: Partial<DisplayPreferenceValues>) {
-    const base = readStoredDisplayPreferences(storage) ?? currentValues.current;
+    const persisted = readStoredDisplayPreferences(storage);
+    const base = { ...(persisted ?? currentValues.current), ...unsavedValues.current };
     const next = { ...base, ...patch };
     if (!validValues(next)) return;
     currentValues.current = next;
     setValues(next);
-    setSaved(writeDisplayPreferences(next, storage) ? 'saved' : 'memory');
+    const wasSaved = writeDisplayPreferences(next, storage);
+    if (wasSaved) unsavedValues.current = {};
+    else rememberUnsavedValues(next, persisted, patch);
+    setSaved(wasSaved ? 'saved' : 'memory');
   }
 
   return <div class={`display-preferences${open ? ' is-open' : ''}`} onKeyDown={event => {
@@ -129,7 +146,10 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
       <button type="button" onClick={() => {
         currentValues.current = defaults;
         setValues(defaults);
-        setSaved(resetDisplayPreferences(storage) ? 'saved' : 'memory');
+        const wasSaved = resetDisplayPreferences(storage);
+        if (wasSaved) unsavedValues.current = {};
+        else unsavedValues.current = { ...defaults };
+        setSaved(wasSaved ? 'saved' : 'memory');
       }}>{copy.resetDisplayPreferences}</button>
       <p role="status">{saved === 'saved' ? copy.displayPreferencesSavedInThisBrowser
         : saved === 'memory' ? copy.changesApplyToThisTabButCouldNotBeSaved : ''}</p>

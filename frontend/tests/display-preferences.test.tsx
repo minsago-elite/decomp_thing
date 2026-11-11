@@ -350,6 +350,27 @@ describe('workbench display controls', () => {
     expect(document.body.textContent).not.toContain(privateMarker);
   });
 
+  it('preserves earlier tab-only choices when a readable stale record cannot be updated', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    storage.setItem.mockImplementation(() => { throw new Error(privateMarker); });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'reduce' } });
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    expect(screen.getByRole('status').textContent).toBe('Changes apply to this tab, but could not be saved in this browser.');
+    fireEvent.change(screen.getByLabelText('Theme'), { target: { value: 'dark' } });
+
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('dark');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('reduce');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    expect(records.get(DISPLAY_PREFERENCES_KEY)).toBe('{"version":1,"theme":"light","motion":"system"}');
+    expect(document.body.textContent).not.toContain(privateMarker);
+  });
+
   it('returns focus on Escape and restores the prior root attributes when unmounted', () => {
     document.documentElement.setAttribute('data-theme', 'light');
     document.documentElement.setAttribute('data-motion', 'reduce');

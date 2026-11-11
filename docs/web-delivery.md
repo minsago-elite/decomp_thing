@@ -153,11 +153,11 @@ change events on each rendered preference select; the other tab must receive a t
 counts `setItem` and `removeItem` calls for the preference key and `clear` calls while that key
 exists; it does not intercept direct property assignment or writes to other keys. The select change
 is DOM-dispatched rather than a trusted keyboard/mouse gesture. The audit runs this scenario after
-its route, contrast, focus, connection and navigation measurements, then clears the test record
-and closes both targets.
+its route, contrast, focus, connection and navigation measurements, then restores the preference
+record and rendered state observed before the scenario and closes both targets.
 The report retains target identities, initial/final states, event trust/storage area, observed
-storage-method mutation counts and the shared serialized preference record. This is browser evidence for cross-tab preference
-convergence; it does not qualify session expiry or version-reload recovery. The cross-engine
+storage-method mutation counts and the shared serialized preference record. This is browser
+evidence for cross-tab preference convergence; it does not qualify session expiry or version-reload recovery. The cross-engine
 runner explicitly skips this Chrome DevTools-specific evidence and still runs its own full
 route/contrast/focus audit.
 

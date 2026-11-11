@@ -50,7 +50,7 @@ function crossTabPreferenceEvidence() {
     ],
     finalTabs: [values(1, 1), values(1, 1)],
     storage: '{"version":1,"theme":"dark","motion":"reduce"}',
-    cleanup: { preferenceRemoved: true, otherTabReset: true, targetsClosed: true },
+    cleanup: { preferenceRestored: true, otherTabRestored: true, targetsClosed: true },
   };
 }
 function connectionEvidence() {
@@ -96,14 +96,15 @@ test('packaged audit requires two real tabs to converge without echo writes', ()
   assert.match(verdict(missing).join('\n'), /cross-tab preferences: missing evidence/);
 });
 
-test('cross-tab audit records both deliveries and clears its profile state and targets', async () => {
+test('cross-tab audit records both deliveries and restores its profile state and targets', async () => {
   const origin = 'http://127.0.0.1:4173';
   const tabs = [
     { targetId: 'target-a', sessionId: 'session-a' },
     { targetId: 'target-b', sessionId: 'session-b' },
   ];
   const values = new Map(tabs.map(tab => [tab.sessionId, { theme: 'system', motion: 'system', writes: 0, events: [] }]));
-  let stored = null;
+  const originalStored = '{"version":1,"theme":"system","motion":"system"}';
+  let stored = originalStored;
   const closed = [];
   const state = tab => {
     const value = values.get(tab.sessionId);
@@ -120,7 +121,7 @@ test('cross-tab audit records both deliveries and clears its profile state and t
       if (label === 'display preferences in packaged workspace') return true;
       if (label === 'second packaged tab receives first preference update') return current.theme === 'dark' && current.events.length === 1;
       if (label === 'first packaged tab receives second preference update') return current.motion === 'reduce' && current.events.length === 1;
-      if (label === 'preference tabs reset after cross-tab audit') return current.theme === 'system' && current.motion === 'system' && current.events.length === 2;
+      if (label === 'preference tabs restore their initial state') return current.theme === 'system' && current.motion === 'system' && current.events.length === 2;
       return false;
     },
     evaluate: async (tab, expression) => {
@@ -142,11 +143,14 @@ test('cross-tab audit records both deliveries and clears its profile state and t
         return true;
       }
       if (expression.startsWith('localStorage.getItem(')) return stored;
-      if (expression.includes('localStorage.removeItem(')) {
-        stored = null;
-        for (const value of values.values()) {
-          value.theme = 'system'; value.motion = 'system';
-          value.events.push({ key: displayPreferencesKey, trusted: true, storageArea: 'localStorage' });
+      if (expression.includes('window.__displayPreferenceAudit.counting = false')) return true;
+      if (expression.startsWith('(() => {\n          const key =')) {
+        const previous = stored;
+        stored = originalStored;
+        if (previous !== stored) {
+          const receiver = values.get('session-b');
+          receiver.theme = 'system'; receiver.motion = 'system';
+          receiver.events.push({ key: displayPreferencesKey, trusted: true, storageArea: 'localStorage' });
         }
         return true;
       }
@@ -157,8 +161,9 @@ test('cross-tab audit records both deliveries and clears its profile state and t
   assert.deepEqual(crossTabPreferenceFailures(result), []);
   assert.deepEqual(closed.sort(), ['target-a', 'target-b']);
   assert.equal(result.storage, '{"version":1,"theme":"dark","motion":"reduce"}');
-  assert.equal(result.cleanup.preferenceRemoved, true);
-  assert.equal(result.cleanup.otherTabReset, true);
+  assert.equal(stored, originalStored);
+  assert.equal(result.cleanup.preferenceRestored, true);
+  assert.equal(result.cleanup.otherTabRestored, true);
   assert.equal(result.cleanup.targetsClosed, true);
 });
 
@@ -434,7 +439,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       const receiver = preferenceTabs.get(tab.sessionId);
       if (label === 'second packaged tab receives first preference update') return receiver.theme === 'dark' && receiver.events === 1;
       if (label === 'first packaged tab receives second preference update') return receiver.motion === 'reduce' && receiver.events === 1;
-      if (label === 'preference tabs reset after cross-tab audit') return receiver.theme === 'system' && receiver.motion === 'system' && receiver.events === 2;
+      if (label === 'preference tabs restore their initial state') return receiver.theme === 'system' && receiver.motion === 'system' && receiver.events === 2;
       return current.ready(tab, expression, label);
     },
     evaluate: async (tab, expression) => {
@@ -459,13 +464,16 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
         }
         return true;
       }
-      if (expression.includes('localStorage.removeItem(')) {
-        for (const tab of preferenceTabs.values()) {
-          tab.theme = 'system'; tab.motion = 'system'; tab.events++;
+      if (expression.includes('window.__displayPreferenceAudit.counting = false')) return true;
+      if (expression.startsWith('localStorage.getItem(')) return '{"version":1,"theme":"system","motion":"system"}';
+      if (expression.startsWith('(() => {\n          const key =')) {
+        const writer = preferenceTabs.get(tab.sessionId);
+        for (const current of preferenceTabs.values()) {
+          current.theme = 'system'; current.motion = 'system';
+          if (current !== writer) current.events++;
         }
         return true;
       }
-      if (expression.startsWith('localStorage.getItem(')) return '{"version":1,"theme":"dark","motion":"reduce"}';
       if (expression.startsWith('(() => {\n        const audit = window.__displayPreferenceAudit;')) return true;
       let kind = null;
       if (expression === measurePage) kind = 'layout';

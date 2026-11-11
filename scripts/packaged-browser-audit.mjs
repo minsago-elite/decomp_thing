@@ -755,6 +755,9 @@ export async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, inte
   })()`);
   const result = { sameOrigin: false, targetIds: [], initial: null, initialTabs: [], steps: [], finalTabs: [] };
   let preferenceMutationStarted = false;
+  let originalPreferenceRecord;
+  let originalPreferenceCaptured = false;
+  let expectedRestoredEventCount;
   try {
     tabs.push(await makeTarget());
     result.targetIds.push(tabs[0].targetId);
@@ -768,6 +771,9 @@ export async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, inte
     result.sameOrigin = await Promise.all(tabs.map((tab) => evaluate(tab, 'location.origin')))
       .then((origins) => origins.length === 2 && origins[0] === origins[1] && origins[0] === new URL(origin).origin);
     assert.ok(result.sameOrigin, 'Preference tabs must share the packaged origin');
+    originalPreferenceRecord = await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)})`);
+    assert.ok(originalPreferenceRecord === null || typeof originalPreferenceRecord === 'string', 'Stored preference record must be readable');
+    originalPreferenceCaptured = true;
     result.initialTabs = await Promise.all(tabs.map(state));
     result.initial = result.initialTabs[0];
     assert.ok(result.initialTabs.every(initial => initial.theme === 'system' && initial.motion === 'system'),
@@ -775,7 +781,7 @@ export async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, inte
     for (const tab of tabs) {
       const installedHandler = await evaluate(tab, `(() => {
         const key = ${JSON.stringify(displayPreferencesKey)};
-        const audit = { events: [], writes: 0 };
+        const audit = { events: [], writes: 0, counting: true };
         window.__displayPreferenceAudit = audit;
         audit.onStorage = (event) => {
           if (event.key === key || event.key === null) audit.events.push({ key: event.key, trusted: event.isTrusted,
@@ -786,15 +792,15 @@ export async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, inte
         audit.originalRemoveItem = Storage.prototype.removeItem;
         audit.originalClear = Storage.prototype.clear;
         Storage.prototype.setItem = function (name, value) {
-          if (this === window.localStorage && name === key) audit.writes += 1;
+          if (audit.counting && this === window.localStorage && name === key) audit.writes += 1;
           return audit.originalSetItem.call(this, name, value);
         };
         Storage.prototype.removeItem = function (name) {
-          if (this === window.localStorage && name === key) audit.writes += 1;
+          if (audit.counting && this === window.localStorage && name === key) audit.writes += 1;
           return audit.originalRemoveItem.call(this, name);
         };
         Storage.prototype.clear = function () {
-          if (this === window.localStorage && this.getItem(key) !== null) audit.writes += 1;
+          if (audit.counting && this === window.localStorage && this.getItem(key) !== null) audit.writes += 1;
           return audit.originalClear.call(this);
         };
         return true;
@@ -824,28 +830,48 @@ export async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, inte
     result.failure = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown browser audit failure';
   } finally {
     if (preferenceMutationStarted) {
+      let currentRecord;
       try {
-        const preferenceRemoved = await evaluate(tabs[0], `(() => {
-          localStorage.removeItem(${JSON.stringify(displayPreferencesKey)});
-          return localStorage.getItem(${JSON.stringify(displayPreferencesKey)}) === null;
+        currentRecord = await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)})`);
+        result.storage ??= currentRecord;
+      } catch (error) { cleanupFailures.push(String(error)); }
+      try {
+        const otherTabBeforeRestore = await state(tabs[1]);
+        if (currentRecord !== undefined) {
+          expectedRestoredEventCount = (otherTabBeforeRestore.storageEvents ?? 0) + (currentRecord === originalPreferenceRecord ? 0 : 1);
+        }
+      } catch (error) { cleanupFailures.push(String(error)); }
+      for (const tab of installed) {
+        await evaluate(tab, 'if (window.__displayPreferenceAudit) window.__displayPreferenceAudit.counting = false')
+          .catch((error) => cleanupFailures.push(String(error)));
+      }
+      try {
+        const preferenceRestored = await evaluate(tabs[0], `(() => {
+          const key = ${JSON.stringify(displayPreferencesKey)};
+          const original = ${JSON.stringify(originalPreferenceRecord)};
+          if (original === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, original);
+          return localStorage.getItem(key) === original;
         })()`);
-        result.cleanup = { preferenceRemoved: preferenceRemoved === true, otherTabReset: false, targetsClosed: false };
-        assert.equal(preferenceRemoved, true, 'Cross-tab audit preference must be removed from the shared profile');
+        result.cleanup = { preferenceRestored: preferenceRestored === true, otherTabRestored: false, targetsClosed: false };
+        assert.equal(preferenceRestored, true, 'Cross-tab audit must restore the original preference record');
       } catch (error) {
-        result.cleanup ??= { preferenceRemoved: false, otherTabReset: false, targetsClosed: false };
+        result.cleanup ??= { preferenceRestored: false, otherTabRestored: false, targetsClosed: false };
         cleanupFailures.push(String(error));
       }
-      if (result.cleanup?.preferenceRemoved === true) {
+      if (result.cleanup?.preferenceRestored === true) {
         try {
-        await ready(tabs[1], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === 'system' && s[1]?.value === 'system' && window.__displayPreferenceAudit.events.length === 2; })()`,
-          'preference tabs reset after cross-tab audit');
-        result.cleanup.otherTabReset = true;
+          if (expectedRestoredEventCount === undefined) throw new Error('Could not capture the peer tab before restoration');
+          const priorState = result.initialTabs[1];
+          await ready(tabs[1], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === ${JSON.stringify(priorState.theme)} && s[1]?.value === ${JSON.stringify(priorState.motion)} && window.__displayPreferenceAudit.events.length === ${expectedRestoredEventCount}; })()`,
+            'preference tabs restore their initial state');
+          result.cleanup.otherTabRestored = true;
         } catch (error) { cleanupFailures.push(String(error)); }
       }
-    } else if (result.sameOrigin) {
+    } else if (result.sameOrigin && originalPreferenceCaptured) {
       try {
-        result.cleanup = { preferenceRemoved: await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)}) === null`),
-          otherTabReset: true, targetsClosed: false };
+        result.cleanup = { preferenceRestored: await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)}) === ${JSON.stringify(originalPreferenceRecord)}`),
+          otherTabRestored: true, targetsClosed: false };
       } catch (error) { cleanupFailures.push(String(error)); }
     }
     for (const tab of installed) {
@@ -867,7 +893,7 @@ export async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, inte
         closed.push(response?.success === true);
       } catch (error) { closed.push(false); cleanupFailures.push(String(error)); }
     }
-    result.cleanup ??= { preferenceRemoved: false, otherTabReset: false, targetsClosed: false };
+    result.cleanup ??= { preferenceRestored: false, otherTabRestored: false, targetsClosed: false };
     result.cleanup.targetsClosed = closed.length === tabs.length && closed.every(Boolean);
   }
   result.cleanupFailures = cleanupFailures;
@@ -915,8 +941,8 @@ export function crossTabPreferenceFailures(evidence) {
     if (tab.storageEvents !== 1 || tab.writes !== 1) fail(`final tab ${index + 1} event/write counts ${JSON.stringify(tab)}`);
   }
   if (evidence.storage !== '{"version":1,"theme":"dark","motion":"reduce"}') fail('shared persisted record does not match the final controls');
-  if (evidence.cleanup?.preferenceRemoved !== true || evidence.cleanup?.otherTabReset !== true || evidence.cleanup?.targetsClosed !== true)
-    fail(`test preference or browser targets were not cleaned up ${JSON.stringify(evidence.cleanup)}`);
+  if (evidence.cleanup?.preferenceRestored !== true || evidence.cleanup?.otherTabRestored !== true || evidence.cleanup?.targetsClosed !== true)
+    fail(`original preference state or browser targets were not restored ${JSON.stringify(evidence.cleanup)}`);
   return failures;
 }
 

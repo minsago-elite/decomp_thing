@@ -37,11 +37,13 @@ Using the repository-pinned Node 24.20.0/npm 11.19.0 toolchain:
   pending; the local control validates report rejection behavior, not real browser event delivery.
 
 The focused tests cover valid cross-tab updates, malformed values, clear events, unrelated
-keys, `localStorage` versus `sessionStorage`, no write-back, and a local edit after a missed
-event. The packaged audit now includes a two-target browser exchange using DOM-dispatched changes
+keys, `localStorage` versus `sessionStorage`, no write-back, a local edit after a missed event, and
+preservation of tab-only choices when a readable stale record cannot be updated. The packaged
+audit now includes a two-target browser exchange using DOM-dispatched changes
 on rendered selects, trusted `localStorage` events, rendered state, and preference-key mutation
 assertions. The scenario runs after the pre-existing audit measurements, then clears its test
-record and closes its targets. The select activation is not a trusted keyboard or mouse gesture;
+record back to the value found before the scenario and closes its targets. The select activation is
+not a trusted keyboard or mouse gesture;
 exact-head browser execution is pending. Existing tests cover reload-once version recovery and
 concurrent session expiry.
 
