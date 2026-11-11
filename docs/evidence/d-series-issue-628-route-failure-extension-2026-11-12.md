@@ -221,3 +221,17 @@ Verification:
 - The production build passed at the unchanged source checkpoint `48eba88c0d4b806ab8b8f79d7ee0dc8760272dcf` (recorded above).
 
 This is local JSDOM evidence only. Packaged-browser, assistive-technology, and full #628/#221 acceptance remain open.
+
+## Dashboard recovery inventory panel isolation — 2026-11-12
+
+Exact source checkpoint: `8da24324f32cc01356a4841eb6069367a8dd5d53` on PR #1946.
+
+The recovery-file inventory now has an independent panel boundary inside the job dashboard. A render failure replaces only that inventory; the upload form, filters, loaded jobs, dashboard heading, and page controls remain available. The fixed panel notice suppresses exception details, and retry rerenders only that read-only panel without sending a command.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `panel-isolation.test.tsx` — 1 file, 5 tests passed.
+- Full frontend Vitest suite — 84 files, 1,234 tests passed.
+- `npm run build` with pinned Node 24.20.0/npm 11.19.0 — generated API drift, TypeScript, ESLint, production bundle, and all bundle-size budgets passed.
+
+This is local frontend/JSDOM evidence only. It does not qualify packaged-browser or assistive-technology behavior, recovery endpoint failures beyond the existing component matrix, or full #628/#221 acceptance.
