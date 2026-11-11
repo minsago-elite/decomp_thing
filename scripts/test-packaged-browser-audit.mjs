@@ -96,14 +96,14 @@ test('packaged audit requires two real tabs to converge without echo writes', ()
   assert.match(verdict(missing).join('\n'), /cross-tab preferences: missing evidence/);
 });
 
-test('cross-tab audit records both deliveries and restores its profile state and targets', async () => {
+for (const originalStored of [null, '{"version":1,"theme":"system","motion":"system"}']) test(
+  `cross-tab audit restores its original preference record (${originalStored === null ? 'absent' : 'present'})`, async () => {
   const origin = 'http://127.0.0.1:4173';
   const tabs = [
     { targetId: 'target-a', sessionId: 'session-a' },
     { targetId: 'target-b', sessionId: 'session-b' },
   ];
   const values = new Map(tabs.map(tab => [tab.sessionId, { theme: 'system', motion: 'system', writes: 0, events: [] }]));
-  const originalStored = '{"version":1,"theme":"system","motion":"system"}';
   let stored = originalStored;
   const closed = [];
   const state = tab => {
@@ -116,12 +116,16 @@ test('cross-tab audit records both deliveries and restores its profile state and
   const result = await qualifyCrossTabPreferences({ origin,
     cdp: { async call(method, params) { if (method === 'Target.closeTarget') { closed.push(params.targetId); return { success: true }; } return {}; } },
     makeTarget: async () => tabs.shift(), intercept: async () => {}, capture: async () => {},
-    ready: async (tab, _expression, label) => {
+    ready: async (tab, expression, label) => {
       const current = values.get(tab.sessionId);
       if (label === 'display preferences in packaged workspace') return true;
       if (label === 'second packaged tab receives first preference update') return current.theme === 'dark' && current.events.length === 1;
       if (label === 'first packaged tab receives second preference update') return current.motion === 'reduce' && current.events.length === 1;
-      if (label === 'preference tabs restore their initial state') return current.theme === 'system' && current.motion === 'system' && current.events.length === 2;
+      if (label === 'preference tabs restore their initial state') {
+        const expected = expression.match(/s\[0\]\?\.value === ("(?:[^"\\]|\\.)*") && s\[1\]\?\.value === ("(?:[^"\\]|\\.)*") && window\.__displayPreferenceAudit\.events\.length === (\d+)/);
+        return expected !== null && current.theme === JSON.parse(expected[1]) && current.motion === JSON.parse(expected[2])
+          && current.events.length === Number(expected[3]);
+      }
       return false;
     },
     evaluate: async (tab, expression) => {
@@ -145,9 +149,10 @@ test('cross-tab audit records both deliveries and restores its profile state and
       if (expression.startsWith('localStorage.getItem(')) return stored;
       if (expression.includes('window.__displayPreferenceAudit.counting = false')) return true;
       if (expression.startsWith('(() => {\n          const key =')) {
-        const previous = stored;
-        stored = originalStored;
-        if (previous !== stored) {
+        const original = JSON.parse(expression.match(/const original = (.*);/)?.[1] ?? 'undefined');
+        const changed = stored !== original;
+        stored = original;
+        if (changed) {
           const receiver = values.get('session-b');
           receiver.theme = 'system'; receiver.motion = 'system';
           receiver.events.push({ key: displayPreferencesKey, trusted: true, storageArea: 'localStorage' });
@@ -439,7 +444,11 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       const receiver = preferenceTabs.get(tab.sessionId);
       if (label === 'second packaged tab receives first preference update') return receiver.theme === 'dark' && receiver.events === 1;
       if (label === 'first packaged tab receives second preference update') return receiver.motion === 'reduce' && receiver.events === 1;
-      if (label === 'preference tabs restore their initial state') return receiver.theme === 'system' && receiver.motion === 'system' && receiver.events === 2;
+      if (label === 'preference tabs restore their initial state') {
+        const expected = expression.match(/s\[0\]\?\.value === ("(?:[^"\\]|\\.)*") && s\[1\]\?\.value === ("(?:[^"\\]|\\.)*") && window\.__displayPreferenceAudit\.events\.length === (\d+)/);
+        return expected !== null && receiver.theme === JSON.parse(expected[1]) && receiver.motion === JSON.parse(expected[2])
+          && receiver.events === Number(expected[3]);
+      }
       return current.ready(tab, expression, label);
     },
     evaluate: async (tab, expression) => {
