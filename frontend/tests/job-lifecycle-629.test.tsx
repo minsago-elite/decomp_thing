@@ -264,6 +264,23 @@ it('a same-tab library refresh during accepted readback does not report its own 
   stop();
 });
 
+it('adopts an untouched field from a refreshed job version during accepted readback', async () => {
+  const accepted = { ...base, version: 'job_version_2', label: 'Mine' };
+  const concurrent = { ...accepted, version: 'job_version_3', archived: true };
+  const f = seq(doc(accepted), fail(503, 'INTERNAL'));
+  const stop = onLibraryChange('/', () => current?.setJob(concurrent));
+  render(<Org fetcher={f} />);
+  fireEvent.input(input(), { target: { value: 'Mine' } }); save();
+  await waitFor(() => expect(status()).toContain(copy.unconfirmed));
+  await waitFor(() => expect(box().checked).toBe(true));
+  expect(input().value).toBe('Mine');
+  expect(screen.getByText(copy.currentServerArchived)).toBeTruthy();
+  save();
+  await waitFor(() => expect(status()).toBe(copy.unchanged));
+  expect(f).toHaveBeenCalledTimes(2);
+  stop();
+});
+
 it('decoded 422 VALIDATION_FAILED for a submitted label is field-attached and cleared by input', async () => {
   const f = seq(fail(422, 'VALIDATION_FAILED'));
   const { container } = render(<Org fetcher={f} />);
@@ -377,6 +394,18 @@ it.each(['running', 'completed', 'recovery-required'] as const)('accepted %s del
   await new Promise(r => setTimeout(r, 20));
   expect(f).toHaveBeenCalledTimes(2);
   noCanary(); stop();
+});
+
+it('preserves fixed storage-recovery guidance when a failed deletion requires recovery', async () => {
+  const failed = { ...op('failed'), recoveryRequired: true };
+  const f = seq(json('jobDeletionPreview', { ...prev, jobId, version: v1 }), json('operation', failed, 202));
+  const deleted = del(f);
+  fireEvent.input(await screen.findByRole('textbox'), { target: { value: prev.displayFilename } });
+  fireEvent.click(screen.getByRole('button', { name: jobDeletionCopy.deletePermanently }));
+  expect(await screen.findByText(jobDeletionCopy.operationStates['recovery-required'])).toBeTruthy();
+  expect(screen.queryByText(jobDeletionCopy.operationStates.failed)).toBeNull();
+  expect(deleted).toHaveBeenCalledWith(expect.objectContaining({ state: 'failed', recoveryRequired: true }));
+  noCanary();
 });
 
 it('protections render fixed per-code copy with a generic fallback and never the server message', async () => {

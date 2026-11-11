@@ -22,8 +22,10 @@ const code = (failure: unknown) => failure instanceof ApiClientError ? failure.s
 type Change = { label?: string | null; archived?: boolean };
 const own = <T extends object>(table: T, key: string): key is Extract<keyof T, string> => Object.prototype.hasOwnProperty.call(table, key);
 
-export function jobDeletionStateMessage(state: string): string {
-  return own(jobDeletionCopy.operationStates, state) ? jobDeletionCopy.operationStates[state] : jobDeletionCopy.operationStateUnknown;
+export function jobDeletionStateMessage(operation: Pick<Operation, 'state' | 'recoveryRequired'>): string {
+  if (operation.recoveryRequired) return jobDeletionCopy.operationStates['recovery-required'];
+  return own(jobDeletionCopy.operationStates, operation.state)
+    ? jobDeletionCopy.operationStates[operation.state] : jobDeletionCopy.operationStateUnknown;
 }
 
 /** A response names exactly this job; anything else is unverified, never adopted. */
@@ -59,6 +61,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
   const notifiedVersion = useRef<{ jobId: string; version: string } | null>(null);
   // Edited fields survive a newer server version of the same job; a different job or session starts clean.
   const dirty = useRef({ label: false, archived: false });
+  const activeSubmission = useRef<{ label: string; archived: boolean } | null>(null);
   const owner = useRef({ jobId: job.jobId, basePath, session });
   const observed = useRef({ jobId: job.jobId, version: job.version, label: job.label ?? null, archived: job.archived ?? false });
   const renderedOwner = useRef(owner.current);
@@ -74,6 +77,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
       notifiedVersion.current = null;
       observed.current = { jobId: job.jobId, version: job.version, label: job.label ?? null, archived: job.archived ?? false };
       dirty.current = { label: false, archived: false };
+      activeSubmission.current = null;
       latest.current = { label: job.label ?? '', archived: job.archived ?? false };
       setLabel(job.label ?? ''); setArchived(job.archived ?? false);
       setNotice(''); setLabelError(''); setServerState(null);
@@ -85,8 +89,17 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
     const ownAcknowledgedVersion = notifiedVersion.current?.jobId === job.jobId && notifiedVersion.current.version === job.version;
     if (newerVersion && (activePhase.current === 'accepted-readback' || ownAcknowledgedVersion)) {
       // The 2xx path broadcasts before its own readback. A same-tab route refresh
-      // can arrive first; retain drafts without misreporting our own save as a conflict.
+      // can arrive first; adopt untouched fields without misreporting our own save as a conflict.
       if (ownAcknowledgedVersion) notifiedVersion.current = null;
+      const submission = activeSubmission.current;
+      const preserveLabel = submission !== null && latest.current.label !== submission.label;
+      const preserveArchive = submission !== null && latest.current.archived !== submission.archived;
+      const nextLabel = preserveLabel ? latest.current.label : job.label ?? '';
+      const nextArchived = preserveArchive ? latest.current.archived : job.archived ?? false;
+      latest.current = { label: nextLabel, archived: nextArchived };
+      dirty.current = { label: preserveLabel, archived: preserveArchive };
+      if (!preserveLabel) setLabel(nextLabel);
+      if (!preserveArchive) setArchived(nextArchived);
       observed.current = { jobId: job.jobId, version: job.version, label: job.label ?? null, archived: job.archived ?? false };
       setServerState({ label: job.label ?? null, archived: job.archived ?? false });
       return;
@@ -138,6 +151,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
     activePhase.current = 'patch';
     const before = job.version; const jobId = job.jobId;
     const submitted = { label, archived };
+    activeSubmission.current = submitted;
     let answered = false;
     setBusy(true); setNotice(copy.saving); setLabelError('');
     try {
@@ -208,7 +222,9 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
         } catch { setNotice(copy.changedUnreadable); }
       }
     } finally {
-      if (active.current === controller) { active.current = null; activePhase.current = null; setBusy(false); }
+      if (active.current === controller) {
+        active.current = null; activePhase.current = null; activeSubmission.current = null; setBusy(false);
+      }
     }
   }
   let notified = false;
@@ -351,7 +367,7 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
       </form>}
     </>}
     {operation && <>
-      <p>{jobDeletionStateMessage(operation.state)}</p>
+      <p>{jobDeletionStateMessage(operation)}</p>
       {operation.state === 'running' && <p>{copy.stillRunning}</p>}
     </>}
     <p role="status">{!available ? copy.paused : notice}</p>

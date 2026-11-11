@@ -59,7 +59,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     return () => { controller.abort(); };
   }, [binding, client, jobId, refresh]);
   if (deleted) return <div class="notice" role="alert"><p>{copy.thisJobWasDeleted}</p>
-    {operation && <p>{jobDeletionStateMessage(operation.state)}</p>}
+    {operation && <p>{jobDeletionStateMessage(operation)}</p>}
     {operation?.state === 'running' && <p>{jobDeletionCopy.stillRunning}</p>}
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
   return <>
