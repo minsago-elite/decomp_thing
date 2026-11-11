@@ -60,3 +60,17 @@ Verification at this source checkpoint:
 - `npm run build` — generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
 
 These are local frontend results. Remaining job panels, full route/panel-state acceptance, packaged-browser evidence, screen-reader evidence, and parent #221 qualification remain open.
+
+## Dashboard recovery-inspection failure states — 2026-11-12
+
+Source checkpoint: `bed9cb0cb892808fe21058e98d29905c48ce6c9c` on PR #1946.
+
+The independent recovery inventory now distinguishes session expiry, denied access, missing recovery data, unsupported response formats, unverified inventory, and other read failures. An active upload's `RECOVERY_INSPECTION_BUSY` remains a separate paused state. Read failures are announced as alerts and preserve the explicit warning to retain stored files; no cleanup action or recovery authority is exposed. The component tests verify distinct fixed messages, safe correlation references, diagnostic redaction, and clearing an earlier observation on denied refresh.
+
+Verification at this source checkpoint:
+
+- Focused Vitest: `dashboard-recovery.test.tsx` and `resilience.test.tsx` — 2 files, 25 tests passed.
+- Full frontend Vitest suite — 84 files, 1,206 tests passed.
+- `npm run build` — generated API drift, TypeScript, ESLint, production bundle and all bundle-size budgets passed.
+
+These local results leave other job panels, complete route-by-state coverage, packaged-browser and assistive-technology evidence, and parent #221 acceptance open.
