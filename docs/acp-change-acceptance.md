@@ -1493,3 +1493,31 @@ validator is injected and rejects after candidate inspection; this does not
 qualify successful production validation under #236, live providers, other
 profiles, hosted exact-head CI, or the full #734/#63 acceptance scope. Keep
 #734 and #63 open.
+
+## Active repair ACP filesystem read-byte refusal after candidate write — 2026-11-11
+
+Source commit `f42e29e54ae0c15a7920823790904172180978f9` adds an active
+repair callback control for `AcpFilesystemLimits.maximumReadBytes`. The
+scripted ACP process first writes an exact 4,097-byte replacement, then tries
+to read that candidate while the read ceiling is 4,096 bytes. The write
+ceiling is 8 MiB; patch, source-file, staging, context, patch-count, frame,
+and protocol limits have headroom. The test verifies the initial captured
+context itself fits the read ceiling, so the refusal occurs on the post-write
+callback read rather than preflight.
+
+The receipt records the allowed write followed by a `RESOURCE_LIMIT` read
+denial. The exact modified candidate and its digest reach the injected
+`STRICT_CONTAINED` validator, which throws the expected sentinel. The graph
+retains the linked receipt and rejected assessment, restores the accepted
+source/head, clears pending state, and verifies process and sandbox cleanup.
+The focused run also includes the existing patch-byte and filesystem
+write-byte retry controls: three tests, zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-acp-read-byte-retry-2026-11-11.xml)
+and [provenance record](evidence/issue-734-active-repair-acp-read-byte-retry-2026-11-11.json)
+bind the exact source commit, command, toolchain, and report digest.
+
+This is local scripted-ACP evidence for the Generated C repair profile. The
+validator is injected and rejects after candidate inspection; it does not
+qualify successful production validation under #236, live providers, other
+profiles, hosted exact-head CI, or the full #734/#63 acceptance scope. Keep
+#734 and #63 open.
