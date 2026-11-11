@@ -741,17 +741,34 @@ if MODE == "repair-active-declared-role-tool-limit-after-write":
         "/* tool-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
         148,
     )
-    for ordinal in range(2):
-        update({
-            "sessionUpdate": "tool_call",
-            "toolCallId": f"tool-after-write-{ordinal}",
-            "title": f"Tool call {ordinal} after target write",
-            "kind": "other",
-            "status": "completed",
-        })
-    # End the prompt immediately after exceeding the single-call request budget. The host must
-    # preserve the recorded limit even if prompt completion is already visible to its wait loop.
-    respond(prompt, {"stopReason": "end_turn"})
+    # Let the host enter its prompt wait loop, then deliver the over-limit updates and final
+    # response in one pipe write. This keeps prompt completion adjacent to the recorded limit.
+    time.sleep(0.05)
+    completion_burst = [
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "fixture-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": f"tool-after-write-{ordinal}",
+                    "title": f"Tool call {ordinal} after target write",
+                    "kind": "other",
+                    "status": "completed",
+                },
+            },
+        }
+        for ordinal in range(2)
+    ]
+    completion_burst.append({
+        "jsonrpc": "2.0",
+        "id": prompt["id"],
+        "result": {"stopReason": "end_turn"},
+    })
+    sys.stdout.write("".join(json.dumps(message, separators=(",", ":")) + "\n"
+                            for message in completion_burst))
+    sys.stdout.flush()
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-frame-limit-after-write":
     source = join_path(cwd, "src/modules/reconstructed.c")
