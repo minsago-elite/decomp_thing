@@ -11,10 +11,17 @@ import { createBrowserSession } from '../src/session/session';
 
 // One independent panel failing to render must not take down its route (#628).
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string) => Promise<unknown>>(), post: vi.fn() }));
-const failing = vi.hoisted(() => ({ renders: 0 }));
+const failing = vi.hoisted(() => ({ renders: 0, storageRenders: 0, storage: false }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 vi.mock('../src/jobs/ExplorationEvidence', () => ({
   ExplorationEvidence: () => { failing.renders += 1; throw new Error('private stack detail /home/user/secret'); },
+}));
+vi.mock('../src/jobs/StorageSummary', () => ({
+  StorageSummary: () => {
+    failing.storageRenders += 1;
+    if (failing.storage) throw new Error('private storage render failure /home/user/storage');
+    return null;
+  },
 }));
 
 type Fixture = { data: Record<string, unknown> };
@@ -30,7 +37,7 @@ const responses: Record<string, () => unknown> = {
 };
 
 beforeEach(() => {
-  failing.renders = 0;
+  failing.renders = 0; failing.storageRenders = 0; failing.storage = false;
   transport.get.mockReset(); transport.post.mockReset();
   transport.get.mockImplementation(kind => responses[kind] ? Promise.resolve(responses[kind]()) : Promise.reject(new ApiClientError('http_error', { status: 404 })));
 });
@@ -69,4 +76,31 @@ it('replaces only the failed panel with a fixed, accessible notice and retries b
   } finally {
     silence.mockRestore();
   }
+});
+
+it('isolates a Runtime storage-panel render failure from build identity and capabilities', async () => {
+  failing.storage = true;
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const auth = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...fixture.data, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  sessions.push(auth);
+  await auth.initialize({ kind: 'absent' });
+  const silence = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    history.replaceState(null, '', '/nested/runtime');
+    render(<App basePath="/nested" session={auth} />);
+    const notice = await screen.findByRole('alert', { name: 'Stored data could not be displayed' });
+    expect(notice.textContent).toContain('The rest of this page is still available.');
+    expect(document.body.textContent).not.toContain('private storage render failure');
+    expect(document.body.textContent).not.toContain('/home/user/storage');
+    expect(screen.getByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Page build identity' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Workflow capabilities' })).toBeTruthy();
+    const before = failing.storageRenders;
+    fireEvent.click(screen.getByRole('button', { name: 'Show this section again' }));
+    expect(failing.storageRenders).toBeGreaterThan(before);
+    expect(await screen.findByRole('alert', { name: 'Stored data could not be displayed' })).toBeTruthy();
+  } finally { silence.mockRestore(); }
 });

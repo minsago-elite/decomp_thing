@@ -8,6 +8,7 @@ import { lazyContractSchema } from '../api/generated-schema-lazy';
 import type { MaintenancePreview, StorageSummary as Summary } from '../api/generated';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { formatExactBytes, formatExactCount } from '../copy/format';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 registerContractExtension(lazyContractSchema);
 
@@ -20,11 +21,12 @@ export function StorageSummary({ basePath }: { basePath: string }) {
   const [preview, setPreview] = useState<MaintenancePreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
   const active = useRef<AbortController | null>(null);
   async function read() {
     if (active.current) return;
     const controller = new AbortController(); active.current = controller;
-    setBusy(true); setNotice(copy.reading);
+    setBusy(true); setNotice(copy.reading); setError('');
     try {
       const [storage, maintenance] = await Promise.all([
         client.get('storageSummary', '/storage', { signal: controller.signal }),
@@ -32,7 +34,17 @@ export function StorageSummary({ basePath }: { basePath: string }) {
       ]);
       setSummary(storage.data); setPreview(maintenance.data); setNotice('');
     } catch (failure: unknown) {
-      if (!controller.signal.aborted) { setSummary(null); setPreview(null); setNotice(withApiFailureReference(copy.failed, failure)); }
+      if (!controller.signal.aborted) {
+        const message = {
+          session: copy.sessionExpired,
+          denied: copy.accessDenied,
+          missing: copy.missing,
+          unsupported: copy.unsupported,
+          unverified: copy.unverified,
+          failed: copy.failed,
+        }[metadataFailureKind(failure)];
+        setSummary(null); setPreview(null); setNotice(''); setError(withApiFailureReference(message, failure));
+      }
     } finally {
       active.current = null; setBusy(false);
     }
@@ -41,7 +53,8 @@ export function StorageSummary({ basePath }: { basePath: string }) {
     <h3 id="storage-summary-title">{copy.storage}</h3>
     <p>{copy.explanation}</p>
     <button type="button" disabled={busy} onClick={() => { void read(); }}>{copy.read}</button>
-    <p role="status">{notice}</p>
+    {notice && <p role="status">{notice}</p>}
+    {error && <p role="alert">{error}</p>}
     {summary && <>
       {!summary.complete && <p>{copy.partial}</p>}
       <dl class="job-facts">

@@ -79,6 +79,7 @@ describe('route failure states (#628)', () => {
   ];
   const routes: [string, string, string][] = [
     ['job overview', `/nested/jobs/${jobId}`, 'job'],
+    ['attempt history', `/nested/jobs/${jobId}/runs`, 'runs'],
     ['attempt overview', `/nested/jobs/${jobId}/runs/${runId}`, 'run'],
     ['source directory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`, 'revisionDirectory'],
     ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/file_0_${'a'.repeat(64)}`, 'revisionFile'],
@@ -106,6 +107,38 @@ describe('route failure states (#628)', () => {
       expect(new Set(messages.values()).size).toBe(failures.length);
     });
   }
+
+  it('distinguishes every storage-read failure on Runtime while retaining the page identity and capabilities', async () => {
+    const messages = new Set<string>();
+    for (const [, failure] of failures) {
+      transport.get.mockClear();
+      transport.get.mockImplementation((kind) => {
+        if (kind === 'storageSummary') return Promise.reject(failure);
+        if (kind === 'maintenancePreview') return Promise.resolve(fixture('maintenance-preview'));
+        return responses[kind] ? Promise.resolve(responses[kind]()) : Promise.reject(new ApiClientError('http_error', { status: 404 }));
+      });
+      const auth = await session();
+      history.replaceState(null, '', '/nested/runtime');
+      const view = render(<App basePath="/nested" session={auth} />);
+      expect(await screen.findByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+      const alert = await screen.findByRole('alert');
+      const text = alert.textContent ?? '';
+      messages.add(text.replace(` Reference ID: ${reference}.`, ''));
+      expect(text.includes(`Reference ID: ${reference}.`)).toBe(failure.requestId !== undefined);
+      for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed'])
+        expect(text).not.toContain(leaked);
+      expect(text).not.toMatch(/\n\s+at\s/);
+      expect(screen.getByRole('heading', { name: 'Page build identity' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Connected server' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Workflow capabilities' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Stored data' })).toBeTruthy();
+      expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeTruthy();
+      expect(transport.get.mock.calls.filter(([kind]) => kind === 'storageSummary' || kind === 'maintenancePreview')).toHaveLength(2);
+      view.unmount();
+    }
+    expect(messages.size).toBe(failures.length);
+  });
 
   it('shows an explicit empty state rather than a failure when there is no data', async () => {
     responses.jobs = () => fixture('jobs-empty');
