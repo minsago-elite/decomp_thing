@@ -92,7 +92,10 @@ bounded live reads and the local session-expiry timer are separate from recovery
 - **Missing application files:** the asset-recovery notice uses the same guard, so a reload that
   returns the same stale build cannot be offered again in a loop.
 - **Display preferences:** an invalid or unreadable stored preference falls back to the defaults
-  without being rewritten at startup (`display-preferences.test.tsx`).
+  without being rewritten at startup (`display-preferences.test.tsx`). Other tabs re-read the
+  bounded preference record after a matching storage update or clear event; applying a remote
+  change does not write back, and a later local field edit merges with the latest valid stored
+  values. Malformed remote values converge to defaults without entering a write loop.
 
 `resilience.test.tsx` covers the reload-once-then-guidance sequence, convergence after a
 successful reload, the asset-recovery guard, and six concurrent expiry rejections producing a
