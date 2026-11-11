@@ -2204,6 +2204,188 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `active ACP repair passes a receipt-backed candidate to the validation strategy`() {
+        val testRoot = java.nio.file.Path.of("build/test-tmp").createDirectories()
+        val project = createProject(
+            Files.createTempDirectory(testRoot, "repair-active-acp-validator-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+        )
+        val targetPath = "src/modules/reconstructed.c"
+        val target = project.resolve(targetPath)
+        val acceptedSource = target.readBytes()
+        val candidateSource = "/* validated candidate */\nint decomp_engine_main(void) { return 1; }\n"
+            .toByteArray(Charsets.UTF_8)
+        val makefile = project.resolve("Makefile")
+        val acceptedMakefile = makefile.readBytes()
+        val profile = requireNotNull(GeneratedCRepairIndexProfile.reconstructionProfile())
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+        val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-candidate")
+        var dispatches = 0
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = acp.execute(request, onEvent)
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                turnIdentity: decompengine.agent.AgentTurnIdentity,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt {
+                dispatches++
+                val authority = assertNotNull(request.accessPolicy.mutationAuthority)
+                val grant = authority.grants.single()
+                assertEquals("declared-role-generated-c-repair-v1", authority.policyId)
+                assertEquals("project", grant.path.rootId)
+                assertEquals(targetPath, grant.path.relativePath)
+                assertEquals(setOf(AgentOperation.WRITE_FILE), grant.operations)
+                assertEquals(decompengine.agent.AgentMutationContentKind.UTF8_TEXT, grant.contentKind)
+                assertEquals(profile.layout.declarationForPath(targetPath).id, grant.declarationId)
+                return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+            }
+        }
+        val validationReached = java.util.concurrent.atomic.AtomicInteger()
+        var observedCandidateDigest: String? = null
+        var observedInvocation: RepairValidationInvocation? = null
+        val validationStop = IllegalStateException("candidate reached the injected validation boundary")
+        val validation = object : RepairValidationStrategy {
+            override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+            override fun requireAvailable() = Unit
+            override fun validateCandidate(
+                request: RepairCandidateValidationRequest,
+            ): RepairCandidateValidationOutcome {
+                validationReached.incrementAndGet()
+                val candidateSources = request.candidateSources
+                assertEquals(
+                    setOf("Makefile", "include/modules/reconstructed.h", "src/main.c", targetPath),
+                    request.candidateSourcePaths.toSet(),
+                )
+                assertContentEquals(candidateSource, candidateSources.getValue(targetPath))
+                assertEquals(request.profileSha256, assertNotNull(request.invocation).profileSha256)
+                assertEquals(
+                    decompengine.repair.repairCandidateSourceSha256(candidateSources),
+                    request.sourceRevisionSha256,
+                )
+                observedCandidateDigest = request.sourceRevisionSha256
+                observedInvocation = request.invocation
+                throw validationStop
+            }
+            override fun compile(projectDir: java.nio.file.Path, logPath: java.nio.file.Path,
+                                 budget: RepairResourceBudget): CompileFailure? =
+                error("active repair must use immutable candidate validation")
+            override fun rebuiltProgram(projectDir: java.nio.file.Path, budget: RepairResourceBudget): java.nio.file.Path =
+                error("active repair must use immutable candidate validation")
+            override fun evaluateBehavior(
+                id: String,
+                projectDir: java.nio.file.Path,
+                originalBinary: java.nio.file.Path,
+                rebuiltBinary: java.nio.file.Path,
+                inputs: List<ProcessInput>,
+                reportsDir: java.nio.file.Path,
+                budget: RepairResourceBudget,
+            ): BehaviorComparisonReport = error("active repair must use immutable candidate validation")
+        }
+        val loop = TestRepairRuntimeAccess.openLoop(
+            harness = harness,
+            history = RepairHistory(project.resolve("reports/repair_history.json")),
+            profile = GeneratedCRepairIndexProfile,
+            validationStrategy = validation,
+            stagingAuthority = CapturedRepairStagingAuthority,
+            limits = AgentExecutionLimits(),
+            cancellation = AgentCancellation.NONE,
+            onAgentEvent = {},
+            resourceBudget = RepairResourceBudget(),
+            allowTestOnlyValidation = false,
+            faultInjector = null,
+        )
+
+        val failure = assertFailsWith<IllegalStateException> {
+            loop.repairCompileError(
+                project,
+                CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                emptyList(),
+            )
+        }
+        assertTrue(failure === validationStop)
+        assertEquals(1, dispatches)
+        assertEquals(1, validationReached.get())
+        val candidateDigest = assertNotNull(observedCandidateDigest)
+        val validationInvocation = assertNotNull(
+            observedInvocation,
+            "the validator must receive the attempt-bound validation invocation",
+        )
+        assertEquals(candidateDigest, validationInvocation.sourceRevisionSha256)
+        assertContentEquals(acceptedSource, target.readBytes())
+        assertContentEquals(acceptedMakefile, makefile.readBytes())
+        assertTrue(validationStop.suppressed.isEmpty(), validationStop.suppressed.joinToString())
+
+        val rawGraph = Json.parseToJsonElement(
+            project.resolve("reports/repair-revisions/graph.json").readText(),
+        ).jsonObject
+        assertEquals(JsonNull, rawGraph.getValue("pending"))
+        val rawRejected = rawGraph.getValue("nodes").jsonArray.last().jsonObject
+        assertEquals(validationInvocation.candidateRevisionId, rawRejected.getValue("id").jsonPrimitive.content)
+        assertEquals("rejected", rawRejected.getValue("status").jsonPrimitive.content)
+        assertFalse(rawRejected.getValue("recoveredAfterCrash").jsonPrimitive.boolean)
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            val rejected = graph.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            assertEquals(validationInvocation.candidateRevisionId, rejected.id)
+            assertEquals(validationInvocation.runId, rejected.repairMetadata?.runId)
+            assertFalse(rejected.recoveredAfterCrash)
+            val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+            assertEquals("returned-completed", binding.terminalOutcome)
+            assertTrue(binding.receiptReleaseComplete)
+            val receiptBytes = project.resolve(binding.receiptPath).readBytes()
+            assertEquals(binding.receiptSha256, sha256(receiptBytes))
+            val receipt = Json.parseToJsonElement(receiptBytes.decodeToString()).jsonObject
+            assertTrue(receipt.getValue("lifecycle").jsonObject
+                .getValue("releaseComplete").jsonPrimitive.boolean)
+            assertEquals(binding.resultChangesSha256,
+                receipt.getValue("outcome").jsonObject.getValue("result").jsonObject
+                    .getValue("changes").jsonObject.getValue("aggregateSha256").jsonPrimitive.content)
+            val filesystem = receipt.getValue("policyAudits").jsonObject
+                .getValue("filesystem").jsonObject
+            val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
+            assertEquals(1, filesystem.getValue("recordCount").jsonPrimitive.int)
+            assertEquals(1, records.size)
+            assertEquals(sha256(targetPath.toByteArray(Charsets.UTF_8)), records.single()
+                .getValue("policyPath").jsonObject.getValue("relativePath").jsonObject
+                .getValue("sha256").jsonPrimitive.content)
+            assertEquals("allowed", records.single().getValue("outcome").jsonPrimitive.content)
+            assertEquals("completed", records.single().getValue("reason").jsonPrimitive.content)
+            val assessment = decompengine.project.AcpChangeAssessment.parse(
+                project.resolve(requireNotNull(binding.assessmentPath)).readBytes(),
+            )
+            assertEquals(candidateDigest, assessment.afterSha256)
+            assertEquals(binding.resultChangesSha256, assessment.changesSha256)
+            assertEquals(decompengine.project.AcpChangeValidationStatus.FAILED, assessment.validationStatus)
+            assertEquals(decompengine.project.AcpChangePublicationEligibility.REJECTED, assessment.eligibility)
+            assertEquals("validation-failed", assessment.reasonCodes.single())
+        }
+    }
+
+    @Test
     fun `agent termination closes the pending graph and releases its root lock`() {
         val tempDir = createTempDirectory("repair-agent-termination-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")

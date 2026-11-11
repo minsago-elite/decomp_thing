@@ -74,6 +74,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
     "repair-active-output-limit",
     "repair-active-declared-role-no-change",
+    "repair-active-declared-role-candidate",
 }
 RECONSTRUCTION_OVERSIZED_BYTES = 256 * 1024 + 1
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
@@ -253,6 +254,7 @@ expected_fs = {
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-candidate": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -741,6 +743,15 @@ if MODE == "repair-active-declared-role-no-change":
         150,
     )
     write_workspace_file(source, "int decomp_engine_main(void) { return 0; }\n", 151)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-candidate":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* validated candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        152,
+    )
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "pipelined-callbacks":
