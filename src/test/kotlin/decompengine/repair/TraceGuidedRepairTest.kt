@@ -2155,8 +2155,16 @@ class TraceGuidedRepairTest {
                     val failed = outcome.getValue("failure").jsonObject
                     assertEquals("protocol", failed.getValue("kind").jsonPrimitive.content, case.label)
                     val messageCommitment = failed.getValue("message").jsonObject
-                    assertTrue(messageCommitment.getValue("encodedBytes").jsonPrimitive.content.toLong() > 0, case.label)
-                    assertEquals(64, messageCommitment.getValue("sha256").jsonPrimitive.content.length, case.label)
+                    val observedFailure = generateSequence<Throwable>(failure) { it.cause }
+                        .filterIsInstance<AgentExecutionException>()
+                        .single()
+                    val observedMessageBytes = observedFailure.failure.message.toByteArray(Charsets.UTF_8)
+                    assertTrue(observedFailure.failure.message.contains(case.invalidUsageMessage), case.label)
+                    assertEquals(observedMessageBytes.size.toLong(),
+                        messageCommitment.getValue("encodedBytes").jsonPrimitive.content.toLong(), case.label)
+                    assertEquals(sha256(observedMessageBytes),
+                        messageCommitment.getValue("sha256").jsonPrimitive.content, case.label)
+                    assertEquals("utf-8", messageCommitment.getValue("encoding").jsonPrimitive.content, case.label)
                     assertFalse(binding.receiptReleaseComplete, case.label)
                 } else {
                     assertEquals("returned", outcome.getValue("type").jsonPrimitive.content, case.label)
@@ -2181,9 +2189,10 @@ class TraceGuidedRepairTest {
                 assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int, case.label)
                 assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean, case.label)
                 if (case.exhausted || case.invalidUsageMessage != null) {
-                    val assessment = decompengine.project.AcpChangeAssessment.parse(
-                        project.resolve(requireNotNull(binding.assessmentPath)).readBytes(),
-                    )
+                    val assessmentBytes = project.resolve(requireNotNull(binding.assessmentPath)).readBytes()
+                    assertEquals(binding.assessmentSha256, sha256(assessmentBytes), case.label)
+                    val assessment = decompengine.project.AcpChangeAssessment.parse(assessmentBytes)
+                    assertEquals(binding.receiptSha256, assessment.receiptSha256, case.label)
                     assertEquals(
                         if (case.exhausted) decompengine.project.AcpChangePublicationEligibility.INTERRUPTED
                         else decompengine.project.AcpChangePublicationEligibility.REJECTED,
@@ -2670,7 +2679,12 @@ class TraceGuidedRepairTest {
         val acceptedModuleHeader = moduleHeader.readBytes()
         val acceptedMainSource = mainSource.readBytes()
         val profile = requireNotNull(GeneratedCRepairIndexProfile.reconstructionProfile())
-        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+        val resourceBudget = RepairResourceBudget(maximumSourceFileBytes = 4096)
+        assertTrue(profile.budgets.archiveMaximumFileBytes >= resourceBudget.maximumSourceFileBytes)
+        assertTrue(acceptedSource.size < resourceBudget.maximumSourceFileBytes)
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, resourceBudget).use {
+            it.snapshot.headId
+        }
         val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-no-change")
         var dispatches = 0
         val harness = object : CapturedRepairAgentHarness {
@@ -2721,7 +2735,7 @@ class TraceGuidedRepairTest {
                     grant.roles,
                 )
                 assertEquals(
-                    minOf(RepairResourceBudget().maximumSourceFileBytes, profile.budgets.archiveMaximumFileBytes),
+                    minOf(resourceBudget.maximumSourceFileBytes, profile.budgets.archiveMaximumFileBytes),
                     grant.maximumBytes,
                 )
                 return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
@@ -2763,7 +2777,7 @@ class TraceGuidedRepairTest {
             limits = AgentExecutionLimits(),
             cancellation = AgentCancellation.NONE,
             onAgentEvent = {},
-            resourceBudget = RepairResourceBudget(),
+            resourceBudget = resourceBudget,
             allowTestOnlyValidation = false,
             faultInjector = null,
         )
@@ -2792,7 +2806,7 @@ class TraceGuidedRepairTest {
         assertEquals(baselineHead, persisted.getValue("headId").jsonPrimitive.content)
         val rejectedNode = persisted.getValue("nodes").jsonArray.last().jsonObject
         assertEquals("rejected", rejectedNode.getValue("status").jsonPrimitive.content)
-        val graph = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        val graph = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, resourceBudget)
         graph.use {
             assertNull(it.snapshot.pendingAttemptId)
             assertEquals(baselineHead, it.snapshot.headId)
@@ -2809,7 +2823,7 @@ class TraceGuidedRepairTest {
             val filesystem = receipt.getValue("policyAudits").jsonObject
                 .getValue("filesystem").jsonObject
             val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
-            assertEquals(7, filesystem.getValue("recordCount").jsonPrimitive.int)
+            assertEquals(9, filesystem.getValue("recordCount").jsonPrimitive.int)
             val policyDecisions = records.map { record ->
                 val path = record.getValue("policyPath").jsonObject
                 Triple(
@@ -2831,6 +2845,8 @@ class TraceGuidedRepairTest {
                     Triple(moduleHeaderHash, "denied", "policy-denied"),
                     Triple(mainSourceHash, "denied", "policy-denied"),
                     Triple(repairGraphHash, "denied", "policy-denied"),
+                    Triple(targetHash, "denied", "policy-denied"),
+                    Triple(targetHash, "allowed", "completed"),
                     Triple(targetHash, "allowed", "completed"),
                     Triple(targetHash, "allowed", "completed"),
                 ),

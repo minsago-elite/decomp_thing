@@ -875,6 +875,14 @@ if MODE == "repair-active-declared-role-no-change":
         denied = try_write_workspace_file(path, content, request_id)
         if denied.get("error", {}).get("code") != -32602:
             raise SystemExit(154)
+    oversized = try_write_workspace_file(
+        source,
+        "/*" + ("o" * 4092) + "*/\n",
+        157,
+    )
+    if oversized.get("error", {}).get("code") != -32602:
+        raise SystemExit(158)
+    write_workspace_file(source, "/*" + ("e" * 4091) + "*/\n", 159)
     write_workspace_file(
         source,
         "/* café */\nint decomp_engine_main(void) { return 1; }\n",
