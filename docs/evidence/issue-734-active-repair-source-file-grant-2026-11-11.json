@@ -35,7 +35,7 @@
   "scope": {
     "profile": "Generated C repair index",
     "provider": "scripted ACP process through AcpCapturedRepairFilesystem",
-    "scenario": "The new case configures the active grant's maximumSourceFileBytes=4,096. The scripted peer writes exactly 4,096 bytes, attempts a 4,097-byte retry, reads back the retained candidate, and completes. ACP write/read ceilings and patch, staging, context, and patch-count budgets have headroom; the policy audit must report POLICY_DENIED for the oversized mutation grant. The run also executes the exact patch-byte, filesystem write-byte, and filesystem read-byte retry controls.",
+    "scenario": "The new case configures the active grant's maximumSourceFileBytes=4,096. The scripted peer writes exactly 4,096 bytes, attempts a 4,097-byte retry, reads back the retained candidate, and completes. The ACP write ceiling and patch, staging, context, and patch-count budgets have headroom; the ACP read ceiling equals the 4,096-byte candidate, so readback is admitted at equality. The policy audit must report POLICY_DENIED for the oversized mutation grant. The run also executes the exact patch-byte, filesystem write-byte, and filesystem read-byte retry controls.",
     "candidate": "The active validator receives the exact MODIFIED candidate, verifies its source digest, and throws the expected sentinel. Receipt and rejected assessment linkage, unchanged accepted source/head, cleared pending state, and verified process/sandbox cleanup are asserted.",
     "qualificationLimits": [
       "scripted ACP fixture and Generated C repair profile only",
