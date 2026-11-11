@@ -13,12 +13,15 @@ sentences, never server text. Source reads use the same classes after their sour
 outcomes (invalid address, busy, invalid range, expired continuation).
 
 The table describes those metadata views' vocabulary, not a universal contract for every
-private read. The dashboard still uses listing-specific handling: unsupported-contract,
-malformed-response and network failures can share generic guidance, and some hard failures
-retain previous rows. Source views use latest-only read state rather than the metadata views'
-stale-data retention. The four-route matrix below does not qualify the dashboard or all other
-panels. Full route-by-state acceptance remains open in #628; this PR is not closure evidence
-for that issue.
+private read. The dashboard now uses the shared session, denied, missing, unsupported,
+unverified and failed classes for listing failures, with listing-specific guidance for busy,
+limit and expired-cursor outcomes. Only transient transport/server failures and the explicit
+busy/limit/cursor cases retain a previously verified page; unverified collection results clear
+the old rows and page controls. Fixed dashboard copy includes only the safe request reference,
+never server text. Source views use latest-only read state rather than the metadata views'
+stale-data retention. The four-route matrix below still does not qualify the dashboard or all
+other panels. Full route-by-state acceptance remains open in #628; this focused slice is not
+closure evidence for that issue.
 
 | State | Trigger | What the view shows |
 | --- | --- | --- |

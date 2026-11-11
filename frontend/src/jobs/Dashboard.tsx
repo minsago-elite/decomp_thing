@@ -14,6 +14,7 @@ import { JobSummary } from './JobSummary';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import { RecoverySummary } from './RecoverySummary';
 import { onLibraryChange } from './libraryChannel';
 
@@ -117,18 +118,41 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   }, [binding, client, selection]);
   const failRead = useCallback((failure: unknown) => {
     setPhase('error');
-    if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
+    const serverCode = failure instanceof ApiClientError ? failure.serverCode : undefined;
+    const category = metadataFailureKind(failure);
+    let message: string;
+    let retainPrevious: boolean;
+    if (serverCode === 'LISTING_BUSY') {
+      message = copy.anotherJobListingIsInProgressWaitAMomentThen;
+      retainPrevious = true;
+    } else if (serverCode === 'LISTING_LIMIT') {
+      message = copy.thisLibraryExceedsAListingLimitNoPartialResultsWere;
+      retainPrevious = true;
+    } else if (serverCode === 'CURSOR_EXPIRED' || serverCode === 'INVALID_CURSOR') {
+      // A failed continuation leaves its last verified page in place until the user refreshes.
+      message = copy.thisPageSnapshotExpiredRefreshJobsToStartANew;
+      retainPrevious = true;
+    } else if (serverCode === 'LISTING_UNAVAILABLE') {
+      // The server could not verify a complete collection, so an earlier page is not current evidence.
+      message = copy.storedJobsCouldNotBeListedCompletelyTheServerHas;
+      retainPrevious = false;
+    } else {
+      message = {
+        session: copy.jobLibrarySessionExpiredReconnectToRead,
+        denied: copy.jobLibraryAccessDeniedCheckPermissions,
+        missing: copy.jobLibraryRouteUnavailableCheckServerVersion,
+        unsupported: copy.jobLibraryResponseUnsupportedUpdateApplication,
+        unverified: copy.storedJobsCouldNotBeListedCompletelyTheServerHas,
+        failed: copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable,
+      }[category];
+      retainPrevious = canRetainMetadata(failure);
+    }
+    if (!retainPrevious) {
       firstPage.current = null;
-      setData(null); setDisplayedPageIndex(null); setError(withApiFailureReference(copy.accessToThisJobLibraryIsUnavailableCheckYourLocal, failure));
-    } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
-      setError(withApiFailureReference(copy.storedJobsCouldNotBeListedCompletelyTheServerHas, failure));
-    } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
-      setError(withApiFailureReference(copy.anotherJobListingIsInProgressWaitAMomentThen, failure));
-    } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_LIMIT') {
-      setError(withApiFailureReference(copy.thisLibraryExceedsAListingLimitNoPartialResultsWere, failure));
-    } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
-      setError(withApiFailureReference(copy.thisPageSnapshotExpiredRefreshJobsToStartANew, failure));
-    } else setError(withApiFailureReference(copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable, failure));
+      entryPin.current = null;
+      setData(null); setDisplayedPageIndex(null);
+    }
+    setError(withApiFailureReference(message, failure));
     pageTransition.current = null;
   }, []);
   const reloadLatest = useRef(reload);
