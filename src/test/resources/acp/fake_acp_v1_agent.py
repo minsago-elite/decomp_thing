@@ -91,6 +91,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-no-change",
     "repair-active-declared-role-candidate",
     "repair-active-declared-role-quota-retry",
+    "repair-active-declared-role-read-limit-after-write",
     "repair-active-declared-role-patch-count-retry",
     "repair-active-declared-role-timeout-after-write",
 }
@@ -290,6 +291,7 @@ expected_fs = {
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-candidate": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-quota-retry": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-read-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-patch-count-retry": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
@@ -936,6 +938,21 @@ if MODE == "repair-active-declared-role-quota-retry":
     readback = read_workspace_file(source, 156)
     if "error" in readback or readback.get("result", {}).get("content") != candidate:
         raise SystemExit(157)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-read-limit-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    prefix = "/* exact repair quota-byte boundary: "
+    suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+    candidate_size = REPAIR_QUOTA_BOUNDARY_BYTES + 1
+    candidate = prefix + ("q" * (candidate_size - len(prefix.encode()) - len(suffix.encode()))) + suffix
+    if len(candidate.encode()) != candidate_size:
+        raise SystemExit(158)
+    write_workspace_file(source, candidate, 159)
+
+    refused = read_workspace_file(source, 160)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(161)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-patch-count-retry":

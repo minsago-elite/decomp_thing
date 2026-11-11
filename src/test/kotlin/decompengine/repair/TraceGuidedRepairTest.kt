@@ -3053,21 +3053,31 @@ class TraceGuidedRepairTest {
     @Test
     @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `active ACP repair preserves an exact patch candidate after refusing an oversized retry`() {
-        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(enforceAcpWriteLimit = false)
+        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(ActiveAcpRepairQuota.PATCH_BYTES)
     }
 
     @Test
     @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `active ACP repair enforces the filesystem write limit after retaining an exact candidate`() {
-        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(enforceAcpWriteLimit = true)
+        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(ActiveAcpRepairQuota.FILESYSTEM_WRITE_BYTES)
     }
 
-    private fun activeAcpRepairPreservesExactCandidateAfterRefusedRetry(enforceAcpWriteLimit: Boolean) {
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active ACP repair enforces the filesystem read limit after an acknowledged candidate write`() {
+        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(ActiveAcpRepairQuota.FILESYSTEM_READ_BYTES)
+    }
+
+    private enum class ActiveAcpRepairQuota { PATCH_BYTES, FILESYSTEM_READ_BYTES, FILESYSTEM_WRITE_BYTES }
+
+    private fun activeAcpRepairPreservesExactCandidateAfterRefusedRetry(quota: ActiveAcpRepairQuota) {
+        val readQuota = quota == ActiveAcpRepairQuota.FILESYSTEM_READ_BYTES
+        val enforceAcpWriteLimit = quota == ActiveAcpRepairQuota.FILESYSTEM_WRITE_BYTES
         val testRoot = Path.of("build/test-tmp").createDirectories()
         val project = createProject(
             Files.createTempDirectory(
                 testRoot,
-                if (enforceAcpWriteLimit) "repair-active-acp-write-quota-retry-" else
+                if (readQuota) "repair-active-acp-read-quota-retry-" else if (enforceAcpWriteLimit) "repair-active-acp-write-quota-retry-" else
                     "repair-active-acp-patch-quota-retry-",
             ).resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
@@ -3079,30 +3089,34 @@ class TraceGuidedRepairTest {
         val patchLimit = 4096L
         val prefix = "/* exact repair quota-byte boundary: "
         val suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+        val candidateLimit = patchLimit + if (readQuota) 1 else 0
         val candidateSource = (prefix + "q".repeat(
-            patchLimit.toInt() - prefix.toByteArray(Charsets.UTF_8).size - suffix.toByteArray(Charsets.UTF_8).size,
+            candidateLimit.toInt() - prefix.toByteArray(Charsets.UTF_8).size - suffix.toByteArray(Charsets.UTF_8).size,
         ) + suffix).toByteArray(Charsets.UTF_8)
-        assertEquals(patchLimit, candidateSource.size.toLong())
+        assertEquals(candidateLimit, candidateSource.size.toLong())
         val budget = RepairResourceBudget(
             maximumSourceFileBytes = 64L * 1024,
-            maximumPatchBytes = if (enforceAcpWriteLimit) 8L * 1024 else patchLimit,
+            maximumPatchBytes = if (quota == ActiveAcpRepairQuota.PATCH_BYTES) patchLimit else 8L * 1024,
         )
         val filesystemLimits = AcpFilesystemLimits(
-            maximumReadBytes = 8 * 1024 * 1024,
+            maximumReadBytes = if (readQuota) patchLimit.toInt() else 8 * 1024 * 1024,
             maximumWriteBytes = if (enforceAcpWriteLimit) patchLimit.toInt() else 8 * 1024 * 1024,
         )
-        assertTrue(budget.maximumSourceFileBytes > patchLimit + 1)
-        assertTrue(budget.maximumStagingBytes > patchLimit + 1)
-        assertTrue(budget.maximumContextBytes > patchLimit + 1)
+        assertTrue(budget.maximumSourceFileBytes > candidateLimit)
+        assertTrue(budget.maximumStagingBytes > candidateLimit)
+        assertTrue(budget.maximumContextBytes > candidateLimit)
         assertTrue(budget.maximumPatchFiles > 1)
-        if (enforceAcpWriteLimit) assertTrue(budget.maximumPatchBytes > patchLimit + 1)
-        else assertEquals(patchLimit, budget.maximumPatchBytes)
+        if (quota == ActiveAcpRepairQuota.PATCH_BYTES) assertEquals(patchLimit, budget.maximumPatchBytes)
+        else assertTrue(budget.maximumPatchBytes > candidateLimit)
+        if (readQuota) assertEquals(patchLimit.toInt(), filesystemLimits.maximumReadBytes)
+        else assertTrue(filesystemLimits.maximumReadBytes > candidateLimit)
         val profile = requireNotNull(GeneratedCRepairIndexProfile.reconstructionProfile())
         val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use {
             it.snapshot.headId
         }
         val acp = AcpAgentHarnessTest().harness(
-            "repair-active-declared-role-quota-retry",
+            if (readQuota) "repair-active-declared-role-read-limit-after-write"
+            else "repair-active-declared-role-quota-retry",
             filesystemLimits = filesystemLimits,
         )
         var dispatches = 0
@@ -3141,6 +3155,7 @@ class TraceGuidedRepairTest {
                 assertEquals(targetPath, grant.path.relativePath)
                 assertEquals(setOf(AgentOperation.WRITE_FILE), grant.operations)
                 assertEquals(budget.maximumSourceFileBytes, grant.maximumBytes)
+                if (readQuota) assertTrue(initialFiles.values.all { it.size <= filesystemLimits.maximumReadBytes })
                 return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
             }
         }
@@ -3148,8 +3163,11 @@ class TraceGuidedRepairTest {
         var observedInvocation: RepairValidationInvocation? = null
         var observedCandidateDigest: String? = null
         val validationStop = IllegalStateException(
-            if (enforceAcpWriteLimit) "filesystem-write-limit-preserved candidate reached validator"
-            else "patch-byte-limit-preserved candidate reached validator",
+            when (quota) {
+                ActiveAcpRepairQuota.PATCH_BYTES -> "patch-byte-limit-preserved candidate reached validator"
+                ActiveAcpRepairQuota.FILESYSTEM_READ_BYTES -> "filesystem-read-limit-preserved candidate reached validator"
+                ActiveAcpRepairQuota.FILESYSTEM_WRITE_BYTES -> "filesystem-write-limit-preserved candidate reached validator"
+            },
         )
         val validation = object : RepairValidationStrategy {
             override val assurance = RepairValidationAssurance.STRICT_CONTAINED
@@ -3159,7 +3177,7 @@ class TraceGuidedRepairTest {
             ): RepairCandidateValidationOutcome {
                 validationCalls++
                 assertContentEquals(candidateSource, request.candidateSources.getValue(targetPath))
-                assertEquals(patchLimit, request.candidateSources.getValue(targetPath).size.toLong())
+                assertEquals(candidateLimit, request.candidateSources.getValue(targetPath).size.toLong())
                 val candidateDigest = decompengine.repair.repairCandidateSourceSha256(request.candidateSources)
                 assertEquals(candidateDigest, request.sourceRevisionSha256)
                 observedCandidateDigest = candidateDigest
@@ -3244,14 +3262,17 @@ class TraceGuidedRepairTest {
             assertEquals("modified", change.getValue("kind").jsonPrimitive.content)
             assertEquals(sha256(acceptedSource), change.getValue("beforeSha256").jsonPrimitive.content)
             assertEquals(sha256(candidateSource), change.getValue("afterSha256").jsonPrimitive.content)
-            assertEquals(patchLimit, change.getValue("sizeBytes").jsonPrimitive.content.toLong())
+            assertEquals(candidateLimit, change.getValue("sizeBytes").jsonPrimitive.content.toLong())
             val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
-            assertEquals(3, filesystem.getValue("recordCount").jsonPrimitive.int)
+            val expectedOutcomes = if (readQuota) listOf("allowed", "denied") else listOf("allowed", "denied", "allowed")
+            val expectedReasons = if (readQuota) listOf("completed", "resource-limit") else
+                listOf("completed", "resource-limit", "completed")
+            assertEquals(expectedOutcomes.size, filesystem.getValue("recordCount").jsonPrimitive.int)
             val auditRecords = filesystem.getValue("records").jsonArray.map { it.jsonObject }
-            assertEquals(listOf("allowed", "denied", "allowed"), auditRecords.map {
+            assertEquals(expectedOutcomes, auditRecords.map {
                 it.getValue("outcome").jsonPrimitive.content
             })
-            assertEquals(listOf("completed", "resource-limit", "completed"), auditRecords.map {
+            assertEquals(expectedReasons, auditRecords.map {
                 it.getValue("reason").jsonPrimitive.content
             })
             assertTrue(auditRecords.all {
