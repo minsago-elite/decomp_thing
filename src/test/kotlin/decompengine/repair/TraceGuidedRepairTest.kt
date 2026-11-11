@@ -3243,6 +3243,219 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active ACP repair preserves an exact staging candidate after refusing an oversized retry`() {
+        val targetPath = "src/modules/reconstructed.c"
+        val candidateBytes = 4096L
+        val diagnostic = "$targetPath: compiler error"
+        val sizingProject = createProject(
+            createRepairTempDirectory("repair-active-acp-staging-quota-sizing-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+        )
+        val sizingContext = ModuleRevisionGraph.open(sizingProject, GeneratedCRepairIndexProfile).use { graph ->
+            graph.selectContext("compile", diagnostic).let { selection ->
+                selection to graph.preflightStagingContext(selection)
+            }
+        }
+        val contextWithoutTarget = sizingContext.second.filterKeys { it != targetPath }
+        assertTrue(targetPath in sizingContext.second)
+        val otherContextBytes = contextWithoutTarget.values.fold(0L) { total, bytes ->
+            Math.addExact(total, bytes.size.toLong())
+        }
+        val stagingLimit = Math.addExact(otherContextBytes, candidateBytes)
+        assertEquals(sizingContext.first.totalBytes, sizingContext.second.values.sumOf { it.size.toLong() })
+
+        val project = createProject(
+            createRepairTempDirectory("repair-active-acp-staging-quota-retry-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+        )
+        val acceptedPaths = listOf(
+            "Makefile",
+            "include/modules/reconstructed.h",
+            "src/main.c",
+            targetPath,
+        )
+        val acceptedFiles = acceptedPaths.associateWith { project.resolve(it).readBytes() }
+        val candidateSource = ("/* exact repair patch-byte boundary: " +
+            "q".repeat(candidateBytes.toInt() -
+                "/* exact repair patch-byte boundary: ".toByteArray(Charsets.UTF_8).size -
+                " */\nint decomp_engine_main(void) { return 1; }\n".toByteArray(Charsets.UTF_8).size) +
+            " */\nint decomp_engine_main(void) { return 1; }\n").toByteArray(Charsets.UTF_8)
+        assertEquals(candidateBytes, candidateSource.size.toLong())
+        val budget = RepairResourceBudget(maximumStagingBytes = stagingLimit)
+        assertEquals(otherContextBytes + candidateBytes, budget.maximumStagingBytes)
+        assertTrue(budget.maximumSourceFileBytes > candidateBytes + 1)
+        assertTrue(budget.maximumPatchBytes > candidateBytes + 1)
+        assertTrue(budget.maximumPatchFiles > 1)
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use {
+            it.snapshot.headId
+        }
+        val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-quota-retry")
+        var dispatches = 0
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = acp.execute(request, onEvent)
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                turnIdentity: decompengine.agent.AgentTurnIdentity,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt {
+                dispatches++
+                assertEquals(sizingContext.second.keys, initialFiles.keys)
+                sizingContext.second.forEach { (path, bytes) -> assertContentEquals(bytes, initialFiles.getValue(path)) }
+                val admittedBytes = initialFiles.values.fold(0L) { total, bytes ->
+                    Math.addExact(total, bytes.size.toLong())
+                }
+                assertEquals(sizingContext.first.totalBytes, admittedBytes)
+                assertEquals(stagingLimit, admittedBytes - initialFiles.getValue(targetPath).size + candidateBytes)
+                val authority = assertNotNull(request.accessPolicy.mutationAuthority)
+                val grant = authority.grants.single()
+                assertEquals("declared-role-generated-c-repair-v1", authority.policyId)
+                assertEquals(targetPath, grant.path.relativePath)
+                assertEquals(budget.maximumSourceFileBytes, grant.maximumBytes)
+                return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+            }
+        }
+        var validationCalls = 0
+        var observedInvocation: RepairValidationInvocation? = null
+        var observedCandidateDigest: String? = null
+        val validationStop = IllegalStateException("staging-preserved candidate reached validator")
+        val validation = object : RepairValidationStrategy {
+            override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+            override fun requireAvailable() = Unit
+            override fun validateCandidate(
+                request: RepairCandidateValidationRequest,
+            ): RepairCandidateValidationOutcome {
+                validationCalls++
+                assertEquals(acceptedFiles.keys, request.candidateSourcePaths.toSet())
+                acceptedFiles.filterKeys { it != targetPath }.forEach { (path, bytes) ->
+                    assertContentEquals(bytes, request.candidateSources.getValue(path), path)
+                }
+                assertContentEquals(candidateSource, request.candidateSources.getValue(targetPath))
+                val candidateDigest = decompengine.repair.repairCandidateSourceSha256(request.candidateSources)
+                assertEquals(candidateDigest, request.sourceRevisionSha256)
+                observedCandidateDigest = candidateDigest
+                observedInvocation = assertNotNull(request.invocation)
+                throw validationStop
+            }
+            override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                error("candidate validation must use the immutable source snapshot")
+            override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                error("candidate validation must use the immutable source snapshot")
+            override fun evaluateBehavior(
+                id: String,
+                projectDir: Path,
+                originalBinary: Path,
+                rebuiltBinary: Path,
+                inputs: List<ProcessInput>,
+                reportsDir: Path,
+                budget: RepairResourceBudget,
+            ): BehaviorComparisonReport = error("candidate validation must use the immutable source snapshot")
+        }
+        val loop = TestRepairRuntimeAccess.openLoop(
+            harness = harness,
+            history = RepairHistory(project.resolve("reports/repair_history.json")),
+            profile = GeneratedCRepairIndexProfile,
+            validationStrategy = validation,
+            stagingAuthority = CapturedRepairStagingAuthority,
+            limits = AgentExecutionLimits(),
+            cancellation = AgentCancellation.NONE,
+            onAgentEvent = {},
+            resourceBudget = budget,
+            allowTestOnlyValidation = false,
+            faultInjector = null,
+        )
+
+        val failure = assertFailsWith<IllegalStateException> {
+            loop.repairCompileError(project, CompileFailure(listOf("make"), 2, "", diagnostic), emptyList())
+        }
+        assertSame(validationStop, failure)
+        assertEquals(1, dispatches)
+        assertEquals(1, validationCalls)
+        val invocation = assertNotNull(observedInvocation)
+        acceptedFiles.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes(), path) }
+        assertTrue(validationStop.suppressed.isEmpty(), validationStop.suppressed.joinToString())
+
+        val rawGraph = Json.parseToJsonElement(project.resolve("reports/repair-revisions/graph.json").readText())
+            .jsonObject
+        assertEquals(JsonNull, rawGraph.getValue("pending"))
+        assertEquals(baselineHead, rawGraph.getValue("headId").jsonPrimitive.content)
+        val rawRejected = rawGraph.getValue("nodes").jsonArray.last().jsonObject
+        assertEquals("rejected", rawRejected.getValue("status").jsonPrimitive.content)
+        assertEquals(invocation.candidateRevisionId, rawRejected.getValue("id").jsonPrimitive.content)
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(RepairRunStatus.VALIDATION_FAILED, graph.snapshot.runs.last().status)
+            val rejected = graph.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            assertEquals(invocation.candidateRevisionId, rejected.id)
+            val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+            assertEquals(invocation.runId, rejected.repairMetadata?.runId)
+            assertEquals("returned-completed", binding.terminalOutcome)
+            assertTrue(binding.receiptReleaseComplete)
+
+            val receiptBytes = project.resolve(binding.receiptPath).readBytes()
+            assertEquals(binding.receiptSha256, sha256(receiptBytes))
+            val receipt = Json.parseToJsonElement(receiptBytes.decodeToString()).jsonObject
+            val process = receipt.getValue("process").jsonObject
+            assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int)
+            assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean)
+            val result = receipt.getValue("outcome").jsonObject.getValue("result").jsonObject
+            assertEquals("completed", result.getValue("stopReason").jsonPrimitive.content)
+            val changes = result.getValue("changes").jsonObject
+            assertEquals(1, changes.getValue("observedCount").jsonPrimitive.int)
+            val change = changes.getValue("records").jsonArray.single().jsonObject
+            assertEquals("modified", change.getValue("kind").jsonPrimitive.content)
+            assertEquals(sha256(acceptedFiles.getValue(targetPath)), change.getValue("beforeSha256").jsonPrimitive.content)
+            assertEquals(sha256(candidateSource), change.getValue("afterSha256").jsonPrimitive.content)
+            assertEquals(candidateBytes, change.getValue("sizeBytes").jsonPrimitive.content.toLong())
+            val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
+            assertEquals(3, filesystem.getValue("recordCount").jsonPrimitive.int)
+            val auditRecords = filesystem.getValue("records").jsonArray.map { it.jsonObject }
+            assertEquals(listOf("allowed", "denied", "allowed"), auditRecords.map {
+                it.getValue("outcome").jsonPrimitive.content
+            })
+            assertEquals(listOf("completed", "resource-limit", "completed"), auditRecords.map {
+                it.getValue("reason").jsonPrimitive.content
+            })
+            assertTrue(auditRecords.all {
+                it.getValue("policyPath").jsonObject.getValue("relativePath").jsonObject
+                    .getValue("sha256").jsonPrimitive.content == sha256(targetPath.toByteArray(Charsets.UTF_8))
+            })
+
+            val assessmentBytes = project.resolve(requireNotNull(binding.assessmentPath)).readBytes()
+            assertEquals(binding.assessmentSha256, sha256(assessmentBytes))
+            val assessment = decompengine.project.AcpChangeAssessment.parse(assessmentBytes)
+            assertEquals(binding.receiptSha256, assessment.receiptSha256)
+            assertEquals(assertNotNull(observedCandidateDigest), assessment.afterSha256)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+            assertEquals(decompengine.project.AcpChangePublicationEligibility.REJECTED, assessment.eligibility)
+            assertEquals(decompengine.project.AcpChangeValidationStatus.FAILED, assessment.validationStatus)
+        }
+    }
+
+    @Test
     fun `active ACP repair deadlines retain timeout receipts after an acknowledged write`() {
         data class DeadlineCase(
             val id: String,
