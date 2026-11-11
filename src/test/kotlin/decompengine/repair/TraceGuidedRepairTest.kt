@@ -80,6 +80,28 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `repair abort preserves pending state after an immutable assessment is persisted`() {
+        val cancellation = IllegalStateException("cancelled after assessment publication")
+        assertFalse(repairAttemptCanBeRejected(finalized = false, assessmentPersisted = true, failure = cancellation))
+        assertFalse(repairAttemptCanBeRejected(
+            finalized = false,
+            assessmentPersisted = false,
+            RepairAgentEvidencePersistenceException("assessment write failed"),
+        ))
+        assertFalse(repairAttemptCanBeRejected(
+            finalized = false,
+            assessmentPersisted = false,
+            RepairAcceptancePendingException("decision outcome is ambiguous"),
+        ))
+        assertFalse(repairAttemptCanBeRejected(finalized = true, assessmentPersisted = false, failure = cancellation))
+        assertTrue(repairAttemptCanBeRejected(
+            finalized = false,
+            assessmentPersisted = false,
+            cancellation,
+        ))
+    }
+
+    @Test
     fun `ordinary ACP terminal outcomes persist immutable receipts before rejected repair history`() {
         val cases = listOf(
             "returned-no-changes" to AgentExecutionOutcome.Returned(

@@ -407,6 +407,12 @@ also verifies that a candidate-rejection assessment persistence failure does
 not finalize the attempt in-process; startup recovery supplies the interrupted
 assessment instead.
 
+After a `PROVISIONAL` or `VALIDATED_FOR_PUBLICATION` assessment is durable, an
+exception before the graph disposition also leaves the attempt pending. The
+immutable assessment cannot be rewritten as an ordinary rejection; startup
+recovery performs the verified rollback or roll-forward and records the
+terminal disposition.
+
 The current ACP adapter exposes its normalized stop reason in the invocation
 receipt, but does not expose the raw protocol stop code. Reconstruction
 assessments therefore leave `protocolStopCode` null instead of deriving or

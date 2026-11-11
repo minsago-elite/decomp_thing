@@ -699,10 +699,11 @@ class ReconstructionAgentExecutionEvidence private constructor(
         val root = OracleJson.parse(document.json.toByteArray(StandardCharsets.UTF_8), ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject
         val outcome = root.getValue("outcome").jsonObject
         if (outcome.getValue("type").jsonPrimitive.content != "returned") null
-        else AgentStopReason.valueOf(
-            outcome.getValue("result").jsonObject.getValue("stopReason").jsonPrimitive.content
-                .uppercase().replace('-', '_'),
-        )
+        else {
+            val wireName = outcome.getValue("result").jsonObject.getValue("stopReason").jsonPrimitive.content
+            AgentStopReason.entries.singleOrNull { it.name.wireName() == wireName }
+                ?: AgentStopReason.entries.singleOrNull { it.name == wireName.uppercase().replace('-', '_') }
+        }
     }.getOrNull()
     internal val resultAfterSha256: String? get() = runCatching {
         val root = OracleJson.parse(document.json.toByteArray(StandardCharsets.UTF_8), ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject

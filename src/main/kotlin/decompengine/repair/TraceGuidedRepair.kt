@@ -725,6 +725,13 @@ data class RepairRunOutcome @JvmOverloads constructor(
 internal fun repairFailureCanBeFinalized(failure: Exception, pendingAttemptId: String?): Boolean =
     failure !is RepairAcceptancePendingException && pendingAttemptId == null
 
+internal fun repairAttemptCanBeRejected(
+    finalized: Boolean,
+    assessmentPersisted: Boolean,
+    failure: Exception,
+): Boolean = !finalized && !assessmentPersisted &&
+    failure !is RepairAcceptancePendingException && failure !is RepairAgentEvidencePersistenceException
+
 internal fun RepairIteration.deepFrozenCopy(): RepairIteration = RepairIteration(
     index = index,
     failureKind = failureKind,
@@ -1619,10 +1626,11 @@ class TraceGuidedRepairLoop private constructor(
 
         /** Preserve [original] while making rollback/close failures available as suppressed detail. */
         fun abortAndClose(original: Exception, evidenceKind: String) {
-            // A durable schema-6 acceptance decision is the point of no return. Publication
-            // failures after it must remain pending for roll-forward, never become a rejection.
-            if (!finalized && original !is RepairAcceptancePendingException &&
-                original !is RepairAgentEvidencePersistenceException) {
+            // Once an immutable assessment exists, it cannot be rewritten to describe an
+            // ordinary rejection. Leave the attempt pending so startup recovery can bind a
+            // conservative interrupted disposition. Ambiguous acceptance writes likewise stay
+            // pending for roll-forward; neither case may be terminalized here.
+            if (repairAttemptCanBeRejected(finalized, assessmentPersisted, original)) {
                 runCatching {
                     reject(repairFailureEvidence(evidenceKind, original))
                     reconcile()
