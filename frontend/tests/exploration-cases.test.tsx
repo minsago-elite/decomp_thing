@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../src/api/errors';
 import type { Artifact } from '../src/api/generated';
 import { ExplorationCases } from '../src/jobs/ExplorationCases';
 import { bytePreview, MAX_RETAINED_CASES, MAX_RETAINED_CORPUS, parseRetainedCases, textPreview } from '../src/jobs/explorationCases';
@@ -94,6 +95,34 @@ it('enforces complete-input byte, duplicate-key, argument and case limits before
   expect(() => parseRetainedCases(JSON.stringify(value))).toThrow();
 });
 
+it('distinguishes retained-artifact read failures with sanitized request correlation', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  const failures: [ApiClientError, string, boolean][] = [
+    [new ApiClientError('http_error', { status: 401, requestId, serverCode: 'SESSION_EXPIRED' }), 'Reconnect the local session', true],
+    [new ApiClientError('http_error', { status: 403, requestId, serverCode: 'ACCESS_DENIED' }), 'This session cannot read the retained case artifact', true],
+    [new ApiClientError('http_error', { status: 404, requestId, serverCode: 'NOT_FOUND' }), 'unavailable at this server address', true],
+    [new ApiClientError('unsupported_contract', { serverCode: 'PRIVATE_DIAGNOSTIC' }), 'cannot read the retained case artifact response', false],
+    [new ApiClientError('invalid_response', { serverCode: 'CORRUPT_WORKFLOW_STATE' }), 'could not be verified', false],
+    [new ApiClientError('http_error', { status: 503, requestId, serverCode: 'INTERNAL_ERROR' }), 'Case details could not be read', true],
+  ];
+  const messages = new Set<string>();
+  for (const [failure, expected, hasReference] of failures) {
+    transport.readArtifactText.mockRejectedValueOnce(failure);
+    const mounted = render(view());
+    fireEvent.click(screen.getByRole('button', { name: 'Read retained case details' }));
+    const alert = await screen.findByRole('alert');
+    const text = alert.textContent ?? '';
+    expect(text).toContain(expected);
+    expect(text.includes(`Reference ID: ${requestId}.`)).toBe(hasReference);
+    for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'PRIVATE_DIAGNOSTIC', 'ApiClientError', 'Web API request failed'])
+      expect(text).not.toContain(leaked);
+    messages.add(text.replace(` Reference ID: ${requestId}.`, ''));
+    mounted.unmount();
+  }
+  expect(messages.size).toBe(failures.length);
+  expect(transport.readArtifactText).toHaveBeenCalledTimes(failures.length);
+});
+
 it('renders bounded byte and Unicode previews without control interpretation or split surrogate pairs', () => {
   expect(bytePreview('001b5c41ff')).toEqual({ hex: '00 1b 5c 41 ff', text: '\\x00\\x1b\\\\A\\xff', bytes: 5, truncated: false });
   const bytes = bytePreview('41'.repeat(129)); expect(bytes.bytes).toBe(129); expect(bytes.truncated).toBe(true); expect(bytes.text.length).toBe(128);
@@ -168,6 +197,6 @@ it('aborts obsolete reads and ignores their late content after navigation', asyn
 it('turns malformed detail bytes into a bounded unavailable state while retaining the report download path', async () => {
   transport.readArtifactText.mockResolvedValue('{broken'); render(view());
   fireEvent.click(screen.getByRole('button', { name: 'Read retained case details' }));
-  expect((await screen.findByRole('alert')).textContent).toBe('Case details are unavailable or exceed this viewer’s format or limits. Refresh the report or download its observed JSON.');
+  expect((await screen.findByRole('alert')).textContent).toBe('The retained case artifact could not be verified or exceeds this viewer’s format limits. Refresh the report or download its observed JSON.');
   expect(screen.queryByRole('table')).toBeNull(); expect(transport.readArtifactText).toHaveBeenCalledOnce();
 });

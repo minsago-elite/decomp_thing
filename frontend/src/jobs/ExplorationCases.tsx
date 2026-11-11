@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import type { Artifact } from '../api/generated';
-import { withApiFailureReference } from '../api/errors';
+import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { explorationCasesCopy as copy } from '../copy/attempt';
 import { message, textMessage } from '../shared/messages';
@@ -13,6 +13,7 @@ import type { PreparationCase, PreparationCases } from './explorationPreparation
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 function failureCase(value: RetainedCase): FailureRetainedCase | null {
   return 'sample' in value ? value as FailureRetainedCase : null;
@@ -104,7 +105,18 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
       if (!controller.signal.aborted) setData(receive(producerSchemaVersion === 1 ? parsePartialCases(text)
         : parseRetainedCases(text, producerSchemaVersion === 2 ? 2 : null)));
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(withApiFailureReference(copy.unavailable, failure));
+      if (!controller.signal.aborted) {
+        const kind = failure instanceof ApiClientError ? metadataFailureKind(failure) : 'unverified';
+        const message = {
+          session: copy.session,
+          denied: copy.denied,
+          missing: copy.missing,
+          unsupported: copy.unsupported,
+          unverified: copy.unverified,
+          failed: copy.failed,
+        }[kind];
+        setError(withApiFailureReference(message, failure));
+      }
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [artifact, jobId, runId, client, intent, producerSchemaVersion]);
