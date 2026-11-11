@@ -2,7 +2,7 @@
 
 ## Scope
 
-Source checkpoint: `3e53e0d7250c8cf45ef80d330ff8d4554308ebf3`, based on diagnostic commit
+Source checkpoint: `cfac8f4729a8486998c127c7d3b2d79f0fb238a9`, based on diagnostic commit
 `9c3b99efcc9d90ea1461f696f6833db0cea18a54` and ultimately on master
 `2b1121999c806d5b3f89d3723fca8a39879c49b1`.
 
@@ -37,15 +37,22 @@ On Node `v26.12.1`, from the clean source snapshot at the source checkpoint:
 
 - `node --check scripts/packaged-browser-exception-context.mjs` — passed.
 - `node --check scripts/packaged-browser-engines.mjs` — passed.
-- `node --test scripts/test-packaged-browser-exception-context.mjs` — 6 passed.
+- `node --test scripts/test-packaged-browser-exception-context.mjs` — 7 passed.
 - `node scripts/test-packaged-browser-engine-adapter.mjs` — 6 passed.
 - `node scripts/test-packaged-browser-audit.mjs` — 28 passed.
 
 The new controls exercise a WebKit-style access-control page error correlated with a failed run
 read, an HTTP refusal, cross-origin classification, cancellation overlapping navigation, bounded
-collection and runner wiring. They use fake event emitters. They do not reproduce the historical
-browser incident, prove Playwright/WebKit event ordering, or qualify the packaged Firefox/WebKit
-journeys at this new source checkpoint. The existing exact-head browser run remains required.
+collection, retention of a failing context after the 16-context summary cap, and runner wiring.
+They use fake event emitters. They do not reproduce the historical browser incident or prove
+Playwright/WebKit event ordering.
+
+Packaged Firefox `146.0.1` and WebKit `26.0` both passed run
+[43122417956](https://github.com/minsago-elite/decomp_thing/actions/runs/43122417956) at the earlier
+head `319328f31ba9ca675e19a78c6bbecfd0ad86f05d`. Both reports observed zero page exceptions, CSP
+violations, missing policy documents, and failed API requests in retained contexts. This run
+preceded the summary-cap fix at this source checkpoint; it is not exact-head browser qualification
+for `cfac8f4`.
 
 ## Remaining acceptance
 
