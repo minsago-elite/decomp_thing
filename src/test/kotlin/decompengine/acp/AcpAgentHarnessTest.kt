@@ -1309,7 +1309,7 @@ class AcpAgentHarnessTest {
         val exactSourceBoundary = runAttempt(
             "reconstruction-exact-source-byte-boundary",
             index = 18,
-            maximumFrameBytes = 512 * 1024,
+            maximumFrameBytes = 1024 * 1024,
             snapshotLimits = WorkspaceSnapshotLimits(
                 fileBytes = 256L * 1024,
                 totalBytes = 256L * 1024,

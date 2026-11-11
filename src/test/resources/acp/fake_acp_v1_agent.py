@@ -1422,11 +1422,20 @@ if MODE in RECONSTRUCTION_MODES:
         "int decomp_engine_main(void) { return 0; }\n"
     )
     if MODE == "reconstruction-exact-source-byte-boundary":
+        opening = "/*"
         suffix = "*/\n"
-        padding_bytes = RECONSTRUCTION_MAXIMUM_SOURCE_BYTES - len(content.encode("utf-8")) - 2 - len(suffix)
+        padding_bytes = (
+            RECONSTRUCTION_MAXIMUM_SOURCE_BYTES
+            - len(content.encode("utf-8"))
+            - len(opening.encode("utf-8"))
+            - len(suffix.encode("utf-8"))
+        )
         if padding_bytes < 0:
             raise SystemExit(135)
-        content += "/*" + ("b" * padding_bytes) + suffix
+        # Use multi-byte text, plus one ASCII byte when needed, so the test proves
+        # that grant/snapshot limits measure UTF-8 bytes instead of character count.
+        padding = "é" * (padding_bytes // 2) + ("x" if padding_bytes % 2 else "")
+        content += opening + padding + suffix
         if len(content.encode("utf-8")) != RECONSTRUCTION_MAXIMUM_SOURCE_BYTES:
             raise SystemExit(136)
     if MODE == "reconstruction-mutation-grant":
