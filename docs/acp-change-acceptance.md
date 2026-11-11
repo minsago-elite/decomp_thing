@@ -952,18 +952,38 @@ the candidate-validation seam with a completed receipt. An injected sentinel
 then refuses validation, allowing the test to verify that the exact boundary
 was admitted without claiming successful compilation or publication.
 
-Follow-up commit `75242e462` pauses for 50 ms before writing both tool updates
-and the terminal response in one flushed burst, giving the host time to enter
-prompt processing. This narrows the scheduling window but does not synchronize
-with the host polling loop; the regression test remains scheduling-dependent
-and may pass through the ordinary exhaustion path. Both focused tests passed
-again with that fixture, and the accumulated
-`TraceGuidedRepairTest.active*` selection passed 17 methods with zero failures,
-errors or skips at `75242e462`. This is scripted local ACP evidence for
-tool-call exhaustion after a brokered write and the exact count boundary. It
-does not qualify other token or provider budgets, live-provider behavior,
-production validation under #236, or hosted exact-head CI. #734 and #63 remain
-open.
+Follow-up commit `0fbd34761` adds a one-shot test barrier in
+`AcpAgentHarness.runPrompt`. The ordering regression test joins the completed
+prompt job before the host begins terminal polling; thus the tool updates and
+terminal response have both been processed before the limit decision. The
+two-call/one-call-limit case now tests that exhaustion cannot be hidden by an
+already completed response, while the two-call/two-call-limit case still
+reaches candidate validation. This removes the earlier scheduling-dependent
+50 ms timing claim.
+
+The same commit adds `TraceGuidedRepairTest.active ACP repair cancellation
+after acknowledged write preserves accepted state`. The fixture waits for the
+host's successful write acknowledgement, emits a correlated ready event, and
+then waits for `session/cancel`. The active repair callback requests caller
+cancellation only after that event. The test checks a returned `CANCELLED`
+receipt, an interrupted assessment, no validator entry, exact preservation of
+accepted source and Makefile bytes and graph head, no pending attempt, and
+verified process and sandbox cleanup. It is scripted cooperative cancellation;
+it does not establish uncooperative-peer cleanup or production-provider
+behavior.
+
+The accumulated `TraceGuidedRepairTest.active*` selection passed 19 methods at
+`0fbd347615e8049a6198523209b08a576b94b734`, with zero failures, errors, or
+skips. Command:
+
+```text
+./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active*'
+```
+
+All active-test fixture roots touched by this slice are under repository-local
+`build/test-tmp`. This remains local scripted ACP evidence. It does not qualify
+other token/provider budgets, live-provider behavior, production validation
+under #236, or hosted exact-head CI. #734 and #63 remain open.
 
 ## Active repair reported token-ceiling checkpoint — 2026-11-11
 
