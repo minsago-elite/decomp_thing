@@ -10,6 +10,7 @@ import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionLimits
 import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentHarness
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentWorkflowProgress
@@ -1133,6 +1134,7 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    @Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val maximumSourceBytes = 256L * 1024
@@ -1165,8 +1167,10 @@ class AcpAgentHarnessTest {
             index: Int,
             maximumFrameBytes: Int = 64 * 1024,
             requestTimeoutMillis: Long? = null,
+            executionLimits: AgentExecutionLimits? = null,
         ): Attempt {
             val receipts = mutableListOf<AgentExecutionReceipt>()
+            val boundedHarnessReceipts = mutableListOf<AgentExecutionReceipt>()
             var taskCount = 0
             val progress = object : AgentWorkflowProgress {
                 override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
@@ -1193,6 +1197,33 @@ class AcpAgentHarnessTest {
                     timeouts(startup = 2_500, request = timeout, shutdown = 1_500)
                 } ?: timeouts(),
             )
+            val selectedHarness = executionLimits?.let { limits ->
+                object : AgentHarness {
+                    private fun bounded(request: AgentExecutionRequest) = AgentExecutionRequest(
+                        objective = request.objective,
+                        workspaceRoots = request.workspaceRoots,
+                        contextInputs = request.contextInputs,
+                        accessPolicy = request.accessPolicy,
+                        limits = limits,
+                        cancellation = request.cancellation,
+                        sessionContinuation = request.sessionContinuation,
+                    )
+
+                    override fun execute(
+                        request: AgentExecutionRequest,
+                        onEvent: (decompengine.agent.AgentExecutionEvent) -> Unit,
+                    ) = acp.execute(bounded(request), onEvent)
+
+                    override fun executeReceipt(
+                        request: AgentExecutionRequest,
+                        onEvent: (decompengine.agent.AgentExecutionEvent) -> Unit,
+                    ): AgentExecutionReceipt = acp.executeReceipt(bounded(request), onEvent).also {
+                        boundedHarnessReceipts += it
+                    }
+
+                    override fun implementationIdentifier(): String? = acp.implementationIdentifier()
+                }
+            } ?: acp
             val function = RecoveredFunction(
                 "fn_0000000000001000",
                 "decomp_engine_main",
@@ -1216,7 +1247,7 @@ class AcpAgentHarnessTest {
                     model
                 },
                 reconstructor = BoundedLlmModuleReconstructor(
-                    acp,
+                    selectedHarness,
                     harnessProvenanceDescriptor = provenance.stableDescriptor,
                     progress = progress,
                 ),
@@ -1237,7 +1268,7 @@ class AcpAgentHarnessTest {
                     failure = caught
                 }
             }
-            return Attempt(result, failure, acp, taskCount, receipts.toList())
+            return Attempt(result, failure, acp, taskCount, (receipts + boundedHarnessReceipts).toList())
         }
 
         val successful = runAttempt("reconstruction-mutation-grant", index = 1, maximumFrameBytes = 512 * 1024)
@@ -1287,6 +1318,68 @@ class AcpAgentHarnessTest {
         assertEquals(AgentStopReason.LIMIT_EXHAUSTED, interruptionInChain.stopReason)
         assertEquals(AgentStopReason.LIMIT_EXHAUSTED, limited.receipts.single().requireResult().stopReason)
         assertEquals(AgentFileChangeKind.CREATED, limited.receipts.single().requireResult().changes.single().kind)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val wallLimited = runAttempt(
+            "reconstruction-request-timeout-after-write",
+            index = 8,
+            requestTimeoutMillis = 25_000,
+            executionLimits = AgentExecutionLimits(
+                wallClockTimeout = Duration.ofSeconds(12),
+                idleTimeout = Duration.ofSeconds(20),
+            ),
+        )
+        val wallFailure = assertNotNull(wallLimited.failure, "request wall-clock exhaustion must refuse publication")
+        assertEquals(1, wallLimited.taskCount)
+        val wallReceipt = wallLimited.receipts.single()
+        val wallOutcome = assertIs<AgentExecutionOutcome.Failed>(wallReceipt.outcome)
+        assertEquals(AgentFailureKind.TIMEOUT, wallOutcome.failure.kind)
+        assertTrue(wallOutcome.failure.message.contains("wall-clock", ignoreCase = true), wallOutcome.failure.message)
+        assertNull(assertIs<AcpInvocationEvidenceSnapshot>(wallReceipt.providerEvidence).completeExecutionEvidence)
+        assertTrue(wallLimited.harness.latestFilesystemAudit().any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        })
+        assertTrue(generateSequence<Throwable>(wallFailure) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        val wallDiagnostics = assertNotNull(wallLimited.harness.latestDiagnostics())
+        assertTrue(wallDiagnostics.remainingProcessIds.isEmpty(), wallDiagnostics.toString())
+        assertTrue(wallDiagnostics.sandboxCleanupVerified, wallDiagnostics.toString())
+        assertProcessStopped(wallDiagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val idleLimited = runAttempt(
+            "reconstruction-request-timeout-after-write",
+            index = 9,
+            requestTimeoutMillis = 25_000,
+            executionLimits = AgentExecutionLimits(
+                wallClockTimeout = Duration.ofSeconds(20),
+                idleTimeout = Duration.ofSeconds(12),
+            ),
+        )
+        val idleFailure = assertNotNull(idleLimited.failure, "request idle exhaustion must refuse publication")
+        assertEquals(1, idleLimited.taskCount)
+        val idleReceipt = idleLimited.receipts.single()
+        val idleOutcome = assertIs<AgentExecutionOutcome.Failed>(idleReceipt.outcome)
+        assertEquals(AgentFailureKind.TIMEOUT, idleOutcome.failure.kind)
+        assertTrue(idleOutcome.failure.message.contains("idle", ignoreCase = true), idleOutcome.failure.message)
+        assertNull(assertIs<AcpInvocationEvidenceSnapshot>(idleReceipt.providerEvidence).completeExecutionEvidence)
+        assertTrue(idleLimited.harness.latestFilesystemAudit().any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        })
+        assertTrue(generateSequence<Throwable>(idleFailure) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        val idleDiagnostics = assertNotNull(idleLimited.harness.latestDiagnostics())
+        assertTrue(idleDiagnostics.remainingProcessIds.isEmpty(), idleDiagnostics.toString())
+        assertTrue(idleDiagnostics.sandboxCleanupVerified, idleDiagnostics.toString())
+        assertProcessStopped(idleDiagnostics.pid)
         assertEquals(acceptedMetadata, capturePublishedMetadata(output))
         assertNoReconstructionPublicationResidue(output)
 
