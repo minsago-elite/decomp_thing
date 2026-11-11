@@ -588,6 +588,13 @@ focused test passed locally at this commit: one test method, zero failures,
 errors or skips. This covers aggregate stream output only; wall-clock, idle,
 snapshot inventory and other limits remain unqualified.
 
+Commit `314566269` adds a cross-stream control: 5 MiB of stderr followed by
+4.2 MiB of stdout text. Each stream stays below 8 MiB independently, but their
+combined output exceeds the shared allowance and must still fail with
+`RESOURCE_EXHAUSTED`. The same focused test passed at this commit with the
+cross-stream scenario included. This does not qualify wall-clock, idle or
+snapshot inventory limits.
+
 ## Reconstruction change-claim consistency checkpoint — 2026-11-11
 
 Commit `6a195ace9` adds
