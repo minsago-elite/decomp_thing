@@ -557,6 +557,20 @@ process to exceed an output budget. The separate live ACP reconstruction and
 captured-repair controls exercise actual process/filesystem limits. Production
 provider and complete #734 qualification remain outstanding.
 
+Commit `e287eb0e2` adds
+`TraceGuidedRepairTest.active ACP repair retains resource-limited write refusal
+without changing accepted source`. This drives a real scripted ACP process
+through the active generated-C repair loop. Its oversized write reaches the
+filesystem broker and is refused with `RESOURCE_LIMIT`; the agent then ends
+with `NO_CHANGES`. The repair graph retains the invocation-bound receipt and
+rejection assessment, including the denied-write audit and verified process
+and sandbox cleanup. The test reopens the graph, verifies the terminal outcome
+is not release-complete, and confirms the accepted source bytes are unchanged.
+The focused live-sandbox Gradle test passed locally at this commit: one test
+method, zero failures, errors or skips. This exercises the active repair
+workflow's file-write limit, not ACP stream-output exhaustion, a live provider,
+production validation under #236, or hosted exact-head qualification.
+
 ## Public ACP reconstruction mutation-grant and limit checkpoint — 2026-11-11
 
 Commit `7d363753b` adds
