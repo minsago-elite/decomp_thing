@@ -51,12 +51,13 @@ export function attachExceptionContext(context) {
   };
   const requestPath = request => {
     const raw = request.url();
-    if (typeof raw !== 'string' || raw.length > 8192) { countsIncomplete = true; return null; }
-    try {
-      const parsed = new URL(raw);
-      return parsed.pathname.startsWith('/nested/api/v1/') || parsed.pathname === '/nested/api/v1'
-        ? parsed.pathname : null;
-    } catch { countsIncomplete = true; return null; }
+    if (typeof raw !== 'string') { countsIncomplete = true; return null; }
+    let pathname;
+    try { pathname = new URL(raw).pathname; }
+    catch { countsIncomplete = true; return null; }
+    if (pathname !== '/nested/api/v1' && !pathname.startsWith('/nested/api/v1/')) return null;
+    if (raw.length > 8192) { countsIncomplete = true; return null; }
+    return pathname;
   };
   const findPage = request => {
     try { return pages.get(request.frame().page()) ?? null; }

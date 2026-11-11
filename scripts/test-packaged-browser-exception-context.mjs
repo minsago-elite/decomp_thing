@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { attachExceptionContext, exceptionContextLimits, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
 
 const runner = resolve(dirname(fileURLToPath(import.meta.url)), 'packaged-browser-engines.mjs');
@@ -120,9 +121,30 @@ test('bounds pages and request records and reports incomplete observation', () =
   assert.equal(capped.countsIncomplete, true);
 });
 
-test('cross-engine runner attaches and serializes diagnostics without replacing its failure list', () => {
+test('cross-engine runner call site records actual page errors and retains the original failure gate', async () => {
   const source = readFileSync(runner, 'utf8');
+  const start = source.indexOf('async function context(options = {})');
+  const end = source.indexOf('\n}\n', start) + 2;
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  const created = new EventEmitter();
+  created.exposeBinding = async () => undefined;
+  created.addInitScript = async () => undefined;
+  const open = body.indexOf('{', body.indexOf(')'));
+  const make = runInNewContext(`(async function(options = {}) { ${body.slice(open + 1, body.lastIndexOf('}'))} })`, {
+    browser: { newContext: async () => created }, attachExceptionContext,
+  });
+  const { record } = await make();
+  const page = new EventEmitter();
+  const frame = { page: () => page };
+  Object.assign(page, { mainFrame: () => frame, url: () => 'http://127.0.0.1:1234/nested/', isClosed: () => false });
+  created.emit('page', page);
+  page.emit('pageerror', Object.assign(new Error('PRIVATE_RUN_ID browser failure'), { name: 'TypeError' }));
+  assert.equal(record.exceptionContext.snapshot().exceptions.length, 1);
+  assert.equal(record.exceptions.length, 1);
+  assert.equal(record.exceptions[0], 'TypeError: PRIVATE_RUN_ID browser failure');
   assert.match(source, /const exceptionContext = attachExceptionContext\(created\)/);
   assert.match(source, /pageExceptionContexts = summarizeExceptionContexts/);
-  assert.match(source, /if \(report\.contentSecurityPolicy\.exceptions\.length\) failures\.push\(`Page exceptions:/);
+  assert.ok(source.includes('if (report.contentSecurityPolicy.exceptions.length) failures.push(`Page exceptions:'));
+  assert.ok(source.includes('if (report.contentSecurityPolicy.violations.length) failures.push(`CSP violations:'));
 });
