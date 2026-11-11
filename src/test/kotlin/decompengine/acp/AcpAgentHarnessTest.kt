@@ -1943,6 +1943,8 @@ class AcpAgentHarnessTest {
                 "/* fn_0000000000001000 */\n" +
                 "int decomp_engine_main(void) { return 0; }\n"
             ).toByteArray(Charsets.UTF_8)
+        val previouslyPublishedMakefile = Files.readAllBytes(output.resolve("source-tree/Makefile"))
+        val previouslyPublishedHeader = Files.readAllBytes(output.resolve("source-tree/include/modules/decomp.h"))
         val terminalMutation = runAttempt("reconstruction-terminal-mutation-refusal-disabled", index = 20)
         assertNull(
             terminalMutation.failure,
@@ -2000,12 +2002,22 @@ class AcpAgentHarnessTest {
 
         assertTrue(Files.isRegularFile(terminalResult.projectDir.resolve("Makefile")))
         assertTrue(Files.isRegularFile(terminalResult.projectDir.resolve("include/modules/decomp.h")))
+        assertContentEquals(previouslyPublishedMakefile, Files.readAllBytes(terminalResult.projectDir.resolve("Makefile")))
+        assertContentEquals(
+            previouslyPublishedHeader,
+            Files.readAllBytes(terminalResult.projectDir.resolve("include/modules/decomp.h")),
+        )
         assertFalse(Files.exists(terminalResult.projectDir.resolve("src/modules/decomp_extra.c")))
         val terminalExtracted = fixture.resolve("verified-terminal-mutation-20")
         ArchivalBundleVerifier.extractAndVerify(terminalResult.bundle.archivePath, terminalExtracted, profile = profile)
         assertContentEquals(expectedCreatedSource, Files.readAllBytes(terminalExtracted.resolve(implementationPath)))
         assertTrue(Files.isRegularFile(terminalExtracted.resolve("Makefile")))
         assertTrue(Files.isRegularFile(terminalExtracted.resolve("include/modules/decomp.h")))
+        assertContentEquals(previouslyPublishedMakefile, Files.readAllBytes(terminalExtracted.resolve("Makefile")))
+        assertContentEquals(
+            previouslyPublishedHeader,
+            Files.readAllBytes(terminalExtracted.resolve("include/modules/decomp.h")),
+        )
         assertFalse(Files.exists(terminalExtracted.resolve("src/modules/decomp_extra.c")))
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(terminalExtracted, profile).returnCode)
         acceptedMetadata = capturePublishedMetadata(output)
