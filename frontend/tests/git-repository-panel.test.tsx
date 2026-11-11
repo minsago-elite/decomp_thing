@@ -80,6 +80,41 @@ it('offers no initialization without a recorded candidate and ignores foreign li
   view.unmount();
   transport.get.mockResolvedValueOnce({ data: { jobId: 'f'.repeat(32), repositories: [], operations: [] } });
   mount();
-  await waitFor(() => expect(screen.getByText(/could not be read/)).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(/could not be verified/)).toBeTruthy());
   expect(screen.queryByRole('button', { name: 'Initialize repository from the latest candidate' })).toBeNull();
+});
+
+it('distinguishes sanitized repository-read failure classes without enabling initialization', async () => {
+  const reference = '0b8f2c1e-4d3a-4b6c-9e7f-1a2b3c4d5e6f';
+  const failures: [string, ApiClientError, string, boolean][] = [
+    ['session', new ApiClientError('http_error', { status: 401, serverCode: 'SESSION_EXPIRED', requestId: reference }), 'The local session expired.', true],
+    ['denied', new ApiClientError('http_error', { status: 403, serverCode: 'ACCESS_DENIED', requestId: reference }), 'Repository state access was denied.', true],
+    ['missing', new ApiClientError('http_error', { status: 404, serverCode: 'NOT_FOUND', requestId: reference }), 'Repository state is unavailable at this address.', true],
+    ['unsupported', new ApiClientError('unsupported_contract', { serverCode: 'PRIVATE_DIAGNOSTIC' }), 'This application cannot read the repository response format.', false],
+    ['corrupt', new ApiClientError('http_error', { status: 500, serverCode: 'CORRUPT_WORKFLOW_STATE', requestId: reference }), 'Repository state could not be verified.', true],
+    ['server', new ApiClientError('http_error', { status: 503, serverCode: 'INTERNAL_ERROR', requestId: reference }), 'Repository state could not be read.', true],
+  ];
+  const messages = new Set<string>();
+
+  for (const [, failure, expected, hasReference] of failures) {
+    transport.get.mockClear(); transport.post.mockClear();
+    transport.get.mockRejectedValueOnce(failure);
+    const view = mount();
+    const status = await screen.findByRole('status');
+    const text = status.textContent ?? '';
+    expect(text).toContain(expected);
+    messages.add(text.replace(` Reference ID: ${reference}.`, ''));
+    expect(text.includes(`Reference ID: ${reference}.`)).toBe(hasReference);
+    for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'NOT_FOUND', 'PRIVATE_DIAGNOSTIC',
+      'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed'])
+      expect(text).not.toContain(leaked);
+    expect(text).not.toMatch(/\n\s+at\s/);
+    expect(screen.getByRole('heading', { name: 'Source repository' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Refresh repository' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Initialize repository from the latest candidate' })).toBeNull();
+    expect(transport.get).toHaveBeenCalledOnce();
+    expect(transport.post).not.toHaveBeenCalled();
+    view.unmount();
+  }
+  expect(messages.size).toBe(failures.length);
 });
