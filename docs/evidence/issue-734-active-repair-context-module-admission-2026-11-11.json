@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "cb3024428fdf156d137ce7f1ab217fb8ae1d49bb",
+  "sourceParent": "17686876d1031b2fe932859643709fcc86ebe44a",
+  "sourceTree": "f46b19c671654ab7161265261ecd7b061af40cd4",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair required context module file and byte budgets refuse before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair reuses a patch slot after restoring the first file"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active repair required context module file and byte budgets refuse before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair reuses a patch slot after restoring the first file'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1"
+  },
+  "result": {
+    "report": "issue-734-active-repair-context-module-admission-2026-11-11.xml",
+    "tests": 2,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.243,
+    "timestamp": "2026-11-11T13:52:54.454Z",
+    "sha256": "29cb1d3b72c3a565d3eab1897df681c8859eae1996985a550e88a27f0f229409"
+  },
+  "scope": {
+    "claim": "The active repair loop independently refuses (1) two required modules under maximumContextModules=1, with both module owners seeded; (2) two required files under maximumContextFiles=1 while the byte ceiling exactly fits; and (3) a two-file required context whose bytes exceed maximumContextBytes by one while module/file ceilings have headroom. Each case refuses before harness dispatch, preserves accepted source/head, leaves no pending attempt, and records RESOURCE_EXHAUSTED. The run also includes the active ACP patch-slot reuse case.",
+    "limitations": [
+      "Context admissions use a strict captured test harness and do not launch ACP after pre-dispatch refusal.",
+      "Local evidence only; no live provider, successful production validation under #236, other profiles, hosted exact-head CI, or complete #734/#63 acceptance."
+    ]
+  }
+}

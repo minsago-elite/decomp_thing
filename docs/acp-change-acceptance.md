@@ -1674,3 +1674,25 @@ process was launched for a request that failed admission. This local evidence
 does not qualify successful production validation under #236, live-provider
 behavior, other profiles, hosted exact-head CI, or complete #734/#63
 acceptance. Keep #734 and #63 open.
+
+## Active repair context module limit — 2026-11-11
+
+Source commit `cb3024428fdf156d137ce7f1ab217fb8ae1d49bb` extends the active
+context-admission case to isolate `maximumContextModules` as well. The profile
+owns the two required files in separate modules, and the diagnostic identifies
+both owners while the module ceiling is one. The file-count case keeps the
+combined byte ceiling at the exact required total; the byte case keeps module
+and file ceilings high enough for the two-file context while setting the byte
+ceiling one byte below that total. All three cases refuse before harness
+dispatch and preserve source/head with no pending attempt.
+
+The focused local run passed the expanded admission case together with active
+ACP patch-slot reuse: two tests, zero failures, errors, or skips. The retained
+[JUnit report](evidence/issue-734-active-repair-context-module-admission-2026-11-11.xml)
+is SHA-256 `29cb1d3b72c3a565d3eab1897df681c8859eae1996985a550e88a27f0f229409`;
+see the accompanying [provenance record](evidence/issue-734-active-repair-context-module-admission-2026-11-11.json).
+
+This remains pre-dispatch active-loop coverage with a strict captured test
+harness, not an ACP launch, live provider, production validator result under
+#236, hosted exact-head CI, or complete #734/#63 qualification. Keep #734 and
+#63 open.
