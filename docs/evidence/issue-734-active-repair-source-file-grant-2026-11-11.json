@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "e99523ed77a98b9e3817c8381da4a7e8c8e2279d",
+  "sourceParent": "ca7880ad6fff8b11108d0d17519e1a84c0c157db",
+  "sourceTree": "bd5b041fd770c54fdd8aee6478c90452d8c5d117",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem read limit after an acknowledged candidate write",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the declared source-file byte grant after an acknowledged candidate"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem read limit after an acknowledged candidate write' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the declared source-file byte grant after an acknowledged candidate'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 4,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 7.194,
+    "suiteSeconds": 7.194,
+    "timestamp": "2026-11-11T12:47:25.276Z",
+    "junitSha256": "a82500a6035b69b323f97452bb77ee428d6f25e87704ea3dbfcb6251b324d282"
+  },
+  "scope": {
+    "profile": "Generated C repair index",
+    "provider": "scripted ACP process through AcpCapturedRepairFilesystem",
+    "scenario": "The new case configures the active grant's maximumSourceFileBytes=4,096. The scripted peer writes exactly 4,096 bytes, attempts a 4,097-byte retry, reads back the retained candidate, and completes. ACP write/read ceilings and patch, staging, context, and patch-count budgets have headroom; the policy audit must report POLICY_DENIED for the oversized mutation grant. The run also executes the exact patch-byte, filesystem write-byte, and filesystem read-byte retry controls.",
+    "candidate": "The active validator receives the exact MODIFIED candidate, verifies its source digest, and throws the expected sentinel. Receipt and rejected assessment linkage, unchanged accepted source/head, cleared pending state, and verified process/sandbox cleanup are asserted.",
+    "qualificationLimits": [
+      "scripted ACP fixture and Generated C repair profile only",
+      "injected STRICT_CONTAINED validator rejects after candidate inspection; successful production validation is not established",
+      "no live-provider behavior",
+      "no production validator qualification under #236",
+      "no hosted exact-head CI qualification"
+    ]
+  }
+}

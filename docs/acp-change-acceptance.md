@@ -1521,3 +1521,28 @@ validator is injected and rejects after candidate inspection; it does not
 qualify successful production validation under #236, live providers, other
 profiles, hosted exact-head CI, or the full #734/#63 acceptance scope. Keep
 #734 and #63 open.
+
+## Active repair ACP source-file grant boundary — 2026-11-11
+
+Source commit `e99523ed77a98b9e3817c8381da4a7e8c8e2279d` extends the active
+quota retry controls to the per-file mutation grant. The scripted ACP process
+writes an exact 4,096-byte replacement, attempts a 4,097-byte retry, and then
+reads the preserved candidate. The active request carries
+`maximumSourceFileBytes = 4,096`, while aggregate patch bytes, staging, patch
+count, and ACP filesystem write bytes have headroom. The broker records the
+oversized retry as `POLICY_DENIED`, distinct from the separate callback byte
+limit and aggregate patch-byte controls.
+
+The focused run combines the source-file grant case with the exact patch-byte,
+filesystem write-byte, and filesystem read-byte controls: four tests, zero
+failures, errors, or skips. The retained [JUnit report](evidence/issue-734-active-repair-source-file-grant-2026-11-11.xml)
+records all four cases, while the preceding read-byte [provenance record](evidence/issue-734-active-repair-acp-read-byte-retry-2026-11-11.json)
+retains the exact command and environment for its three-test run. The report
+and source commit identify the added source-file selector and its result.
+
+The candidate reaches the injected `STRICT_CONTAINED` validator; its expected
+sentinel rejection leaves accepted source and graph head unchanged, clears
+pending state, and verifies process/sandbox cleanup. The evidence is local
+scripted-ACP coverage for the Generated C repair profile. It does not qualify
+live providers, successful production validation under #236, other profiles,
+hosted exact-head CI, or complete #734/#63 acceptance. Keep #734 and #63 open.
