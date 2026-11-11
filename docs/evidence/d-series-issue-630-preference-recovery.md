@@ -23,14 +23,30 @@ Using the repository-pinned Node 24.20.0/npm 11.19.0 toolchain:
 - `npm run lint` — passed with zero warnings.
 - `npm run build` — passed; bundle limits and module ownership checks passed.
 
+### Packaged two-tab control
+
+- Follow-up source: `19326581a7135e77694f57299569573dfb0b4f3c`.
+- The audit opens two targets in the packaged profile, checks both begin at defaults, dispatches
+  one rendered-select change in each tab, and retains trusted storage-event, target, rendered
+  state, write-count and persisted-record evidence. The verdict fails on missing or divergent
+  evidence.
+- Focused local control: `node --test scripts/test-packaged-browser-audit.mjs` — 29 tests passed;
+  all three changed JavaScript files passed `node --check`; `git diff --check` passed.
+- A local packaged Chrome run was not available in this checkout because no Chrome executable
+  or packaged runtime archive was present. Exact-head hosted packaged-browser qualification is
+  pending; the local control validates report rejection behavior, not real browser event delivery.
+
 The focused tests cover valid cross-tab updates, malformed values, clear events, unrelated
 keys, `localStorage` versus `sessionStorage`, no write-back, and a local edit after a missed
-event. Existing tests cover reload-once version recovery and concurrent session expiry.
+event. The packaged audit now includes a two-target browser exchange using DOM-dispatched changes
+on rendered selects, trusted `localStorage` events, rendered state, and no-echo-write assertions;
+the select activation is not a trusted keyboard or mouse gesture, and exact-head browser execution
+is pending. Existing tests cover reload-once version recovery and concurrent session expiry.
 
 ## Limits and remaining acceptance
 
-Cross-tab coverage uses synthetic `StorageEvent`s in jsdom. No two-tab packaged-browser run was
-performed, so browser delivery of real storage events is not qualified here. This source slice
+The current retained test results qualify synthetic `StorageEvent`s in jsdom only; the new
+two-tab packaged-browser control has not yet produced hosted evidence. This source slice
 does not add new packaged-browser evidence for the second stale-build reload or production
 session-expiry paths. Dependencies #159 is closed; #167 and #179 remain open and retain their
 respective shell/version and multi-tab/session ownership. Keep #630 and #221 open until their
