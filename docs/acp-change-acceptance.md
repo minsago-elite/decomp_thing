@@ -1246,3 +1246,39 @@ This is local evidence using a scripted ACP peer and
 production repair validator. It does not qualify live-provider behavior,
 production validation under #236, other repair profiles, the full mutation or
 resource-limit matrix, or hosted exact-head CI. #734 and #63 remain open.
+
+## Active repair exact staging-byte retry — 2026-11-11
+
+Commit `ede3bf193c7606815211a6fdfc0b1b29ca8a0afe` adds
+`TraceGuidedRepairTest.active ACP repair preserves an exact staging candidate
+after refusing an oversized retry`. The test first measures the selected repair
+context with the same `GeneratedCRepairIndexProfile` and diagnostic, then sets
+`maximumStagingBytes` to the unchanged non-target context bytes plus 4,096.
+The scripted ACP peer writes a 4,096-byte replacement, which brings the
+captured workspace exactly to the staging ceiling; its 4,097-byte retry is
+refused. The agent reads back the preserved 4,096-byte candidate and completes.
+Per-file, aggregate-patch-byte, and patch-file-count budgets have explicit
+headroom, so the refused callback exercises staging bytes.
+
+At active dispatch the test rechecks the measured context inventory and byte
+sum. The receipt records an allowed write, a resource-limit denial, and an
+allowed read of the same target. The resulting single `MODIFIED` change has the
+expected before/after hashes and 4,096-byte size. Exact candidate bytes and
+unchanged context reach the injected `STRICT_CONTAINED` validator, which throws
+a sentinel. Durable receipt and rejected assessment hashes are linked; the
+accepted source files and graph head remain unchanged, no attempt remains
+pending, and process/sandbox cleanup is verified. This demonstrates staging
+quota enforcement, candidate preservation, validator handoff and rejection
+handling, not successful compilation or behavioral validation.
+
+The focused test passed locally at source commit
+`ede3bf193c7606815211a6fdfc0b1b29ca8a0afe`: one test, zero failures, errors or
+skips. The retained [JUnit report](evidence/issue-734-active-repair-staging-quota-retry-2026-11-11.xml)
+and [provenance record](evidence/issue-734-active-repair-staging-quota-retry-2026-11-11.json)
+bind the result to the exact source, command, toolchain and report digest.
+
+This is local evidence using a scripted ACP peer and
+`CapturedRepairStagingAuthority`, with an injected validator rather than the
+production repair validator. It does not qualify live-provider behavior,
+production validation under #236, other repair profiles, the full mutation or
+resource-limit matrix, or hosted exact-head CI. #734 and #63 remain open.

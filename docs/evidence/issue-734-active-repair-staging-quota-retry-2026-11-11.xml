@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-11T10:03:08.093Z" hostname="whatsername" time="2.383">
+  <properties/>
+  <testcase name="active ACP repair preserves an exact staging candidate after refusing an oversized retry()" classname="decompengine.repair.TraceGuidedRepairTest" time="2.373"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
