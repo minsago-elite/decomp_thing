@@ -1283,6 +1283,34 @@ qualify a live provider, production validation under #236, other profiles,
 hosted exact-head CI, or all ACP terminal protocol methods. Keep #734 and #63
 open.
 
+## Public reconstruction caller interruption after acknowledged write — 2026-11-11
+
+Commit `87450266c5ec69ce3ad041e9fb67653435d8ed03` maps an `InterruptedException`
+from the ACP prompt's `runBlocking` boundary to the harness's existing caller
+cancellation outcome. Previously, `runBlocking` cleared the worker's interrupt,
+and the exception became an `INTERNAL` agent failure; reconstruction reported an
+unresolved fallback instead of an interrupted attempt.
+
+The scripted peer writes the declared implementation and emits a readiness
+message only after the host acknowledges that write. The test runs the public
+`ArchivalReconstructionService.reconstructWithWorkspace` path on a worker,
+interrupts it once after that message, then verifies a request-bound `CANCELLED`
+receipt and `ModuleReconstructionInterruptedException(CANCELLED)`. It also
+checks that the accepted output's bytes and metadata remain unchanged, no
+publication residue remains, the worker exits, no agent processes remain, and
+sandbox cleanup is verified.
+
+The focused test passed locally at this source commit: one test, zero
+failures/errors/skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-interrupt-rollback-2026-11-11.xml)
+and [provenance record](evidence/issue-734-public-reconstruction-interrupt-rollback-2026-11-11.json)
+bind the result to the exact source, command, toolchain and report digest. This
+is scripted local evidence for the Generated C Make profile. It does not
+qualify live providers, uncooperative peers, other profiles, production
+validation under #236 or hosted exact-head CI. It does not establish delivery
+of the ACP `session/cancel` method, repeated-interrupt behavior, concurrent
+failure handling, or persisted interruption-report contents. Keep #734 and #63
+open.
+
 ## Active repair exact patch-file-count retry — 2026-11-11
 
 Commit `f83280073182d91e14e577b2fe875bd027520dd1` adds

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "87450266c5ec69ce3ad041e9fb67653435d8ed03",
+  "sourceParent": "eb095606a9d89758a0223a82536358b43526a001",
+  "sourceTree": "a3f4ff69878d0d7aa02b988e538d27016650727f",
+  "test": "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes",
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "environment": {
+    "java": "openjdk version 21.0.12.1",
+    "node": "v26.12.1",
+    "npm": "11.20.0",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 56.871,
+    "suiteSeconds": 56.889,
+    "timestamp": "2026-11-11T11:18:12.903Z",
+    "junitSha256": "b454ce1d88bcc2170ffe9adbaaf98b0174879a77409473b6259fb7f63952830f"
+  },
+  "scope": {
+    "profile": "Generated C Make",
+    "provider": "scripted ACP process",
+    "cancellation": "The test interrupts the public reconstruction worker exactly once after the fixture emits its readiness event following the successful target-write acknowledgement.",
+    "receipt": "The invocation-bound receipt is request-bound and returned with stopReason CANCELLED; reconstruction raises ModuleReconstructionInterruptedException(CANCELLED).",
+    "rollback": "Previously accepted output metadata and bytes remain identical; no publication residue remains.",
+    "cleanup": "Process is stopped, no owned processes remain, sandbox cleanup is verified.",
+    "qualificationLimits": [
+      "local scripted fixture only",
+      "no live-provider behavior",
+      "no uncooperative ACP peer",
+      "no production validator qualification under #236",
+      "no hosted exact-head CI",
+      "one reconstruction profile",
+      "does not establish session/cancel method delivery",
+      "does not qualify repeated interrupts or concurrent failures",
+      "does not inspect persisted interruption-report contents"
+    ]
+  }
+}
