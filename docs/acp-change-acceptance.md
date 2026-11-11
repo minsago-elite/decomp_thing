@@ -724,9 +724,10 @@ the active `TraceGuidedRepairLoop` through `CapturedRepairStagingAuthority` and
 checks duplicate relative paths, non-canonical ordering, foreign and read-only
 paths, omitted and phantom claims, a write reverted to its original bytes,
 incorrect before/after digests, and incorrect or missing size. Every refusal
-leaves the accepted source bytes and graph head unchanged and closes the
-pending attempt as rejected. The existing `repair loop can patch compile
-errors` case is the valid-change control.
+leaves the accepted source bytes and graph head unchanged. Before reopening the
+graph, the test reads its persisted state and requires no pending attempt, a
+`candidate-error` rejected node, and `recoveredAfterCrash=false`; the existing
+`repair loop can patch compile errors` case is the valid-change control.
 
 These are fake captured-adapter results at the active loop boundary. Production
 ACP adapters derive change claims from host-observed snapshots, so a peer cannot

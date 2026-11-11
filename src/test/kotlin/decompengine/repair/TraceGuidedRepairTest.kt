@@ -40,6 +40,7 @@ import decompengine.validation.ProcessInput
 import decompengine.validation.ProcessOutput
 import com.sun.net.httpserver.HttpServer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.boolean
@@ -1441,6 +1442,16 @@ class TraceGuidedRepairTest {
             assertTrue(messages.any { it.contains(expectedReason) }, "$variant: $messages")
             assertContentEquals(before, target.readBytes(), "$variant must leave the accepted source unchanged")
             assertFalse(project.resolve("src/modules/created.c").exists(), "$variant must not create a source")
+
+            val persistedState = Json.parseToJsonElement(
+                project.resolve("reports/repair-revisions/graph.json").readText(),
+            ).jsonObject
+            assertEquals(JsonNull, persistedState.getValue("pending"), "$variant must be rejected in-process")
+            assertEquals(baselineHead, persistedState.getValue("headId").jsonPrimitive.content, variant)
+            val terminalNode = persistedState.getValue("nodes").jsonArray.last().jsonObject
+            assertEquals("rejected", terminalNode.getValue("status").jsonPrimitive.content, variant)
+            assertEquals("candidate-error", terminalNode.getValue("evidenceKind").jsonPrimitive.content, variant)
+            assertEquals(false, terminalNode.getValue("recoveredAfterCrash").jsonPrimitive.boolean, variant)
 
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
                 assertNull(graph.snapshot.pendingAttemptId, variant)
