@@ -1692,11 +1692,16 @@ if MODE in RECONSTRUCTION_MODES:
             raise SystemExit(136)
     if MODE == "reconstruction-modify-existing-source":
         content = content.replace("return 0;", "return 1;")
+    candidate_written_before_retry = False
     if MODE == "reconstruction-mutation-grant":
         outside_path = join_path(cwd, f"src/modules/{module_id}_extra.c")
         outside = try_write_workspace_file(outside_path, "unauthorized sibling\n", 817)
         if outside.get("error", {}).get("code") != -32602:
             raise SystemExit(126)
+        # Establish a valid candidate before exercising the denied over-limit
+        # retry, so the host can verify refusal preserves existing bytes.
+        write_workspace_file(source, content, 816)
+        candidate_written_before_retry = True
         # Keep the UTF-8 payload at exactly grant + 1 while using non-ASCII
         # source bytes. The host raises the frame ceiling for this scenario so
         # JSON escaping cannot mask the filesystem byte-limit refusal.
@@ -1718,7 +1723,8 @@ if MODE in RECONSTRUCTION_MODES:
         )
         if oversized.get("error", {}).get("code") != -32602:
             raise SystemExit(127)
-    write_workspace_file(source, content, 816)
+    if not candidate_written_before_retry:
+        write_workspace_file(source, content, 816)
     if MODE == "reconstruction-refusal-after-write":
         respond(prompt, {"stopReason": "refusal"})
         raise SystemExit(0)

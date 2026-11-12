@@ -1514,7 +1514,13 @@ class AcpAgentHarnessTest {
             )
         }
 
-        val successful = runAttempt("reconstruction-mutation-grant", index = 1, maximumFrameBytes = 1024 * 1024)
+        var sourceBytesAfterOversizedRefusal: ByteArray? = null
+        val successful = runAttempt(
+            "reconstruction-mutation-grant",
+            index = 1,
+            maximumFrameBytes = 1024 * 1024,
+            afterPromptCompletion = { sourceBytesAfterOversizedRefusal = Files.readAllBytes(it) },
+        )
         assertNull(successful.failure)
         val result = assertNotNull(successful.result)
         assertEquals(1, successful.taskCount)
@@ -1529,6 +1535,7 @@ class AcpAgentHarnessTest {
         assertNull(change.beforeSha256)
         assertEquals(expectedCreatedSource.size.toLong(), change.sizeBytes)
         assertEquals(sha256(expectedCreatedSource), change.afterSha256)
+        assertContentEquals(expectedCreatedSource, assertNotNull(sourceBytesAfterOversizedRefusal))
         assertContentEquals(
             expectedCreatedSource,
             Files.readAllBytes(result.projectDir.resolve(implementationPath)),
@@ -1547,11 +1554,11 @@ class AcpAgentHarnessTest {
         assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[6].outcome)
         assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[6].reason)
         assertEquals(implementationPath, assertNotNull(audit[7].policyPath).relativePath)
-        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[7].outcome)
-        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[7].reason)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, audit[7].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, audit[7].reason)
         assertEquals(implementationPath, assertNotNull(audit[8].policyPath).relativePath)
-        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, audit[8].outcome)
-        assertEquals(AcpFilesystemAuditReason.COMPLETED, audit[8].reason)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[8].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[8].reason)
         assertFalse(result.projectDir.resolve("src/modules/decomp_extra.c").exists())
         val extracted = fixture.resolve("verified-success")
         ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
@@ -1786,11 +1793,13 @@ class AcpAgentHarnessTest {
         val modifiedOverlimitSeed = priorModifiedSource.decodeToString()
             .replace("return 0;", "return 1;")
             .toByteArray(Charsets.UTF_8)
+        var modifiedSourceBytesAfterOversizedRefusal: ByteArray? = null
         val overlimitModified = runAttempt(
             "reconstruction-mutation-grant",
             index = 31,
             maximumFrameBytes = 1024 * 1024,
             seedSourceBeforeDispatch = modifiedOverlimitSeed,
+            afterPromptCompletion = { modifiedSourceBytesAfterOversizedRefusal = Files.readAllBytes(it) },
         )
         assertNull(overlimitModified.failure, "a denied oversized replacement must leave the existing target writable")
         assertEquals(1, overlimitModified.taskCount)
@@ -1814,14 +1823,15 @@ class AcpAgentHarnessTest {
             expectedCreatedSource,
             Files.readAllBytes(overlimitModifiedResult.projectDir.resolve(implementationPath)),
         )
+        assertContentEquals(expectedCreatedSource, assertNotNull(modifiedSourceBytesAfterOversizedRefusal))
         val overlimitModifiedAudit = overlimitModified.harness.latestFilesystemAudit()
         assertEquals(9, overlimitModifiedAudit.size, overlimitModifiedAudit.toString())
         assertEquals(implementationPath, assertNotNull(overlimitModifiedAudit[7].policyPath).relativePath)
-        assertEquals(AcpFilesystemAuditOutcome.DENIED, overlimitModifiedAudit[7].outcome)
-        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, overlimitModifiedAudit[7].reason)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, overlimitModifiedAudit[7].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, overlimitModifiedAudit[7].reason)
         assertEquals(implementationPath, assertNotNull(overlimitModifiedAudit[8].policyPath).relativePath)
-        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, overlimitModifiedAudit[8].outcome)
-        assertEquals(AcpFilesystemAuditReason.COMPLETED, overlimitModifiedAudit[8].reason)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, overlimitModifiedAudit[8].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, overlimitModifiedAudit[8].reason)
         assertFalse(overlimitModifiedResult.projectDir.resolve("src/modules/decomp_extra.c").exists())
         val overlimitModifiedExtracted = fixture.resolve("verified-overlimit-modified-source")
         ArchivalBundleVerifier.extractAndVerify(
