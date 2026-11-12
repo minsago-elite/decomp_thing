@@ -2754,3 +2754,34 @@ injected validator; it does not qualify production validation under #236, live
 providers, publication recovery under #732, durable provenance under #733,
 hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
 #63 open.
+
+## Active repair generated-C include-closure traversal boundary — 2026-11-12
+
+The active repair loop now qualifies the `maximumDependencyEdges` include-closure
+traversal count with a minimal Generated C fallback-profile project. Its source
+inventory is exactly `Makefile`, `include/decomp_types.h`, and
+`src/modules/reconstructed.c`; the implementation includes the shared header,
+and no module-plan or program-model evidence is present. The index has one
+fallback implementation module and its closure visits two paths. At a limit of
+two, scripted ACP acknowledges the replacement and readback, and the candidate
+reaches an injected validator that verifies the candidate bytes and
+profile/index/source-revision bindings before throwing the expected sentinel.
+The receipt records final-snapshot completion, two successful filesystem
+callbacks, and verified process/sandbox cleanup. At a limit of one, graph
+opening rejects with `repair include-closure traversal exceeds 1 entries`
+before ACP dispatch or validation. Source bytes remain unchanged, no repair
+history, run, or pending attempt is retained, and a subsequent graph open
+succeeds.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-include-closure-boundary-2026-11-12.xml)
+has SHA-256
+`06e3adcac29850ed978bc5557c4caf87655f61b8f751391a9776b821a3c12ec6`; the
+[provenance record](evidence/issue-734-active-include-closure-boundary-2026-11-12.json)
+binds the tested source commit/tree, selector, command, and result.
+
+This is local scripted-ACP admission and validator-handoff evidence using an
+injected validator. It does not qualify production validation under #236, live
+providers, publication recovery under #732, durable provenance under #733,
+hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
+#63 open.
