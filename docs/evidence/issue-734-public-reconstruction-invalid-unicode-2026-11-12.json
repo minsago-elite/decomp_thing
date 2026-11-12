@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "2a775e440c492be206d9c14973977edddd914a1a",
+  "sourceParent": "924ffa9fe6b4617c0fd7010f4d2b58acd25d44ef",
+  "sourceTree": "0f9612e450e03755c4174859eedef8dd2c7adcd8",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 75.559,
+    "suiteSeconds": 75.587,
+    "timestamp": "2026-11-12T08:21:45.462Z",
+    "junitSha256": "c7a3079e5742549c22230d36d7d1ad0a807c0f470e59472cbcae62ba9052b408"
+  },
+  "scope": {
+    "profile": "Generated C Make public reconstruction through a scripted ACP peer",
+    "coverage": "After the peer's authorized source write is acknowledged, it submits a write containing a lone UTF-16 surrogate. The callback returns the expected protocol error; the filesystem audit records DENIED/INVALID_TEXT. The completed invocation receipt contains only the valid CREATED source change with its expected byte count and SHA-256. The published project and verified extracted archive retain those exact bytes, and the extracted project rebuilds successfully.",
+    "qualificationLimits": [
+      "local scripted ACP only; no live provider qualification",
+      "does not qualify production repair validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not establish hosted exact-head CI or complete #734/#63 acceptance"
+    ]
+  }
+}

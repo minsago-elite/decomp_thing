@@ -2086,3 +2086,24 @@ the [provenance record](evidence/issue-734-active-repair-utf8-quota-suite-2026-1
 binds the exact source commit/tree, selectors, command, and result. This remains
 local scripted-ACP evidence with injected validation, not #236 production
 qualification or completion of #734/#63.
+
+## Public reconstruction invalid-Unicode callback refusal — 2026-11-12
+
+The public Generated C Make reconstruction fixture now sends a lone UTF-16
+surrogate through the ACP `fs/write_text_file` callback after an authorized
+candidate write has been acknowledged. The broker returns the expected
+protocol refusal and records `DENIED/INVALID_TEXT`. The completed host receipt,
+published project, and verified extracted archive all retain the preceding
+valid candidate bytes and digest; the extracted project rebuilds successfully.
+
+The focused local scripted-ACP test passed with one test and zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-invalid-unicode-2026-11-12.xml)
+has SHA-256
+`c7a3079e5742549c22230d36d7d1ad0a807c0f470e59472cbcae62ba9052b408`;
+the [provenance record](evidence/issue-734-public-reconstruction-invalid-unicode-2026-11-12.json)
+binds the source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence for Generated C Make. It does not qualify
+live providers, production repair validation under #236, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
