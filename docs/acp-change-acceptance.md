@@ -2072,3 +2072,17 @@ This is local scripted-ACP evidence with an injected validator. It does not
 qualify production validation under #236, live providers, publication recovery
 under #732, durable provenance under #733, hosted exact-head CI, or the full
 #734/#63 acceptance matrix. Keep #734 and #63 open.
+
+The shared multibyte quota fixture also serves the active staging-byte boundary.
+After review identified that its staging test still expected the former ASCII
+candidate, that assertion now constructs the same exact 4,096-byte UTF-8 text
+and verifies that its character count is lower. The staging ceiling remains
+unchanged context bytes plus the candidate's encoded length, isolating staging
+admission. The corrected staging, source-file, patch-byte, and filesystem-write
+controls all passed: four tests with zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-utf8-quota-suite-2026-11-12.xml)
+has SHA-256 `90ea99e36c9dc180a2e1d1707a952bd3cc24e157cb582936c3477766f63f8756`;
+the [provenance record](evidence/issue-734-active-repair-utf8-quota-suite-2026-11-12.json)
+binds the exact source commit/tree, selectors, command, and result. This remains
+local scripted-ACP evidence with injected validation, not #236 production
+qualification or completion of #734/#63.
