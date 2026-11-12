@@ -2115,6 +2115,44 @@ class AcpAgentHarnessTest {
         assertEquals(acceptedMetadata, capturePublishedMetadata(output))
         assertNoReconstructionPublicationResidue(output)
 
+        val refused = runAttempt("reconstruction-refusal-after-write", index = 33)
+        val refusalFailure = assertNotNull(refused.failure, "a model refusal must prevent candidate publication")
+        assertNull(refused.result)
+        assertEquals(1, refused.taskCount)
+        assertEquals(1, refused.receipts.size)
+        assertTrue(
+            refusalFailure.message.orEmpty().contains("validated source publication was refused"),
+            refusalFailure.message.orEmpty(),
+        )
+        val refusalReceipt = refused.receipts.single()
+        assertEquals(refused.requestSha256s.single(), refusalReceipt.requestBinding.requestSha256)
+        assertEquals(refusalReceipt.requestBinding.requestSha256, refusalReceipt.turnIdentity?.requestSha256)
+        val refusalExecution = refusalReceipt.requireResult()
+        assertEquals(AgentStopReason.REFUSED, refusalExecution.stopReason)
+        assertEquals(1, refusalExecution.changes.size)
+        val refusedChange = refusalExecution.changes.single()
+        assertEquals(implementationPath, refusedChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, refusedChange.kind)
+        assertNull(refusedChange.beforeSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), refusedChange.sizeBytes)
+        assertEquals(sha256(expectedCreatedSource), refusedChange.afterSha256)
+        val refusalEvidence = assertIs<AcpInvocationEvidenceSnapshot>(refusalReceipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, refusalEvidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, refusalEvidence.cleanupDisposition)
+        assertNotNull(refusalEvidence.completeExecutionEvidence)
+        val refusalDiagnostics = assertNotNull(refused.harness.latestDiagnostics())
+        assertTrue(refusalDiagnostics.remainingProcessIds.isEmpty(), refusalDiagnostics.toString())
+        assertTrue(refusalDiagnostics.sandboxCleanupVerified, refusalDiagnostics.toString())
+        assertProcessStopped(refusalDiagnostics.pid)
+        val refusalAudit = refused.harness.latestFilesystemAudit()
+        assertEquals(7, refusalAudit.size, refusalAudit.toString())
+        val refusalWrite = refusalAudit.last()
+        assertEquals(implementationPath, assertNotNull(refusalWrite.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, refusalWrite.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, refusalWrite.reason)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
         val wallLimited = runAttempt(
             "reconstruction-request-timeout-after-write",
             index = 8,

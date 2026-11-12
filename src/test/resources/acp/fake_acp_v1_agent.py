@@ -66,6 +66,7 @@ RECONSTRUCTION_MODES = {
     "reconstruction-modify-existing-source",
     "reconstruction-exact-source-byte-boundary",
     "reconstruction-invalid-unicode-after-write",
+    "reconstruction-refusal-after-write",
     "reconstruction-frame-count-limit-after-write",
     "reconstruction-tool-limit-after-write",
     "reconstruction-limit-after-write",
@@ -273,6 +274,7 @@ expected_fs = {
     "reconstruction-modify-existing-source": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-exact-source-byte-boundary": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-invalid-unicode-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-refusal-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-frame-count-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-tool-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
@@ -1674,6 +1676,9 @@ if MODE in RECONSTRUCTION_MODES:
         if oversized.get("error", {}).get("code") != -32602:
             raise SystemExit(127)
     write_workspace_file(source, content, 816)
+    if MODE == "reconstruction-refusal-after-write":
+        respond(prompt, {"stopReason": "refusal"})
+        raise SystemExit(0)
     if MODE == "reconstruction-invalid-unicode-after-write":
         malformed = try_write_workspace_file(source, "/*\ud800*/\n", 819)
         if malformed.get("error", {}).get("code") != -32602:
