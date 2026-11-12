@@ -2724,3 +2724,33 @@ qualify compilation, behavior validation, production validation under #236,
 live providers, successful publication, publication crash recovery under #732,
 durable provenance under #733, hosted exact-head CI, or the complete #734/#63
 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair generated-C indexed-entity boundary — 2026-11-12
+
+The active repair loop now has an exact `maximumIndexedEntities` admission
+control using Generated C module-plan and program-model evidence. The fixture is
+generated through `SourceTreeGenerator` and contains one function, one global,
+and one type, for three indexed entities total. At a limit of three, the
+scripted ACP peer replaces the declared implementation and the candidate
+reaches the injected validator. The receipt records the completed final
+snapshot and verified process/sandbox cleanup; the validator checks the
+candidate source bytes, profile/index binding, and candidate revision digest
+before throwing its expected sentinel. At a limit of two, the active repair
+path returns the exact `generated C model has 3 indexed entities; limit=2`
+resource diagnostic before ACP dispatch or validation. Source and generated
+plan/model evidence remain unchanged. No repair run or pending attempt is
+created; reopening the graph confirms the lock was released and no run or
+pending attempt was retained.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-indexed-entity-boundary-2026-11-12.xml)
+has SHA-256
+`0a2f315e8ec3789cbcadaf80273979527cc403eb9dea0856f4076fdf8e86193a`; the
+[provenance record](evidence/issue-734-active-indexed-entity-boundary-2026-11-12.json)
+binds the tested source commit/tree, selector, command, and result.
+
+This is local scripted-ACP admission and validator-handoff evidence using an
+injected validator; it does not qualify production validation under #236, live
+providers, publication recovery under #732, durable provenance under #733,
+hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
+#63 open.
