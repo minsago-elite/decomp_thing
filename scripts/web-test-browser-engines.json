@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "product": "playwright",
+  "playwrightCoreVersion": "1.58.2",
+  "platform": "ubuntu24.04-x64",
+  "metadataUrl": "https://raw.githubusercontent.com/microsoft/playwright/v1.58.2/packages/playwright-core/browsers.json",
+  "engines": {
+    "firefox": {
+      "revision": "1509",
+      "browserVersion": "146.0.1",
+      "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/firefox/1509/firefox-ubuntu-24.04.zip",
+      "bytes": 104293300,
+      "sha256": "8690bdaf3614f2b311dd711536675508d62a0ac4ce13dd380807494d1a13cf87",
+      "entries": 60,
+      "expandedBytes": 287660044,
+      "roots": ["firefox"],
+      "symlinks": [],
+      "executable": "firefox/firefox"
+    },
+    "webkit": {
+      "revision": "2248",
+      "browserVersion": "26.0",
+      "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/webkit/2248/webkit-ubuntu-24.04.zip",
+      "bytes": 104032186,
+      "sha256": "c8ea5ee749558b9aeb50c00dd833dfb80e3719a150f5363749aa9699c896de2c",
+      "entries": 65,
+      "expandedBytes": 298277573,
+      "roots": ["minibrowser-gtk", "minibrowser-wpe", "protocol.json", "pw_run.sh"],
+      "symlinks": [
+        {"path": "minibrowser-gtk/sys/lib/libsoup-3.0.so.0", "target": "libsoup-3.0.so.0.7.4"},
+        {"path": "minibrowser-gtk/sys/lib/libbrotlicommon.so.1", "target": "libbrotlicommon.so.1.0.7"},
+        {"path": "minibrowser-gtk/sys/lib/libbrotlidec.so.1", "target": "libbrotlidec.so.1.0.7"},
+        {"path": "minibrowser-gtk/sys/lib/libjxl.so.0.8", "target": "libjxl.so.0.8.2"},
+        {"path": "minibrowser-gtk/sys/lib/libbrotlienc.so.1", "target": "libbrotlienc.so.1.0.7"},
+        {"path": "minibrowser-gtk/lib/libjavascriptcoregtk-6.0.so.1", "target": "libjavascriptcoregtk-6.0.so.1.7.3"},
+        {"path": "minibrowser-gtk/lib/libwebkitgtk-6.0.so.4", "target": "libwebkitgtk-6.0.so.4.15.2"},
+        {"path": "minibrowser-wpe/sys/lib/libsoup-3.0.so.0", "target": "libsoup-3.0.so.0.7.4"},
+        {"path": "minibrowser-wpe/sys/lib/libbrotlicommon.so.1", "target": "libbrotlicommon.so.1.0.7"},
+        {"path": "minibrowser-wpe/sys/lib/libbrotlidec.so.1", "target": "libbrotlidec.so.1.0.7"},
+        {"path": "minibrowser-wpe/sys/lib/libjxl.so.0.8", "target": "libjxl.so.0.8.2"},
+        {"path": "minibrowser-wpe/sys/lib/libbrotlienc.so.1", "target": "libbrotlienc.so.1.0.7"},
+        {"path": "minibrowser-wpe/lib/libwpe-1.0.so.1", "target": "libwpe-1.0.so.1.9.3"},
+        {"path": "minibrowser-wpe/lib/libWPEWebKit-2.0.so.1", "target": "libWPEWebKit-2.0.so.1.8.2"},
+        {"path": "minibrowser-wpe/lib/libWPEBackend-fdo-1.0.so", "target": "libWPEBackend-fdo-1.0.so.1.9.5"},
+        {"path": "minibrowser-wpe/lib/libWPEBackend-fdo-1.0.so.1", "target": "libWPEBackend-fdo-1.0.so.1.9.5"}
+      ],
+      "executable": "pw_run.sh"
+    }
+  }
+}
