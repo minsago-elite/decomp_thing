@@ -1621,9 +1621,18 @@ if MODE in RECONSTRUCTION_MODES:
         outside = try_write_workspace_file(outside_path, "unauthorized sibling\n", 817)
         if outside.get("error", {}).get("code") != -32602:
             raise SystemExit(126)
-        oversized_content = (
-            "/*" + ("a" * (RECONSTRUCTION_OVERSIZED_SOURCE_BYTES - 5)) + "*/\n"
+        # Keep the UTF-8 payload at exactly grant + 1 while using non-ASCII
+        # source bytes. The host raises the frame ceiling for this scenario so
+        # JSON escaping cannot mask the filesystem byte-limit refusal.
+        opening = "/*"
+        suffix = "*/\n"
+        padding_bytes = (
+            RECONSTRUCTION_OVERSIZED_SOURCE_BYTES
+            - len(opening.encode("utf-8"))
+            - len(suffix.encode("utf-8"))
         )
+        padding = "é" * (padding_bytes // 2) + ("x" if padding_bytes % 2 else "")
+        oversized_content = opening + padding + suffix
         if len(oversized_content.encode("utf-8")) != RECONSTRUCTION_OVERSIZED_SOURCE_BYTES:
             raise SystemExit(137)
         oversized = try_write_workspace_file(

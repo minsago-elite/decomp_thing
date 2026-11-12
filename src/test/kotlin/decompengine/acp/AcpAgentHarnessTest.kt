@@ -1440,7 +1440,7 @@ class AcpAgentHarnessTest {
             )
         }
 
-        val successful = runAttempt("reconstruction-mutation-grant", index = 1, maximumFrameBytes = 512 * 1024)
+        val successful = runAttempt("reconstruction-mutation-grant", index = 1, maximumFrameBytes = 1024 * 1024)
         assertNull(successful.failure)
         val result = assertNotNull(successful.result)
         assertEquals(1, successful.taskCount)
