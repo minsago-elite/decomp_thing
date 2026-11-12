@@ -2567,7 +2567,7 @@ accepted source/head are checked.
 The focused test passed with one test and zero failures, errors, or skips. The
 retained [JUnit report](evidence/issue-734-active-repair-aggregate-patch-byte-reuse-2026-11-12.xml)
 has SHA-256
-`86bd96be290300593bb790944808f501b69e0dd93a19a2f206f2bbabb1b37d31`; the
+`652dee6bdc263ca081b80514c1af7cd08ff3f6c835efa0feb3d03456a6ca96f8`; the
 [provenance record](evidence/issue-734-active-repair-aggregate-patch-byte-reuse-2026-11-12.json)
 binds the exact source commit/tree, selector, command, and result.
 
