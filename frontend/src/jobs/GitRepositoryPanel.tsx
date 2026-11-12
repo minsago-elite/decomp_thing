@@ -73,17 +73,27 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
         const csrfToken = session.csrf();
         if (!runId || !revisionId) throw new ApiClientError('invalid_request');
         if (!csrfToken) { setStatus(copy.reconnectBeforeInitializing); return; }
-        let operation = (await client.post('operation', repositoriesPath, 'gitRepositoryInitRequest',
+        const operation = (await client.post('operation', repositoriesPath, 'gitRepositoryInitRequest',
           { action: 'git.init', runId, revisionId, initialBranch: null },
           { csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal })).data;
-        for (let poll = 0; !terminal.has(operation.state); poll++) {
+        if (operation.jobId !== job.jobId || operation.action !== 'git.init' || !operation.repositoryId || !operation.operationId) {
+          throw new ApiClientError('invalid_response');
+        }
+        const expected = { jobId: job.jobId, action: 'git.init' as const,
+          repositoryId: operation.repositoryId, operationId: operation.operationId };
+        let state = operation.state;
+        for (let poll = 0; !terminal.has(state); poll++) {
           if (poll >= maximumPolls) { setStatus(copy.stillRunning); break; }
           setStatus(copy.initializationRunning);
           await sleep(pollIntervalMs, controller.signal);
-          operation = (await client.get('operation',
-            `${repositoriesPath}/${operation.repositoryId}/operations/${operation.operationId}`, { signal: controller.signal })).data;
+          const next = (await client.get('operation',
+            `${repositoriesPath}/${expected.repositoryId}/operations/${expected.operationId}`, { signal: controller.signal })).data;
+          if (next.jobId !== expected.jobId || next.action !== expected.action || next.repositoryId !== expected.repositoryId
+            || next.operationId !== expected.operationId) throw new ApiClientError('invalid_response');
+          state = next.state;
         }
       }
+      if (controller.signal.aborted) return;
       const next = await read(controller.signal);
       if (controller.signal.aborted) return;
       setObserved(next);

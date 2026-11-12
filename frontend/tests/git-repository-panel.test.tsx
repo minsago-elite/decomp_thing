@@ -1,15 +1,23 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
 import type { Capability, Job } from '../src/api/generated';
 import { GitRepositoryPanel } from '../src/jobs/GitRepositoryPanel';
 
 const transport = vi.hoisted(() => ({
+  useRealClient: false,
   get: vi.fn<(kind: string, path: string, settings: { signal: AbortSignal }) => Promise<unknown>>(),
   post: vi.fn<(kind: string, path: string, request: string, data: unknown, settings: { csrfToken: string; ifMatch: string; idempotencyKey: string; signal: AbortSignal }) => Promise<unknown>>(),
 }));
-vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+vi.mock('../src/api/client', async load => {
+  const actual = await load<typeof ClientModule>();
+  return { ...actual, createApiClient: (options: Parameters<typeof actual.createApiClient>[0]) =>
+    transport.useRealClient ? actual.createApiClient(options) : transport };
+});
 
 const jobId = '0123456789abcdef0123456789abcdef';
 const job = { jobId, version: 'job_version_1', latestRunId: 'run_1' } as unknown as Job;
@@ -29,11 +37,33 @@ const workspace = { data: { repositoryId: 'repository_1', worktreeId: 'worktree_
   objectFormat: 'sha1', origin: 'initialized', trackingPolicy: 'source-only-v1', headObjectId: null, headRefId: null,
   headState: 'unborn', headRefName: 'refs/heads/trunk', candidateRevisionId: 'revision_1', dirty: true, refs: [], mapping: null } };
 const run = { data: { jobId, runId: 'run_1', resultRevisionId: 'revision_1' } };
+const fixture = <T,>(name: string): T => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
+function apiResponse(kind: string, data: unknown, status = 200) {
+  return new Response(JSON.stringify({ apiVersion: 1, kind, requestId: 'request_git_identity_test', data }), {
+    status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Request-ID': 'request_git_identity_test' },
+  });
+}
+
+type FetchMock = Mock<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>;
+
+function realApi(fetcher: FetchMock) {
+  transport.useRealClient = true;
+  vi.stubGlobal('fetch', fetcher);
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+}
+
+function mockedFetch(handler: (url: string, init: RequestInit) => Response | Promise<Response>): FetchMock {
+  return vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>((input, init) =>
+    Promise.resolve().then(() => handler(requestUrl(input), init ?? {})));
+}
 
 function mount(state: Capability['state'] = 'supported', reason: string | null = null, message: string | null = null) {
   return render(<GitRepositoryPanel job={job} capabilities={[capability(state, reason, message)]} basePath="/nested/" session={session} pollIntervalMs={1} />);
 }
-beforeEach(() => { transport.get.mockReset(); transport.post.mockReset(); });
+beforeEach(() => { transport.useRealClient = false; transport.get.mockReset(); transport.post.mockReset(); vi.unstubAllGlobals(); });
 
 it('explains unavailable Git without making any request', () => {
   mount('unavailable', 'GIT_VERSION_UNSUPPORTED', 'Git 2.20.1 is older than the required 2.36.0.');
@@ -82,6 +112,209 @@ it('offers no initialization without a recorded candidate and ignores foreign li
   mount();
   await waitFor(() => expect(screen.getByText(/could not be verified/)).toBeTruthy());
   expect(screen.queryByRole('button', { name: 'Initialize repository from the latest candidate' })).toBeNull();
+});
+
+it('rejects mismatched initialization acknowledgements through the real client without polling or readback', async () => {
+  const cases = [
+    { name: 'wrong job', operation: { ...operation('queued').data, jobId: 'f'.repeat(32) } },
+    { name: 'wrong action', operation: { ...operation('queued').data, action: 'git.fetch' } },
+    { name: 'null repository', operation: { ...operation('queued').data, repositoryId: null } },
+  ];
+  for (const testCase of cases) {
+    const fetcher = mockedFetch((url, init) => {
+      const method = init.method ?? 'GET';
+      if (method === 'GET' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('gitRepositories', { jobId, repositories: [], operations: [] });
+      if (method === 'GET' && url.endsWith(`/jobs/${jobId}/runs/run_1`)) {
+        const data = fixture<{ data: Record<string, unknown> }>('run-completed-unaccepted').data;
+        return apiResponse('run', { ...data, jobId, runId: 'run_1', resultRevisionId: 'revision_1' });
+      }
+      if (method === 'POST' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('operation', testCase.operation, 202);
+      throw new Error(`unexpected request ${method} ${url}`);
+    });
+    realApi(fetcher);
+    const view = mount();
+    const initialize = await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' });
+    fireEvent.click(initialize);
+    expect(await screen.findByText(/initialization could not be confirmed/)).toBeTruthy();
+    expect(fetcher.mock.calls.map(([, init]) => init?.method ?? 'GET')).toEqual(['GET', 'GET', 'POST']);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    view.unmount();
+    vi.unstubAllGlobals();
+  }
+});
+
+it('keeps every initialization poll bound to the acknowledged identity through the real client', async () => {
+  const mismatches = [
+    { name: 'job', operation: { ...operation('running').data, jobId: 'f'.repeat(32) } },
+    { name: 'repository', operation: { ...operation('running').data, repositoryId: 'repository_other' } },
+    { name: 'operation', operation: { ...operation('running').data, operationId: 'operation_other' } },
+    { name: 'action', operation: { ...operation('running').data, action: 'git.fetch' } },
+  ];
+  for (const mismatch of mismatches) {
+    const pollPath = `/nested/api/v1/jobs/${jobId}/repositories/repository_1/operations/operation_1`;
+    const fetcher = mockedFetch((url, init) => {
+      const method = init.method ?? 'GET';
+      if (method === 'GET' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('gitRepositories', { jobId, repositories: [], operations: [] });
+      if (method === 'GET' && url.endsWith(`/jobs/${jobId}/runs/run_1`)) {
+        const data = fixture<{ data: Record<string, unknown> }>('run-completed-unaccepted').data;
+        return apiResponse('run', { ...data, jobId, runId: 'run_1', resultRevisionId: 'revision_1' });
+      }
+      if (method === 'POST' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('operation', operation('queued').data, 202);
+      if (method === 'GET' && url === pollPath) return apiResponse('operation', mismatch.operation);
+      throw new Error(`unexpected request ${method} ${url}`);
+    });
+    realApi(fetcher);
+    const view = mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+    expect(await screen.findByText(/initialization could not be confirmed/)).toBeTruthy();
+    expect(fetcher.mock.calls.map(([url]) => requestUrl(url))).toEqual([
+      `/nested/api/v1/jobs/${jobId}/repositories`,
+      `/nested/api/v1/jobs/${jobId}/runs/run_1`,
+      `/nested/api/v1/jobs/${jobId}/repositories`,
+      pollPath,
+    ]);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    view.unmount();
+    vi.unstubAllGlobals();
+  }
+});
+
+it('keeps one guarded POST and succeeds through queued-to-completed polling with the real client', async () => {
+  let repositoryReads = 0;
+  const completed = { ...operation('completed').data, endedAt: '2026-10-25T00:00:02Z' };
+  const fetcher = mockedFetch((url, init) => {
+    const method = init.method ?? 'GET';
+    if (method === 'GET' && url.endsWith(`/jobs/${jobId}/repositories`)) {
+      repositoryReads++;
+      if (repositoryReads === 1) return apiResponse('gitRepositories', { jobId, repositories: [], operations: [] });
+      return apiResponse('gitRepositories', { jobId, repositories: [listed.data.repositories[0]], operations: [completed] });
+    }
+    if (method === 'GET' && url.endsWith(`/jobs/${jobId}/runs/run_1`)) {
+      const data = fixture<{ data: Record<string, unknown> }>('run-completed-unaccepted').data;
+      return apiResponse('run', { ...data, jobId, runId: 'run_1', resultRevisionId: 'revision_1' });
+    }
+    if (method === 'POST' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('operation', operation('queued').data, 202);
+    if (method === 'GET' && url.endsWith('/repositories/repository_1/operations/operation_1')) return apiResponse('operation', completed);
+    if (method === 'GET' && url.endsWith('/repositories/repository_1')) return apiResponse('gitWorkspace', workspace.data);
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+  realApi(fetcher);
+  const view = mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+  expect(await screen.findByText('Branch trunk (no commits yet)')).toBeTruthy();
+  const post = fetcher.mock.calls.find(([, init]) => init?.method === 'POST');
+  expect(post).toBeDefined();
+  const headers = new Headers(post?.[1]?.headers);
+  expect(headers.get('X-CSRF-Token')).toBe(session.csrf());
+  expect(headers.get('If-Match')).toBe('"job_version_1"');
+  expect(headers.get('Idempotency-Key')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  expect(fetcher.mock.calls.map(([url]) => requestUrl(url)).filter(url => url.includes('/operations/operation_1')))
+    .toEqual(['/nested/api/v1/jobs/0123456789abcdef0123456789abcdef/repositories/repository_1/operations/operation_1']);
+  view.unmount();
+});
+
+it('keeps a terminal initialization failure truthful through the real client without retrying', async () => {
+  const failed = { ...operation('failed').data, endedAt: '2026-10-25T00:00:02Z', message: 'The selected source snapshot is unavailable.' };
+  let repositoryReads = 0;
+  const fetcher = mockedFetch((url, init) => {
+    const method = init.method ?? 'GET';
+    if (method === 'GET' && url.endsWith(`/jobs/${jobId}/repositories`)) {
+      repositoryReads++;
+      return apiResponse('gitRepositories', { jobId, repositories: [], operations: repositoryReads === 1 ? [] : [failed] });
+    }
+    if (method === 'GET' && url.endsWith(`/jobs/${jobId}/runs/run_1`)) {
+      const data = fixture<{ data: Record<string, unknown> }>('run-completed-unaccepted').data;
+      return apiResponse('run', { ...data, jobId, runId: 'run_1', resultRevisionId: 'revision_1' });
+    }
+    if (method === 'POST' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('operation', operation('queued').data, 202);
+    if (method === 'GET' && url.endsWith('/repositories/repository_1/operations/operation_1')) return apiResponse('operation', failed);
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+  realApi(fetcher);
+  const view = mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+  expect(await screen.findByText(/last repository operation is failed: The selected source snapshot is unavailable/)).toBeTruthy();
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  expect(fetcher.mock.calls.map(([url]) => requestUrl(url)).filter(url => url.includes('/operations/')))
+    .toEqual(['/nested/api/v1/jobs/0123456789abcdef0123456789abcdef/repositories/repository_1/operations/operation_1']);
+  view.unmount();
+});
+
+it('does not publish a late poll response after the job binding changes', async () => {
+  const deferred: { releasePoll?: (response: Response) => void; pollStarted?: () => void; pollSignal?: AbortSignal | null } = {};
+  const started = new Promise<void>(resolve => { deferred.pollStarted = resolve; });
+  const delayedPoll = new Promise<Response>(resolve => { deferred.releasePoll = resolve; });
+  const reboundJobId = 'a'.repeat(32);
+  const fetcher = mockedFetch((url, init) => {
+    const method = init.method ?? 'GET';
+    if (method === 'GET' && (url.endsWith(`/jobs/${jobId}/repositories`) || url.endsWith(`/jobs/${reboundJobId}/repositories`))) {
+      const requestJobId = url.includes(reboundJobId) ? reboundJobId : jobId;
+      return apiResponse('gitRepositories', { jobId: requestJobId, repositories: [], operations: [] });
+    }
+    if (method === 'GET' && (url.endsWith(`/jobs/${jobId}/runs/run_1`) || url.endsWith(`/jobs/${reboundJobId}/runs/run_1`))) {
+      const requestJobId = url.includes(reboundJobId) ? reboundJobId : jobId;
+      const data = fixture<{ data: Record<string, unknown> }>('run-completed-unaccepted').data;
+      return apiResponse('run', { ...data, jobId: requestJobId, runId: 'run_1', resultRevisionId: 'revision_1' });
+    }
+    if (method === 'POST' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('operation', operation('queued').data, 202);
+    if (method === 'GET' && url.endsWith('/repositories/repository_1/operations/operation_1')) {
+      deferred.pollStarted?.();
+      deferred.pollSignal = init.signal ?? null;
+      return delayedPoll;
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+  realApi(fetcher);
+  const view = render(<GitRepositoryPanel job={job} capabilities={[capability('supported')]} basePath="/nested/" session={session} pollIntervalMs={1} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+  await started;
+  view.rerender(<GitRepositoryPanel job={{ ...job, jobId: reboundJobId, version: 'job_version_2' }} capabilities={[capability('supported')]} basePath="/nested/" session={session} pollIntervalMs={1} />);
+  expect(await screen.findByText('This job has no managed repository.')).toBeTruthy();
+  expect(deferred.pollSignal?.aborted).toBe(true);
+  deferred.releasePoll?.(apiResponse('operation', operation('completed').data));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  expect(screen.getByText('This job has no managed repository.')).toBeTruthy();
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(([url]) => requestUrl(url).includes('/operations/'))).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(([url, init]) => init?.method !== 'POST' && requestUrl(url).endsWith(`/jobs/${jobId}/repositories`))).toHaveLength(1);
+  view.unmount();
+});
+
+it('cancels a pending poll when the panel unmounts without a retry or readback', async () => {
+  const deferred: { releasePoll?: (response: Response) => void; pollStarted?: () => void; pollSignal?: AbortSignal | null } = {};
+  const started = new Promise<void>(resolve => { deferred.pollStarted = resolve; });
+  const delayedPoll = new Promise<Response>(resolve => { deferred.releasePoll = resolve; });
+  const fetcher = mockedFetch((url, init) => {
+    const method = init.method ?? 'GET';
+    if (method === 'GET' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('gitRepositories', { jobId, repositories: [], operations: [] });
+    if (method === 'GET' && url.endsWith(`/jobs/${jobId}/runs/run_1`)) {
+      const data = fixture<{ data: Record<string, unknown> }>('run-completed-unaccepted').data;
+      return apiResponse('run', { ...data, jobId, runId: 'run_1', resultRevisionId: 'revision_1' });
+    }
+    if (method === 'POST' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('operation', operation('queued').data, 202);
+    if (method === 'GET' && url.endsWith('/repositories/repository_1/operations/operation_1')) {
+      deferred.pollStarted?.();
+      deferred.pollSignal = init.signal ?? null;
+      return delayedPoll;
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+  realApi(fetcher);
+  const view = mount('supported', null, null);
+  fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+  await started;
+  expect(fetcher).toHaveBeenCalledTimes(4);
+  view.unmount();
+  expect(deferred.pollSignal?.aborted).toBe(true);
+  deferred.releasePoll?.(apiResponse('operation', operation('completed').data));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  expect(fetcher).toHaveBeenCalledTimes(4);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(([url, init]) => init?.method !== 'POST' && requestUrl(url).endsWith(`/jobs/${jobId}/repositories`))).toHaveLength(1);
+  vi.unstubAllGlobals();
 });
 
 it('distinguishes sanitized repository-read failure classes without enabling initialization', async () => {
