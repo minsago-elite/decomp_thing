@@ -2184,6 +2184,30 @@ qualify production validation under #236, live providers, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Active repair cumulative regression-argument admission — 2026-11-12
+
+The cumulative active-ACP controls now also cover argument count across calls.
+The first call retains one argument; the second brings the aggregate to exactly
+three and reaches the injected validator. A third call adds one empty argument
+and is refused at four with the exact argument-limit diagnostic, before
+dispatch, validation, or run creation. Empty argument values keep retained
+input bytes below their separate ceiling, and the input-count limit has
+headroom. The assertion checks that the original two inputs and corpus digest
+remain retained and that the accepted source/head and pending state are
+unchanged.
+
+The focused count, byte, and argument cumulative tests passed with three tests
+and zero failures, errors, or skips. The retained [JUnit report](evidence/issue-734-active-repair-cumulative-regression-arguments-2026-11-12.xml)
+has SHA-256
+`e12289f415eb721a96c94ac5fddc1a24a6484f18448f51aedd1b041ad735a92d`; the
+[provenance record](evidence/issue-734-active-repair-cumulative-regression-arguments-2026-11-12.json)
+binds the exact source commit/tree, selectors, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Public reconstruction invalid-Unicode callback refusal — 2026-11-12
 
 The public Generated C Make reconstruction fixture now sends a lone UTF-16

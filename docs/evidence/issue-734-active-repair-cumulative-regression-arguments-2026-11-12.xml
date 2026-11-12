@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-11-12T09:27:38.461Z" hostname="whatsername" time="11.134">
+  <properties/>
+  <testcase name="active repair enforces cumulative retained regression byte limit across calls()" classname="decompengine.repair.TraceGuidedRepairTest" time="4.775"/>
+  <testcase name="active repair enforces cumulative retained regression argument limit across calls()" classname="decompengine.repair.TraceGuidedRepairTest" time="3.754"/>
+  <testcase name="active repair enforces cumulative retained regression input count across calls()" classname="decompengine.repair.TraceGuidedRepairTest" time="2.59"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
