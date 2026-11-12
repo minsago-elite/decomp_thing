@@ -105,6 +105,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-source-bytes-exact",
     "repair-active-declared-role-source-bytes-over",
     "repair-active-declared-role-indexed-entities",
+    "repair-active-declared-role-indexed-modules",
     "repair-active-declared-role-include-closure",
     "repair-active-declared-role-invalid-unicode-after-write",
     "repair-active-declared-role-read-limit-after-write",
@@ -323,6 +324,7 @@ expected_fs = {
     "repair-active-declared-role-source-bytes-exact": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-source-bytes-over": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-indexed-entities": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-indexed-modules": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-include-closure": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-invalid-unicode-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-read-limit-after-write": {"readTextFile": True, "writeTextFile": True},
@@ -1023,6 +1025,15 @@ if MODE == "repair-active-declared-role-candidate":
 if MODE == "repair-active-declared-role-indexed-entities":
     source = join_path(cwd, "src/modules/reconstructed.c")
     candidate = "/* indexed entity boundary candidate */\nint reconstructed_main(void) { return 1; }\n"
+    write_workspace_file(source, candidate, 153)
+    readback = read_workspace_file(source, 154)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(155)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-indexed-modules":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    candidate = "int reconstructed_value(void) { return 42; }\n"
     write_workspace_file(source, candidate, 153)
     readback = read_workspace_file(source, 154)
     if "error" in readback or readback.get("result", {}).get("content") != candidate:

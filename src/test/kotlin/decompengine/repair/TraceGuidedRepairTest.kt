@@ -5821,6 +5821,234 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair admits exact generated C indexed module count including fallback modules`() {
+        val targetPath = "src/modules/reconstructed.c"
+        val siblingPath = "src/modules/secondary.c"
+        val originalTarget = "int reconstructed_value(void) { return 41; }\n"
+        val candidateTarget = "int reconstructed_value(void) { return 42; }\n"
+        val siblingSource = "int secondary_value(void) { return 7; }\n"
+
+        fun budget(moduleLimit: Int) = RepairResourceBudget(
+            maximumIndexedModules = moduleLimit,
+            maximumContextModules = 1,
+        )
+
+        fun project(prefix: String): Path {
+            val project = createRepairTempDirectory(prefix).resolve("project")
+            project.resolve("src/modules").createDirectories()
+            project.resolve("reports").createDirectories()
+            project.resolve("Makefile").writeText(
+                "CC ?= cc\nall:\n\t\$(CC) -c $targetPath -o build/reconstructed.o\n",
+            )
+            project.resolve(targetPath).writeText(originalTarget)
+            project.resolve(siblingPath).writeText(siblingSource)
+            assertFalse(project.resolve("reports/module_plan.json").exists())
+            assertFalse(project.resolve("reports/program_model.json").exists())
+            return project
+        }
+
+        fun runScenario(moduleLimit: Int, exact: Boolean) {
+            val project = project(
+                if (exact) "repair-active-indexed-modules-exact-" else "repair-active-indexed-modules-under-",
+            )
+            val resolved = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget())
+            assertTrue(resolved.modules.isEmpty(), "fixture must use fallback module mappings")
+            assertEquals(setOf(targetPath, siblingPath), resolved.fallbackModuleIdsByPath.keys)
+            assertEquals(2, resolved.fallbackModuleIdsByPath.values.toSet().size)
+            assertTrue(targetPath in resolved.editablePaths)
+            assertTrue(siblingPath in resolved.sourcePaths)
+            assertEquals(listOf("Makefile", targetPath, siblingPath), resolved.sourcePaths)
+            val acceptedSources = resolved.sourcePaths.associateWith { project.resolve(it).readBytes() }
+            val repairBudget = budget(moduleLimit)
+            val baseline = if (exact) {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, repairBudget).use { it.snapshot }
+            } else null
+
+            val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-indexed-modules")
+            var dispatches = 0
+            var capturedReceipt: AgentExecutionReceipt? = null
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    dispatches++
+                    return acp.execute(request, onEvent)
+                }
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    dispatches++
+                    return acp.executeCaptured(request, initialFiles, output, onEvent)
+                }
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    return acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+                }
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    val authority = assertNotNull(request.accessPolicy.mutationAuthority)
+                    val grant = authority.grants.single { it.path.relativePath == targetPath }
+                    assertEquals(setOf(AgentOperation.WRITE_FILE), grant.operations)
+                    assertFalse(authority.grants.any { it.path.relativePath == siblingPath })
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                        .also { capturedReceipt = it }
+                }
+            }
+
+            var validationCalls = 0
+            val validationStop = IllegalStateException("indexed module equality reached candidate validator")
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    assertEquals(acceptedSources.keys, request.candidateSources.keys)
+                    acceptedSources.forEach { (path, beforeBytes) ->
+                        assertContentEquals(
+                            if (path == targetPath) candidateTarget.toByteArray(Charsets.UTF_8) else beforeBytes,
+                            request.candidateSources.getValue(path),
+                            path,
+                        )
+                    }
+                    assertEquals(baseline!!.indexSha256, request.indexSha256)
+                    assertEquals(
+                        GeneratedCRepairIndexProfile.configurationSha256(repairBudget),
+                        request.profileSha256,
+                    )
+                    assertEquals(
+                        repairCandidateSourceSha256(request.candidateSources),
+                        request.sourceRevisionSha256,
+                    )
+                    throw validationStop
+                }
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("indexed module admission test must use immutable candidate validation")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("indexed module admission test must use immutable candidate validation")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport =
+                    error("indexed module admission test must use immutable candidate validation")
+            }
+            val historyPath = project.resolve("reports/repair_history.json")
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = RepairHistory(historyPath),
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = repairBudget,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+            try {
+                if (exact) {
+                    val failure = assertFailsWith<IllegalStateException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertSame(validationStop, failure)
+                    assertEquals(1, dispatches)
+                    assertEquals(1, validationCalls)
+                    val receipt = assertNotNull(capturedReceipt)
+                    val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+                    assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, evidence.phaseReached)
+                    assertEquals(AcpExecutionCleanupDisposition.VERIFIED, evidence.cleanupDisposition)
+                    assertNotNull(evidence.completeExecutionEvidence)
+                    val result = assertIs<AgentExecutionOutcome.Returned>(receipt.outcome).result
+                    assertEquals(AgentStopReason.COMPLETED, result.stopReason)
+                    val change = result.changes.single()
+                    assertEquals(targetPath, change.path.relativePath)
+                    assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+                    assertEquals(sha256(acceptedSources.getValue(targetPath)), change.beforeSha256)
+                    assertEquals(sha256(candidateTarget.toByteArray(Charsets.UTF_8)), change.afterSha256)
+                    assertEquals(candidateTarget.toByteArray(Charsets.UTF_8).size.toLong(), change.sizeBytes)
+                    assertEquals(2, evidence.filesystemAudit.size)
+                    assertTrue(evidence.filesystemAudit.all {
+                        it.outcome == decompengine.acp.AcpFilesystemAuditOutcome.ALLOWED &&
+                            it.reason == decompengine.acp.AcpFilesystemAuditReason.COMPLETED
+                    })
+                    acceptedSources.forEach { (path, bytes) ->
+                        assertContentEquals(bytes, project.resolve(path).readBytes(), path)
+                    }
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, repairBudget).use { graph ->
+                        assertNull(graph.snapshot.pendingAttemptId)
+                        assertEquals(baseline!!.headId, graph.snapshot.headId)
+                        assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                        assertEquals(1, graph.snapshot.runs.size)
+                    }
+                } else {
+                    val failure = assertFailsWith<RepairBudgetExceededException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertEquals("repair index has 2 modules; limit=1", failure.message)
+                    assertEquals(0, dispatches)
+                    assertEquals(0, validationCalls)
+                    acceptedSources.forEach { (path, bytes) ->
+                        assertContentEquals(bytes, project.resolve(path).readBytes(), path)
+                    }
+                    assertFalse(historyPath.exists())
+                    val graphPath = project.resolve("reports/repair-revisions/graph.json")
+                    if (graphPath.exists()) {
+                        val state = Json.parseToJsonElement(graphPath.readText()).jsonObject
+                        assertEquals(JsonNull, state.getValue("pending"))
+                        assertTrue(state.getValue("nodes").jsonArray.isEmpty())
+                        assertTrue(state.getValue("runs").jsonArray.isEmpty())
+                    }
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget(2)).use { graph ->
+                        assertNull(graph.snapshot.pendingAttemptId)
+                        assertEquals(1, graph.snapshot.nodes.size)
+                        assertEquals(ModuleRevisionStatus.ROOT, graph.snapshot.nodes.single().status)
+                        assertTrue(graph.snapshot.runs.isEmpty())
+                    }
+                }
+            } finally {
+                loop.close()
+            }
+        }
+
+        runScenario(moduleLimit = 2, exact = true)
+        runScenario(moduleLimit = 1, exact = false)
+    }
+
+    @Test
     @org.junit.jupiter.api.Timeout(value = 180, unit = TimeUnit.SECONDS)
     fun `active ACP repair bounds the complete candidate source tree including an unselected sibling`() {
         val targetPath = "src/modules/reconstructed.c"
