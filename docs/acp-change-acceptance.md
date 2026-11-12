@@ -2159,6 +2159,33 @@ qualify production validation under #236, live providers, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Active repair stored-blob byte admission — 2026-11-12
+
+A paired active-repair test exercises the revision graph's aggregate stored-blob
+ceiling after a scripted ACP agent has acknowledged both an implementation
+write and its readback. The baseline graph has 485 unique stored bytes. A
+4,096-byte replacement is admitted at the exact 4,581-byte ceiling and reaches
+the injected candidate validator. A separate 4,097-byte replacement is also
+accepted by the per-file, patch, staging, and ACP callback budgets, then refused
+by graph admission at 4,582 bytes. The overflow run is retained as
+`RESOURCE_EXHAUSTED`; its receipt is bound to the observed modification, while
+the assessment records that validation did not run. Both cases preserve
+accepted source/head and leave no pending attempt. The graph reopens with exact
+stored-byte accounting; the over-limit candidate blob is absent and every
+baseline blob remains.
+
+The focused scripted-ACP test passed with one test and zero failures, errors,
+or skips. The retained [JUnit report](evidence/issue-734-active-repair-stored-blob-boundary-2026-11-12.xml)
+has SHA-256
+`2a0989b5fabb35fa9164164b8f8077b7c23ffad9cf4dd1fd47d7bac4ae517535`; the
+[provenance record](evidence/issue-734-active-repair-stored-blob-boundary-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Active repair cumulative regression-input byte admission — 2026-11-12
 
 The paired cumulative controls use one project and retained corpus across
