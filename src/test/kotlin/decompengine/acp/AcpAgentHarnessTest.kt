@@ -1562,6 +1562,64 @@ class AcpAgentHarnessTest {
         var acceptedMetadata = capturePublishedMetadata(output)
         assertEquals(false, successful.implementationExistedAtDispatch)
 
+        val invalidUnicode = runAttempt(
+            "reconstruction-invalid-unicode-after-write",
+            index = 32,
+            outputPath = fixture.resolve("invalid-unicode-output"),
+        )
+        assertNull(invalidUnicode.failure, "invalid Unicode must be refused without discarding the valid candidate")
+        assertEquals(1, invalidUnicode.taskCount)
+        assertEquals(1, invalidUnicode.receipts.size)
+        val invalidUnicodeResult = assertNotNull(invalidUnicode.result)
+        assertEquals(0, invalidUnicodeResult.build.returnCode)
+        assertTrue(requireNotNull(invalidUnicodeResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        val invalidUnicodeReceipt = invalidUnicode.receipts.single()
+        assertEquals(
+            invalidUnicode.requestSha256s.single(),
+            invalidUnicodeReceipt.requestBinding.requestSha256,
+        )
+        val invalidUnicodeExecution = invalidUnicodeReceipt.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, invalidUnicodeExecution.stopReason)
+        assertEquals(1, invalidUnicodeExecution.changes.size)
+        val invalidUnicodeChange = invalidUnicodeExecution.changes.single()
+        assertEquals(implementationPath, invalidUnicodeChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, invalidUnicodeChange.kind)
+        assertNull(invalidUnicodeChange.beforeSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), invalidUnicodeChange.sizeBytes)
+        assertEquals(sha256(expectedCreatedSource), invalidUnicodeChange.afterSha256)
+        assertContentEquals(
+            expectedCreatedSource,
+            Files.readAllBytes(invalidUnicodeResult.projectDir.resolve(implementationPath)),
+        )
+        val invalidUnicodeAudit = invalidUnicode.harness.latestFilesystemAudit()
+        assertEquals(8, invalidUnicodeAudit.size, invalidUnicodeAudit.toString())
+        assertTrue(invalidUnicodeAudit.take(5).all {
+            it.method == "fs/read_text_file" && it.outcome == AcpFilesystemAuditOutcome.DENIED &&
+                it.reason == AcpFilesystemAuditReason.CAPABILITY_DISABLED
+        }, invalidUnicodeAudit.toString())
+        assertEquals("Makefile", assertNotNull(invalidUnicodeAudit[5].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, invalidUnicodeAudit[5].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, invalidUnicodeAudit[5].reason)
+        assertEquals(implementationPath, assertNotNull(invalidUnicodeAudit[6].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, invalidUnicodeAudit[6].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, invalidUnicodeAudit[6].reason)
+        assertEquals(implementationPath, assertNotNull(invalidUnicodeAudit[7].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, invalidUnicodeAudit[7].outcome)
+        assertEquals(AcpFilesystemAuditReason.INVALID_TEXT, invalidUnicodeAudit[7].reason)
+        val invalidUnicodeExtracted = fixture.resolve("verified-invalid-unicode")
+        ArchivalBundleVerifier.extractAndVerify(
+            invalidUnicodeResult.bundle.archivePath,
+            invalidUnicodeExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(invalidUnicodeExtracted.resolve(implementationPath)))
+        assertContentEquals(
+            expectedCreatedSource,
+            Files.readAllBytes(fixture.resolve("invalid-unicode-output/source-tree").resolve(implementationPath)),
+        )
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(invalidUnicodeExtracted, profile).returnCode)
+        assertNoReconstructionPublicationResidue(fixture.resolve("invalid-unicode-output"))
+
         val exactSourceBoundary = runAttempt(
             "reconstruction-exact-source-byte-boundary",
             index = 18,
