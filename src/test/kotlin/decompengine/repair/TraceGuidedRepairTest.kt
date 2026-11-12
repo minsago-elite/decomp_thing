@@ -6462,8 +6462,9 @@ class TraceGuidedRepairTest {
             assertEquals(sha256(secondExact), change.getValue("afterSha256").jsonPrimitive.content)
             assertEquals(secondExact.size.toLong(), change.getValue("sizeBytes").jsonPrimitive.content.toLong())
 
-            val records = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
-                .getValue("records").jsonArray.map { it.jsonObject }
+            val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
+            assertEquals(13, filesystem.getValue("recordCount").jsonPrimitive.int)
+            val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
             assertEquals(13, records.size)
             assertEquals(
                 listOf("write", "write", "write", "read", "read", "write", "write", "write", "read", "write", "write", "read", "read")
