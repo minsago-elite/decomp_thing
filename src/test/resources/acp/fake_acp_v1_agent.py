@@ -828,8 +828,9 @@ if MODE in (
         "/* delayed tool-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
         148,
     )
-    # Exceed the host tool-call ceiling, then hold the final response until the host
-    # acknowledges cancellation. The receipt must retain the usage arriving in this race.
+    # Exceed the host tool-call ceiling. The delayed-response mode waits for the host's
+    # cancellation notification before sending final usage, so only a live response drain
+    # can retain these counters.
     for ordinal in range(2):
         update({
             "sessionUpdate": "tool_call",
@@ -839,16 +840,21 @@ if MODE in (
             "status": "completed",
         })
     if MODE == "repair-active-declared-role-tool-limit-delayed-response-after-write":
-        time.sleep(0.05)
-        respond(prompt, {
-            "stopReason": "end_turn",
-            "usage": {
-                "inputTokens": 11,
-                "outputTokens": 7,
-                "totalTokens": 18,
-                "cachedReadTokens": 3,
-            },
-        })
+        while True:
+            message = read_message()
+            if message is None:
+                raise SystemExit(0)
+            if message.get("method") == "session/cancel":
+                respond(prompt, {
+                    "stopReason": "end_turn",
+                    "usage": {
+                        "inputTokens": 11,
+                        "outputTokens": 7,
+                        "totalTokens": 18,
+                        "cachedReadTokens": 3,
+                    },
+                })
+                raise SystemExit(0)
     while True:
         message = read_message()
         if message is None:

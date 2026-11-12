@@ -1744,11 +1744,7 @@ class TraceGuidedRepairTest {
         )
         val harness = AcpAgentHarnessTest().harness(
             "repair-active-declared-role-tool-limit-delayed-response-after-write",
-        ).withToolLimitResponseGateForTesting { promptJob ->
-            // This gate is reached only after the host snapshots tool exhaustion. Holding
-            // cancellation until the delayed response completes reproduces the stale snapshot.
-            withTimeout(5_000) { promptJob.join() }
-        }
+        )
 
         val failure = assertFailsWith<Exception> {
             generatedCRepairLoop(

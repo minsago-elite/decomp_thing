@@ -136,7 +136,6 @@ class AcpAgentHarness(
     private var configuredWorkspaceSnapshotLimits = WorkspaceSnapshotLimits()
     private var workspaceSnapshotLimitsFrozen = false
     private val promptLoopGateForTesting = AtomicReference<(suspend (Job) -> Unit)?>(null)
-    private val toolLimitResponseGateForTesting = AtomicReference<(suspend (Job) -> Unit)?>(null)
     private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
     private val latestDiagnosticsReference = AtomicReference<AcpProcessDiagnostics?>()
@@ -157,13 +156,6 @@ class AcpAgentHarness(
     /** Internal-only barrier for deterministic prompt-completion ordering tests. */
     internal fun withPromptLoopGateForTesting(gate: suspend (Job) -> Unit): AcpAgentHarness = apply {
         check(promptLoopGateForTesting.compareAndSet(null, gate)) { "prompt loop test gate is already configured" }
-    }
-
-    /** Internal-only barrier after host tool exhaustion is observed and before cancellation. */
-    internal fun withToolLimitResponseGateForTesting(gate: suspend (Job) -> Unit): AcpAgentHarness = apply {
-        check(toolLimitResponseGateForTesting.compareAndSet(null, gate)) {
-            "tool-limit response gate is already configured"
-        }
     }
 
     private fun freezeWorkspaceSnapshotLimits(): WorkspaceSnapshotLimits = synchronized(workspaceSnapshotLimitsLock) {
@@ -1543,7 +1535,6 @@ class AcpAgentHarness(
                 throw callbackFailure
             }
             exhaustedOutcome()?.let { exhausted ->
-                toolLimitResponseGateForTesting.getAndSet(null)?.invoke(promptJob)
                 cancelPrompt(session, promptJob, operationScope)
                 // A peer may deliver its final response while acknowledging cancellation.
                 // Re-read after the bounded drain so available usage is retained, while a
@@ -1613,8 +1604,15 @@ class AcpAgentHarness(
             }
         }
         cancelJob.cancel()
-        promptJob.cancel()
-        awaitWithin(promptJob, deadline)
+        // Keep collecting until the cancellation grace expires. Some peers send their final
+        // prompt response (including usage) only after they receive session/cancel. Cancelling
+        // the collector first loses that response and can misclassify tool exhaustion as a
+        // missing-token-usage protocol failure.
+        if (promptJob.isActive) awaitWithin(promptJob, deadline)
+        if (promptJob.isActive) {
+            promptJob.cancel()
+            awaitWithin(promptJob, deadline)
+        }
     }
 
     private suspend fun awaitWithin(job: Job, deadline: MonotonicDeadline) {
