@@ -1288,6 +1288,11 @@ class AcpAgentHarnessTest {
         val output = fixture.resolve("output")
         val implementationPath = profile.layout.declaration("module-implementation")
             .materialize(mapOf("module" to "decomp"))
+        val expectedCreatedSource = (
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+            ).toByteArray(Charsets.UTF_8)
 
         data class Attempt(
             val result: ArchivalReconstructionResult?,
@@ -1467,7 +1472,13 @@ class AcpAgentHarnessTest {
         val change = execution.changes.single()
         assertEquals(implementationPath, change.path.relativePath)
         assertEquals(AgentFileChangeKind.CREATED, change.kind)
-        assertEquals(Files.size(result.projectDir.resolve(implementationPath)), change.sizeBytes)
+        assertNull(change.beforeSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), change.sizeBytes)
+        assertEquals(sha256(expectedCreatedSource), change.afterSha256)
+        assertContentEquals(
+            expectedCreatedSource,
+            Files.readAllBytes(result.projectDir.resolve(implementationPath)),
+        )
 
         val audit = successful.harness.latestFilesystemAudit()
         assertEquals(9, audit.size, audit.toString())
@@ -1491,6 +1502,9 @@ class AcpAgentHarnessTest {
         val extracted = fixture.resolve("verified-success")
         ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
         assertFalse(extracted.resolve("src/modules/decomp_extra.c").exists())
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(extracted.resolve(implementationPath)))
+        assertEquals(sha256(expectedCreatedSource), sha256(Files.readAllBytes(extracted.resolve(implementationPath))))
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(output.resolve("source-tree").resolve(implementationPath)))
         var acceptedMetadata = capturePublishedMetadata(output)
         assertEquals(false, successful.implementationExistedAtDispatch)
 
@@ -2127,11 +2141,6 @@ class AcpAgentHarnessTest {
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactExtracted, profile).returnCode)
         assertNoReconstructionPublicationResidue(output)
 
-        val expectedCreatedSource = (
-            "#include \"modules/decomp.h\"\n" +
-                "/* fn_0000000000001000 */\n" +
-                "int decomp_engine_main(void) { return 0; }\n"
-            ).toByteArray(Charsets.UTF_8)
         val previouslyPublishedMakefile = Files.readAllBytes(output.resolve("source-tree/Makefile"))
         val previouslyPublishedHeader = Files.readAllBytes(output.resolve("source-tree/include/modules/decomp.h"))
         val terminalMutation = runAttempt("reconstruction-terminal-mutation-refusal-disabled", index = 20)
