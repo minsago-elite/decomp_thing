@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -17,7 +17,19 @@ const responses = ['assets/index-a.js', 'assets/index-a.css', 'assets/Home-a.js'
 const stop = { key: 1, heading: false, target: 'button "Refresh"', focusVisible: true, outlineStyle: 'solid', outlineWidth: 3, contrast: 5.1, inViewport: true, unobscured: true };
 function timingEvidence(cold = 400, feedback = 40, data = 90) {
   return { coldLoad: { samples: 20, median: cold, p95: cold }, routeFeedback: { samples: 50, median: feedback, p95: feedback },
-    routeData: { samples: 50, median: data, p95: data }, raw: { cold: Array(20).fill(cold), feedback: Array(50).fill(feedback), data: Array(50).fill(data) } };
+    routeData: { samples: 50, median: data, p95: data }, filterFeedback: { samples: 50, median: 35, p95: 35 },
+    filterData: { samples: 50, median: 80, p95: 80 }, raw: { cold: Array(20).fill(cold), feedback: Array(50).fill(feedback),
+      data: Array(50).fill(data), filterFeedback: Array(50).fill(35), filterData: Array(50).fill(80) } };
+}
+function jobFilterEvidence() {
+  return { ...jobFilterContract, samples: Array.from({ length: 50 }, (_, sample) => {
+    const filtered = sample % 2 === 0;
+    const query = filtered ? jobFilterContract.filteredQuery : jobFilterContract.unfilteredQuery;
+    const pageSearch = filtered ? `?search=${jobFilterContract.value}` : '';
+    const request = { method: 'GET', path: '/jobs', status: 200, query };
+    return { sample, direction: filtered ? 'filtered' : 'cleared', query, pageSearch, feedbackMs: 35, dataMs: 80,
+      feedbackSignal: 'loading', requestStartIndex: sample, requestEndIndex: sample + 1, requestIndex: sample, request };
+  }) };
 }
 function clean() {
   const fixtures = auditFixtures(repo, manifest.buildId);
@@ -32,6 +44,8 @@ function clean() {
     focus: fixtures.pages.flatMap(({ name: page }) => ['light', 'dark'].map(scheme => ({ page, scheme,
       stops: [{ ...stop }, { ...stop, key: 2 }, { ...stop, key: 3 }] }))),
     unmapped: [],
+    fulfilled: jobFilterEvidence().samples.map(sample => ({ ...sample.request })),
+    jobFilter: jobFilterEvidence(),
     workers: { highlightedTokens: 12, targets: [{ url: `${base}assets/highlight.worker-a.js`, responses: [{ url: `${base}assets/highlight.worker-a.js`, status: 200 }] }] },
     timing: timingEvidence(),
     connectionNotice: connectionEvidence(),
@@ -80,7 +94,10 @@ test('rejects absent, empty, partial, duplicate and unexpected measurement matri
   }
   const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = [];
   empty.timing = { coldLoad: { p95: null }, routeFeedback: { p95: null }, routeData: { p95: null } };
-  assert.equal(verdict(empty).length, 6, 'the independently reproduced empty/null report must fail');
+  const emptyFailures = verdict(empty).join('\n');
+  for (const timing of ['cold dashboard', 'route feedback', 'route data', 'job filter feedback', 'job filter first data'])
+    assert.match(emptyFailures, new RegExp(`${timing}: invalid timing evidence`));
+  assert.match(emptyFailures, /job filter: feedback: requires 50 finite nonnegative raw samples/);
 });
 
 test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
@@ -111,10 +128,10 @@ test('requires finite, complete timing samples and consistent summaries before b
   }
   for (const timing of [undefined, null, {}]) {
     const audit = clean(); audit.timing = timing;
-    assert.equal(verdict(audit).length, 3);
+    assert.equal(verdict(audit).length, 7);
   }
   const noRaw = clean(); delete noRaw.timing.raw;
-  assert.equal(verdict(noRaw).length, 3);
+  assert.equal(verdict(noRaw).length, 7);
 });
 
 test('reports page-wide horizontal scrolling, clipped actions and small targets', () => {
@@ -165,7 +182,54 @@ test('requires every declared script/style and the worker to resolve under the b
 test('enforces the documented loopback timing budgets', () => {
   const audit = clean();
   audit.timing = timingEvidence(1600, 101, 501);
-  assert.equal(verdict(audit).length, 3);
+  audit.timing.filterFeedback = { samples: 50, median: 101, p95: 101 };
+  audit.timing.filterData = { samples: 50, median: 501, p95: 501 };
+  audit.timing.raw.filterFeedback.fill(101);
+  audit.timing.raw.filterData.fill(501);
+  audit.jobFilter.samples.forEach(sample => { sample.feedbackMs = 101; sample.dataMs = 501; });
+  assert.equal(verdict(audit).length, 5);
+});
+
+test('job filter evidence binds 50 alternating actions to fulfilled requests and raw summaries', () => {
+  assert.deepEqual(verdict(clean()), []);
+  for (const mutate of [
+    audit => { audit.jobFilter = undefined; },
+    audit => { delete audit.jobFilter.samples; },
+    audit => { audit.jobFilter.samples.pop(); },
+    audit => { audit.jobFilter.samples.push(structuredClone(audit.jobFilter.samples.at(-1))); },
+    audit => { audit.jobFilter.samples[0].direction = 'cleared'; },
+    audit => { audit.jobFilter.samples[1].query = jobFilterContract.filteredQuery; },
+    audit => { audit.jobFilter.samples[0].pageSearch = '?search=wrong'; },
+    audit => { audit.jobFilter.samples[0].feedbackMs = NaN; },
+    audit => { audit.jobFilter.samples[0].dataMs = Infinity; },
+    audit => { audit.jobFilter.samples[0].dataMs = 20; },
+    audit => { audit.jobFilter.samples[0].feedbackSignal = 'unknown'; },
+    audit => { audit.jobFilter.samples[0].feedbackSignal = 'data'; },
+    audit => { audit.jobFilter.samples[0].requestIndex = 1; },
+    audit => { audit.jobFilter.samples[0].requestStartIndex = -1; },
+    audit => { audit.jobFilter.samples[0].requestEndIndex = 0; },
+    audit => { audit.fulfilled[0].status = 404; },
+    audit => { audit.fulfilled[0].query = jobFilterContract.unfilteredQuery; },
+    audit => { audit.timing.raw.filterFeedback[0] = 99; },
+    audit => { audit.jobFilter.filteredQuery = 'search=forged&limit=50'; },
+  ]) {
+    const audit = clean(); mutate(audit);
+    assert.match(verdict(audit).join('\n'), /job filter:/);
+  }
+  for (const [field, value] of [['samples', 49], ['p95', null], ['median', Infinity]]) {
+    const audit = clean(); audit.timing.filterData[field] = value;
+    assert.match(verdict(audit).join('\n'), /job filter first data: invalid timing evidence/);
+  }
+  const forgedSummary = clean(); forgedSummary.timing.filterFeedback.p95 = 36;
+  assert.match(verdict(forgedSummary).join('\n'), /job filter feedback: timing summary does not match raw samples/);
+  const coincidentDataFeedback = clean();
+  coincidentDataFeedback.jobFilter.samples[0].feedbackSignal = 'data';
+  coincidentDataFeedback.jobFilter.samples[0].feedbackMs = 80;
+  coincidentDataFeedback.timing.raw.filterFeedback[0] = 80;
+  coincidentDataFeedback.timing.raw.filterData[0] = 80;
+  assert.deepEqual(verdict(coincidentDataFeedback), [], 'rendered data can serve as feedback when it arrives in the first observed frame');
+  const invalidBudget = assertAudit(clean(), manifest, responses, origin, { filterFeedbackP95: null }).failures.join('\n');
+  assert.match(invalidBudget, /job filter feedback: invalid timing budget/);
 });
 
 test('reports API reads the fixture set does not cover', () => {
@@ -179,6 +243,16 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   assert.equal(new Set(fixtures.pages.map((page) => page.path)).size, fixtures.pages.length);
   const job = fixtures.respond('GET', `/jobs/${fixtures.pages[3].path.split('/').at(-1)}`, 'application/json').document;
   assert.equal(job.data.displayFilename.length, 255);
+  const allJobs = fixtures.respond('GET', '/jobs', 'application/json', fixtures.jobFilter.unfilteredQuery);
+  const filteredJobs = fixtures.respond('GET', '/jobs', 'application/json', fixtures.jobFilter.filteredQuery);
+  assert.equal(allJobs.status, 200);
+  assert.equal(filteredJobs.status, 200);
+  assert.deepEqual(allJobs.document.data.items.map(item => item.displayFilename), [fixtures.jobFilter.unfilteredRendered]);
+  assert.deepEqual(filteredJobs.document.data.items.map(item => item.displayFilename), [fixtures.jobFilter.filteredRendered]);
+  assert.notEqual(allJobs.document.data.items[0].jobId, filteredJobs.document.data.items[0].jobId);
+  assert.equal(filteredJobs.document.data.items[0].jobId, fixtures.jobFilter.filteredJobId);
+  assert.notDeepEqual(allJobs.document.data.items, filteredJobs.document.data.items);
+  assert.equal(fixtures.respond('GET', '/jobs', 'application/json', 'search=unexpected&limit=50').status, 404);
   const searchForm = fixtures.pages.find((page) => page.name === 'source search form');
   const searchResults = fixtures.pages.find((page) => page.name === 'source search results');
   assert.ok(searchForm && searchResults);
@@ -536,8 +610,8 @@ test('connection notice evidence fails closed when missing, misbound, mis-ordere
   fails(c => { delete c.restoration; }, /cleanup/);
   assert.deepEqual(connectionNoticeFailures(connectionEvidence()), []);
   const engine = clean(); delete engine.connectionNotice;
-  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined, { connectionNotice: false }).failures, [],
-    'only the explicit cross-engine opt-out skips Chrome connection evidence');
+  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined, { connectionNotice: false, jobFilter: false }).failures, [],
+    'cross-engine audits explicitly opt out of Chrome-only connection and filter evidence');
   assert.match(assertAudit(engine, manifest, responses, origin, undefined, {}).failures.join('\n'), /missing evidence/);
 });
 
