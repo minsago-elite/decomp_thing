@@ -1631,6 +1631,33 @@ providers, ACP delete/move operations, successful production validation under
 #236, hosted exact-head CI, or complete #734/#63 acceptance. Keep #734 and #63
 open.
 
+## Active reconstruction binds receipt changes to observed bytes — 2026-11-12
+
+Source commit `71233bb5502ee9c0b54550e6ec12b2c4e3caa770` strengthens the
+successful public Make reconstruction case. The host-produced `CREATED` change
+must have no preimage digest, an `afterSha256` matching the expected source, and
+the matching byte size. The test also compares the reconstructed project, the
+published `source-tree`, and the verified extracted archive with those same
+bytes; the admitted reconstruction must build successfully with no unresolved
+entities.
+
+ACP does not accept agent-declared change claims on this path: the host derives
+the receipt change set from its initial and final workspace snapshots. The
+relevant active-path check is therefore that this observed receipt is bound to
+the bytes actually reconstructed and published, rather than a fabricated
+agent-supplied `CREATED`/`DELETED` claim.
+
+The focused local scripted-ACP run passed one JUnit method with zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-change-bytes-2026-11-12.xml)
+has SHA-256 `d03fab755f1da9ade0d967ac4710c2c12791caffcc1d45241042aa7f22bf7def`;
+the [provenance record](evidence/issue-734-public-reconstruction-change-bytes-2026-11-12.json)
+binds the exact source tree and command.
+
+This is local scripted evidence for Generated C Make. It does not qualify live
+providers, other profiles, hosted exact-head CI, production validation under
+#236, publication crash recovery under #732, durable provenance under #733, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Captured repair deletion patch-count boundary — 2026-11-11
 
 Source commit `add817e0ab90be33dbc5b98a9345d7cc20b99ebf` adds a focused

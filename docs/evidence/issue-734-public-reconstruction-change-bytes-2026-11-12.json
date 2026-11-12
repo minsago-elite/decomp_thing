@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "71233bb5502ee9c0b54550e6ec12b2c4e3caa770",
+  "sourceParent": "8a3c4736b787ed6163bfcc17f6795a26df3d48e2",
+  "sourceTree": "6fb88fdd1e83ca49c34aca2a13c92d01f8957c98",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x buildAnalysisIoHelper --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 66.766,
+    "suiteSeconds": 66.781,
+    "timestamp": "2026-11-12T06:49:16.819Z",
+    "junitSha256": "d03fab755f1da9ade0d967ac4710c2c12791caffcc1d45241042aa7f22bf7def"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction profile",
+    "provider": "Scripted ACP process through the public ArchivalReconstructionService workflow",
+    "coverage": "The successful admitted attempt requires the host-produced CREATED change to have no preimage digest, an afterSha256 matching the exact expected source bytes, and sizeBytes equal to that source. The reconstructed project, published source-tree, and verified extracted archive must all contain those same bytes. Reconstruction returns a successful build and no unresolved entities. ACP change records are derived by the host from initial/final workspace snapshots; the protocol does not accept agent-declared change claims to forge on this path.",
+    "qualificationLimits": [
+      "local scripted ACP evidence for Generated C Make only",
+      "does not qualify live providers, other profiles, or hosted exact-head CI",
+      "does not replace production validation qualification under #236",
+      "does not qualify publication crash recovery or durable provenance under #732/#733",
+      "complete #734/#63 mutation and resource acceptance remains open"
+    ]
+  }
+}
