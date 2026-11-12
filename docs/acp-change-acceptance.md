@@ -2087,6 +2087,30 @@ binds the exact source commit/tree, selectors, command, and result. This remains
 local scripted-ACP evidence with injected validation, not #236 production
 qualification or completion of #734/#63.
 
+## Active repair invalid-Unicode callback refusal — 2026-11-12
+
+The active Generated C repair fixture writes an exact 4,096-byte multibyte
+candidate, then sends a lone UTF-16 surrogate through the ACP
+`fs/write_text_file` callback. The callback refuses the malformed text and
+records `DENIED/INVALID_TEXT`; an immediate ACP readback confirms the valid
+candidate is unchanged. The active repair loop then delivers the same
+candidate bytes to its receipt-bound injected validator. Receipt and assessment
+hashes, candidate digest, accepted source/head, rejected validation outcome,
+and cleared pending state are asserted.
+
+Five focused local scripted-ACP controls passed with zero failures, errors, or
+skips, including the existing patch-byte, filesystem read/write, and
+source-file grant retry tests. The retained [JUnit report](evidence/issue-734-active-repair-invalid-unicode-2026-11-12.xml)
+has SHA-256
+`373184a410650d849fc6e20afb84e91b641ab1be43ce4510633c01b3dabb7525`;
+the [provenance record](evidence/issue-734-active-repair-invalid-unicode-2026-11-12.json)
+binds the exact source commit/tree, selectors, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Public reconstruction invalid-Unicode callback refusal — 2026-11-12
 
 The public Generated C Make reconstruction fixture now sends a lone UTF-16
