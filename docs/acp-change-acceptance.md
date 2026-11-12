@@ -2257,6 +2257,29 @@ qualify production validation under #236, live providers, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Active repair cumulative UTF-8 regression-argument bytes — 2026-11-12
+
+A focused multi-call case makes argument-byte accounting explicit. Two
+successive ACP-backed calls retain `é` and `界` as arguments; their UTF-8
+payloads contribute two and three bytes, plus one byte for each input ID, for
+an exact seven-byte retained-corpus total. Both calls dispatch and reach the
+injected validator. A third distinct input with a one-byte argument raises
+the aggregate to nine bytes and is refused before another dispatch,
+validation call, or run. The test keeps stdin empty and the argument-count
+ceiling above the observed count, then verifies the accepted corpus and digest,
+source/head, and pending-attempt state remain unchanged.
+
+The focused scripted-ACP method passed with one test and zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-active-repair-cumulative-utf8-argument-bytes-2026-11-12.xml)
+has SHA-256 `00572efd487342cfae1c32d15c927c62dac96dc8f389c1c4fa6b5569e0fa9734`;
+the [provenance record](evidence/issue-734-active-repair-cumulative-utf8-argument-bytes-2026-11-12.json)
+binds the source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Active repair cumulative regression-argument admission — 2026-11-12
 
 The cumulative active-ACP controls now also cover argument count across calls.
