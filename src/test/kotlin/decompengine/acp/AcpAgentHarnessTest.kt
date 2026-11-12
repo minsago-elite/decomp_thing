@@ -1271,7 +1271,7 @@ class AcpAgentHarnessTest {
     }
 
     @Test
-    @Timeout(value = 120, unit = TimeUnit.SECONDS)
+    @Timeout(value = 180, unit = TimeUnit.SECONDS)
     fun `public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val maximumSourceBytes = 256L * 1024
@@ -1850,6 +1850,61 @@ class AcpAgentHarnessTest {
         // parents make initial entry-count refusal reachable. The workflow normally starts with
         // an absent target, so the one-shot snapshot hook seeds a target only for initial byte
         // ceiling cases; final byte ceilings separately cover candidate creation.
+        val seededImplementation = (
+            expectedCreatedSource.toString(Charsets.UTF_8) + "/* seeded initial snapshot headroom */\n"
+        ).toByteArray(Charsets.UTF_8)
+        for ((offset, dimension) in listOf("file-bytes", "total-bytes").withIndex()) {
+            val limits = when (dimension) {
+                "file-bytes" -> WorkspaceSnapshotLimits(fileBytes = seededImplementation.size.toLong())
+                "total-bytes" -> WorkspaceSnapshotLimits(totalBytes = seededImplementation.size.toLong())
+                else -> error("unexpected initial snapshot dimension: $dimension")
+            }
+            assertEquals(seededImplementation.size.toLong(), when (dimension) {
+                "file-bytes" -> limits.fileBytes
+                "total-bytes" -> limits.totalBytes
+                else -> error("unexpected initial snapshot dimension: $dimension")
+            })
+            val exactOutput = fixture.resolve("exact-initial-snapshot-$dimension-output")
+            val exactInitialSnapshot = runAttempt(
+                "reconstruction-mutation-grant",
+                index = 40 + offset,
+                maximumFrameBytes = 1024 * 1024,
+                snapshotLimits = limits,
+                seedExistingTarget = seededImplementation,
+                outputPath = exactOutput,
+            )
+            assertTrue(
+                exactInitialSnapshot.failure?.message.orEmpty()
+                    .contains("agent generation contains a rejected module"),
+                "$dimension equality must pass initial snapshot admission and reach downstream generation handling",
+            )
+            assertEquals(1, exactInitialSnapshot.taskCount)
+            assertEquals(1, exactInitialSnapshot.receipts.size)
+            assertEquals(true, exactInitialSnapshot.implementationExistedAtDispatch)
+            assertNull(exactInitialSnapshot.result, "the injected pre-existing target is refused by generation admission")
+            val exactInvocation = exactInitialSnapshot.receipts.single()
+            val exactEvidence = assertIs<AcpInvocationEvidenceSnapshot>(exactInvocation.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, exactEvidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, exactEvidence.cleanupDisposition)
+            assertNotNull(exactEvidence.completeExecutionEvidence)
+            val exactExecution = exactInitialSnapshot.receipts.single().requireResult()
+            assertEquals(AgentStopReason.COMPLETED, exactExecution.stopReason)
+            val exactChange = exactExecution.changes.single()
+            assertEquals(implementationPath, exactChange.path.relativePath)
+            assertEquals(AgentFileChangeKind.MODIFIED, exactChange.kind)
+            assertEquals(sha256(seededImplementation), exactChange.beforeSha256)
+            assertEquals(expectedCreatedSource.size.toLong(), exactChange.sizeBytes)
+            assertEquals(sha256(expectedCreatedSource), exactChange.afterSha256)
+            val exactWriteAudit = exactInitialSnapshot.harness.latestFilesystemAudit().single {
+                it.policyPath?.relativePath == implementationPath && it.outcome == AcpFilesystemAuditOutcome.ALLOWED
+            }
+            assertEquals(implementationPath, assertNotNull(exactWriteAudit.policyPath).relativePath)
+            assertEquals(AcpFilesystemAuditOutcome.ALLOWED, exactWriteAudit.outcome)
+            assertEquals(AcpFilesystemAuditReason.COMPLETED, exactWriteAudit.reason)
+            assertFalse(exactOutput.resolve("source-tree").exists())
+            assertNoReconstructionPublicationResidue(exactOutput)
+        }
+
         data class SnapshotLimitCase(
             val dimension: String,
             val limits: WorkspaceSnapshotLimits,
@@ -1858,7 +1913,6 @@ class AcpAgentHarnessTest {
             val mode: String,
             val seedExistingTarget: ByteArray? = null,
         )
-        val seededImplementation = "int decomp_engine_main(void) { return 0; }\n".toByteArray(Charsets.UTF_8)
         val snapshotLimitCases = listOf(
             SnapshotLimitCase(
                 "entry-count",
