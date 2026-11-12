@@ -1800,3 +1800,32 @@ binds the source commit, tree, focused command, and result.
 This is local scripted-provider evidence and uses an injected validation
 strategy; it does not qualify production validation under #236, live providers,
 hosted exact-head CI, or the complete #734/#63 matrix. Keep #734 and #63 open.
+
+## Active repair retained-regression count boundaries — 2026-11-12
+
+Source commit `a12ea50898a8b464fff187c738bcd6b03e36aaa2` adds an active-loop
+boundary pair for retained regression input count and argument count. The
+input-count case accepts exactly two inputs through scripted ACP and the
+receipt-bound compile-valid validator; a three-input corpus is refused with
+`retained regression corpus contains 3 inputs; limit=2` before dispatch or run
+creation. For argument count, two inputs with exactly three total arguments
+reach the same validator. The over-limit control keeps the input count at two,
+adds a fourth argument, and requires the exact diagnostic
+`retained regression corpus contains 4 arguments; limit=3`. Both dimensions
+use a 64-byte retained-input ceiling and a 64 KiB request ceiling, leaving
+headroom so the selected count limit decides admission. Rejection assertions
+require zero dispatches and validator calls, unchanged source and graph head,
+no new run or node, no pending attempt, and an empty retained corpus.
+
+The focused run passed the byte, input-count, and argument-count boundary
+methods: three tests with zero failures, errors, or skips. The retained
+[JUnit report](evidence/issue-734-active-repair-regression-counts-2026-11-12.xml)
+has SHA-256 `4cbcb5f8c0c002ef88bea8b55e7b2c2afc851444495db0e11380adce017c573e`;
+the [provenance record](evidence/issue-734-active-repair-regression-counts-2026-11-12.json)
+binds the exact source commit/tree, selectors, command, and result.
+
+This is local scripted-ACP evidence with an injected validator, not production
+validation under #236 or live-provider acceptance. Each over-limit control
+starts from a separate empty-corpus project, so cumulative growth across calls
+remains unqualified. Hosted exact-head CI, remaining resource limits, and the
+complete #734/#63 matrix remain open. Keep #734 and #63 open.
