@@ -3369,6 +3369,133 @@ class TraceGuidedRepairTest {
         }
     }
 
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair admits exact retained regression argument count and refuses one argument over before dispatch`() {
+        val exactInputs = listOf(
+            ProcessInput("a", args = listOf("x"), stdin = byteArrayOf(1)),
+            ProcessInput("b", args = listOf("y", "z"), stdin = byteArrayOf(2)),
+        )
+        val budget = RepairResourceBudget(
+            maximumRegressionInputs = exactInputs.size,
+            maximumRegressionArguments = 3,
+            maximumRegressionInputBytes = 64,
+            maximumRequestBytes = 64 * 1024,
+        )
+        activeAcpRepairConsumesReceiptBoundValidationResult(
+            compileValid = true,
+            regressionInputs = exactInputs,
+            resourceBudget = budget,
+        )
+
+        val project = createProject(
+            createRepairTempDirectory("repair-active-regression-argument-over-limit-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+        )
+        val sourcePath = "src/modules/reconstructed.c"
+        val source = project.resolve(sourcePath).readBytes()
+        val overInputs = listOf(exactInputs[0], exactInputs[1].copy(args = exactInputs[1].args + "w"))
+        val baseline = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            Triple(graph.snapshot.headId, graph.snapshot.nodes.size, graph.snapshot.runs.size)
+        }
+        var dispatches = 0
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("over-limit regression arguments must be refused before dispatch")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                dispatches++
+                error("over-limit regression arguments must be refused before dispatch")
+            }
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt {
+                dispatches++
+                error("over-limit regression arguments must be refused before dispatch")
+            }
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                turnIdentity: decompengine.agent.AgentTurnIdentity,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt {
+                dispatches++
+                error("over-limit regression arguments must be refused before dispatch")
+            }
+        }
+        var validationCalls = 0
+        val validation = object : RepairValidationStrategy {
+            override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+            override fun requireAvailable() = Unit
+            override fun validateCandidate(request: RepairCandidateValidationRequest): RepairCandidateValidationOutcome {
+                validationCalls++
+                error("over-limit regression arguments must be refused before validation")
+            }
+            override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                error("over-limit regression arguments must not reach compilation")
+            override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                error("over-limit regression arguments must not reach rebuilding")
+            override fun evaluateBehavior(
+                id: String,
+                projectDir: Path,
+                originalBinary: Path,
+                rebuiltBinary: Path,
+                inputs: List<ProcessInput>,
+                reportsDir: Path,
+                budget: RepairResourceBudget,
+            ): BehaviorComparisonReport = error("over-limit regression arguments must not reach behavior validation")
+        }
+        val loop = TestRepairRuntimeAccess.openLoop(
+            harness = harness,
+            history = RepairHistory(project.resolve("reports/repair_history.json")),
+            profile = GeneratedCRepairIndexProfile,
+            validationStrategy = validation,
+            stagingAuthority = CapturedRepairStagingAuthority,
+            limits = AgentExecutionLimits(),
+            cancellation = AgentCancellation.NONE,
+            onAgentEvent = {},
+            resourceBudget = budget,
+            allowTestOnlyValidation = false,
+            faultInjector = null,
+        )
+
+        try {
+            val failure = assertFailsWith<RepairBudgetExceededException> {
+                loop.repairCompileError(
+                    project,
+                    CompileFailure(listOf("cc"), 1, "", "$sourcePath: compiler error"),
+                    overInputs,
+                )
+            }
+            assertEquals("retained regression corpus contains 4 arguments; limit=3", failure.message)
+            assertEquals(0, dispatches)
+            assertEquals(0, validationCalls)
+            assertContentEquals(source, project.resolve(sourcePath).readBytes())
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId)
+                assertEquals(baseline.first, graph.snapshot.headId)
+                assertEquals(baseline.second, graph.snapshot.nodes.size)
+                assertEquals(baseline.third, graph.snapshot.runs.size, "admission fails before a repair run starts")
+                assertTrue(graph.retainedRegressionCorpus().inputs.isEmpty())
+            }
+        } finally {
+            loop.close()
+        }
+    }
+
     private fun activeAcpRepairConsumesReceiptBoundValidationResult(
         compileValid: Boolean,
         regressionInputs: List<ProcessInput> = emptyList(),
