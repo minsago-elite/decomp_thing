@@ -526,9 +526,11 @@ staging and acceptance path. Its benign fixtures attempt an unauthorized new
 source, attempt to delete the authorized target, and report canonical
 `CREATED`/`DELETED` changes after replacing an existing target. Each refusal
 retains the validator reason, leaves the accepted source byte-identical,
-creates no extra source, and leaves no pending graph attempt. This confirms
-that the active repair path applies its modification-only contract rather than
-relying only on standalone policy helpers.
+creates no extra source, and leaves no pending graph attempt. This case goes
+through the loop's captured staging and acceptance path with its test-only
+authority; it does not establish the declared-role policy through production
+ACP callbacks. The separate active ACP quota controls cover replacement-only
+declared-role writes.
 
 At implementation commit `7767e6074ce31d7b6680a18e797f481c212b7cfd`, a focused
 Gradle run passed 35 tests with no failures, errors, or skips:
@@ -2018,6 +2020,36 @@ The rerun passed one method with zero failures, errors, or skips. Its retained
 has SHA-256 `6ba74c900fa4818db3c2246ba8c54b34ae8c540a829ca9e9f0fc1681d480744f`;
 the [provenance record](evidence/issue-734-public-reconstruction-modified-grant-audit-rerun-2026-11-12.json)
 binds the exact test source and result.
+
+## Public reconstruction authority and existing-target snapshot refusals — 2026-11-12
+
+The active reconstruction test now inspects every dispatched request's
+mutation authority: it must be bound to the reconstruction owner, profile,
+declared implementation path, declaration roles, UTF-8 content kind, and
+256 KiB ceiling, with only `CREATE_FILE` and `WRITE_FILE` authority. The path
+rule must be non-recursive and must not grant deletion.
+
+Two host-side final-snapshot injections now follow a successful agent write to
+an existing implementation. Deleting the target is rejected with the
+path-specific `DELETE_FILE` authority failure; changing its POSIX mode is
+rejected as `file-metadata-changed`. Both receipts must show that the
+final-workspace snapshot was reached after verified process/sandbox cleanup,
+and that complete execution evidence is absent. The accepted publication
+metadata remains identical and no reconstruction transaction residue remains.
+These injections exercise host-observed final-state enforcement; they do not
+claim that the ACP agent can invoke delete or chmod operations.
+
+The focused local scripted-ACP method passed with zero failures, errors, or
+skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-existing-target-snapshot-refusals-2026-11-12.xml)
+has SHA-256 `c3b19e8ceb370fb5225fd9827f3bff872fb1278456628aac5526a2967b3d9155`;
+the [provenance record](evidence/issue-734-public-reconstruction-existing-target-snapshot-refusals-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted ACP evidence for Generated C Make and host-injected
+snapshot changes. It does not qualify live providers, production repair
+validation under #236, publication crash recovery under #732, durable
+provenance under #733, other profiles, hosted exact-head CI, or the full
+#734/#63 acceptance matrix. Keep #734 and #63 open.
 
 ## Active repair UTF-8 source-file grant boundary — 2026-11-12
 
