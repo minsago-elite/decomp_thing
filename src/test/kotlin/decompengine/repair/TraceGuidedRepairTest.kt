@@ -6317,60 +6317,86 @@ class TraceGuidedRepairTest {
     }
 
     @Test
-    fun `active repair path records staging directory admission refusal as resource exhaustion`() {
-        val project = createRepairTempDirectory("repair-active-directory-entry-limit-").resolve("project")
-        val sourcePath = "a/b/c/program.c"
-        project.resolve(sourcePath).parent.createDirectories()
-        val source = "int program(void) { return 1; }\n".toByteArray()
-        project.resolve(sourcePath).writeBytes(source)
-        val profile = DeclarativeRepairIndexProfile(
-            "deep-staging-path-v1",
-            RepairIndexLayout(sourcePaths = listOf(sourcePath), editablePaths = listOf(sourcePath)),
-        )
-        val budget = RepairResourceBudget(maximumStagingDirectories = 3)
-        val baselineHead = ModuleRevisionGraph.open(project, profile, budget).use { it.snapshot.headId }
-        val dispatches = AtomicInteger()
-        val harness = object : CapturedRepairAgentHarness {
-            override fun execute(
-                request: AgentExecutionRequest,
-                onEvent: (AgentExecutionEvent) -> Unit,
-            ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+    fun `active repair staging directory limit admits equality and refuses one fewer before dispatch`() {
+        fun runCase(limit: Int, expectDispatch: Boolean) {
+            val project = createRepairTempDirectory("repair-active-directory-entry-limit-").resolve("project")
+            val sourcePath = "a/b/c/program.c"
+            project.resolve(sourcePath).parent.createDirectories()
+            val source = "int program(void) { return 1; }\n".toByteArray()
+            project.resolve(sourcePath).writeBytes(source)
+            val profile = DeclarativeRepairIndexProfile(
+                "deep-staging-path-v1",
+                RepairIndexLayout(sourcePaths = listOf(sourcePath), editablePaths = listOf(sourcePath)),
+            )
+            val budget = RepairResourceBudget(maximumStagingDirectories = limit)
+            val baselineHead = ModuleRevisionGraph.open(project, profile, budget).use { it.snapshot.headId }
+            val dispatches = AtomicInteger()
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
 
-            override fun executeCaptured(
-                request: AgentExecutionRequest,
-                initialFiles: Map<String, ByteArray>,
-                output: BoundedRepairOutput,
-                onEvent: (AgentExecutionEvent) -> Unit,
-            ): AgentExecutionResult {
-                dispatches.incrementAndGet()
-                error("agent must not run when the staged directory count exceeds budget")
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    dispatches.incrementAndGet()
+                    assertEquals(setOf(sourcePath), initialFiles.keys)
+                    assertContentEquals(source, initialFiles.getValue(sourcePath))
+                    return AgentExecutionResult(AgentStopReason.NO_CHANGES)
+                }
+            }
+            val loop = TraceGuidedRepairLoop.forTesting(
+                harness,
+                RepairHistory(project.resolve("reports/repair_history.json")),
+                profile,
+                GeneratedCRepairValidationStrategy(TestOnlyGeneratedCRepairValidationBoundary),
+                CapturedRepairStagingAuthority,
+                resourceBudget = budget,
+            )
+
+            try {
+                if (expectDispatch) {
+                    val noChange = assertFailsWith<IllegalArgumentException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("cc"), 1, "", "$sourcePath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertTrue(noChange.message.orEmpty().contains("repair agent stopped with no_changes"))
+                } else {
+                    val refusal = assertFailsWith<RepairBudgetExceededException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("cc"), 1, "", "$sourcePath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertEquals("repair staging requires 4 directories; limit=3", refusal.message)
+                }
+            } finally {
+                loop.close()
+            }
+            assertEquals(if (expectDispatch) 1 else 0, dispatches.get())
+            assertContentEquals(source, project.resolve(sourcePath).readBytes())
+
+            ModuleRevisionGraph.open(project, profile, budget).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId)
+                assertEquals(baselineHead, graph.snapshot.headId)
+                assertEquals(2, graph.snapshot.nodes.size)
+                assertEquals(
+                    if (expectDispatch) RepairRunStatus.NO_CHANGES else RepairRunStatus.RESOURCE_EXHAUSTED,
+                    graph.snapshot.runs.last().status,
+                )
             }
         }
-        val loop = TraceGuidedRepairLoop.forTesting(
-            harness,
-            RepairHistory(project.resolve("reports/repair_history.json")),
-            profile,
-            GeneratedCRepairValidationStrategy(TestOnlyGeneratedCRepairValidationBoundary),
-            CapturedRepairStagingAuthority,
-            resourceBudget = budget,
-        )
 
-        assertFailsWith<RepairBudgetExceededException> {
-            loop.repairCompileError(
-                project,
-                CompileFailure(listOf("cc"), 1, "", "$sourcePath: compiler error"),
-                emptyList(),
-            )
-        }
-        assertEquals(0, dispatches.get())
-        assertContentEquals(source, project.resolve(sourcePath).readBytes())
-
-        ModuleRevisionGraph.open(project, profile, budget).use { graph ->
-            assertNull(graph.snapshot.pendingAttemptId)
-            assertEquals(baselineHead, graph.snapshot.headId)
-            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
-            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
-        }
+        runCase(limit = 4, expectDispatch = true)
+        runCase(limit = 3, expectDispatch = false)
     }
 
     @Test
