@@ -1955,3 +1955,28 @@ This is local scripted-ACP evidence with an injected validator, not production
 validation under #236 or live-provider acceptance. Hosted exact-head CI,
 remaining resource limits, and the complete #734/#63 acceptance matrix remain
 open. Keep #734 and #63 open.
+
+## Public reconstruction admitted modification of an existing target — 2026-11-12
+
+The public `ArchivalReconstructionService.reconstructWithWorkspace` scenario
+now seeds the declared implementation in the staged reconstruction project
+before dispatch, then exercises an ACP write to that already-existing target.
+The request and receipt bindings match. The sole host-observed change is
+`MODIFIED` and carries the seeded preimage hash, the expected postimage hash,
+and the exact UTF-8 byte count. This is separate from the paired `CREATED`
+exact-limit and one-byte-over grant controls above.
+
+The workflow reaches the selected Generated C Make build validator, returns a
+successful build, and has no unresolved entities. The expected bytes are
+checked in the reconstructed project, published `source-tree`, and verified
+extracted archive; the extracted project also rebuilds, and no sibling source
+is present. The focused local scripted-ACP run passed one JUnit method with
+zero failures, errors, or skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-modification-2026-11-12.xml)
+has SHA-256 `37cd97515e1276904d173602fb0683cf5b9e6fd84b9074e8d782a4a620c50958`;
+the [provenance record](evidence/issue-734-public-reconstruction-modification-2026-11-12.json)
+binds the source commit/tree, command, selector, and result.
+
+This is local scripted-provider evidence for Generated C Make. It does not
+qualify live providers, other profiles, hosted exact-head CI, production repair
+validation under #236, publication crash recovery under #732, or durable
+provenance under #733. The full #734/#63 acceptance matrix remains open.

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "ae647edad80252e7c042aabf5966bb118dd65902",
+  "sourceParent": "a761d2bd6efc727131760d5b091d7154039018c5",
+  "sourceTree": "6c3d0c25a2eec47467bc9881834113ece3e9702c",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x buildAnalysisIoHelper --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 63.019,
+    "suiteSeconds": 63.037,
+    "timestamp": "2026-11-12T07:30:16.439Z",
+    "junitSha256": "37cd97515e1276904d173602fb0683cf5b9e6fd84b9074e8d782a4a620c50958"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction profile with the source grant limited to 256 KiB",
+    "provider": "Scripted ACP process through ArchivalReconstructionService.reconstructWithWorkspace",
+    "coverage": "The active case seeds an existing declared implementation in the staged reconstruction project before dispatch. The scripted ACP peer replaces its return-0 body with return 1. The completed receipt must bind the request and contain exactly one MODIFIED change at the declared path, with the seeded preimage digest, expected postimage digest, and exact UTF-8 size. The public workflow reports a successful Make build with no unresolved entities. Expected bytes are compared with the reconstructed project, published source-tree, and verified extracted archive; the extracted archive rebuilds successfully and no sibling file appears. The same public method retains the existing CREATE grant, one-byte-over UTF-8 refusal, snapshot limits, and later preservation-on-refusal controls.",
+    "qualificationLimits": [
+      "local scripted ACP evidence for Generated C Make only",
+      "does not qualify live-provider behavior, other profiles, or hosted exact-head CI",
+      "does not qualify production repair validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "complete #734/#63 mutation and resource acceptance remains open"
+    ]
+  }
+}
