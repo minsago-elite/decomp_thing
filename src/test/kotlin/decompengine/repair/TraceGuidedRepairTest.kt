@@ -952,6 +952,198 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(value = 240, unit = TimeUnit.SECONDS)
+    fun `active behavior repair enforces exact stdout stderr and aggregate output byte boundaries`() {
+        data class OutputBoundaryCase(
+            val id: String,
+            val referenceStdout: String,
+            val referenceStderr: String,
+            val exactStdout: String,
+            val exactStderr: String,
+            val overStdout: String,
+            val overStderr: String,
+            val maximumStdoutBytes: Long,
+            val maximumStderrBytes: Long,
+            val maximumOutputBytes: Long,
+            val overDiagnostic: String,
+            val exactCandidateMatchesReference: Boolean,
+        )
+
+        val cases = listOf(
+            OutputBoundaryCase(
+                id = "stdout",
+                referenceStdout = "s".repeat(64),
+                referenceStderr = "",
+                exactStdout = "s".repeat(64),
+                exactStderr = "",
+                overStdout = "s".repeat(65),
+                overStderr = "",
+                maximumStdoutBytes = 64,
+                maximumStderrBytes = 64,
+                maximumOutputBytes = 128,
+                overDiagnostic = "sandboxed behavior stdout exceeds 64 bytes",
+                exactCandidateMatchesReference = true,
+            ),
+            OutputBoundaryCase(
+                id = "stderr",
+                referenceStdout = "",
+                referenceStderr = "e".repeat(64),
+                exactStdout = "",
+                exactStderr = "e".repeat(64),
+                overStdout = "",
+                overStderr = "e".repeat(65),
+                maximumStdoutBytes = 64,
+                maximumStderrBytes = 64,
+                maximumOutputBytes = 128,
+                overDiagnostic = "sandboxed behavior stderr exceeds 64 bytes",
+                exactCandidateMatchesReference = true,
+            ),
+            OutputBoundaryCase(
+                id = "process-aggregate",
+                referenceStdout = "",
+                referenceStderr = "",
+                exactStdout = "o".repeat(50),
+                exactStderr = "p".repeat(50),
+                overStdout = "o".repeat(50),
+                overStderr = "p".repeat(51),
+                maximumStdoutBytes = 64,
+                maximumStderrBytes = 64,
+                maximumOutputBytes = 100,
+                overDiagnostic = "sandboxed behavior output exceeds 100 aggregate bytes",
+                exactCandidateMatchesReference = false,
+            ),
+            OutputBoundaryCase(
+                id = "comparison-aggregate",
+                referenceStdout = "r".repeat(64),
+                referenceStderr = "",
+                exactStdout = "r".repeat(64),
+                exactStderr = "",
+                overStdout = "r".repeat(64),
+                overStderr = "x",
+                maximumStdoutBytes = 64,
+                maximumStderrBytes = 64,
+                maximumOutputBytes = 128,
+                overDiagnostic = "behavior comparison output exceeds 128 aggregate bytes",
+                exactCandidateMatchesReference = true,
+            ),
+        )
+
+        fun cFunction(symbol: String, stdout: String, stderr: String): String = buildString {
+            append("#include <stdio.h>\nint ").append(symbol).append("(void) {\n")
+            if (stdout.isNotEmpty()) {
+                append("    if (fwrite(\"").append(stdout).append("\", 1, ").append(stdout.length)
+                    .append(", stdout) != ").append(stdout.length).append(") return 91;\n")
+            }
+            if (stderr.isNotEmpty()) {
+                append("    if (fwrite(\"").append(stderr).append("\", 1, ").append(stderr.length)
+                    .append(", stderr) != ").append(stderr.length).append(") return 92;\n")
+            }
+            append("    return 0;\n}\n")
+        }
+
+        for (case in cases) {
+            val tempDir = createRepairTempDirectory("repair-behavior-output-${case.id}-")
+            val original = compileC(
+                tempDir,
+                "reference",
+                cFunction("main", case.referenceStdout, case.referenceStderr),
+            )
+            val budget = RepairResourceBudget(
+                maximumBehaviorStdoutBytes = case.maximumStdoutBytes,
+                maximumBehaviorStderrBytes = case.maximumStderrBytes,
+                maximumBehaviorOutputBytes = case.maximumOutputBytes,
+                maximumBehaviorExecutionMillis = 10_000,
+            )
+
+            fun runCandidate(
+                attemptId: String,
+                stdout: String,
+                stderr: String,
+            ): Triple<Path, String, RepairIteration?> {
+                val project = createProject(
+                    tempDir.resolve(attemptId).resolve("project"),
+                    reconstructedSource = cFunction("decomp_engine_main", "wrong", ""),
+                )
+                val target = project.resolve("src/modules/reconstructed.c")
+                val acceptedSource = target.readBytes()
+                val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use {
+                    it.snapshot.headId
+                }
+                val initialBuild = MakeProjectBuilder.build(project)
+                val candidate = cFunction("decomp_engine_main", stdout, stderr)
+                val loop = generatedCRepairLoop(
+                    RepairClientAgentHarness(
+                        FakeRepairClient(
+                            RepairResponse(
+                                "exercise ${case.id} output boundary",
+                                listOf(SourcePatch("src/modules/reconstructed.c", candidate)),
+                            ),
+                        ),
+                    ),
+                    RepairHistory(project.resolve("reports/repair_history.json")),
+                    budget,
+                )
+                return try {
+                    val iteration = loop.repairBehaviorMismatch(
+                        project,
+                        original,
+                        initialBuild.projectDir.resolve("build/reconstructed"),
+                        listOf(ProcessInput("boundary")),
+                        project.resolve("reports"),
+                    )
+                    Triple(project, baselineHead, iteration)
+                } catch (failure: Exception) {
+                    assertTrue(
+                        failure is BehaviorOutputLimitException,
+                        "${case.id}/$attemptId should fail only through the selected output boundary: $failure",
+                    )
+                    assertTrue(failure.message.orEmpty().contains(case.overDiagnostic), failure.message.orEmpty())
+                    assertContentEquals(acceptedSource, target.readBytes(), "${case.id}/$attemptId rollback")
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                        assertNull(graph.snapshot.pendingAttemptId, "${case.id}/$attemptId")
+                        assertEquals(baselineHead, graph.snapshot.headId, "${case.id}/$attemptId")
+                        assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                    }
+                    Triple(project, baselineHead, null)
+                } finally {
+                    loop.close()
+                }
+            }
+
+            val exact = runCandidate("exact", case.exactStdout, case.exactStderr)
+            if (case.exactCandidateMatchesReference) {
+                val iteration = assertNotNull(exact.third, "${case.id} equality must complete validation")
+                assertTrue(iteration.succeeded, "${case.id} equality candidate must match the reference")
+                assertContentEquals(
+                    cFunction("decomp_engine_main", case.exactStdout, case.exactStderr).toByteArray(Charsets.UTF_8),
+                    exact.first.resolve("src/modules/reconstructed.c").readBytes(),
+                )
+                ModuleRevisionGraph.open(exact.first, GeneratedCRepairIndexProfile, budget).use { graph ->
+                    assertNull(graph.snapshot.pendingAttemptId, case.id)
+                    assertEquals(ModuleRevisionStatus.ACCEPTED, graph.snapshot.nodes.last().status, case.id)
+                }
+            } else {
+                val iteration = assertNotNull(exact.third, "exact aggregate equality must reach comparison")
+                assertFalse(iteration.succeeded, "the fixture intentionally differs from the empty reference")
+                assertEquals("no-validated-improvement", assertNotNull(iteration.after).kind)
+                assertContentEquals(
+                    cFunction("decomp_engine_main", "wrong", "").toByteArray(Charsets.UTF_8),
+                    exact.first.resolve("src/modules/reconstructed.c").readBytes(),
+                    "mismatching but exact-limit candidate must be rejected",
+                )
+                ModuleRevisionGraph.open(exact.first, GeneratedCRepairIndexProfile, budget).use { graph ->
+                    assertNull(graph.snapshot.pendingAttemptId, case.id)
+                    assertEquals(exact.second, graph.snapshot.headId, case.id)
+                    assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status, case.id)
+                }
+            }
+
+            val over = runCandidate("one-over", case.overStdout, case.overStderr)
+            assertNull(over.third, "${case.id} one-over output must be refused")
+        }
+    }
+
+    @Test
     fun `ordinary callers cannot forge the repair loop construction authority`() {
         val project = createProject(
             createTempDirectory("repair-validation-assurance-").resolve("project"),
