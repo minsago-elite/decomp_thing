@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "083e59626f538c28f5be011a1dbdedf5a9f4aa20",
+  "sourceParent": "8a1c37516af4654af633212c3af4ae36ba861995",
+  "sourceTree": "3e56e4b2a27efe45100ff966db789996a48081d1",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair refuses candidate graph growth while persisting the rejected receipt"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair refuses candidate graph growth while persisting the rejected receipt'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.835,
+    "suiteSeconds": 2.846,
+    "timestamp": "2026-11-12T10:32:57.847Z",
+    "junitSha256": "93a0177f27b26648320efa51eadbc679c667dca6945cec648316d4739889f837"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "With maximumGraphBytes=8,920 and headroom in the other budget fields, the test establishes a fresh graph under the cap, dispatches once to a scripted ACP peer that acknowledges an authorized source modification, and then observes the graph-byte admission refusal before candidate validation. It verifies the exact graph-byte budget exception, RESOURCE_EXHAUSTED terminal run, receipt and rejected assessment binding, observed path/preimage/postimage/size commitments, unchanged accepted source and head, no pending attempt or candidate blob residue, graph size within the cap after rejection, and verified final-snapshot/process/sandbox cleanup.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy and does not qualify production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other graph limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

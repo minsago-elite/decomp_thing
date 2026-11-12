@@ -2159,6 +2159,28 @@ qualify production validation under #236, live providers, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Active repair revision-graph byte admission — 2026-11-12
+
+The scripted ACP peer acknowledges an authorized source modification before
+candidate graph persistence exceeds `maximumGraphBytes=8,920`. The active loop
+records the receipt and assessment, rejects the candidate as
+`RESOURCE_EXHAUSTED`, and does not invoke the injected validator. Assertions
+bind the receipt to the observed modified path, preimage/postimage hashes, and
+byte count; they also require unchanged accepted source/head, no pending
+attempt, no candidate blob residue, and verified final-snapshot and process
+cleanup. The cap leaves enough room for the terminal rejected graph record.
+
+The focused method passed locally with one test and zero failures, errors, or
+skips. The retained [JUnit report](evidence/issue-734-active-repair-graph-byte-limit-2026-11-12.xml)
+has SHA-256 `93a0177f27b26648320efa51eadbc679c667dca6945cec648316d4739889f837`;
+the [provenance record](evidence/issue-734-active-repair-graph-byte-limit-2026-11-12.json)
+binds the source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Active repair revision-node admission — 2026-11-12
 
 The active repair path now exercises the `maximumRevisionNodes` boundary with a
