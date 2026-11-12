@@ -2478,7 +2478,8 @@ captured harness with the exact staged path and bytes; a ceiling of three is
 refused with the exact directory-budget diagnostic before harness dispatch.
 Both attempts leave the accepted source and graph head unchanged and clear
 pending state. The graph records `NO_CHANGES` at equality and
-`RESOURCE_EXHAUSTED` for the lower ceiling.
+`RESOURCE_EXHAUSTED` for the lower ceiling; each attempt node remains explicitly
+`REJECTED` and the accepted head is unchanged.
 
 The focused test passed with one test and zero failures, errors, or skips. The
 retained [JUnit report](evidence/issue-734-active-repair-staging-directory-boundary-2026-11-12.xml)

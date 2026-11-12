@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "issue": 734,
   "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
-  "sourceCommit": "d3af7c9746e2216d2d85dfa3c1bf4d4b20d97641",
-  "sourceParent": "118a6484c668b434c76198ae80efad611dab38c3",
-  "sourceTree": "90932176129e8636f090587afec8dee4de5d585a",
+  "sourceCommit": "f52ed2067546f222edae86511c706c4775859a81",
+  "sourceParent": "b312e099b26b6eaa90cbf41acb4b4fd4c343b0f3",
+  "sourceTree": "ff4af1ce5320bf01752cfa10c41fbc6c2e3bc484",
   "tests": [
     "decompengine.repair.TraceGuidedRepairTest.active repair staging directory limit admits equality and refuses one fewer before dispatch"
   ],
@@ -14,10 +14,10 @@
     "failures": 0,
     "errors": 0,
     "skipped": 0,
-    "testSeconds": 1.28,
-    "suiteSeconds": 1.298,
-    "timestamp": "2026-11-12T11:42:17.835Z",
-    "junitSha256": "9b05f19b5d338fd978bbae748149e35f976e8c5cabd20e9af87cc8d15b2ca35e"
+    "testSeconds": 1.388,
+    "suiteSeconds": 1.402,
+    "timestamp": "2026-11-12T11:46:31.386Z",
+    "junitSha256": "b8defa6e9b99221733f8b596707fa5be9d922403e0b7b515ee10e0df2e5f0b22"
   },
   "scope": {
     "profile": "Declarative repair index profile with one source at a/b/c/program.c",
