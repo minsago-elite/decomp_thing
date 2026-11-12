@@ -10,6 +10,9 @@ on:
       - 'scripts/*browser-engine*.mjs'
       - 'scripts/packaged-browser-audit.mjs'
       - 'scripts/packaged-browser-install.py'
+      - 'scripts/install-web-test-browser-engines.py'
+      - 'scripts/test-web-test-browser-engines.py'
+      - 'scripts/web-test-browser-engines.json'
       - 'frontend/src/api/client.ts'
       - 'frontend/tests/capability-fallbacks.test.tsx'
   workflow_dispatch:
@@ -71,17 +74,34 @@ jobs:
           echo "ENGINES=$engines" >> "$GITHUB_ENV"
       - name: Verify shared audit and cross-engine adapter controls
         run: |
+          python3 -B scripts/test-web-test-browser-engines.py
           node scripts/test-packaged-browser-audit.mjs
           node scripts/test-packaged-browser-engine-adapter.mjs
-      - name: Install test-only Playwright and browsers with host dependencies
+      - name: Install test-only Playwright and host dependencies; verify browser archive locks
         env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/build/pw-browsers
         run: |
           npm install --prefix "$RUNNER_TEMP/pw" --no-audit --no-fund --no-save "playwright-core@$PLAYWRIGHT_CORE_VERSION"
+          mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
           # shellcheck disable=SC2086
           sudo --preserve-env=PLAYWRIGHT_BROWSERS_PATH "$(command -v node)" "$RUNNER_TEMP/pw/node_modules/playwright-core/cli.js" install-deps $ENGINES
-          # shellcheck disable=SC2086
-          node "$RUNNER_TEMP/pw/node_modules/playwright-core/cli.js" install $ENGINES
+          pinned_engines=()
+          unpinned_engines=()
+          read -r -a requested_engines <<< "$ENGINES"
+          for engine in "${requested_engines[@]}"; do
+            case "$engine" in
+              firefox|webkit) pinned_engines+=("$engine") ;;
+              chromium) unpinned_engines+=("$engine") ;;
+              *) echo "unsupported engine after validation: $engine" >&2; exit 2 ;;
+            esac
+          done
+          if ((${#pinned_engines[@]})); then
+            python3 -B scripts/install-web-test-browser-engines.py "$PLAYWRIGHT_BROWSERS_PATH" \
+              --playwright-core "$RUNNER_TEMP/pw/node_modules/playwright-core" "${pinned_engines[@]}"
+          fi
+          if ((${#unpinned_engines[@]})); then
+            node "$RUNNER_TEMP/pw/node_modules/playwright-core/cli.js" install "${unpinned_engines[@]}"
+          fi
       - name: Build the packaged distribution
         run: |
           ./gradlew --no-daemon distZip
@@ -90,7 +110,8 @@ jobs:
           echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
       - name: Run the packaged smoke and audit in each engine
         env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/build/pw-browsers
+          PLAYWRIGHT_DOWNLOAD_HOST: http://127.0.0.1:9
         run: |
           status=0
           for engine in $ENGINES; do
