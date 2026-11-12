@@ -207,7 +207,7 @@ it('accepts a known version-one observation failure through the real decoder wit
   expect(fetcher).toHaveBeenCalledOnce();
   fetcher.mockResolvedValueOnce(new Response(legacyDetails, { headers: { 'Content-Type': 'application/octet-stream', 'X-Request-ID': frozen.requestId } }));
   fireEvent.click(inspect);
-  expect((await screen.findByRole('alert')).textContent).toContain('Case details are unavailable');
+  expect((await screen.findByRole('alert')).textContent).toContain('The retained case artifact could not be verified');
   expect(screen.queryByRole('table', { name: 'Retained candidate records' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Inspect case "legacy_case"' })).toBeNull();
   expect(fetcher).toHaveBeenCalledTimes(2);

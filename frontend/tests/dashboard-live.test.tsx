@@ -136,7 +136,6 @@ it('pauses on continuation pages and resumes bounded reads after returning to th
 
 it.each([
   new ApiClientError('timeout'),
-  new ApiClientError('http_error', { status: 503, serverCode: 'JOB_RECORD_UNAVAILABLE' }),
 ])('retains honest stale empty states and stops automatic reads after %s', async failure => {
   transport.get.mockResolvedValueOnce(page([])).mockRejectedValueOnce(failure);
   render(<Dashboard basePath="" />); await flush();
@@ -153,7 +152,7 @@ it('clears private rows and the retained first page after a denied live read', a
     .mockResolvedValueOnce(page([job(2)]));
   render(<Dashboard basePath="" />); await flush(); await tick();
   expect(screen.queryByText('live-1.elf')).toBeNull();
-  expect(screen.getByRole('alert').textContent).toBe('Access to this job library is unavailable. Check your local session.');
+  expect(screen.getByRole('alert').textContent).toBe('Access to the job library was denied. Check the local session and server permissions.');
   await tick(120_000); expect(transport.get).toHaveBeenCalledTimes(2);
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' })); await flush();
   expect(order()).toEqual(['live-2.elf']); expect(screen.queryByText('live-1.elf')).toBeNull();

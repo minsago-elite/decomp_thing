@@ -14,8 +14,11 @@ import { JobSummary } from './JobSummary';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import { RecoverySummary } from './RecoverySummary';
 import { onLibraryChange } from './libraryChannel';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
 
 function currentFilters() {
   try { return { ...jobLocation(location.search), valid: true }; }
@@ -39,10 +42,12 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const [pageIndex, setPageIndex] = useState(0);
   const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
+  const [navigationAttempt, setNavigationAttempt] = useState(0);
   const [observation, setData] = useState<Received<Jobs> | null>(null);
   const data = observation?.value;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
+  const [retainedPageNavigation, setRetainedPageNavigation] = useState(false);
   const [validationError, setValidationError] = useState<JobFilterError | null>(retainedDraft?.validationError ?? null);
   useEffect(() => {
     rememberFilterDraft(draftOwner, basePath, filterSearch(selection.filters), draft, validationError);
@@ -76,8 +81,11 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   // Only one extra bounded page is retained; continuation pages stay server-backed.
   const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; basePath: string; data: Received<Jobs> } | null>(null);
   const cursor = selection.cursor ?? cursors[pageIndex] ?? null;
+  const navigationPageIndex = phase === 'error' && retainedPageNavigation && displayedPageIndex !== null
+    ? displayedPageIndex : pageIndex;
   const dashboardPath = useRef(location.pathname);
-  const binding = useMemo(() => ({ selection, refresh, client, basePath, pageIndex, cursor }), [selection, refresh, client, basePath, pageIndex, cursor]);
+  const binding = useMemo(() => ({ selection, refresh, client, basePath, pageIndex, cursor, navigationAttempt }),
+    [selection, refresh, client, basePath, pageIndex, cursor, navigationAttempt]);
   const activeBinding = useRef<typeof binding | null>(binding);
   activeBinding.current = binding;
   const entryPin = useRef<{ query: string; client: typeof client; cursor: string } | null>(null);
@@ -117,18 +125,45 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   }, [binding, client, selection]);
   const failRead = useCallback((failure: unknown) => {
     setPhase('error');
-    if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
+    const serverCode = failure instanceof ApiClientError ? failure.serverCode : undefined;
+    const category = metadataFailureKind(failure);
+    let message: string;
+    let retainPrevious: boolean;
+    if (serverCode === 'LISTING_BUSY') {
+      message = copy.anotherJobListingIsInProgressWaitAMomentThen;
+      retainPrevious = true;
+    } else if (serverCode === 'LISTING_LIMIT') {
+      message = copy.thisLibraryExceedsAListingLimitNoPartialResultsWere;
+      retainPrevious = true;
+    } else if (serverCode === 'CURSOR_EXPIRED' || serverCode === 'INVALID_CURSOR') {
+      // A failed continuation leaves its last verified page in place until the user refreshes.
+      message = copy.thisPageSnapshotExpiredRefreshJobsToStartANew;
+      retainPrevious = true;
+    } else if (serverCode === 'LISTING_UNAVAILABLE') {
+      // The server could not verify a complete collection, so an earlier page is not current evidence.
+      message = copy.storedJobsCouldNotBeListedCompletelyTheServerHas;
+      retainPrevious = false;
+    } else {
+      message = {
+        session: copy.jobLibrarySessionExpiredReconnectToRead,
+        denied: copy.jobLibraryAccessDeniedCheckPermissions,
+        missing: copy.jobLibraryRouteUnavailableCheckServerVersion,
+        unsupported: copy.jobLibraryResponseUnsupportedUpdateApplication,
+        unverified: copy.storedJobsCouldNotBeListedCompletelyTheServerHas,
+        failed: copy.jobsCouldNotBeLoadedRefreshToTryAgain,
+      }[category];
+      retainPrevious = canRetainMetadata(failure);
+    }
+    setRetainedPageNavigation(retainPrevious && canRetainMetadata(failure) &&
+      !['LISTING_BUSY', 'LISTING_LIMIT', 'LISTING_UNAVAILABLE', 'CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(serverCode ?? ''));
+    if (!retainPrevious) {
       firstPage.current = null;
-      setData(null); setDisplayedPageIndex(null); setError(withApiFailureReference(copy.accessToThisJobLibraryIsUnavailableCheckYourLocal, failure));
-    } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
-      setError(withApiFailureReference(copy.storedJobsCouldNotBeListedCompletelyTheServerHas, failure));
-    } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
-      setError(withApiFailureReference(copy.anotherJobListingIsInProgressWaitAMomentThen, failure));
-    } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_LIMIT') {
-      setError(withApiFailureReference(copy.thisLibraryExceedsAListingLimitNoPartialResultsWere, failure));
-    } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
-      setError(withApiFailureReference(copy.thisPageSnapshotExpiredRefreshJobsToStartANew, failure));
-    } else setError(withApiFailureReference(copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable, failure));
+      // The URL may still carry the cursor for this first-page snapshot. Keep
+      // its binding so an explicit refresh can validate that URL before
+      // replacing it with the newly received snapshot cursor.
+      setData(null); setDisplayedPageIndex(null);
+    }
+    setError(withApiFailureReference(message, failure));
     pageTransition.current = null;
   }, []);
   const reloadLatest = useRef(reload);
@@ -166,11 +201,11 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     if (cached && ((!cursor && cached.selection === selection) || retainedSnapshot)) {
       if (!pinReceivedPage(cached.data.value.page)) return;
       if (retainedSnapshot) setPageNotice(copy.cachedFirstSnapshot);
-      setData(cached.data); setDisplayedPageIndex(0); setPhase('ready'); setError('');
+      setData(cached.data); setDisplayedPageIndex(0); setPhase('ready'); setError(''); setRetainedPageNavigation(false);
       return;
     }
     const controller = new AbortController();
-    setPhase('loading'); setError('');
+    setPhase('loading'); setError(''); setRetainedPageNavigation(false);
     const params = new URLSearchParams(filterSearch(selection.filters));
     params.set('limit', selection.filters.limit);
     if (cursor) params.set('cursor', cursor);
@@ -185,7 +220,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       if (!pinReceivedPage(page)) return;
       const received = receive(response.data);
       if (!cursor) firstPage.current = { selection, refresh, client, basePath, data: received };
-      setData(received); setDisplayedPageIndex(pageIndex); setPhase('ready');
+      setData(received); setDisplayedPageIndex(pageIndex); setPhase('ready'); setRetainedPageNavigation(false);
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return;
@@ -336,7 +371,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     : data ? copy.loadingJobsPreviouslyLoadedRowsRemainBelow : copy.loadingJobs;
   return <section aria-labelledby="job-library-title">
     <h2 id="job-library-title">{copy.uploadedJobs}</h2>
-    <RecoverySummary client={client} refresh={refresh} />
+    <PanelBoundary name={panelBoundaryCopy.names.recovery}><RecoverySummary client={client} refresh={refresh} /></PanelBoundary>
     <form ref={form} class="job-filters" onSubmit={event => { event.preventDefault(); apply(draft); }}>
       <label>{copy.filenameSearch}<input {...fieldA11y('search')} value={draft.search} maxLength={256} onInput={event => field('search', event.currentTarget.value)} /></label>
       <label>{copy.workflowState}<select {...fieldA11y('status')} value={draft.status} onChange={event => field('status', event.currentTarget.value)}>
@@ -384,18 +419,21 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       </li>)}
     </ul>}
     <nav class="job-actions" aria-label={copy.jobPages}>
-      <button type="button" disabled={phase !== 'ready' || (snapshotPage ? !snapshotPage.previousCursor : pageIndex === 0)} onClick={() => {
+      <button type="button" disabled={phase === 'loading' || (phase === 'error' && !retainedPageNavigation) || (snapshotPage ? !snapshotPage.previousCursor : navigationPageIndex === 0)} onClick={() => {
         if (snapshotPage) { if (snapshotPage.previousCursor) goToPage(snapshotPage.previousCursor); return; }
         activeBinding.current = null;
-        moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1));
+        moveFocus.current = true; setNavigationAttempt(value => value + 1);
+        setPageIndex(Math.max(0, navigationPageIndex - 1));
       }}>{copy.previousPage}</button>
       <span aria-live="polite">{data && displayedPageIndex !== null ? displayMessage(copy.page, { page: snapshotPage?.pageNumber ?? displayedPageIndex + 1 })
         : phase === 'loading' && selection.valid ? selection.cursor ? copy.loadingSavedPage : displayMessage(copy.loadingPage, { page: pageIndex + 1 }) : copy.noPageAvailable}</span>
-      <button type="button" disabled={phase !== 'ready' || !data?.page.nextCursor} onClick={() => {
+      <button type="button" disabled={phase === 'loading' || (phase === 'error' && !retainedPageNavigation) || !data?.page.nextCursor} onClick={() => {
         if (!data?.page.nextCursor) return;
         if (snapshotPage) { goToPage(data.page.nextCursor); return; }
         activeBinding.current = null;
-        moveFocus.current = true; setCursors(previous => [...previous.slice(0, pageIndex + 1), data.page.nextCursor]); setPageIndex(pageIndex + 1);
+        moveFocus.current = true; setNavigationAttempt(value => value + 1);
+        setCursors(previous => [...previous.slice(0, navigationPageIndex + 1), data.page.nextCursor]);
+        setPageIndex(navigationPageIndex + 1);
       }}>{copy.nextPage}</button>
     </nav>
   </section>;

@@ -10,6 +10,7 @@ import { createAssetRecovery } from '../src/app/assetRecovery';
 import { createReloadGuard } from '../src/app/reloadGuard';
 import { createBrowserSession } from '../src/session/session';
 import type { SessionState } from '../src/session/session';
+import { activityWindowSearch } from '../src/jobs/activityNavigation';
 
 // Route/panel failure states (#628), retry safety and form context (#629), and convergent
 // session/version recovery (#630), against the same contract fixtures as the axe gate.
@@ -78,8 +79,11 @@ describe('route failure states (#628)', () => {
     ['server', new ApiClientError('http_error', { status: 503, serverCode: 'INTERNAL_ERROR', requestId: reference })],
   ];
   const routes: [string, string, string][] = [
+    ['job library', '/nested/', 'jobs'],
     ['job overview', `/nested/jobs/${jobId}`, 'job'],
+    ['attempt history', `/nested/jobs/${jobId}/runs`, 'runs'],
     ['attempt overview', `/nested/jobs/${jobId}/runs/${runId}`, 'run'],
+    ['saved activity window', `/nested/jobs/${jobId}/runs/${runId}/activity${activityWindowSearch({ after: 'cursor_before', through: 'cursor_after', event: null })}`, 'snapshot'],
     ['source directory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`, 'revisionDirectory'],
     ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/file_0_${'a'.repeat(64)}`, 'revisionFile'],
   ];
@@ -96,8 +100,9 @@ describe('route failure states (#628)', () => {
         const text = alert.textContent ?? '';
         messages.set(label, text.replace(` Reference ID: ${reference}.`, ''));
         expect(text.includes(`Reference ID: ${reference}.`)).toBe(failure.requestId !== undefined);
-        for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed', ' at '])
+        for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed'])
           expect(text).not.toContain(leaked);
+        expect(text).not.toMatch(/\n\s+at\s/);
         // The route stays navigable: heading, breadcrumbs and main navigation remain.
         expect(screen.getByRole('heading', { level: 1 })).toBeTruthy();
         expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeTruthy();
@@ -106,6 +111,64 @@ describe('route failure states (#628)', () => {
       expect(new Set(messages.values()).size).toBe(failures.length);
     });
   }
+
+  it('distinguishes every exploration report failure on attempt evidence with sanitized correlation', async () => {
+    const messages = new Map<string, string>();
+    for (const [label, failure] of failures) {
+      transport.get.mockImplementation(kind => kind === 'report' ? Promise.reject(failure)
+        : responses[kind] ? Promise.resolve(responses[kind]()) : Promise.reject(new ApiClientError('http_error', { status: 404 })));
+      const auth = await session();
+      history.replaceState(null, '', `/nested/jobs/${jobId}/runs/${runId}/evidence`);
+      const view = render(<App basePath="/nested" session={auth} />);
+      expect(await screen.findByRole('heading', { level: 1, name: 'Attempt evidence' })).toBeTruthy();
+      await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh attempt' }).disabled).toBe(false));
+      fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+      const alert = await screen.findByRole('alert');
+      const text = alert.textContent ?? '';
+      messages.set(label, text.replace(` Reference ID: ${reference}.`, ''));
+      expect(text.includes(`Reference ID: ${reference}.`)).toBe(failure.requestId !== undefined);
+      for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed'])
+        expect(text).not.toContain(leaked);
+      expect(text).not.toMatch(/\n\s+at\s/);
+      expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeTruthy();
+      expect(screen.getByRole('link', { name: 'Activity' })).toBeTruthy();
+      expect(screen.getByText('Recorded validation evidence')).toBeTruthy();
+      view.unmount();
+    }
+    expect(new Set(messages.values()).size).toBe(failures.length);
+  });
+
+  it('distinguishes every storage-read failure on Runtime while retaining the page identity and capabilities', async () => {
+    const messages = new Set<string>();
+    for (const [, failure] of failures) {
+      transport.get.mockClear();
+      transport.get.mockImplementation((kind) => {
+        if (kind === 'storageSummary') return Promise.reject(failure);
+        if (kind === 'maintenancePreview') return Promise.resolve(fixture('maintenance-preview'));
+        return responses[kind] ? Promise.resolve(responses[kind]()) : Promise.reject(new ApiClientError('http_error', { status: 404 }));
+      });
+      const auth = await session();
+      history.replaceState(null, '', '/nested/runtime');
+      const view = render(<App basePath="/nested" session={auth} />);
+      expect(await screen.findByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+      const alert = await screen.findByRole('alert');
+      const text = alert.textContent ?? '';
+      messages.add(text.replace(` Reference ID: ${reference}.`, ''));
+      expect(text.includes(`Reference ID: ${reference}.`)).toBe(failure.requestId !== undefined);
+      for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'ApiClientError', 'Web API request failed'])
+        expect(text).not.toContain(leaked);
+      expect(text).not.toMatch(/\n\s+at\s/);
+      expect(screen.getByRole('heading', { name: 'Page build identity' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Connected server' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Workflow capabilities' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Stored data' })).toBeTruthy();
+      expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeTruthy();
+      expect(transport.get.mock.calls.filter(([kind]) => kind === 'storageSummary' || kind === 'maintenancePreview')).toHaveLength(2);
+      view.unmount();
+    }
+    expect(messages.size).toBe(failures.length);
+  });
 
   it('shows an explicit empty state rather than a failure when there is no data', async () => {
     responses.jobs = () => fixture('jobs-empty');

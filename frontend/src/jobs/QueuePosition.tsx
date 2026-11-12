@@ -5,6 +5,7 @@ import { formatExactTimestamp } from './metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { withApiFailureReference } from '../api/client';
 import type { QueuePosition as QueueSample } from '../api/generated';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 /** A sampled, approximate observation of one queued attempt; never scheduling authority. */
 export function QueuePosition({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
@@ -22,7 +23,17 @@ export function QueuePosition({ jobId, runId, basePath }: { jobId: string; runId
       setState({ sample: data, loading: false, error: '' });
     }).catch((failure: unknown) => {
       // An older sample would misstate the queue, so a failed read discards it.
-      if (!controller.signal.aborted) setState({ sample: null, loading: false, error: withApiFailureReference(copy.failed, failure) });
+      if (!controller.signal.aborted) {
+        const message = {
+          session: copy.sessionExpired,
+          denied: copy.accessDenied,
+          missing: copy.missing,
+          unsupported: copy.unsupported,
+          unverified: copy.unverified,
+          failed: copy.failed,
+        }[metadataFailureKind(failure)];
+        setState({ sample: null, loading: false, error: withApiFailureReference(message, failure) });
+      }
     });
     return () => { controller.abort(); };
   }, [client, jobId, runId, read]);

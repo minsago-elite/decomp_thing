@@ -35,6 +35,36 @@ it('requires a policy read, sends one guarded change, and reconciles a newer pol
   expect(screen.queryByText('Progress history is pinned.')).toBeNull();
 });
 
+it('distinguishes progress policy read failures with safe correlation and leaves refresh available', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  const failures: [ApiClientError, string, boolean][] = [
+    [new ApiClientError('http_error', { status: 401, requestId, serverCode: 'SESSION_EXPIRED' }), 'Reconnect the local session to read progress-retention policy.', true],
+    [new ApiClientError('http_error', { status: 403, requestId, serverCode: 'ACCESS_DENIED' }), 'Access to progress-retention policy was denied.', true],
+    [new ApiClientError('http_error', { status: 404, requestId, serverCode: 'NOT_FOUND' }), 'unavailable at this server address', true],
+    [new ApiClientError('unsupported_contract', { serverCode: 'PRIVATE_DIAGNOSTIC' }), 'cannot read the progress-retention response', false],
+    [new ApiClientError('invalid_response', { serverCode: 'CORRUPT_WORKFLOW_STATE' }), 'current pin policy could not be verified', false],
+    [new ApiClientError('http_error', { status: 503, requestId, serverCode: 'INTERNAL_ERROR' }), 'policy could not be read. Check the server', true],
+  ];
+  const messages = new Set<string>();
+  for (const [failure, expected, hasReference] of failures) {
+    transport.get.mockRejectedValueOnce(failure);
+    const mounted = mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Read progress pin' }));
+    const status = await screen.findByRole('status');
+    await waitFor(() => expect(status.textContent).toContain(expected));
+    const text = status.textContent ?? '';
+    expect(text.includes(`Reference ID: ${requestId}.`)).toBe(hasReference);
+    for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'PRIVATE_DIAGNOSTIC', 'ApiClientError', 'Web API request failed'])
+      expect(text).not.toContain(leaked);
+    messages.add(text.replace(` Reference ID: ${requestId}.`, ''));
+    expect(screen.getByRole('button', { name: 'Read progress pin' })).toHaveProperty('disabled', false);
+    expect(transport.put).not.toHaveBeenCalled();
+    mounted.unmount();
+  }
+  expect(messages.size).toBe(failures.length);
+  expect(transport.get).toHaveBeenCalledTimes(failures.length);
+});
+
 it('unpins only after a read and never displays optimistic success', async () => {
   transport.get.mockResolvedValueOnce(policy(true));
   let complete!: (value: unknown) => void;
