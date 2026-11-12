@@ -39,12 +39,18 @@ export function evaluate(report, baseline = {}) {
         ![sample.activeListeners, sample.activeListenerTargets, sample.registrations, sample.explicitRemovals,
           sample.automaticRemovals, sample.collectedTargets, sample.collectedListeners, sample.gcPrunedTargets,
           sample.gcPrunedListeners, sample.rendererHeapBytesAfterGc, sample.rendererBackingStorageBytesAfterGc,
-          sample.dashboardNavigationMs, sample.streamDrainMs].every(Number.isSafeInteger) ||
+          sample.dashboardNavigationMs, sample.streamDrainMs, sample.dashboardListing?.requestCount,
+          sample.dashboardListing?.completedCount, sample.dashboardListing?.durationMs].every(Number.isSafeInteger) ||
         sample.activeListeners < 0 || sample.activeListenerTargets < 0 || sample.rendererHeapBytesAfterGc < 0 ||
         sample.activeListenerTargets > sample.activeListeners || sample.rendererBackingStorageBytesAfterGc < 0 ||
         [sample.registrations, sample.explicitRemovals, sample.automaticRemovals, sample.collectedTargets,
           sample.collectedListeners, sample.gcPrunedTargets, sample.gcPrunedListeners].some(value => value < 0) ||
         sample.dashboardNavigationMs < 0 || sample.streamDrainMs < 0 || sample.streamDrainMs > LIMITS.drainSeconds * 1000 ||
+        sample.dashboardListing.requestCount < 1 || sample.dashboardListing.requestCount > 16 ||
+        sample.dashboardListing.completedCount !== sample.dashboardListing.requestCount || sample.dashboardListing.durationMs < 0 ||
+        !Array.isArray(sample.dashboardListing.responseStatuses) ||
+        sample.dashboardListing.responseStatuses.length !== sample.dashboardListing.requestCount ||
+        sample.dashboardListing.responseStatuses.some(status => status !== 200) ||
         sample.trackingOverflow !== false || !sample.activeListenersByType || typeof sample.activeListenersByType !== 'object' ||
         Array.isArray(sample.activeListenersByType)) {
       fail('malformed or non-quiescent listener-retention sample');

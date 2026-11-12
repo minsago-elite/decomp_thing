@@ -7,6 +7,7 @@ import { waitForSuccessfulStreamOpen } from './soak626/stream-renewal.mjs';
 import { routeFeedbackExpression } from './soak626/route-feedback.mjs';
 import { LIMITS } from './soak626/evaluate.mjs';
 import { sampleRetention } from './soak626/listener-retention.mjs';
+import { createDashboardListingTracker } from './soak626/dashboard-listing.mjs';
 
 const RUN_PREFIX = 'run_fixture_soak_';
 const JOB_PREFIX = 'c';
@@ -143,6 +144,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
   const retentionSamples = [];
   const openStreams = new Set();
   const pendingEventStreams = new Set();
+  const dashboardListingTracker = createDashboardListingTracker({ cdp, sessionId: tab.sessionId, origin });
   let streamLimitResponses = 0;
   let successfulStreamOpens = 0;
   const leaseRenewals = [];
@@ -413,9 +415,13 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     if ((slot + 1) % 5 === 0) {
       stage = `retention-sample-${slot + 1}-dashboard`;
       const dashboardNavigationStartedAt = Date.now();
+      const dashboardListingObservation = dashboardListingTracker.begin();
       await clickHref(tab, evaluate, '/nested/');
       await ready(tab, `location.pathname === '/nested/'`, `dashboard for retention sample ${slot + 1}`);
       const dashboardNavigationMs = Date.now() - dashboardNavigationStartedAt;
+      await ready(tab, `!!document.querySelector('ul[aria-label="Uploaded jobs"] a[href="/nested/jobs/${fixture.jobs[0].jobId}"]')`,
+        `dashboard fixture job visible for retention sample ${slot + 1}`);
+      const dashboardListing = await dashboardListingTracker.waitForCompletion(dashboardListingObservation);
       const drainStarted = Date.now();
       while (openStreams.size > 0 && Date.now() - drainStarted < LIMITS.drainSeconds * 1000) await delay(100);
       const streamDrainMs = Date.now() - drainStarted;
@@ -423,6 +429,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
       const retention = await sampleRetention({ cdp, tab, evaluate, index: slot + 1, settledRoute: '/nested/' });
       retention.openStreamCount = openStreams.size;
       retention.dashboardNavigationMs = dashboardNavigationMs;
+      retention.dashboardListing = dashboardListing;
       retention.streamDrainMs = streamDrainMs;
       retentionSamples.push(retention);
       assert.ok(retentionSamples.length <= Math.ceil(slots / 5), 'Listener-retention observations exceeded the bounded sample envelope');

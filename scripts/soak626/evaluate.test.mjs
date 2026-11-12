@@ -5,7 +5,7 @@ import { evaluate } from './evaluate.mjs';
 function listenerRetention() { return { version: 1, sampleEverySlots: 5, complete: true, samples: Array.from({ length: 24 }, (_, index) => ({
   index: (index + 1) * 5, settledRoute: '/nested/', openStreamCount: 0,
   activeListeners: 12, activeListenerTargets: 6, activeListenersByType: { click: 5, keydown: 2, input: 5 },
-  trackingOverflow: false, dashboardNavigationMs: 10, streamDrainMs: 0,
+  trackingOverflow: false, dashboardNavigationMs: 10, dashboardListing: { requestCount: 1, completedCount: 1, responseStatuses: [200], durationMs: 20 }, streamDrainMs: 0,
   registrations: 100 + index * 100, explicitRemovals: 88 + index * 100, automaticRemovals: 0,
   collectedTargets: 0, collectedListeners: 0, gcPrunedTargets: 0, gcPrunedListeners: 0,
   rendererHeapBytesAfterGc: 8_000_000, rendererBackingStorageBytesAfterGc: 4_000_000,
@@ -84,6 +84,21 @@ test('retention samples report their extra navigation cadence and bounded stream
   const overDrain = good();
   overDrain.retention.samples[0].streamDrainMs = 35_001;
   assert.throws(() => evaluate(overDrain), /retention/);
+});
+
+test('retention samples require completed successful dashboard listing reads', () => {
+  for (const mutate of [
+    sample => { delete sample.dashboardListing; },
+    sample => { sample.dashboardListing.completedCount = 0; },
+    sample => { sample.dashboardListing.responseStatuses[0] = 404; },
+    sample => { sample.dashboardListing.responseStatuses.push(200); },
+    sample => { sample.dashboardListing.requestCount = 0; },
+    sample => { sample.dashboardListing.durationMs = -1; },
+  ]) {
+    const report = good();
+    mutate(report.retention.samples[0]);
+    assert.throws(() => evaluate(report), /retention/);
+  }
 });
 
 test('permits collected-target counts to exceed collected-listener counts', () => {
