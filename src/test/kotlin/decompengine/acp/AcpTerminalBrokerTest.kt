@@ -19,6 +19,7 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -226,6 +227,69 @@ class AcpTerminalBrokerTest {
         assertTrue(records.all { it.networkIsolated })
         assertTrue(records.filter { it.reason == AcpTerminalAuditReason.OUTPUT_OBSERVED }
             .all { it.producedOutputBytes == 16L })
+        }
+    }
+
+    @Test
+    fun `concurrent output observations preserve audit and callback order`() = runBlocking {
+        val fixture = terminalFixture(mode = "terminal-burst-exit", retainedBytes = 4096)
+        val audit = AcpTerminalAuditRecorder()
+        withOwnedTerminalFixture(fixture, audit) { broker ->
+            broker.bindSession(SESSION)
+            val terminalId = broker.create(
+                SESSION,
+                fixture.command,
+                fixture.args,
+                fixture.root.path.toString(),
+                fixture.env,
+                8u,
+            ).terminalId
+            broker.observeToolCall(SESSION, terminalUpdate("tool-output-order", terminalId))
+            broker.waitForExit(SESSION, terminalId)
+
+            val firstCallbackEntered = CountDownLatch(1)
+            val releaseFirstCallback = CountDownLatch(1)
+            val secondCallbackEntered = CountDownLatch(1)
+            val callbackOrder = Collections.synchronizedList(mutableListOf<String>())
+            val executor = Executors.newFixedThreadPool(2)
+            try {
+                val first = executor.submit {
+                    runBlocking {
+                        broker.output(SESSION, terminalId) {
+                            firstCallbackEntered.countDown()
+                            check(releaseFirstCallback.await(5, TimeUnit.SECONDS))
+                            callbackOrder += "first"
+                        }
+                    }
+                }
+                assertTrue(firstCallbackEntered.await(3, TimeUnit.SECONDS), "first output observation never began")
+                val second = executor.submit {
+                    runBlocking {
+                        broker.output(SESSION, terminalId) {
+                            callbackOrder += "second"
+                            secondCallbackEntered.countDown()
+                        }
+                    }
+                }
+
+                assertFalse(
+                    secondCallbackEntered.await(150, TimeUnit.MILLISECONDS),
+                    "later output observation overtook the first event callback",
+                )
+                releaseFirstCallback.countDown()
+                first.get(5, TimeUnit.SECONDS)
+                second.get(5, TimeUnit.SECONDS)
+                assertTrue(secondCallbackEntered.await(1, TimeUnit.SECONDS))
+                assertEquals(listOf("first", "second"), callbackOrder.toList())
+            } finally {
+                releaseFirstCallback.countDown()
+                executor.shutdownNow()
+            }
+
+            val outputRecords = audit.snapshot().filter { it.reason == AcpTerminalAuditReason.OUTPUT_OBSERVED }
+            assertEquals(2, outputRecords.size)
+            assertTrue(outputRecords[0].sequence < outputRecords[1].sequence)
+            assertEquals(listOf(4096L, 4096L), outputRecords.map { it.producedOutputBytes })
         }
     }
 
