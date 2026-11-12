@@ -1,6 +1,7 @@
 package decompengine.project
 
 import decompengine.oracle.fulltree.OracleNativeLibraries
+import decompengine.oracle.fulltree.StableControlFile
 import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.JsonObject
 import java.io.File
@@ -13,10 +14,27 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /** Real child/process fixtures, deliberately without a keeper receipt or acceptance authority. */
 class ContainedModuleCompilerWorkerTest {
+    companion object {
+        @JvmStatic
+        fun main(arguments: Array<String>) {
+            require(arguments.size in 2..3 && arguments[0] == "--direct-landlock-probe")
+            val requestPath = Path.of(arguments[1])
+            val request = ContainedModuleCompilerRequest.parse(Files.readAllBytes(requestPath))
+            val fixture = Fixture(requestPath.parent, request)
+            val result = ContainedModuleCompilerWorkerTest().runDirectTrampolineInNamespace(
+                fixture,
+                arguments.getOrNull(2)?.takeUnless { it == "-" },
+            )
+            Files.writeString(fixture.root.resolve("direct.exit"), result.first.toString())
+            Files.writeString(fixture.root.resolve("direct.stderr"), result.second)
+        }
+    }
+
     @Test
     fun `real native compiler produces exact profile bound ET_REL observation for built ins and budget variants`() = withRoot { root ->
         val profiles = ReconstructionProfiles.builtIn.flatMap { base -> listOf(base,
@@ -368,6 +386,59 @@ class ContainedModuleCompilerWorkerTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("ci-live")
+    fun `native Landlock trampoline denies the production relative scratch traversal`() = withRoot { root ->
+        for ((profileIndex, profile) in ReconstructionProfiles.builtIn.withIndex()) {
+            val positive = fixture(root.resolve("positive-$profileIndex"), profile = profile,
+                source = "#include \"modules/alpha.h\"\n#include \"alpha_internal.h\"\nint alpha(void) { return VALUE; }\n",
+                snapshotRelative = "state/snapshot", outputRelative = "reports")
+            val positiveExecution = runDirectTrampoline(positive)
+            assertEquals(0, positiveExecution.first, positiveExecution.second)
+            assertTrue(positiveExecution.second.contains("cc1"), positiveExecution.second)
+            assertTrue(positiveExecution.second.contains("as"), positiveExecution.second)
+            val positiveObject = Files.readAllBytes(positive.request.outputDirectory.resolve("module.o"))
+            assertEquals("relocatable", decompengine.binary.ElfMetadataReader.read(positiveObject).objectType)
+
+            val attackRoot = root.resolve("attack-$profileIndex")
+            val maliciousSource = """
+                #include "../../../../reports/tmp/input.h"
+                int alpha(void) { return OFF_SNAPSHOT_CANARY; }
+            """.trimIndent() + "\n"
+            val attack = fixture(attackRoot, profile = profile, source = maliciousSource,
+                snapshotRelative = "state/snapshot", outputRelative = "reports")
+            val foreignScratch = Files.createDirectory(attack.request.outputDirectory.resolve("tmp"))
+            Files.writeString(foreignScratch.resolve("input.h"), "#define OFF_SNAPSHOT_CANARY 918273\n")
+            Files.setPosixFilePermissions(foreignScratch.resolve("input.h"), PosixFilePermissions.fromString("r--------"))
+            assertEquals(foreignScratch.resolve("input.h").normalize(),
+                attack.request.snapshotRoot.resolve(attack.request.sourcePath).parent
+                    .resolve("../../../../reports/tmp/input.h").normalize(),
+                "the traversal fixture must resolve to its off-snapshot scratch header")
+            val denied = runDirectTrampoline(attack)
+            assertNotEquals(0, denied.first, denied.second)
+            assertTrue(denied.second.contains("Permission denied"), denied.second)
+            assertFalse(denied.second.contains("918273"), denied.second)
+            val deniedObject = attack.request.outputDirectory.resolve("module.o")
+            val deniedObjectBytes = Files.readAllBytes(deniedObject)
+            assertFalse(deniedObjectBytes.toString(Charsets.ISO_8859_1).contains("OFF_SNAPSHOT_CANARY"),
+                "a denied include must not place its canary symbol name in the partial object")
+            val symbols = ProcessBuilder("/usr/bin/nm", "-a", deniedObject.toString()).redirectErrorStream(true).start()
+            val symbolOutput = symbols.inputStream.readBytes().decodeToString()
+            assertTrue(symbols.waitFor(10, TimeUnit.SECONDS), "symbol inspection timed out")
+            assertEquals(0, symbols.exitValue(), symbolOutput)
+            assertFalse(symbolOutput.contains("OFF_SNAPSHOT_CANARY"), symbolOutput)
+
+            val substituted = fixture(root.resolve("substituted-$profileIndex"), profile = profile,
+                source = "#include \"modules/alpha.h\"\n#include \"alpha_internal.h\"\nint alpha(void) { return VALUE; }\n",
+                snapshotRelative = "state/snapshot", outputRelative = "reports")
+            val replacement = runDirectTrampoline(substituted, replacePinnedPath = "include/modules/alpha.h")
+            assertNotEquals(0, replacement.first, replacement.second)
+            assertTrue(replacement.second.contains("identity or type changed"), replacement.second)
+            assertEquals(0L, Files.size(substituted.request.outputDirectory.resolve("module.o")),
+                "a substituted pathname must not redefine the retained inode identity")
+        }
+    }
+
+    @Test
     fun synchronizedPolicyAdmittedTransientHeaderMutationReturnsInputChanged() = withRoot { root ->
         val parent = Files.createDirectory(root.resolve("transient"))
         val realCompiler = stageCompiler(parent)
@@ -456,11 +527,12 @@ class ContainedModuleCompilerWorkerTest {
         source: String = "#include \"modules/alpha.h\"\n#include \"alpha_internal.h\"\nint alpha(void) { return VALUE; }\n",
         headerSource: String = "int alpha(void);\n",
         extraContent: Map<String, String> = emptyMap(),
+        snapshotRelative: String = "snapshot", outputRelative: String = "output",
         maximumWallMillis: Long = 10000, maximumOutputBytes: Long = 65536): Fixture {
         Files.createDirectories(root)
         Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
-        val snapshot = Files.createDirectory(root.resolve("snapshot"))
-        val output = Files.createDirectory(root.resolve("output"))
+        val snapshot = Files.createDirectories(root.resolve(snapshotRelative))
+        val output = Files.createDirectories(root.resolve(outputRelative))
         val content = mapOf("src/modules/alpha.c" to source, "include/modules/alpha.h" to headerSource,
             "src/modules/alpha_internal.h" to "#define VALUE 7\n", "include/decomp_types.h" to "") + extraContent
         val inputs = content.map { (relative, text) ->
@@ -492,6 +564,107 @@ class ContainedModuleCompilerWorkerTest {
         return Fixture(root, request)
     }
 
+    private fun runDirectTrampoline(fixture: Fixture, replacePinnedPath: String? = null): Pair<Int, String> {
+        val requestPath = fixture.root.resolve("direct-request.json")
+        Files.write(requestPath, fixture.request.canonicalBytes)
+        Files.setPosixFilePermissions(requestPath, PosixFilePermissions.fromString("r--------"))
+        val java = Path.of(System.getProperty("java.home"), "bin", "java").toRealPath()
+        val classpath = System.getProperty("java.class.path").split(File.pathSeparator).filter(String::isNotEmpty)
+            .joinToString(File.pathSeparator) { Path.of(it).toAbsolutePath().normalize().toString() }
+        val temporary = Files.createDirectory(fixture.root.resolve("direct-jvm-tmp"))
+        val stdout = fixture.root.resolve("direct-probe.stdout")
+        val stderr = fixture.root.resolve("direct-probe.stderr")
+        val command = listOf("/usr/bin/bwrap", "--die-with-parent", "--new-session", "--unshare-all", "--unshare-user",
+            "--disable-userns", "--assert-userns-disabled", "--cap-drop", "ALL", "--ro-bind", "/", "/",
+            "--bind", fixture.root.toString(), fixture.root.toString(), "--ro-bind",
+            fixture.request.snapshotRoot.toString(), fixture.request.snapshotRoot.toString(), "--ro-bind",
+            fixture.request.compilerPath.parent.toString(), fixture.request.compilerPath.parent.toString(),
+            "--proc", "/proc", "--dev", "/dev", "--setenv", "TMPDIR", temporary.toString(),
+            "--setenv", "HOME", temporary.toString(), "--", java.toString(), "-Xmx192m",
+            "-XX:+DisableAttachMechanism", "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary",
+            "-cp", classpath, ContainedModuleCompilerWorkerTest::class.java.name,
+            "--direct-landlock-probe", requestPath.toString(), replacePinnedPath ?: "-")
+        val process = ProcessBuilder(command).directory(fixture.root.toFile()).redirectOutput(stdout.toFile())
+            .redirectError(stderr.toFile()).apply { environment().clear() }.start()
+        try {
+            if (replacePinnedPath != null) {
+                await(fixture.root.resolve("direct-pinned"))
+                val target = fixture.request.snapshotRoot.resolve(replacePinnedPath)
+                val replacement = target.resolveSibling("${target.fileName}.replacement")
+                Files.copy(target, replacement)
+                Files.move(replacement, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                Files.writeString(fixture.root.resolve("direct-continue"), "continue")
+            }
+            assertTrue(process.waitFor(40, TimeUnit.SECONDS), "direct Landlock policy probe timed out")
+            assertEquals(0, process.exitValue(), Files.readString(stderr))
+            return Files.readString(fixture.root.resolve("direct.exit")).toInt() to
+                Files.readString(fixture.root.resolve("direct.stderr"))
+        } finally {
+            if (process.isAlive) { process.destroyForcibly(); process.waitFor(5, TimeUnit.SECONDS) }
+        }
+    }
+
+    private fun runDirectTrampolineInNamespace(fixture: Fixture, replacePinnedPath: String? = null): Pair<Int, String> {
+        val request = fixture.request
+        val scratch = request.outputDirectory.resolve("tmp").let { path ->
+            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) path else Files.createDirectory(path)
+        }
+        val output = request.outputDirectory.resolve("module.o")
+        Files.createFile(output)
+        Files.setPosixFilePermissions(output, PosixFilePermissions.fromString("rw-------"))
+        val pinnedFiles = mutableListOf<StableControlFile>()
+        try {
+            val identities = request.inputs.associate { input ->
+                val path = request.snapshotRoot.resolve(input.path)
+                val file = if (input.bytes == 0L) {
+                    StableControlFile.openModuleCompilerEmptyInput(path, "test empty module input ${input.path}")
+                } else StableControlFile.open(path, ContainedModuleCompilerRequest.MAXIMUM_INPUT_FILE_BYTES,
+                    "test module input ${input.path}")
+                pinnedFiles += file
+                file.requireSingleLink("test module input ${input.path}")
+                val identity = file.authenticatedIdentity
+                input.path to ContainedModuleLandlockPolicy.Identity(identity.key.device, identity.key.inode,
+                    identity.mountId, directory = false)
+            }
+            val policy = ContainedModuleLandlockPolicy.forRequest(request, scratch, identities)
+            val policyPath = request.outputDirectory.resolve("landlock-policy.bin")
+            Files.write(policyPath, policy)
+            Files.setPosixFilePermissions(policyPath, PosixFilePermissions.fromString("r--------"))
+            if (replacePinnedPath != null) {
+                Files.writeString(fixture.root.resolve("direct-pinned"), "pinned")
+                await(fixture.root.resolve("direct-continue"))
+            }
+            val helper = requireNotNull(request.trampolinePath).toRealPath()
+            assertEquals(request.trampolinePath, helper)
+            assertEquals(request.trampolineSha256, sha256(Files.readAllBytes(helper)))
+            val command = request.command.toMutableList().apply { add(1, "-v") }
+            val stdout = request.outputDirectory.resolve("direct.stdout")
+            val stderr = request.outputDirectory.resolve("direct.stderr")
+            val process = ProcessBuilder(listOf(helper.toString(), policyPath.toString(), "--") + command)
+                .directory(Path.of("/").toFile())
+                .redirectOutput(stdout.toFile()).redirectError(stderr.toFile()).apply {
+                    environment().clear()
+                    environment()["LANG"] = "C"
+                    environment()["LC_ALL"] = "C"
+                    environment()["PATH"] = request.compilerPath.parent.toString()
+                    environment()["TMPDIR"] = scratch.toString()
+                    environment()["HOME"] = scratch.toString()
+                    environment()["SOURCE_DATE_EPOCH"] = "0"
+                }.start()
+            try {
+                assertTrue(process.waitFor(30, TimeUnit.SECONDS), "direct Landlock compiler invocation timed out")
+                return process.exitValue() to Files.readString(stderr)
+            } finally {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    process.waitFor(5, TimeUnit.SECONDS)
+                }
+            }
+        } finally {
+            pinnedFiles.asReversed().forEach(StableControlFile::close)
+        }
+    }
+
     private fun launch(fixture: Fixture, rootCompiler: Path? = null, useExecutableAlias: Boolean = true,
         noexecOutput: Boolean = false, duringExecution: () -> Unit = {}): Execution {
         val root = fixture.root
@@ -512,13 +685,16 @@ class ContainedModuleCompilerWorkerTest {
             val input = decompengine.oracle.fulltree.KotlinSystemdCgroupCommandInput(original, Files.size(original), sha256(Files.readAllBytes(original)))
             materializeOwnedModuleCompilerSnapshot(input, root.resolve("owned-compiler"))
         }
-        val command = if (rootCompiler == null) arguments else listOf("/usr/bin/bwrap", "--die-with-parent", "--new-session",
+        val bwrapPrefix = listOf("/usr/bin/bwrap", "--die-with-parent", "--new-session",
             "--unshare-all", "--unshare-user", "--disable-userns", "--assert-userns-disabled", "--cap-drop", "ALL",
             "--ro-bind", "/", "/", "--bind", root.toString(), root.toString(),
-            "--ro-bind", rootCompiler.toString(), fixture.request.compilerPath.toString()) +
+            "--ro-bind", fixture.request.snapshotRoot.toString(), fixture.request.snapshotRoot.toString(),
+            "--ro-bind", fixture.request.compilerPath.parent.toString(), fixture.request.compilerPath.parent.toString(),
+            "--proc", "/proc", "--dev", "/dev")
+        val command = if (rootCompiler == null) bwrapPrefix + listOf("--") + arguments else bwrapPrefix +
+            listOf("--ro-bind", rootCompiler.toString(), fixture.request.compilerPath.toString()) +
             (if (useExecutableAlias) listOf("--ro-bind", requireNotNull(ownedCompiler).path.toString(), fixture.request.compilerPath.toString()) else emptyList()) +
-            listOf("--proc", "/proc", "--dev", "/dev", "--",
-            "/bin/sh", "-c", "{ /usr/bin/stat -c '%u' '$rootCompiler'; /usr/bin/stat -c '%u' '${fixture.request.compilerPath}'; /usr/bin/id; " +
+            listOf("--", "/bin/sh", "-c", "{ /usr/bin/stat -c '%u' '$rootCompiler'; /usr/bin/stat -c '%u' '${fixture.request.compilerPath}'; /usr/bin/id; " +
                 "/bin/cat /proc/self/uid_map /proc/self/gid_map; } > '$root/namespace-identity'; exec \"\$@\"", "worker") + arguments
         val mountedCommand = if (!noexecOutput) command else listOf("/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--",
             "/bin/sh", "-c", "set -eu; /bin/mount --bind '${fixture.request.outputDirectory}' '${fixture.request.outputDirectory}'; " +

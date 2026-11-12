@@ -6,6 +6,7 @@
 #include <linux/landlock.h>
 #include <linux/openat2.h>
 #include <linux/seccomp.h>
+#include <linux/stat.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -32,11 +33,18 @@
  * identity/type of every target, installs Landlock and seccomp, closes every setup descriptor,
  * and replaces itself with the requested compiler.  It never forks or supervises a child.
  */
-#define POLICY_HEADER "DMLAND01"
-#define POLICY_VERSION 1u
+#define POLICY_HEADER "DMLAND02"
+#define POLICY_VERSION 2u
 #define POLICY_MAX_BYTES (1024u * 1024u)
 #define POLICY_MAX_RULES 8192u
 #define POLICY_MAX_PATH 4096u
+#define MOUNTINFO_MAX_BYTES (4u * 1024u * 1024u)
+#define MOUNTINFO_MAX_LINE (64u * 1024u)
+#define MOUNTINFO_MAX_RECORDS 8192u
+
+#ifndef STATX_MNT_ID
+#define STATX_MNT_ID 0x00001000U
+#endif
 
 enum rule_kind { RULE_RUNTIME_DIR = 1, RULE_SNAPSHOT_DIR = 2, RULE_SNAPSHOT_FILE = 3,
                  RULE_OUTPUT_FILE = 4, RULE_SCRATCH_DIR = 5, RULE_RUNTIME_EXEC_DIR = 6,
@@ -53,6 +61,230 @@ static uint32_t u32le(const unsigned char *p) {
 
 static uint64_t u64le(const unsigned char *p) {
     return (uint64_t)u32le(p) | ((uint64_t)u32le(p + 4) << 32);
+}
+
+static uint64_t descriptor_mount_id(int fd) {
+#ifdef SYS_statx
+    struct statx status;
+    memset(&status, 0, sizeof(status));
+    if (syscall(SYS_statx, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT, STATX_MNT_ID, &status) != 0) return 0;
+    if ((status.stx_mask & STATX_MNT_ID) == 0 || status.stx_mnt_id == 0) { errno = EOPNOTSUPP; return 0; }
+    return status.stx_mnt_id;
+#else
+    (void)fd;
+    errno = ENOSYS;
+    return 0;
+#endif
+}
+
+struct mount_record { uint64_t id; char *point; int read_only; };
+struct mount_table { struct mount_record *records; size_t count; };
+
+static int compare_mount_id(const void *left, const void *right) {
+    const struct mount_record *a = left, *b = right;
+    return a->id < b->id ? -1 : (a->id > b->id ? 1 : 0);
+}
+
+static int positive_decimal(const char *value, uint64_t *result) {
+    if (value == NULL || *value == '\0') return 0;
+    uint64_t number = 0;
+    for (const unsigned char *cursor = (const unsigned char *)value; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9' || number > (UINT64_MAX - (uint64_t)(*cursor - '0')) / 10u) return 0;
+        number = number * 10u + (uint64_t)(*cursor - '0');
+    }
+    if (number == 0) return 0;
+    *result = number;
+    return 1;
+}
+
+static int decimal(const char *value, uint64_t *result) {
+    if (value == NULL || *value == '\0') return 0;
+    uint64_t number = 0;
+    for (const unsigned char *cursor = (const unsigned char *)value; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9' || number > (UINT64_MAX - (uint64_t)(*cursor - '0')) / 10u) return 0;
+        number = number * 10u + (uint64_t)(*cursor - '0');
+    }
+    *result = number;
+    return 1;
+}
+
+static size_t split_fields(char *value, char **fields, size_t capacity) {
+    if (value == NULL || *value == '\0' || value[0] == ' ' || value[strlen(value) - 1] == ' ') return 0;
+    size_t count = 0;
+    char *start = value;
+    for (char *cursor = value;; ++cursor) {
+        if (*cursor == ' ' || *cursor == '\0') {
+            if (cursor == start || count == capacity) return 0;
+            fields[count++] = start;
+            if (*cursor == '\0') break;
+            *cursor = '\0';
+            start = cursor + 1;
+            if (*start == ' ') return 0;
+        }
+    }
+    return count;
+}
+
+static int canonical_mount_path(const char *path) {
+    size_t length = strlen(path);
+    if (length == 1) return path[0] == '/';
+    if (length == 0 || length > POLICY_MAX_PATH || path[0] != '/' ||
+        (length > 1 && path[length - 1] == '/')) return 0;
+    size_t start = 1;
+    for (size_t i = 1; i <= length; ++i) {
+        if (i == length || path[i] == '/') {
+            size_t part = i - start;
+            if (part == 0 || (part == 1 && path[start] == '.') ||
+                (part == 2 && path[start] == '.' && path[start + 1] == '.')) return 0;
+            start = i + 1;
+        }
+    }
+    return 1;
+}
+
+static int decode_mount_path(char *value) {
+    size_t read_index = 0, write_index = 0, length = strlen(value);
+    while (read_index < length) {
+        if (value[read_index] != '\\') {
+            value[write_index++] = value[read_index++];
+            continue;
+        }
+        if (length - read_index < 4) return 0;
+        const char *escape = value + read_index + 1;
+        char decoded;
+        if (memcmp(escape, "040", 3) == 0) decoded = ' ';
+        else if (memcmp(escape, "011", 3) == 0) decoded = '\t';
+        else if (memcmp(escape, "012", 3) == 0) decoded = '\n';
+        else if (memcmp(escape, "134", 3) == 0) decoded = '\\';
+        else return 0;
+        value[write_index++] = decoded;
+        read_index += 4;
+    }
+    value[write_index] = '\0';
+    return value[0] == '/' && write_index <= POLICY_MAX_PATH;
+}
+
+static int mount_access_mode(const char *options, int *read_only) {
+    unsigned seen = 0;
+    const char *start = options;
+    for (const char *cursor = options;; ++cursor) {
+        if (*cursor == ',' || *cursor == '\0') {
+            size_t length = (size_t)(cursor - start);
+            if (length == 0) return 0;
+            if (length == 2 && memcmp(start, "ro", 2) == 0) ++seen;
+            if (length == 2 && memcmp(start, "rw", 2) == 0) { ++seen; *read_only = 0; }
+            if (length == 2 && memcmp(start, "ro", 2) == 0) *read_only = 1;
+            if (*cursor == '\0') break;
+            start = cursor + 1;
+        }
+    }
+    return seen == 1;
+}
+
+static struct mount_table read_mount_table(void) {
+    struct mount_table table = {0};
+    int fd = open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) fail("could not open final-namespace mount table");
+    char *bytes = malloc(MOUNTINFO_MAX_BYTES + 1u);
+    if (bytes == NULL) { close(fd); fail("could not allocate bounded mount table"); }
+    size_t length = 0;
+    while (length <= MOUNTINFO_MAX_BYTES) {
+        ssize_t amount = read(fd, bytes + length, MOUNTINFO_MAX_BYTES + 1u - length);
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount < 0) { close(fd); free(bytes); fail("could not read final-namespace mount table"); }
+        if (amount == 0) break;
+        length += (size_t)amount;
+        if (length > MOUNTINFO_MAX_BYTES) { close(fd); free(bytes); errno = E2BIG; fail("mount table exceeds its byte bound"); }
+    }
+    if (close(fd) != 0) { free(bytes); fail("could not close final-namespace mount table"); }
+    if (length == 0 || bytes[length - 1] != '\n') { free(bytes); errno = EINVAL; fail("mount table is empty or unterminated"); }
+    table.records = calloc(MOUNTINFO_MAX_RECORDS, sizeof(*table.records));
+    if (table.records == NULL) { free(bytes); fail("could not allocate bounded mount records"); }
+    size_t start = 0;
+    while (start < length) {
+        size_t end = start;
+        while (end < length && bytes[end] != '\n') ++end;
+        size_t line_length = end - start;
+        if (line_length == 0 || line_length > MOUNTINFO_MAX_LINE || table.count == MOUNTINFO_MAX_RECORDS) {
+            free(bytes); errno = E2BIG; fail("mount table record count or length exceeds its bound");
+        }
+        bytes[end] = '\0';
+        char *separator = strstr(bytes + start, " - ");
+        if (separator == NULL || strstr(separator + 3, " - ") != NULL) {
+            free(bytes); errno = EINVAL; fail("mount table record separator is malformed");
+        }
+        *separator = '\0';
+        char *right_text = separator + 3;
+        char *left[128], *right[8];
+        size_t left_count = split_fields(bytes + start, left, 128);
+        size_t right_count = split_fields(right_text, right, 8);
+        uint64_t id = 0, parent = 0;
+        char *colon = left_count >= 3 ? strchr(left[2], ':') : NULL;
+        if (colon != NULL) {
+            *colon = '\0';
+            uint64_t major = 0, minor = 0;
+            if (!decimal(left[2], &major) || !decimal(colon + 1, &minor)) colon = NULL;
+        }
+        if (left_count < 6 || right_count < 3 || !positive_decimal(left[0], &id) ||
+            !positive_decimal(left[1], &parent) || colon == NULL ||
+            !decode_mount_path(left[3]) || !decode_mount_path(left[4]) || !canonical_mount_path(left[4])) {
+            free(bytes); errno = EINVAL; fail("mount table record fields are malformed");
+        }
+        (void)parent;
+        int read_only = 0;
+        if (!mount_access_mode(left[5], &read_only)) { free(bytes); errno = EINVAL; fail("mount access mode is ambiguous"); }
+        char *point = strdup(left[4]);
+        if (point == NULL) { free(bytes); fail("could not retain bounded mount point"); }
+        table.records[table.count++] = (struct mount_record){ .id = id, .point = point, .read_only = read_only };
+        start = end + 1;
+    }
+    free(bytes);
+    qsort(table.records, table.count, sizeof(*table.records), compare_mount_id);
+    for (size_t index = 1; index < table.count; ++index) {
+        if (table.records[index - 1].id == table.records[index].id) {
+            errno = EINVAL; fail("mount table contains duplicate mount identities");
+        }
+    }
+    return table;
+}
+
+static int path_is_at_or_beneath(const char *parent, const char *path) {
+    size_t length = strlen(parent);
+    if (length == 1 && parent[0] == '/') return path[0] == '/';
+    return strncmp(parent, path, length) == 0 && (path[length] == '\0' || path[length] == '/');
+}
+
+static void require_read_only_mount(const struct mount_table *table, const char *path, uint64_t mount_id,
+                                    int directory, int fd) {
+    (void)fd;
+    size_t best_length = 0, best_count = 0;
+    const struct mount_record *best = NULL;
+    for (size_t index = 0; index < table->count; ++index) {
+        const struct mount_record *record = &table->records[index];
+        if (!path_is_at_or_beneath(record->point, path)) continue;
+        size_t candidate_length = strlen(record->point);
+        if (candidate_length > best_length) { best_length = candidate_length; best_count = 1; best = record; }
+        else if (candidate_length == best_length) { ++best_count; if (record->id == mount_id) best = record; }
+    }
+    if (best == NULL || best_count != 1 || best->id != mount_id || !best->read_only) {
+        errno = ESTALE; fail("descriptor mount identity is absent, ambiguous, or writable");
+    }
+    if (directory) {
+        for (size_t index = 0; index < table->count; ++index) {
+            const struct mount_record *record = &table->records[index];
+            if (path_is_at_or_beneath(path, record->point) && !record->read_only) {
+                errno = EROFS; fail("read directory contains a writable nested mount");
+            }
+        }
+    }
+}
+
+static void free_mount_table(struct mount_table *table) {
+    if (table == NULL) return;
+    for (size_t index = 0; index < table->count; ++index) free(table->records[index].point);
+    free(table->records);
+    table->records = NULL;
+    table->count = 0;
 }
 
 static int canonical_absolute_path(const char *path, size_t length) {
@@ -198,15 +430,19 @@ static void enforce_policy(const unsigned char *bytes, size_t length) {
     struct landlock_ruleset_attr ruleset_attr = { .handled_access_fs = handled };
     int ruleset = (int)syscall(SYS_landlock_create_ruleset, &ruleset_attr, sizeof(ruleset_attr), 0);
     if (ruleset < 0) fail("could not create Landlock ruleset");
+    /* This is read from inside the completed worker namespace before Landlock is installed.
+       The parser deliberately uses the per-mount options field, not superblock options. */
+    struct mount_table mounts = read_mount_table();
 
     size_t offset = 16;
     for (uint32_t i = 0; i < count; ++i) {
-        if (length - offset < 24) { errno = EINVAL; fail("policy entry is truncated"); }
+        if (length - offset < 32) { errno = EINVAL; fail("policy entry is truncated"); }
         uint32_t kind = u32le(bytes + offset);
         uint32_t path_length = u32le(bytes + offset + 4);
         uint64_t device = u64le(bytes + offset + 8);
         uint64_t inode = u64le(bytes + offset + 16);
-        offset += 24;
+        uint64_t mount_id = u64le(bytes + offset + 24);
+        offset += 32;
         if (path_length < 2 || path_length > POLICY_MAX_PATH || length - offset < path_length) {
             errno = EINVAL; fail("policy path length is invalid");
         }
@@ -220,9 +456,15 @@ static void enforce_policy(const unsigned char *bytes, size_t length) {
         int target = open_policy_target(path);
         if (target < 0) fail("policy target cannot be opened without symlink traversal");
         struct stat st;
+        uint64_t actual_mount_id = descriptor_mount_id(target);
         if (fstat(target, &st) != 0 || (uint64_t)st.st_dev != device || (uint64_t)st.st_ino != inode ||
+            actual_mount_id == 0 || actual_mount_id != mount_id ||
             !expected_type(kind, st.st_mode) || (kind == RULE_RUNTIME_EXEC_FILE && (st.st_mode & 0111) == 0)) {
             close(target); errno = ESTALE; fail("policy target identity or type changed");
+        }
+        if (kind != RULE_OUTPUT_FILE && kind != RULE_SCRATCH_DIR) {
+            int directory = kind == RULE_RUNTIME_DIR || kind == RULE_RUNTIME_EXEC_DIR || kind == RULE_SNAPSHOT_DIR;
+            require_read_only_mount(&mounts, path, mount_id, directory, target);
         }
         struct landlock_path_beneath_attr rule = { .allowed_access = rights, .parent_fd = target };
         if (syscall(SYS_landlock_add_rule, ruleset, LANDLOCK_RULE_PATH_BENEATH, &rule, 0) != 0) {
@@ -241,6 +483,7 @@ static void enforce_policy(const unsigned char *bytes, size_t length) {
     }
     if (offset != length) { errno = EINVAL; fail("policy contains trailing bytes"); }
     if (compiler_output_fd < 0) { errno = EINVAL; fail("policy has no compiler output"); }
+    free_mount_table(&mounts);
     /* Keep the ruleset at its original fd (normally 3) until restrict_self succeeds. */
     if (compiler_output_fd != 4) {
         if (dup3(compiler_output_fd, 4, O_CLOEXEC) < 0) fail("could not reserve compiler output descriptor");

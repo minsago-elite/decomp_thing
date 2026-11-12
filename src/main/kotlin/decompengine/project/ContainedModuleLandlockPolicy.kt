@@ -1,5 +1,7 @@
 package decompengine.project
 
+import decompengine.acp.LinuxFileIdentity
+import decompengine.acp.LinuxFilesystemSyscalls
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
@@ -8,8 +10,8 @@ import java.nio.file.Path
 
 /** Closed, bounded policy consumed by the native trampoline before it executes the compiler. */
 internal object ContainedModuleLandlockPolicy {
-    private const val VERSION = 1
-    private const val HEADER = "DMLAND01"
+    private const val VERSION = 2
+    private const val HEADER = "DMLAND02"
     private const val MAXIMUM_RULES = 8192
     private const val MAXIMUM_PATH_BYTES = 4096
     private const val MAXIMUM_POLICY_BYTES = 1024 * 1024
@@ -24,15 +26,24 @@ internal object ContainedModuleLandlockPolicy {
         RUNTIME_EXECUTE_FILE(7),
     }
 
-    internal data class Identity(val device: Long, val inode: Long, val directory: Boolean)
+    internal data class Identity(val device: Long, val inode: Long, val mountId: Long, val directory: Boolean)
     internal data class Entry(val kind: Kind, val path: Path, val identity: Identity)
 
-    fun forRequest(request: ContainedModuleCompilerRequest, scratchDirectory: Path): ByteArray {
+    fun forRequest(
+        request: ContainedModuleCompilerRequest,
+        scratchDirectory: Path,
+        pinnedInputIdentities: Map<String, Identity>,
+    ): ByteArray {
         require(request.schemaVersion == 4) { "historical module compiler request has no read-boundary authority" }
+        val expectedInputPaths = request.inputs.map { it.path }.toSet()
+        require(pinnedInputIdentities.keys == expectedInputPaths) {
+            "compiler read policy input identities do not exactly match the authenticated request"
+        }
         val entries = linkedMapOf<Pair<Kind, Path>, Entry>()
-        fun add(kind: Kind, path: Path, directory: Boolean) {
+        fun add(kind: Kind, path: Path, directory: Boolean, pinnedIdentity: Identity? = null) {
             canonicalPath(path)
-            val identity = identity(path, directory)
+            val identity = pinnedIdentity ?: identity(path, directory)
+            require(identity.directory == directory) { "compiler read policy target identity has the wrong type" }
             val key = kind to path
             val entry = Entry(kind, path, identity)
             val previous = entries.putIfAbsent(key, entry)
@@ -46,7 +57,10 @@ internal object ContainedModuleLandlockPolicy {
         }
         val snapshotDirectories = request.inputs.flatMap { input -> directoryAncestors(request.snapshotRoot, input.path) }.toSet()
         snapshotDirectories.forEach { add(Kind.SNAPSHOT_DIRECTORY, it, directory = true) }
-        request.inputs.forEach { input -> add(Kind.SNAPSHOT_FILE, request.snapshotRoot.resolve(input.path), directory = false) }
+        request.inputs.forEach { input ->
+            add(Kind.SNAPSHOT_FILE, request.snapshotRoot.resolve(input.path), directory = false,
+                pinnedIdentity = pinnedInputIdentities.getValue(input.path))
+        }
         add(Kind.OUTPUT_FILE, request.outputDirectory.resolve(ContainedModuleCompilerRequest.OBJECT_FILE), directory = false)
         add(Kind.SCRATCH_DIRECTORY, scratchDirectory, directory = true)
         val roots = request.runtimeReadRoots
@@ -58,7 +72,18 @@ internal object ContainedModuleLandlockPolicy {
                 entry.path.startsWith(request.outputDirectory) || request.outputDirectory.startsWith(entry.path) ||
                 entry.path.startsWith(scratchDirectory) || scratchDirectory.startsWith(entry.path)
         }) { "compiler runtime authority overlaps snapshot or writable output" }
-        return encode(entries.values.toList())
+        val selectedEntries = entries.values.toList()
+        val mounts = ContainedModuleMountPolicy.readCurrent()
+        selectedEntries.filterNot { it.kind == Kind.OUTPUT_FILE || it.kind == Kind.SCRATCH_DIRECTORY }
+            .forEach { entry ->
+                ContainedModuleMountPolicy.requireReadOnlyTarget(
+                    entry.path,
+                    entry.identity.mountId,
+                    entry.identity.directory,
+                    mounts,
+                )
+            }
+        return encode(selectedEntries)
     }
 
     fun encode(entries: List<Entry>): ByteArray {
@@ -75,11 +100,14 @@ internal object ContainedModuleLandlockPolicy {
             val path = canonicalPath(entry.path)
             val bytes = path.toByteArray(Charsets.UTF_8)
             require(bytes.size in 2..MAXIMUM_PATH_BYTES) { "compiler read policy path exceeds its bound" }
-            require(entry.identity.device >= 0 && entry.identity.inode > 0) { "compiler read policy identity is invalid" }
+            require(entry.identity.device >= 0 && entry.identity.inode > 0 && entry.identity.mountId > 0) {
+                "compiler read policy identity is invalid"
+            }
             out.putInt(entry.kind.wireValue)
             out.putInt(bytes.size)
             out.putLong(entry.identity.device)
             out.putLong(entry.identity.inode)
+            out.putLong(entry.identity.mountId)
             out.put(bytes)
         }
         require(out.position() <= MAXIMUM_POLICY_BYTES) { "compiler read policy exceeds its byte bound" }
@@ -90,14 +118,35 @@ internal object ContainedModuleLandlockPolicy {
         val canonical = canonicalPath(path)
         val actual = path.toRealPath(LinkOption.NOFOLLOW_LINKS)
         require(actual == path && !Files.isSymbolicLink(path)) { "compiler read policy target is not canonical" }
-        val attrs = Files.readAttributes(path, "unix:dev,ino,mode,nlink", LinkOption.NOFOLLOW_LINKS)
-        val mode = (attrs.getValue("mode") as Number).toInt()
-        val isDirectory = (mode and 0xf000) == 0x4000
-        val isRegular = (mode and 0xf000) == 0x8000
-        require(if (expectDirectory) isDirectory else isRegular) { "compiler read policy target has the wrong file type" }
-        require((attrs.getValue("nlink") as Number).toInt() >= 1) { "compiler read policy target has no links" }
         require(canonical == path.toString()) { "compiler read policy target changed during canonicalization" }
-        return Identity((attrs.getValue("dev") as Number).toLong(), (attrs.getValue("ino") as Number).toLong(), isDirectory)
+        val selected = descriptorIdentity(path, expectDirectory)
+        require(if (expectDirectory) selected.isDirectory else selected.isRegularFile && !selected.isSymbolicLink) {
+            "compiler read policy target has the wrong descriptor type"
+        }
+        require(selected.linkCount >= 1 && selected.mountId > 0) { "compiler read policy target identity is incomplete" }
+        return Identity(selected.key.device, selected.key.inode, selected.mountId, expectDirectory)
+    }
+
+    private fun descriptorIdentity(path: Path, expectDirectory: Boolean): LinuxFileIdentity {
+        val parts = path.iterator().asSequence().map { it.toString() }.toList()
+        require(parts.isNotEmpty()) { "compiler read policy target cannot be the filesystem root" }
+        var current = LinuxFilesystemSyscalls.openRoot(Path.of("/"))
+        try {
+            val directories = if (expectDirectory) parts else parts.dropLast(1)
+            for (part in directories) {
+                val next = current.whileOpen { parent -> LinuxFilesystemSyscalls.openDirectoryAt(parent, part) }
+                current.close()
+                current = next
+            }
+            if (expectDirectory) return current.whileOpen(LinuxFilesystemSyscalls::identity)
+            val file = current.whileOpen { parent ->
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent, parts.last())
+                    ?: throw IllegalArgumentException("compiler read policy target is absent")
+            }
+            return file.use { it.whileOpen(LinuxFilesystemSyscalls::identity) }
+        } finally {
+            current.close()
+        }
     }
 
     fun canonicalPath(path: Path): String {

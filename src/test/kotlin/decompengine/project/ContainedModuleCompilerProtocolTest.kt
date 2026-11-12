@@ -96,7 +96,7 @@ class ContainedModuleCompilerProtocolTest {
         assertEquals(null, historical.compilerInternalIncludePath)
         assertFalse("-isystem" in historical.command)
         assertFailsWith<IllegalArgumentException> {
-            ContainedModuleLandlockPolicy.forRequest(historical, root.resolve("scratch"))
+            ContainedModuleLandlockPolicy.forRequest(historical, root.resolve("scratch"), emptyMap())
         }
         assertFailsWith<IllegalArgumentException> {
             ContainedModuleCompilerRequest("3".repeat(64), profile.id, profile.sha256, root.resolve("snapshot"),
@@ -106,6 +106,29 @@ class ContainedModuleCompilerProtocolTest {
                 runtimeReadRoots = listOf(Path.of("/opt/compiler"), Path.of("/lib64")),
                 runtimeExecuteRoots = listOf(Path.of("/opt/compiler")),
                 runtimeExecuteFiles = listOf(Path.of("/lib64/ld-linux-x86-64.so.2")), compilerInternalIncludePath = Path.of("/outside/include"))
+        }
+    }
+
+    @Test
+    fun `Landlock snapshot policy requires an exact pinned identity population`() {
+        val profile = ReconstructionProfiles.default
+        val current = ContainedModuleCompilerRequest("3".repeat(64), profile.id, profile.sha256, root.resolve("snapshot"),
+            source.path, listOf(source, header), Path.of("/opt/compiler/bin/cc"), "4".repeat(64), root.resolve("output"),
+            1000, 65536, profileRecord = profileRecord(profile), schemaVersion = 4,
+            trampolinePath = Path.of("/opt/compiler/bin/decomp-module-compiler-exec"), trampolineSha256 = "5".repeat(64),
+            runtimeReadRoots = listOf(Path.of("/opt/compiler"), Path.of("/lib64")),
+            runtimeExecuteRoots = listOf(Path.of("/opt/compiler")),
+            runtimeExecuteFiles = listOf(Path.of("/lib64/ld-linux-x86-64.so.2")),
+            compilerInternalIncludePath = Path.of("/opt/compiler/include"))
+        assertFailsWith<IllegalArgumentException> {
+            ContainedModuleLandlockPolicy.forRequest(current, root.resolve("scratch"), emptyMap())
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ContainedModuleLandlockPolicy.forRequest(current, root.resolve("scratch"), mapOf(
+                source.path to ContainedModuleLandlockPolicy.Identity(1, 2, 7, directory = false),
+                header.path to ContainedModuleLandlockPolicy.Identity(3, 4, 8, directory = false),
+                "undeclared.h" to ContainedModuleLandlockPolicy.Identity(5, 6, 9, directory = false),
+            ))
         }
     }
 

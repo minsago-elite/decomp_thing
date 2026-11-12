@@ -87,18 +87,30 @@ issue live authority. The abstract checkpoint command remains profile-only; the 
 include destination is bound only through concrete request argv and runtime/proof data.
 
 The compiler can read each authenticated snapshot file individually; snapshot
-directories grant enumeration only. Pinned runtime directories grant read access, while
-execute permission is limited to the compiler tool directory containing the pinned
-compiler and its configured compiler subprograms, plus the exact pinned ELF interpreter
-file. Reports, request files, the worker
-runtime and procfs are not readable. The pre-created
-single-linked `module.o` inode is writable and truncatable; it receives a narrow read
-exception because GNU `as` opens this output read/write. The compiler receives that
-inode on descriptor 3. Scratch permits creation, writing and removal but no file reads
-or execution, including reopening a file the compiler created itself. The v2 command
-adds fixed `-pipe` and writes to `/proc/self/fd/3`; there is no readable-temporary
-fallback. Existing source-policy checks, leases, namespace monitoring, object checks,
-resource limits and cleanup remain in force.
+directories grant enumeration only. Snapshot-file rules are now bound to device,
+inode and mount identity obtained from the retained input descriptor, including a
+narrow descriptor-backed lease for empty inputs. The policy requires an exact match
+between request inputs and supplied pinned identities. The trampoline reopens each
+target without symlink traversal and compares all three identities before installing
+Landlock.
+
+Pinned runtime directories grant read access, while execute permission is limited to
+the compiler tool directory containing the pinned compiler and its configured compiler
+subprograms, plus the exact pinned ELF interpreter file. Policy construction and the
+trampoline independently parse a bounded mount table from the final worker namespace.
+They require each read/execute target's descriptor mount ID to identify its unique
+deepest covering read-only mount, and reject writable descendant mounts under granted
+directories. The checks use per-mount options, not superblock options, so a read-only
+bind over writable backing storage is evaluated by its effective mount. Missing,
+ambiguous, malformed or oversized mount evidence refuses execution. Reports, request
+files, the worker runtime and procfs are not readable. The pre-created single-linked
+`module.o` inode is writable and truncatable; it receives a narrow read exception
+because GNU `as` opens this output read/write. The compiler receives that inode on
+descriptor 3. Scratch permits creation, writing and removal but no file reads or
+execution, including reopening a file the compiler created itself. The v2 command adds
+fixed `-pipe` and writes to `/proc/self/fd/3`; there is no readable-temporary fallback.
+Existing source-policy checks, leases, namespace monitoring, object checks, resource
+limits and cleanup remain in force.
 
 Host staging must itself support execution or the attempt fails closed; the bounded
 staging file is removed only before launch or after proven process/scope absence.
@@ -176,18 +188,27 @@ Synchronized worker fixtures add, consume and remove an undeclared header, a sha
 and a valid precompiled sidecar around successful compiler execution. These diagnostics
 have no keeper receipt or acceptance authority. The namespace implementation and those
 worker fixtures still require qualification through the actual configured Make/Ninja
-routes; local success is not a hosted complete-closure guarantee. Empty headers still
-lack a retained kernel lease, and complete-set terminal-validation cutoff qualification
+routes; local success is not a hosted complete-closure guarantee. Empty module inputs
+now have a narrowly scoped descriptor-backed lease, but that path still requires
+configured worker qualification. Complete-set terminal-validation cutoff qualification
 remains separate. The read-only sandbox bind alone does not exclude host-side writes.
 
-This is snapshot-namespace protection, not mediation of every compiler read. In particular,
-source can name writable off-snapshot paths with relative includes. A local synchronized
-worker witness consumed a transient header in its output directory and still returned
-`compiled-object`; the snapshot monitor correctly does not reject ordinary sibling output
-writes. The production layout likewise has writable reports outside `state/snapshot`.
-Closing #738 requires a fail-closed complete compiler-input boundary, including these
-non-snapshot search locations, and actual configured qualification. Do not treat the
-snapshot regression positives as resolution of that broader P1 acceptance-integrity gap.
+The Landlock policy closes the previously observed relative-include route from a
+snapshot source into writable sibling reports: the scratch directory has no read
+authority, even for bytes created by the compiler itself. A direct authenticated
+trampoline regression now pairs a real `cc1`/`as` compilation with the literal
+`../../../../reports/tmp/input.h` traversal and requires permission denial, nonzero
+compiler status, and absence of the canary symbol from partial output. The test also
+substitutes a snapshot pathname after descriptor pinning and requires refusal. The
+existing source-policy regression remains unchanged; it is an early refusal control,
+not evidence for the kernel-enforced boundary.
+
+This implementation is not yet acceptance evidence for #738. The direct trampoline
+case and both configured Make/Ninja workflows still require successful execution in
+the hosted contained-module lane, with exact compiled-method inventory and no skips.
+The read-only sandbox bind alone does not exclude host-side writes. The documented
+same-UID deployment assumption excludes an independently compromised host process;
+it does not relax retained input leases, ownership checks or mutation-history controls.
 
 The current shared NOFILE 512 policy also cannot retain every nonempty input in an
 otherwise admitted large snapshot. Issue #1786 and PR #1800 own the separately versioned,

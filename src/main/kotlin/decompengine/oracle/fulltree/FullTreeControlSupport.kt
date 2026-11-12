@@ -243,6 +243,14 @@ internal class StableControlFile private constructor(
             return initialSha256
         }
 
+    /** Identity selected from the retained descriptor, never from a second pathname lookup. */
+    internal val authenticatedIdentity: LinuxFileIdentity
+        @Synchronized get() {
+            check(!closed) { "$label is already closed" }
+            requireCurrentMetadata("$label identity")
+            return readable.whileOpen(LinuxFilesystemSyscalls::identity)
+        }
+
     val size: Long
         get() = authenticatedSize
 
@@ -403,7 +411,7 @@ internal class StableControlFile private constructor(
         val attributes = descriptorAttributes(readable, label)
         val currentChangeTime = descriptorChangeTime(readable, label)
         if (
-            attributes.size() != size || attributes.size() !in 1L..maximumBytes ||
+            attributes.size() != size || attributes.size() !in minimumAuthenticatedSize()..maximumBytes ||
             attributes.lastModifiedTime() != lastModifiedTime || !attributes.isRegularFile ||
             attributes.isSymbolicLink || currentChangeTime != selectedChangeTime
         ) {
@@ -467,7 +475,7 @@ internal class StableControlFile private constructor(
         val attributes = descriptorAttributes(readable, description)
         val currentChangeTime = descriptorChangeTime(readable, description)
         if (
-            attributes.size() != size || attributes.size() !in 1L..maximumBytes ||
+            attributes.size() != size || attributes.size() !in minimumAuthenticatedSize()..maximumBytes ||
             attributes.lastModifiedTime() != lastModifiedTime || !attributes.isRegularFile ||
             attributes.isSymbolicLink || currentChangeTime != selectedChangeTime
         ) {
@@ -555,6 +563,8 @@ internal class StableControlFile private constructor(
             throw FullTreeControlException("$label must be an identified regular file without untrusted writes")
         }
     }
+
+    private fun minimumAuthenticatedSize(): Long = if (maximumBytes == 0L) 0L else 1L
 
     private fun sameStableControlIdentity(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
         first.key == second.key &&
@@ -1156,6 +1166,10 @@ internal class StableControlFile private constructor(
         fun open(path: Path, maximumBytes: Long, label: String): StableControlFile =
             openDescriptorBound(path, maximumBytes, label, null)
 
+        /** Descriptor-bound, leased empty-file support for the contained module snapshot only. */
+        internal fun openModuleCompilerEmptyInput(path: Path, label: String): StableControlFile =
+            openDescriptorBound(path, 0L, label, null, allowEmpty = true)
+
         /** Cooperative authentication checks; the callback is never invoked during close or cleanup. */
         fun openWithCheckpoint(
             path: Path,
@@ -1169,7 +1183,8 @@ internal class StableControlFile private constructor(
             maximumBytes: Long,
             label: String,
             faultInjector: ((OpenFaultPoint) -> Unit)?,
-        ): StableControlFile = openDescriptorBoundWithCheckpoint(path, maximumBytes, label, faultInjector, {})
+            allowEmpty: Boolean = false,
+        ): StableControlFile = openDescriptorBoundWithCheckpoint(path, maximumBytes, label, faultInjector, {}, allowEmpty)
 
         private fun openDescriptorBoundWithCheckpoint(
             path: Path,
@@ -1177,12 +1192,13 @@ internal class StableControlFile private constructor(
             label: String,
             faultInjector: ((OpenFaultPoint) -> Unit)?,
             checkpoint: (String) -> Unit,
+            allowEmpty: Boolean = false,
         ): StableControlFile {
             val normalized = path.toAbsolutePath().normalize()
             if (normalized.fileName == null || normalized.parent == null) {
                 throw FullTreeControlException("$label must name a file")
             }
-            if (maximumBytes <= 0L) {
+            if (maximumBytes < 0L || maximumBytes == 0L && !allowEmpty) {
                 throw FullTreeControlException("$label maximum byte limit must be positive")
             }
             val directoryDescriptors = ArrayDeque<LinuxDescriptor>()
@@ -1233,8 +1249,9 @@ internal class StableControlFile private constructor(
                 val selectedIdentity = openedSelected.whileOpen(LinuxFilesystemSyscalls::identity)
                 requireStableControlFile(selectedIdentity, label)
                 val attributes = descriptorAttributes(openedSelected, label)
-                if (attributes.size() !in 1L..maximumBytes) {
-                    throw FullTreeControlException("$label must contain 1..$maximumBytes bytes")
+                if (attributes.size() !in (if (allowEmpty) 0L else 1L)..maximumBytes) {
+                    val minimum = if (allowEmpty) 0 else 1
+                    throw FullTreeControlException("$label must contain $minimum..$maximumBytes bytes")
                 }
                 val selectedChangeTime = descriptorChangeTime(openedSelected, label)
                 val openedMutationWatch = registerMutationWatches(

@@ -10,7 +10,6 @@ import decompengine.acp.LinuxBoundedSessionProcess
 import decompengine.acp.LinuxBoundedSessionResult
 import decompengine.acp.LinuxBoundedSessionTimeoutException
 import decompengine.oracle.fulltree.StableControlFile
-import decompengine.repair.readStableRegularFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
@@ -92,7 +91,8 @@ object ContainedModuleCompilerWorker {
                     LinkOption.NOFOLLOW_LINKS), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
                     .use { it.force(true) }
                 val policyPath = request.outputDirectory.resolve("landlock-policy.bin")
-                val policyBytes = ContainedModuleLandlockPolicy.forRequest(request, scratch)
+                val pinnedIdentities = pinned.associate { it.path to it.policyIdentity() }
+                val policyBytes = ContainedModuleLandlockPolicy.forRequest(request, scratch, pinnedIdentities)
                 writeCompilerLog(policyPath, policyBytes)
                 val policyGuard = StableControlFile.open(policyPath, 1024L * 1024, "module compiler Landlock policy")
                 try {
@@ -188,12 +188,21 @@ object ContainedModuleCompilerWorker {
 
 private class PinnedCompilerInput private constructor(
     private val root: Path, private val input: ContainedModuleCompilerInput,
-    private val uid: Int, private val file: StableControlFile?, private val emptyIdentity: Map<String, Any>?,
+    private val uid: Int, private val file: StableControlFile,
 ) : AutoCloseable {
     val path: String get() = input.path
 
+    fun policyIdentity(): ContainedModuleLandlockPolicy.Identity {
+        file.requireSingleLink("module compiler snapshot ${input.path}")
+        val identity = file.authenticatedIdentity
+        require(identity.isRegularFile && !identity.isSymbolicLink && identity.linkCount == 1) {
+            "module compiler snapshot ${input.path} is not a single-link regular file"
+        }
+        return ContainedModuleLandlockPolicy.Identity(identity.key.device, identity.key.inode, identity.mountId, directory = false)
+    }
+
     fun bytes(): ByteArray {
-        val content = file?.readExactly(0, input.bytes.toInt(), "module compiler snapshot ${input.path}") ?: ByteArray(0)
+        val content = file.readExactly(0, input.bytes.toInt(), "module compiler snapshot ${input.path}")
         require(content.size.toLong() == input.bytes && sha256(content) == input.sha256) {
             "module compiler snapshot digest differs: ${input.path}"
         }
@@ -203,33 +212,23 @@ private class PinnedCompilerInput private constructor(
     fun verifyUnchanged() {
         val path = root.resolve(input.path)
         requireOwnedRegularFile(path, uid)
-        if (file != null) file.verifyUnchanged("module compiler snapshot ${input.path}")
-        else {
-            require(Files.readAttributes(path, "unix:dev,ino,size,mode,uid,gid,nlink,ctime,lastModifiedTime", LinkOption.NOFOLLOW_LINKS) == emptyIdentity) {
-                "empty module compiler header changed during execution"
-            }
-            val current = readStableRegularFile(root, input.path, 1)
-            require(current.bytes.isEmpty() && current.sha256 == input.sha256) { "empty module compiler header changed bytes" }
-        }
+        file.verifyUnchanged("module compiler snapshot ${input.path}")
     }
 
-    override fun close() { file?.close() }
+    override fun close() { file.close() }
 
     companion object {
         fun open(root: Path, input: ContainedModuleCompilerInput, uid: Int): PinnedCompilerInput {
             val path = root.resolve(input.path)
             requireOwnedRegularFile(path, uid)
-            if (input.bytes == 0L) {
-                val identity = Files.readAttributes(path, "unix:dev,ino,size,mode,uid,gid,nlink,ctime,lastModifiedTime", LinkOption.NOFOLLOW_LINKS)
-                val snapshot = readStableRegularFile(root, input.path, 1)
-                require(snapshot.bytes.isEmpty() && snapshot.sha256 == input.sha256) { "empty module compiler header digest differs" }
-                return PinnedCompilerInput(root, input, uid, null, identity).also { it.verifyUnchanged() }
-            }
-            val file = StableControlFile.open(path, ContainedModuleCompilerRequest.MAXIMUM_INPUT_FILE_BYTES, "module compiler snapshot ${input.path}")
+            val file = if (input.bytes == 0L) {
+                StableControlFile.openModuleCompilerEmptyInput(path, "module compiler empty snapshot ${input.path}")
+            } else StableControlFile.open(path, ContainedModuleCompilerRequest.MAXIMUM_INPUT_FILE_BYTES,
+                "module compiler snapshot ${input.path}")
             try {
                 file.requireSingleLink("module compiler snapshot ${input.path}")
                 require(file.size == input.bytes && file.authenticatedSha256 == input.sha256) { "module compiler snapshot digest or size differs" }
-                return PinnedCompilerInput(root, input, uid, file, null)
+                return PinnedCompilerInput(root, input, uid, file)
             } catch (failure: Throwable) {
                 file.close()
                 throw failure
