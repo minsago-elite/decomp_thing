@@ -658,6 +658,55 @@ class UploadServerTest {
             assertEquals(200, baseline.status)
 
             val uploadHeaders = sessions.getOrPut(server) { legacySessionHeaders(server) }
+            val quotaFile = Files.createDirectories(root.resolve(statusJobId).resolve("reports")).resolve("quota-probe")
+            FileChannel.open(quotaFile, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { channel ->
+                channel.position(WebUploadStorage.DEFAULT_MAXIMUM_BYTES)
+                channel.write(ByteBuffer.wrap(byteArrayOf(1)))
+            }
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val storageProbe = java.net.Socket("127.0.0.1", server.serverPort).apply { soTimeout = 10_000 }
+            val storageResponse = storageProbe.use { socket ->
+                val headers = buildString {
+                    append("POST /api/v1/jobs HTTP/1.1\r\nHost: 127.0.0.1:${server.serverPort}\r\n")
+                    append("Origin: $origin\r\nAccept: application/json\r\n")
+                    append("Content-Type: multipart/form-data; boundary=storage-quota-probe\r\n")
+                    append("Idempotency-Key: storage-quota-probe\r\nContent-Length: 1024\r\nConnection: close\r\n")
+                    uploadHeaders.forEach { (name, value) -> append("$name: $value\r\n") }
+                    append("\r\n")
+                }
+                socket.getOutputStream().apply { write(headers.toByteArray()); flush() }
+                val input = socket.getInputStream()
+                fun readLine(): String {
+                    val line = java.io.ByteArrayOutputStream()
+                    var previous = -1
+                    while (true) {
+                        val value = input.read()
+                        check(value >= 0) { "HTTP storage-refusal response ended before its headers" }
+                        if (previous == '\r'.code && value == '\n'.code) break
+                        if (previous >= 0) line.write(previous)
+                        previous = value
+                    }
+                    return line.toByteArray().decodeToString()
+                }
+                val statusLine = readLine()
+                var contentLength = 0
+                while (true) {
+                    val header = readLine()
+                    if (header.isEmpty()) break
+                    if (header.startsWith("Content-Length:", ignoreCase = true)) {
+                        contentLength = header.substringAfter(':').trim().toInt()
+                    }
+                }
+                check(contentLength in 1..16_384) { "HTTP storage-refusal response has no bounded body" }
+                statusLine + "\r\n" + input.readNBytes(contentLength).decodeToString()
+            }
+            assertTrue(storageResponse.startsWith("HTTP/1.1 503"), "disk quota must refuse the HTTP upload: $storageResponse")
+            assertTrue(storageResponse.contains("UPLOAD_STORAGE"), "disk quota refusal must be typed")
+            assertEquals(WebUploadStorage.DEFAULT_MAXIMUM_BYTES + 1, Files.size(quotaFile))
+            val statusDuringStorageRefusal = request(server, "GET", "/api/v1/jobs/$statusJobId", headers = mapOf("Accept" to "application/json"))
+            assertEquals(200, statusDuringStorageRefusal.status)
+            Files.delete(quotaFile)
+
             fun holdMultipartUpload(index: Int): HeldUpload {
                 val boundary = "held-upload-$index"
                 val prefix = "--$boundary\r\n".toByteArray() +
@@ -666,7 +715,6 @@ class UploadServerTest {
                 val content = elfFixture()
                 val suffix = "\r\n--$boundary--\r\n".toByteArray()
                 val socket = java.net.Socket("127.0.0.1", server.serverPort).apply { soTimeout = 10_000 }
-                val origin = "http://127.0.0.1:${server.serverPort}"
                 val requestHeaders = buildString {
                     append("POST /api/v1/jobs HTTP/1.1\r\nHost: 127.0.0.1:${server.serverPort}\r\n")
                     append("Origin: $origin\r\nAccept: application/json\r\n")
