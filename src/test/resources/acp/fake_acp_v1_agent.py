@@ -103,6 +103,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-invalid-unicode-after-write",
     "repair-active-declared-role-read-limit-after-write",
     "repair-active-declared-role-patch-count-retry",
+    "repair-active-declared-role-patch-byte-reuse",
     "repair-active-declared-role-timeout-after-write",
 }
 RECONSTRUCTION_MAXIMUM_SOURCE_BYTES = 256 * 1024
@@ -313,6 +314,7 @@ expected_fs = {
     "repair-active-declared-role-invalid-unicode-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-read-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-patch-count-retry": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-patch-byte-reuse": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
@@ -1117,6 +1119,55 @@ if MODE == "repair-active-declared-role-patch-count-retry":
     accepted_second = read_workspace_file(second, 178)
     if "error" in accepted_second or accepted_second.get("result", {}).get("content") != second_candidate:
         raise SystemExit(178)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-patch-byte-reuse":
+    first = join_path(cwd, "src/modules/reconstructed.c")
+    second = join_path(cwd, "src/modules/secondary.c")
+
+    def padded_candidate(prefix, suffix, size):
+        padding_bytes = size - len((prefix + suffix).encode())
+        if padding_bytes < 0:
+            raise SystemExit(179)
+        candidate = prefix + ("x" * padding_bytes) + suffix
+        if len(candidate.encode()) != size:
+            raise SystemExit(180)
+        return candidate
+
+    first_original = "int decomp_engine_main(void) { return 0; }\n"
+    second_original = "int secondary(void) { return 0; }\n"
+    first_large = padded_candidate("/* first-large ", " */\nint decomp_engine_main(void) { return 1; }\n", 2048)
+    first_small = padded_candidate("/* first-small ", " */\nint decomp_engine_main(void) { return 1; }\n", 1024)
+    second_small = padded_candidate("/* second-small ", " */\nint secondary(void) { return 1; }\n", 2048)
+    second_over = padded_candidate("/* second-over ", " */\nint secondary(void) { return 1; }\n", 2049)
+    second_large = padded_candidate("/* second-large ", " */\nint secondary(void) { return 1; }\n", 3072)
+    second_large_over = padded_candidate("/* second-large-over ", " */\nint secondary(void) { return 1; }\n", 3073)
+    second_exact = padded_candidate("/* second-exact ", " */\nint secondary(void) { return 1; }\n", 4096)
+
+    write_workspace_file(first, first_large, 181)
+    write_workspace_file(second, second_small, 182)
+    refused = try_write_workspace_file(second, second_over, 183)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(181)
+    if read_workspace_file(first, 184).get("result", {}).get("content") != first_large:
+        raise SystemExit(182)
+    if read_workspace_file(second, 185).get("result", {}).get("content") != second_small:
+        raise SystemExit(183)
+
+    write_workspace_file(first, first_small, 186)
+    write_workspace_file(second, second_large, 187)
+    refused = try_write_workspace_file(second, second_large_over, 188)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(184)
+    if read_workspace_file(second, 189).get("result", {}).get("content") != second_large:
+        raise SystemExit(185)
+
+    write_workspace_file(first, first_original, 190)
+    write_workspace_file(second, second_exact, 191)
+    if read_workspace_file(first, 192).get("result", {}).get("content") != first_original:
+        raise SystemExit(186)
+    if read_workspace_file(second, 193).get("result", {}).get("content") != second_exact:
+        raise SystemExit(187)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-timeout-after-write":
