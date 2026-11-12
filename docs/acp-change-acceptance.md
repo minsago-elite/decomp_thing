@@ -2069,6 +2069,30 @@ has SHA-256 `6ba74c900fa4818db3c2246ba8c54b34ae8c540a829ca9e9f0fc1681d480744f`;
 the [provenance record](evidence/issue-734-public-reconstruction-modified-grant-audit-rerun-2026-11-12.json)
 binds the exact test source and result.
 
+## Public reconstruction denied retry preserves the acknowledged candidate — 2026-11-12
+
+The follow-up fixture now acknowledges a valid target write before sending the
+262,145-byte multibyte retry against the 262,144-byte grant. The broker records
+the valid write as `ALLOWED/COMPLETED`, then refuses the oversized retry as
+`DENIED/POLICY_DENIED`. After the scripted prompt completes, the host test hook
+observes the target bytes before the reconstruction workflow resumes. Both
+the newly created-target and existing-target cases retain the exact valid
+candidate at that point; the final host receipt still binds the expected
+`CREATED` or `MODIFIED` transition, including the seeded preimage for the
+existing target. This closes the earlier evidence limitation where a later
+valid write could overwrite the target before observation.
+
+The focused local scripted-ACP method passed with one test and zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-refused-retry-preserves-candidate-2026-11-12.xml)
+has SHA-256 `ef7d323735f15a66f9d4cc5089095cbbf50e6a31e76bf31f4f7b1d21cac0eaee`;
+the [provenance record](evidence/issue-734-public-reconstruction-refused-retry-preserves-candidate-2026-11-12.json)
+binds the source commit/tree, selector, command, and result.
+
+This is local scripted ACP evidence for Generated C Make. It does not qualify
+live providers, other profiles, hosted exact-head CI, production validation
+under #236, publication crash recovery under #732, durable provenance under
+#733, or the complete #734/#63 acceptance matrix.
+
 ## Public reconstruction authority and existing-target snapshot refusals — 2026-11-12
 
 The active reconstruction test now inspects every dispatched request's

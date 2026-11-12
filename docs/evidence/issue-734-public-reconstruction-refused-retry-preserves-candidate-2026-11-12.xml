@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpAgentHarnessTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T10:53:31.464Z" hostname="whatsername" time="76.053">
+  <properties/>
+  <testcase name="public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes()" classname="decompengine.acp.AcpAgentHarnessTest" time="76.036"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

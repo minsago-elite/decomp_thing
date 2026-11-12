@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "fb33965d41243f56765c1352a5c0307b63a613ad",
+  "sourceParent": "1a7524f713175b81608d7384aaa674c9590af8ad",
+  "sourceTree": "15dec5c6a2ef9a2d4bf17e0448034d973d96d26d",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 76.036,
+    "suiteSeconds": 76.053,
+    "timestamp": "2026-11-12T10:53:31.464Z",
+    "junitSha256": "ef7d323735f15a66f9d4cc5089095cbbf50e6a31e76bf31f4f7b1d21cac0eaee"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction profile",
+    "provider": "scripted ACP process through ArchivalReconstructionService",
+    "coverage": "The scripted peer first acknowledges the valid 262,144-byte target write, then attempts a 262,145-byte multibyte retry, which is denied with POLICY_DENIED. The prompt-completion hook observes the unchanged candidate bytes before the reconstruction workflow resumes. The test covers both newly created and seeded existing targets and checks the resulting receipt kind, path, preimage/postimage commitments and byte count, the ordered allowed/denied audit records, and successful publication/rebuild for the retained valid candidate.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only for Generated C Make",
+      "does not establish live-provider behavior or other profile coverage",
+      "does not establish production validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not establish hosted exact-head CI or complete #734/#63 acceptance"
+    ]
+  }
+}
