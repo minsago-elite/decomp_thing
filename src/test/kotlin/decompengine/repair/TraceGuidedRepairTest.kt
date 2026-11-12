@@ -5171,7 +5171,13 @@ class TraceGuidedRepairTest {
                 ): RepairCandidateValidationOutcome {
                     validationCalls++
                     assertEquals(acceptedSources.keys, request.candidateSources.keys)
-                    assertContentEquals(candidate, request.candidateSources.getValue(targetPath))
+                    acceptedSources.forEach { (path, beforeBytes) ->
+                        assertContentEquals(
+                            if (path == targetPath) candidate else beforeBytes,
+                            request.candidateSources.getValue(path),
+                            path,
+                        )
+                    }
                     assertEquals(baseline!!.indexSha256, request.indexSha256)
                     assertEquals(
                         GeneratedCRepairIndexProfile.configurationSha256(repairBudget),
@@ -5276,6 +5282,346 @@ class TraceGuidedRepairTest {
 
         runScenario(entityLimit = 3, exact = true)
         runScenario(entityLimit = 2, exact = false)
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair admits exact aggregate generated C index evidence bytes and refuses one below before dispatch`() {
+        val model = RecoveredProgramModel(
+            inputSha256 = "d".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    id = "fn_reconstructed",
+                    name = "reconstructed_main",
+                    address = 0x1000UL,
+                    prototype = "int reconstructed_main(void)",
+                    decompiledC = "int reconstructed_main(void) { return global_counter; }",
+                    referencedGlobals = setOf("global_counter"),
+                ),
+            ),
+            globals = listOf(RecoveredGlobal("global_counter", "global_counter", 0x2000UL, "int", "0")),
+            types = listOf(
+                RecoveredType(
+                    id = "type_counter",
+                    declaration = "typedef struct Counter { int value; } Counter;",
+                    sourceAddress = 0x3000UL,
+                ),
+            ),
+        )
+        val targetPath = "src/modules/reconstructed.c"
+        val candidate = "/* indexed entity boundary candidate */\nint reconstructed_main(void) { return 1; }\n"
+            .toByteArray(Charsets.UTF_8)
+        val trailingJsonWhitespace = ByteArray(32 * 1024) { ' '.code.toByte() }
+        var exactEvidenceLimit = 0L
+        var planBytesAtExactLimit = 0
+        var modelBytesAtExactLimit = 0
+
+        fun budget(evidenceBytes: Long) = RepairResourceBudget(maximumIndexEvidenceBytes = evidenceBytes)
+
+        fun project(prefix: String): Path {
+            val project = createRepairTempDirectory(prefix).resolve("project")
+            SourceTreeGenerator.generate(model, project)
+            val modelPath = project.resolve("reports/program_model.json")
+            Files.write(modelPath, Files.readAllBytes(modelPath) + trailingJsonWhitespace)
+            val wire = Json.parseToJsonElement(modelPath.readText()).jsonObject
+            assertEquals(1, wire.getValue("functions").jsonArray.size)
+            assertEquals(1, wire.getValue("globals").jsonArray.size)
+            assertEquals(1, wire.getValue("types").jsonArray.size)
+            val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+            assertEquals(
+                targetPath,
+                plan.getValue("modules").jsonArray.single().jsonObject.getValue("sourcePath").jsonPrimitive.content,
+            )
+            return project
+        }
+
+        fun runExactLimit() {
+            val project = project("repair-active-index-evidence-exact-")
+            val planPath = project.resolve("reports/module_plan.json")
+            val modelPath = project.resolve("reports/program_model.json")
+            val planBefore = Files.readAllBytes(planPath)
+            val modelBefore = Files.readAllBytes(modelPath)
+            planBytesAtExactLimit = planBefore.size
+            modelBytesAtExactLimit = modelBefore.size
+            exactEvidenceLimit = planBefore.size.toLong() + modelBefore.size.toLong()
+            assertTrue(planBefore.isNotEmpty())
+            assertTrue(modelBefore.size > trailingJsonWhitespace.size)
+            assertTrue(planBefore.size.toLong() <= exactEvidenceLimit - 1)
+            assertTrue(modelBefore.size.toLong() > exactEvidenceLimit - 1 - planBefore.size)
+
+            val repairBudget = budget(exactEvidenceLimit)
+            val layout = GeneratedCRepairIndexProfile.resolve(project, repairBudget)
+            assertTrue("Makefile" in layout.sourcePaths)
+            assertTrue(targetPath in layout.sourcePaths)
+            assertEquals(3, layout.entities.size)
+            assertTrue(targetPath in layout.editablePaths)
+            val acceptedSources = layout.sourcePaths.associateWith { project.resolve(it).readBytes() }
+            val baseline = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, repairBudget).use { it.snapshot }
+            val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-indexed-entities")
+            var dispatches = 0
+            var capturedReceipt: AgentExecutionReceipt? = null
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.execute(request, onEvent)
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    val authority = assertNotNull(request.accessPolicy.mutationAuthority)
+                    val grant = authority.grants.single { it.path.relativePath == targetPath }
+                    assertEquals(setOf(AgentOperation.WRITE_FILE), grant.operations)
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                        .also { capturedReceipt = it }
+                }
+            }
+
+            var validationCalls = 0
+            val validationStop = IllegalStateException("index evidence byte equality reached candidate validator")
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    assertEquals(acceptedSources.keys, request.candidateSources.keys)
+                    assertContentEquals(candidate, request.candidateSources.getValue(targetPath))
+                    assertEquals(baseline.indexSha256, request.indexSha256)
+                    assertEquals(
+                        GeneratedCRepairIndexProfile.configurationSha256(repairBudget),
+                        request.profileSha256,
+                    )
+                    assertEquals(
+                        repairCandidateSourceSha256(request.candidateSources),
+                        request.sourceRevisionSha256,
+                    )
+                    throw validationStop
+                }
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("index evidence admission test must use immutable candidate validation")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("index evidence admission test must use immutable candidate validation")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport =
+                    error("index evidence admission test must use immutable candidate validation")
+            }
+            val history = RepairHistory(project.resolve("reports/repair_history.json"))
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = history,
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = repairBudget,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+            try {
+                val failure = assertFailsWith<IllegalStateException> {
+                    loop.repairCompileError(
+                        project,
+                        CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                        emptyList(),
+                    )
+                }
+                assertSame(validationStop, failure)
+                assertEquals(1, dispatches)
+                assertEquals(1, validationCalls)
+                val receipt = assertNotNull(capturedReceipt)
+                val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+                assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, evidence.phaseReached)
+                assertEquals(AcpExecutionCleanupDisposition.VERIFIED, evidence.cleanupDisposition)
+                assertNotNull(evidence.completeExecutionEvidence)
+                val result = assertIs<AgentExecutionOutcome.Returned>(receipt.outcome).result
+                assertEquals(AgentStopReason.COMPLETED, result.stopReason)
+                val change = result.changes.single()
+                assertEquals(targetPath, change.path.relativePath)
+                assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+                assertEquals(sha256(acceptedSources.getValue(targetPath)), change.beforeSha256)
+                assertEquals(sha256(candidate), change.afterSha256)
+                assertEquals(candidate.size.toLong(), change.sizeBytes)
+                assertEquals(exactEvidenceLimit, planBefore.size.toLong() + modelBefore.size.toLong())
+                assertContentEquals(planBefore, Files.readAllBytes(planPath))
+                assertContentEquals(modelBefore, Files.readAllBytes(modelPath))
+                acceptedSources.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes()) }
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, repairBudget).use { graph ->
+                    assertNull(graph.snapshot.pendingAttemptId)
+                    assertEquals(baseline.headId, graph.snapshot.headId)
+                    assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                    assertEquals(1, graph.snapshot.runs.size)
+                }
+            } finally {
+                loop.close()
+            }
+        }
+
+        fun runOneByteUnder() {
+            val project = project("repair-active-index-evidence-under-")
+            val planBefore = Files.readAllBytes(project.resolve("reports/module_plan.json"))
+            val modelBefore = Files.readAllBytes(project.resolve("reports/program_model.json"))
+            assertEquals(planBytesAtExactLimit, planBefore.size)
+            assertEquals(modelBytesAtExactLimit, modelBefore.size)
+            assertEquals(exactEvidenceLimit, planBefore.size.toLong() + modelBefore.size.toLong())
+            assertTrue(planBefore.size.toLong() <= exactEvidenceLimit - 1)
+            assertEquals(modelBefore.size.toLong(), exactEvidenceLimit - planBefore.size.toLong())
+            assertTrue(modelBefore.size > 1)
+
+            val repairBudget = budget(exactEvidenceLimit - 1)
+            val layout = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget())
+            assertTrue("Makefile" in layout.sourcePaths)
+            assertTrue(targetPath in layout.sourcePaths)
+            assertEquals(3, layout.entities.size)
+            val acceptedSources = layout.sourcePaths.associateWith { project.resolve(it).readBytes() }
+            val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-indexed-entities")
+            var dispatches = 0
+            var validationCalls = 0
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    error("one-under index evidence admission must refuse before candidate validation")
+                }
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("one-under index evidence admission must refuse before compilation")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("one-under index evidence admission must refuse before compilation")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport =
+                    error("one-under index evidence admission must refuse before behavior validation")
+            }
+            val historyPath = project.resolve("reports/repair_history.json")
+            val history = RepairHistory(historyPath)
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    dispatches++
+                    return acp.execute(request, onEvent)
+                }
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    dispatches++
+                    return acp.executeCaptured(request, initialFiles, output, onEvent)
+                }
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    return acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+                }
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                }
+            }
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = history,
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = repairBudget,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+            try {
+                val failure = assertFailsWith<RepairBudgetExceededException> {
+                    loop.repairCompileError(
+                        project,
+                        CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                        emptyList(),
+                    )
+                }
+                assertEquals(
+                    "stable file-read target reports/program_model.json has ${modelBefore.size} bytes; " +
+                        "limit=${modelBefore.size - 1}",
+                    failure.message,
+                )
+                assertEquals(0, dispatches)
+                assertEquals(0, validationCalls)
+                assertContentEquals(planBefore, Files.readAllBytes(project.resolve("reports/module_plan.json")))
+                assertContentEquals(modelBefore, Files.readAllBytes(project.resolve("reports/program_model.json")))
+                acceptedSources.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes()) }
+                assertFalse(historyPath.exists())
+                val graphPath = project.resolve("reports/repair-revisions/graph.json")
+                if (graphPath.exists()) {
+                    val state = Json.parseToJsonElement(graphPath.readText()).jsonObject
+                    assertEquals(JsonNull, state.getValue("pending"))
+                    assertTrue(state.getValue("nodes").jsonArray.isEmpty())
+                    assertTrue(state.getValue("runs").jsonArray.isEmpty())
+                }
+            } finally {
+                loop.close()
+            }
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget(exactEvidenceLimit)).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId)
+                assertEquals(1, graph.snapshot.nodes.size)
+                assertEquals(ModuleRevisionStatus.ROOT, graph.snapshot.nodes.single().status)
+                assertTrue(graph.snapshot.runs.isEmpty())
+            }
+            assertFalse(historyPath.exists())
+        }
+
+        runExactLimit()
+        runOneByteUnder()
     }
 
     @Test
