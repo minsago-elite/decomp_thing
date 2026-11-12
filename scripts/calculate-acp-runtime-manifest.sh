@@ -22,10 +22,12 @@ if [[ ! -f "${jars[0]}" ]]; then
 fi
 classpath=$(IFS=:; echo "${jars[*]}")
 
-work_directory=$(mktemp -d /tmp/decomp-acp-manifest.XXXXXX)
+repository_root=$(pwd -P)
+mkdir -p "$repository_root/build"
+work_directory=$(mktemp -d "$repository_root/build/acp-runtime-manifest.XXXXXX")
 cleanup() {
   case "$work_directory" in
-    /tmp/decomp-acp-manifest.*) rm -rf -- "$work_directory" ;;
+    "$repository_root"/build/acp-runtime-manifest.*) rm -rf -- "$work_directory" ;;
     *) echo "refusing to remove unexpected manifest workspace: $work_directory" >&2 ;;
   esac
 }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
+import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, eventStreamsClosed, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
 
@@ -69,8 +69,12 @@ test('correlates a mutation with its own response and tracks event stream closur
   assert.equal(matchingResponse(request, [{ requestId: 'earlier-pin-get', status: 200 }]), null);
   const streams = new Map([['events-1', { open: true }]]);
   assert.equal(hasOpenEventStream(streams), true);
+  assert.equal(eventStreamsClosed(streams, ['events-1']), false);
+  assert.equal(eventStreamsClosed(streams, ['events-1', 'events-missing']), false);
   streams.get('events-1').open = false;
   assert.equal(hasOpenEventStream(streams), false);
+  assert.equal(eventStreamsClosed(streams, ['events-1']), true);
+  assert.equal(eventStreamsClosed(streams, []), false);
 });
 
 test('publishes by atomic rename and leaves no temporary file', async () => {

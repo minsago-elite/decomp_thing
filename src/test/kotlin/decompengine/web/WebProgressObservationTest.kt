@@ -231,4 +231,61 @@ class WebProgressObservationTest {
             assertTrue(sawWithheldTask)
         } finally { Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) } }
     }
+
+    @Test fun `every paged writer event carries attempt identity order and its available task session and revision correlation`() {
+        val root = Files.createDirectories(Path.of("build/test-fixtures")).let { Files.createTempDirectory(it, "web-progress-correlation-") }
+        try {
+            val request = decompengine.agent.AgentExecutionRequest("fixture task",
+                listOf(decompengine.agent.AgentWorkspaceRoot("project", root.toAbsolutePath().normalize())),
+                accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList()))
+            AgentProgressJournal(root, "reconstruct").use { journal ->
+                val task = journal.beginTask("PRIVATE_TASK_LABEL", request, "PRIVATE_WORKFLOW_RUN")
+                task.event(decompengine.agent.AgentMessageEvent(0, "message", decompengine.agent.AgentMessageRole.ASSISTANT, "PRIVATE_PROSE", true))
+                task.complete(decompengine.agent.AgentExecutionReceipt(decompengine.agent.AgentExecutionRequestBinding.capture(request),
+                    decompengine.agent.AgentExecutionOutcome.Returned(decompengine.agent.AgentExecutionResult(
+                        decompengine.agent.AgentStopReason.NO_CHANGES,
+                        session = decompengine.agent.AgentSessionReference("fixture-harness", "PRIVATE_SESSION")))))
+                journal.runState(decompengine.agent.AgentWorkflowRunObservation("PRIVATE_WORKFLOW_RUN",
+                    decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, revisionId = "PRIVATE_REVISION", taskId = "PRIVATE_TASK_LABEL"))
+            }
+            val bytes = Files.readAllBytes(root.resolve(AgentProgressJournal.FILE_NAME))
+            val pages = WebProgressPages()
+            val items = mutableListOf<JsonObject>()
+            var cursor: String? = null
+            do {
+                val page = pages.page("session_fixture", "job_fixture", "attempt_fixture", bytes, "limit=2" + (cursor?.let { "&after=$it" } ?: ""))
+                items += page.getValue("items").jsonArray.map { it.jsonObject }
+                cursor = page["nextCursor"]?.takeIf { it != JsonNull }?.jsonPrimitive?.content
+            } while (page.getValue("hasMore").jsonPrimitive.boolean)
+            fun digest(value: String) = java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
+            assertTrue(items.size >= 4)
+            assertFalse(items.toString().contains("PRIVATE_"), "Only commitments, never raw labels, are public correlation")
+            items.forEachIndexed { index, event ->
+                assertEquals("job_fixture", event.getValue("jobId").jsonPrimitive.content)
+                assertEquals("attempt_fixture", event.getValue("runId").jsonPrimitive.content)
+                assertEquals(index.toString(), event.getValue("sequence").jsonPrimitive.content)
+                assertTrue(event.getValue("cursor").jsonPrimitive.content.matches(Regex("[A-Za-z0-9_-]{1,128}")))
+                assertTrue(event.getValue("occurredAt").jsonPrimitive.content.endsWith("Z"))
+            }
+            assertEquals(items.size, items.map { it.getValue("cursor") }.toSet().size, "Cursors identify each event")
+            fun fields(kind: String) = items.map { it.getValue("payload").jsonObject }.filter {
+                it.getValue("observationKind").jsonPrimitive.content == kind
+            }.map { it.getValue("fields").jsonObject }
+            val taskRows = fields("task_started") + fields("message") + fields("agent_finished")
+            assertEquals(3, taskRows.size)
+            // Task events share the writer-issued turn and commitments; the session is known only at completion,
+            // so its commitment is attached there and correlates the other rows through the shared turn.
+            assertEquals(1, taskRows.map { it.getValue("turnId") }.toSet().size)
+            taskRows.forEach {
+                assertEquals(digest("PRIVATE_TASK_LABEL"), it.getValue("taskIdSha256").jsonPrimitive.content)
+                assertEquals(digest("PRIVATE_WORKFLOW_RUN"), it.getValue("workflowRunIdSha256").jsonPrimitive.content)
+                assertTrue(it.getValue("requestSha256").jsonPrimitive.content.matches(Regex("[a-f0-9]{64}")))
+            }
+            assertEquals(digest("PRIVATE_SESSION"), fields("agent_finished").single().getValue("sessionIdSha256").jsonPrimitive.content)
+            val runState = fields("workflow_run_state").single()
+            assertEquals(digest("PRIVATE_REVISION"), runState.getValue("revisionIdSha256").jsonPrimitive.content)
+            assertEquals(digest("PRIVATE_WORKFLOW_RUN"), runState.getValue("workflowRunIdSha256").jsonPrimitive.content)
+            assertEquals(digest("PRIVATE_TASK_LABEL"), runState.getValue("taskIdSha256").jsonPrimitive.content)
+        } finally { root.toFile().deleteRecursively() }
+    }
 }
