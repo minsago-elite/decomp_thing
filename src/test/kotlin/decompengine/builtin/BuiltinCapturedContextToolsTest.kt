@@ -3,7 +3,9 @@ package decompengine.builtin
 import decompengine.agent.*
 import decompengine.builtin.provider.*
 import decompengine.repair.*
+import com.fasterxml.jackson.core.JsonFactory
 import kotlinx.serialization.json.*
+import java.io.ByteArrayOutputStream
 import java.nio.file.Path
 import java.time.Duration
 import kotlin.test.*
@@ -21,6 +23,23 @@ class BuiltinCapturedContextToolsTest {
     })
     private fun response(tools: List<ModelToolCall> = emptyList()) = ModelResponse("", tools,
         if (tools.isEmpty()) ModelFinishReason.STOP else ModelFinishReason.TOOL_CALLS, ModelUsage(10, 10, false), 1)
+
+    private fun serializedEvidencePageSize(items: List<AgentContextInput>, total: Int, count: Int): Int {
+        val bytes = ByteArrayOutputStream()
+        JsonFactory().createGenerator(bytes).use { out ->
+            out.writeStartObject(); out.writeArrayFieldStart("evidence")
+            items.take(count).forEach { item ->
+                out.writeStartObject(); out.writeStringField("id", item.id); out.writeStringField("mediaType", item.mediaType)
+                out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
+                out.writeStringField("sha256", decompengine.project.sha256(item.content.toByteArray()))
+                out.writeNumberField("utf8Bytes", item.content.toByteArray().size); out.writeEndObject()
+            }
+            out.writeEndArray(); out.writeNumberField("totalEntries", total)
+            out.writeFieldName("nextOffset"); if (count < total) out.writeNumber(count) else out.writeNull()
+            out.writeEndObject()
+        }
+        return bytes.size()
+    }
 
     @Test fun `directory inventory is sorted virtual and restricted by shared read policy`() {
         val request = request()
@@ -46,6 +65,102 @@ class BuiltinCapturedContextToolsTest {
         val firstItem = first.getValue("evidence").jsonArray.first().jsonObject
         assertEquals("evidence-00", firstItem.getValue("id").jsonPrimitive.content)
         assertEquals(decompengine.project.sha256("content 0".toByteArray()), firstItem.getValue("sha256").jsonPrimitive.content)
+    }
+
+    @Test fun `evidence inventory shrinks pages to the byte budget without gaps or duplicates`() {
+        val inputs = (0 until 12).map { index ->
+            AgentContextInput("evidence-%02d-Ω".format(index), "content-$index", description = "line\n\"quoted Ω😀\" ".repeat(8))
+        }.reversed()
+        val request = request(inputs)
+        val byteLimit = 1024
+        val tools = BuiltinCapturedContextTools(request, emptyList(), byteLimit, 100)
+        val ids = mutableListOf<String>()
+        var offset = 0
+        var firstPageSize = -1
+        while (true) {
+            val result = tools.execute(call("list_evidence", offset = offset), control(request))
+            assertFalse(result.failed, result.content)
+            assertTrue(result.content.toByteArray().size <= byteLimit)
+            val page = Json.parseToJsonElement(result.content).jsonObject
+            assertEquals(inputs.size, page.getValue("totalEntries").jsonPrimitive.int)
+            val entries = page.getValue("evidence").jsonArray.map { it.jsonObject }
+            assertTrue(entries.isNotEmpty() || offset == inputs.size)
+            if (offset == 0) {
+                firstPageSize = entries.size
+                assertTrue(firstPageSize in 1 until inputs.size, "expected byte limit to reduce the first page, got $firstPageSize")
+                val ordered = inputs.sortedBy { it.id }
+                val largerPageBytes = serializedEvidencePageSize(ordered, inputs.size, firstPageSize + 1)
+                assertTrue(largerPageBytes > byteLimit,
+                    "the next sorted entry must not fit: count=$firstPageSize serialized=$largerPageBytes limit=$byteLimit")
+                val nextEntry = ordered[firstPageSize]
+                assertTrue(nextEntry.id > entries.last().getValue("id").jsonPrimitive.content)
+            }
+            entries.forEach { entry ->
+                val id = entry.getValue("id").jsonPrimitive.content
+                ids += id
+                val source = inputs.single { it.id == id }
+                assertEquals(decompengine.project.sha256(source.content.toByteArray()), entry.getValue("sha256").jsonPrimitive.content)
+                assertEquals(source.content.toByteArray().size, entry.getValue("utf8Bytes").jsonPrimitive.int)
+            }
+            val next = page.getValue("nextOffset")
+            if (next == JsonNull) break
+            assertEquals(offset + entries.size, next.jsonPrimitive.int)
+            offset = next.jsonPrimitive.int
+        }
+        assertEquals(inputs.map { it.id }.sorted(), ids)
+        assertEquals(ids.distinct(), ids)
+    }
+
+    @Test fun `evidence inventory stops at an oversized entry without skipping later entries`() {
+        val request = request(listOf(
+            AgentContextInput("a-small", "first"),
+            AgentContextInput("b-large", "middle", description = "Ω".repeat(2_000)),
+            AgentContextInput("c-small", "last"),
+        ))
+        val tools = BuiltinCapturedContextTools(request, emptyList(), 1024, 10)
+        val first = Json.parseToJsonElement(tools.execute(call("list_evidence"), control(request)).content).jsonObject
+        assertEquals(listOf("a-small"), first.getValue("evidence").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content })
+        assertEquals(1, first.getValue("nextOffset").jsonPrimitive.int)
+
+        val blocked = tools.execute(call("list_evidence", offset = 1), control(request))
+        assertTrue(blocked.failed)
+        assertTrue(blocked.content.contains("next evidence entry"))
+    }
+
+    @Test fun `empty evidence inventory returns an empty terminal page`() {
+        val request = request()
+        val result = BuiltinCapturedContextTools(request, emptyList(), 1024, 10)
+            .execute(call("list_evidence"), control(request))
+        assertFalse(result.failed)
+        val page = Json.parseToJsonElement(result.content).jsonObject
+        assertTrue(page.getValue("evidence").jsonArray.isEmpty())
+        assertEquals(0, page.getValue("totalEntries").jsonPrimitive.int)
+        assertEquals(JsonNull, page["nextOffset"])
+    }
+
+    @Test fun `evidence inventory refuses an entry that cannot fit instead of skipping it`() {
+        val request = request(listOf(AgentContextInput("too-large", "small", description = "Ω".repeat(2_000))))
+        val tools = BuiltinCapturedContextTools(request, emptyList(), 1024, 10)
+        val result = tools.execute(call("list_evidence"), control(request))
+        assertTrue(result.failed)
+        assertTrue(result.content.contains("exceeds the configured result limit"))
+        assertTrue(tools.audit().single().failed)
+    }
+
+    @Test fun `evidence inventory accepts exact serialized byte boundary and rejects one byte less`() {
+        val request = request(listOf(AgentContextInput("boundary-Ω", "bytes", description = "quoted \"text\"\n😀")))
+        val reference = BuiltinCapturedContextTools(request, emptyList(), 8192, 10)
+            .execute(call("list_evidence"), control(request))
+        val exactLimit = reference.content.toByteArray().size
+        val exact = BuiltinCapturedContextTools(request, emptyList(), exactLimit, 10)
+            .execute(call("list_evidence"), control(request))
+        assertFalse(exact.failed)
+        assertEquals(exactLimit, exact.content.toByteArray().size)
+
+        val tooSmall = BuiltinCapturedContextTools(request, emptyList(), exactLimit - 1, 10)
+            .execute(call("list_evidence"), control(request))
+        assertTrue(tooSmall.failed)
+        assertTrue(tooSmall.content.contains("exceeds the configured result limit"))
     }
 
     @Test fun `evidence text pages preserve surrogate pairs and the complete input digest`() {
