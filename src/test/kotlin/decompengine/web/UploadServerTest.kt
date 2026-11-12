@@ -1066,8 +1066,8 @@ class UploadServerTest {
     }
 
     @Test
-    fun `HTTP job status remains responsive while a multi-record dashboard listing is stalled`() = withServer { server, _ ->
-        val jobIds = (1..3).map { index ->
+    fun `HTTP job status remains responsive throughout a slow multi-record dashboard listing`() = withServer { server, _ ->
+        val jobIds = (1..8).map { index ->
             val uploaded = upload(server, "listing-$index.elf", elfFixture(), acceptJson = true)
             Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
         }
@@ -1077,6 +1077,16 @@ class UploadServerTest {
         val firstRead = java.util.concurrent.CountDownLatch(1)
         val releaseRead = java.util.concurrent.CountDownLatch(1)
         val listingReads = java.util.concurrent.atomic.AtomicInteger()
+        val statusWarmup = java.util.concurrent.CountDownLatch(4)
+        val statusWarmupResponses = java.util.concurrent.atomic.AtomicInteger()
+        val keepStatusReadersRunning = java.util.concurrent.atomic.AtomicBoolean(true)
+        data class StatusSample(
+            val elapsedMs: Long,
+            val listingReadsAtStart: Int,
+            val dashboardStillRunningAtResponse: Boolean,
+        )
+        val statusSamples = java.util.concurrent.ConcurrentLinkedQueue<StatusSample>()
+        val maximumStatusMillis = 2_000L
         server.listingReadObserver = { relative ->
             if (relative.endsWith("/job.json")) {
                 val readNumber = listingReads.incrementAndGet()
@@ -1084,43 +1094,77 @@ class UploadServerTest {
                     firstRead.countDown()
                     check(releaseRead.await(15, java.util.concurrent.TimeUnit.SECONDS))
                 }
-                // Keep subsequent records slow too, so the successful dashboard response proves
-                // the request resumed and completed the whole multi-record inventory.
-                Thread.sleep(20)
+                // Simulate a sustained slow metadata scan after the first controlled stall.
+                Thread.sleep(250)
             }
         }
 
         val dashboardExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val statusExecutor = java.util.concurrent.Executors.newFixedThreadPool(2)
         try {
             val dashboard = dashboardExecutor.submit<Response> { request(server, "GET", "/") }
             assertTrue(firstRead.await(5, java.util.concurrent.TimeUnit.SECONDS), "Dashboard did not reach a physical metadata read")
             assertFalse(dashboard.isDone, "Dashboard should remain parked in the selected metadata read")
 
-            // Exercise the real HTTP status route repeatedly while dashboard metadata I/O is held.
-            // A service-level test covers lock/stripe contention; this proves routing and response
-            // serialization also remain independent of the slow listing path.
-            repeat(8) {
-                val startedAt = System.nanoTime()
-                val status = request(server, "GET", "/api/jobs/${jobIds.last()}")
-                val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
-                assertEquals(200, status.status, status.body.decodeToString())
-                assertTrue(elapsedMs < 2_000, "HTTP status request took ${elapsedMs}ms while listing was stalled")
-                assertTrue(status.body.decodeToString().contains(jobIds.last()))
-                assertFalse(dashboard.isDone, "Status reads must not release or finish the stalled listing")
+            // Keep two real HTTP clients requesting the unrelated status route while every
+            // physical metadata read is deliberately slow. The warmup proves both clients made
+            // progress while the first listing read is still parked; they then run until the
+            // entire multi-record dashboard response completes.
+            val statusReaders = (1..2).map {
+                statusExecutor.submit {
+                    while (keepStatusReadersRunning.get()) {
+                        val readsAtStart = listingReads.get()
+                        val startedAt = System.nanoTime()
+                        val status = request(server, "GET", "/api/jobs/${jobIds.last()}")
+                        val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+                        assertEquals(200, status.status, status.body.decodeToString())
+                        assertTrue(status.body.decodeToString().contains(jobIds.last()))
+                        statusSamples.add(StatusSample(elapsedMs, readsAtStart, !dashboard.isDone))
+                        if (statusWarmupResponses.incrementAndGet() <= 4) statusWarmup.countDown()
+                        Thread.sleep(10)
+                    }
+                }
             }
+            assertTrue(statusWarmup.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                "Concurrent HTTP status reads did not complete while the dashboard metadata read was held")
+            assertEquals(1, listingReads.get(), "Warmup must run during the first held physical metadata read")
 
             releaseRead.countDown()
-            val completedDashboard = dashboard.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            val completedDashboard = dashboard.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            keepStatusReadersRunning.set(false)
+            statusReaders.forEach { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
             val body = completedDashboard.body.decodeToString()
             assertEquals(200, completedDashboard.status)
             jobIds.forEach { assertTrue(body.contains(it), "Completed dashboard omitted $it") }
             assertTrue(listingReads.get() >= jobIds.size,
-                "Expected physical reads across multiple listed records; observed ${listingReads.get()}")
+                "Expected physical reads across every listed record; observed ${listingReads.get()}")
+
+            val samples = statusSamples.toList()
+            assertTrue(samples.size >= 16, "Expected sustained status traffic during listing; observed ${samples.size} responses")
+            samples.forEach { sample ->
+                assertTrue(sample.elapsedMs < maximumStatusMillis,
+                    "HTTP status request took ${sample.elapsedMs}ms at listing read ${sample.listingReadsAtStart}")
+            }
+            val sortedLatencies = samples.map(StatusSample::elapsedMs).sorted()
+            val p95Index = ((sortedLatencies.size * 95 + 99) / 100 - 1).coerceAtLeast(0)
+            assertTrue(sortedLatencies[p95Index] < maximumStatusMillis,
+                "HTTP status p95 was ${sortedLatencies[p95Index]}ms across ${samples.size} responses")
+            val overlapping = samples.filter { it.dashboardStillRunningAtResponse }
+            assertTrue(samples.any {
+                it.listingReadsAtStart in 2 until jobIds.size && it.dashboardStillRunningAtResponse
+            }, "No status response completed during the middle of the dashboard inventory")
+            println("issue-162-status-responsiveness-v1 responses=${samples.size} " +
+                "overlapping=${overlapping.size} p95_ms=${sortedLatencies[p95Index]} " +
+                "max_ms=${sortedLatencies.last()} listing_reads=${listingReads.get()} " +
+                "samples=${samples.joinToString(",") { "${it.elapsedMs}:${it.listingReadsAtStart}:${it.dashboardStillRunningAtResponse}" }}")
         } finally {
+            keepStatusReadersRunning.set(false)
             releaseRead.countDown()
             server.listingReadObserver = {}
             dashboardExecutor.shutdownNow()
+            statusExecutor.shutdownNow()
             assertTrue(dashboardExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(statusExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
         }
     }
 
