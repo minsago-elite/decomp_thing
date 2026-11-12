@@ -69,6 +69,15 @@ Verification adds reservation overlap/release, exact free-space boundaries,
 accounting-error recovery, retained-report refusal before body reads, status reads
 during blocked transfers, and mutual exclusion between uploads and workflows.
 
+`UploadServerTest` also stalls a physical legacy `job.json` read during a three-job
+dashboard request, then sends eight real `GET /api/jobs/{id}` requests before
+releasing the listing. Each status response must return 200 in under two seconds;
+the dashboard must remain blocked until release and then return all three rows.
+The focused local regression passed on its recorded test run. This qualifies HTTP
+routing and serialization during one deliberately stalled listing; it is not a
+sustained-load benchmark, does not measure physical-disk contention, and does not
+complete the broader #162 upload/listing quota matrix or hosted qualification.
+
 The packaged upload browser qualification passed against `51ff358`, using the
 pinned Chrome driver with test-only `--no-sandbox`. It covered session restoration,
 lost-response reload/retry, invalid and oversized request rejection, and a real

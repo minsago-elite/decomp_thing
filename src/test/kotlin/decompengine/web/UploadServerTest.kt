@@ -1066,6 +1066,65 @@ class UploadServerTest {
     }
 
     @Test
+    fun `HTTP job status remains responsive while a multi-record dashboard listing is stalled`() = withServer { server, _ ->
+        val jobIds = (1..3).map { index ->
+            val uploaded = upload(server, "listing-$index.elf", elfFixture(), acceptJson = true)
+            Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+        }
+        // Initialize the test's legacy-session cache before the dashboard request runs on another thread.
+        assertEquals(200, request(server, "GET", "/api/jobs/${jobIds.last()}").status)
+
+        val firstRead = java.util.concurrent.CountDownLatch(1)
+        val releaseRead = java.util.concurrent.CountDownLatch(1)
+        val listingReads = java.util.concurrent.atomic.AtomicInteger()
+        server.listingReadObserver = { relative ->
+            if (relative.endsWith("/job.json")) {
+                val readNumber = listingReads.incrementAndGet()
+                if (readNumber == 1) {
+                    firstRead.countDown()
+                    check(releaseRead.await(15, java.util.concurrent.TimeUnit.SECONDS))
+                }
+                // Keep subsequent records slow too, so the successful dashboard response proves
+                // the request resumed and completed the whole multi-record inventory.
+                Thread.sleep(20)
+            }
+        }
+
+        val dashboardExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            val dashboard = dashboardExecutor.submit<Response> { request(server, "GET", "/") }
+            assertTrue(firstRead.await(5, java.util.concurrent.TimeUnit.SECONDS), "Dashboard did not reach a physical metadata read")
+            assertFalse(dashboard.isDone, "Dashboard should remain parked in the selected metadata read")
+
+            // Exercise the real HTTP status route repeatedly while dashboard metadata I/O is held.
+            // A service-level test covers lock/stripe contention; this proves routing and response
+            // serialization also remain independent of the slow listing path.
+            repeat(8) {
+                val startedAt = System.nanoTime()
+                val status = request(server, "GET", "/api/jobs/${jobIds.last()}")
+                val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+                assertEquals(200, status.status, status.body.decodeToString())
+                assertTrue(elapsedMs < 2_000, "HTTP status request took ${elapsedMs}ms while listing was stalled")
+                assertTrue(status.body.decodeToString().contains(jobIds.last()))
+                assertFalse(dashboard.isDone, "Status reads must not release or finish the stalled listing")
+            }
+
+            releaseRead.countDown()
+            val completedDashboard = dashboard.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            val body = completedDashboard.body.decodeToString()
+            assertEquals(200, completedDashboard.status)
+            jobIds.forEach { assertTrue(body.contains(it), "Completed dashboard omitted $it") }
+            assertTrue(listingReads.get() >= jobIds.size,
+                "Expected physical reads across multiple listed records; observed ${listingReads.get()}")
+        } finally {
+            releaseRead.countDown()
+            server.listingReadObserver = {}
+            dashboardExecutor.shutdownNow()
+            assertTrue(dashboardExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
     fun `rejected admission can be retried without a stale job reservation`() {
         val reject = java.util.concurrent.atomic.AtomicBoolean(true)
         var calls = 0
