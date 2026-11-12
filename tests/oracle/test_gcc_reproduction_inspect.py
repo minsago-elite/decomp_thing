@@ -621,24 +621,138 @@ class SocketBoundsTest(unittest.TestCase):
 
 
 class WorkflowTest(unittest.TestCase):
-    def test_setup_socket_scoping_and_strict_live_publication_order(self):
+    """The head-owned rootless producer is selected; the setup-action adapter route
+    remains a standalone tested utility and is inactive in this workflow."""
+
+    def test_owned_producer_scoping_and_strict_live_publication_order(self):
         source = (ROOT / ".github/workflows/gcc-oracle-model.yml").read_text()
-        job = source.split("  provenance-and-elf-verifier:\n", 1)[1].split("  driver-dwarf-interfaces:\n", 1)[0]
-        self.assertIn("set -euo pipefail", job)
-        self.assertIn("uses: docker/setup-docker-action@v5", job)
-        self.assertIn("version: v29.7.2", job)
-        self.assertIn("runtime-basedir: ${{ github.workspace }}/.d", job)
-        self.assertLess(job.index("--check-runtime-root"), job.index("uses: docker/setup-docker-action@v5"))
-        self.assertIn("set-host: true", job)
-        self.assertIn('daemon-config: \'{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}\'', job)
-        self.assertIn("DOCKER_HOST: ${{ steps.gcc-reproduction-docker.outputs.sock }}", job)
-        self.assertNotIn("unix://${{ steps.gcc-reproduction-docker.outputs.sock }}", job)
+        job = source.split("  provenance-and-elf-verifier:\n", 1)[1].split(
+            "  driver-dwarf-interfaces:\n", 1
+        )[0]
+        builder = (ROOT / "scripts/ci-gcc-toolchain-builder.sh").read_text()
+        owner = (ROOT / "scripts/ci-gcc-toolchain-owner.py").read_text()
+
+        def fn(name, nxt):
+            start = builder.index("\n" + name + "() {\n")
+            end = builder.index("\n" + nxt + "() {", start)
+            return builder[start:end]
+
+        init = fn("init", "authenticate")
+        start_rootless = fn("start_rootless", "start_buildkit")
+        capture = fn("capture_toolchain_inspect", "reproduce")
+        reproduce = fn("reproduce", "build_solve_argv")
+        clean_start = builder.index("clean_environment() {")
+        clean_end = builder.index("\nmonotonic_remaining() {", clean_start)
+        clean_environment = builder[clean_start:clean_end]
+
+        def assert_owned_docker_calls(region, expected_calls, data_uses=()):
+            # These exact occurrences pass/print the pinned path as data, never execute it.
+            # Account for them explicitly before checking every remaining variable use.
+            for data_use in data_uses:
+                self.assertEqual(1, region.count(data_use))
+                region = region.replace(data_use, "", 1)
+            self.assertEqual(expected_calls, region.count('"$docker_bin"'))
+            self.assertEqual(expected_calls, region.count('"$docker_bin" --host "unix://$socket"'))
+
+        # A1: builder script enforces shell failure behavior.
+        self.assertTrue(builder.startswith("#!/usr/bin/env bash\n# "))
+        self.assertIn("\nset -Eeuo pipefail\n", builder[:200])
+
+        # A2: the owned builder alone provisions the selected behavior engine.
+        self.assertNotIn("docker/setup-docker-action", job)
+        self.assertIn("run: bash scripts/ci-gcc-toolchain-builder.sh authenticate", job)
+        self.assertIn("run: bash scripts/ci-gcc-toolchain-builder.sh start-rootless", job)
+        self.assertEqual(1, job.count("ci-gcc-toolchain-builder.sh start-rootless"))
+        self.assertEqual(1, job.count("ci-gcc-toolchain-builder.sh authenticate"))
+        self.assertNotIn("dockerd-rootless.sh", job)
+
+        # A3: exact Docker archive, executable and client/server identities are pinned.
+        self.assertIn("docker-29.7.2.tgz", builder)
+        self.assertIn("docker_hash=803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f", builder)
+        self.assertIn("check_executable \"$docker_bin\" 42677472 e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13", builder)
+        self.assertIn("= 29.7.2", start_rootless)
+        self.assertIn("= 6a43e3d", start_rootless)
+        self.assertIn("'29.7.2'", capture)
+        self.assertIn("'6a43e3d'", capture)
+        self.assertIn("'a7dcaa6'", capture)
+        self.assertIn("e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13", capture)
+
+        # A4: repo-relative socket root and every reserved Unix endpoint fit 107 bytes.
+        self.assertIn('build_root="$repo/build/g"', builder)
+        self.assertIn('socket="$job_root/d.sock"', builder)
+        self.assertIn("(( ${#path} <= 107 ))", builder)
+
+        # A5: validate socket bounds before reservation and before rootless launch.
+        self.assertLess(init.index("validate_socket_inventory"), init.index("owner_call reserve"))
+        self.assertLess(start_rootless.index("validate_socket_inventory"), start_rootless.index("owner_call launch-rootless"))
+        self.assertLess(job.index("ci-gcc-toolchain-builder.sh init"), job.index("ci-gcc-toolchain-builder.sh start-rootless"))
+        self.assertLess(job.index("ci-gcc-toolchain-builder.sh start-rootless"), job.index("ci-gcc-toolchain-builder.sh reproduce"))
+
+        # A6: each Docker CLI invocation in the relevant producer functions has an explicit owned host.
+        assert_owned_docker_calls(start_rootless, 5)
+        assert_owned_docker_calls(capture, 2, (
+            "admission=$(python3 - \"$version_file\" \"$inspect_api\" \"$fingerprint_file\" \"$docker_bin\" \"$source_file\" <<'PYVERSION'",
+            'python3 - "$inspect_file" "$version_file" "$provenance_file" "$docker_bin" ' + chr(92),
+        ))
+        assert_owned_docker_calls(reproduce, 3, (
+            'printf \'DOCKER=%s\\nDOCKER_HOST=unix://%s\\n\' "$docker_bin" "$socket" >> "$GITHUB_ENV"',
+        ))
+        self.assertEqual(2, capture.count("env -u DOCKER_HOST -u DOCKER_CONTEXT"))
+        self.assertIn("unset DOCKER_HOST DOCKER_CONTEXT", clean_environment)
+        self.assertIn("reproduce() {\n  clean_environment\n", reproduce)
+
+        # A7: classic store selection and overlay2 are independently guarded by owner source.
+        self.assertIn("printf '{\"features\":{\"containerd-snapshotter\":false}}\\n' > \"$state/docker-daemon.json\"", start_rootless)
+        self.assertIn('"--storage-driver=overlay2"', owner)
+        self.assertIn('info.get("Driver") != "overlay2"', owner)
+        self.assertIn('version != ["29.7.2", "6a43e3d"]', owner)
+
+        # A8: published Docker selection comes from the same owned producer socket.
+        self.assertIn('printf \'DOCKER=%s\\nDOCKER_HOST=unix://%s\\n\' "$docker_bin" "$socket" >> "$GITHUB_ENV"', reproduce)
+        reproduce_step = job.index("ci-gcc-toolchain-builder.sh reproduce")
+        self.assertNotIn("DOCKER_HOST:", job[:reproduce_step])
+
+        # A9: no double-wrapped URI or adapter output is selected.
+        self.assertNotIn("unix://unix://", builder)
+        self.assertNotIn("steps.gcc-reproduction-docker", job)
+        self.assertIn('socket="$job_root/d.sock"', builder)
+
+        # A10: API 1.49 stays local to inspect capture, never in workflow ambient env.
         self.assertNotIn("DOCKER_API_VERSION", job)
+        self.assertEqual(2, builder.count("DOCKER_API_VERSION"))
+        self.assertEqual(2, capture.count("DOCKER_API_VERSION"))
+        self.assertIn("local inspect_api=1.49", capture)
+        self.assertIn("if effective != selected:", capture)
+        self.assertIn("if not minimum <= selected <= maximum:", capture)
+
+        # A11: clean-merged pure controls still run before source fetching.
         self.assertLess(job.index("tests.oracle.test_gcc_reproduction_inspect"), job.index("Fetch and fully verify"))
-        self.assertLess(job.index("scripts/capture-gcc-reproduction-inspect.py"), job.index("scripts/verify-gcc-oracle-build-record.py"))
-        self.assertLess(job.index("scripts/verify-gcc-oracle-build-record.py"), job.index('echo "GCC_TOOLCHAIN_IMAGE_ID='))
-        self.assertIn("--build-arg SOURCE_DATE_EPOCH=1786060800", job)
-        self.assertIn("build/gcc-reproduction-adapter/capture", job)
+
+        # A12: capture precedes strict verification on the complete, unmodified response.
+        self.assertLess(reproduce.index("capture_toolchain_inspect"), reproduce.index("scripts/verify-gcc-toolchain-reproduction.py"))
+        self.assertLess(reproduce.index("scripts/verify-gcc-toolchain-reproduction.py"), reproduce.index("scripts/verify-gcc-oracle-build-record.py"))
+        self.assertIn('< "$evidence/image-inspect.json"', reproduce)
+        self.assertIn("'strictVerifierInput': 'complete unmodified image-inspect.json bytes'", capture)
+
+        # A13: the contained live check must succeed before IDs or Docker selection publish.
+        self.assertLess(reproduce.index("verify-gcc-oracle-build-record.py"), reproduce.index("GCC_TOOLCHAIN_IMAGE_ID=%s"))
+        self.assertLess(reproduce.index("GCC_TOOLCHAIN_IMAGE_ID=%s"), reproduce.index("DOCKER_HOST=unix://%s"))
+        self.assertIn("|| die 'contained live GCC build-record verifier failed'", reproduce)
+        self.assertNotIn('echo "GCC_TOOLCHAIN_IMAGE_ID=', job)
+        self.assertIn("--network none --read-only --cap-drop ALL", reproduce)
+
+        # A14: source epoch is pinned in both solve construction and admission.
+        self.assertIn("--opt build-arg:SOURCE_DATE_EPOCH=1786060800", builder)
+        self.assertIn(" build-arg:SOURCE_DATE_EPOCH=1786060800 ", builder)
+
+        # A15: capture provenance and evidence remain attached to the owned run.
+        self.assertIn("build/g/*/evidence", job)
+        self.assertIn("image-inspect-api-provenance.json", capture)
+        self.assertIn("gcc-inspect-api-provenance/v1", capture)
+
+        # A16: master setup-action route remains explicitly inactive in the selected workflow.
+        self.assertNotIn("capture-gcc-reproduction-inspect.py --endpoint", job)
+        self.assertNotIn("--check-runtime-root", job)
 
 
 if __name__ == "__main__":
