@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" tests="19" skipped="0" failures="0" errors="0" timestamp="2026-11-12T18:41:48.154Z" hostname="whatsername" time="7.866">
+  <properties/>
+  <testcase name="archive gate binds compiler acceptance to the profile and source bytes()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.233"/>
+  <testcase name="authorized large observations dispatch successfully without retained fallback input()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.271"/>
+  <testcase name="archive release gate rejects schema-v3 checkpoint downgrade()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.242"/>
+  <testcase name="independently verified historical v4 archives remain readable()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.321"/>
+  <testcase name="legacy null observation fallback passes independently replayed model overflow()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.361"/>
+  <testcase name="archive gate rejects an agent-generated unresolved module()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.265"/>
+  <testcase name="pre-dispatch fallback independently replays bounded compiler diagnostics()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.137"/>
+  <testcase name="archive rejects semantically incomplete retained ACP receipts after every commitment is rebound()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.755"/>
+  <testcase name="reconstructor identity v4 replays the historical path-only mutation commitment()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.293"/>
+  <testcase name="archive gate rejects closed-schema and semantic ACP evidence tampering()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.267"/>
+  <testcase name="archive gate rejects checkpoint path and digest ambiguity()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.396"/>
+  <testcase name="undispatched fallback rejects rehashed compiler claims for every supported outcome()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.411"/>
+  <testcase name="fresh mismatched wire prompt retains receipt and rolls back candidate to unresolved source()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.121"/>
+  <testcase name="archive gate rejects missing and extra ACP evidence artifacts()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.369"/>
+  <testcase name="v4 archive rejects a different wire prompt after every receipt commitment is rebound()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.741"/>
+  <testcase name="rehashed rejected ACP candidates cannot impersonate undispatched budget fallbacks()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.592"/>
+  <testcase name="all fallback and mixed accepted archives reject rehashed confidence claims()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="1.291"/>
+  <testcase name="v4 archive rejects rehashed header and prior-source read grants on accepted receipts()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.551"/>
+  <testcase name="rejected ACP revision retains its receipt and restores accepted release evidence()" classname="decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest" time="0.241"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
