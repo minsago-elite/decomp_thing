@@ -1,14 +1,14 @@
 {
   "status": "passed",
   "issue": 162,
-  "sourceCommit": "b8edf832c8a244c38b957c2f8235e084bf1d5327",
-  "sourceParent": "82c03dde0db19bf00a73fadee96259ab4e1368d6",
-  "sourceTree": "42c53991e6dbf6ecec5f8863ec32b31739c6cedf",
+  "sourceCommit": "e20f19d9b0cb0568048a520d2d402d02e82798d9",
+  "sourceParent": "b10d0390d6de7e526050365e8410c7654b05be0a",
+  "sourceTree": "a5616c148cc120369a6f4be3ca40df6cddad22b1",
   "command": "PATH=\"$PWD/build/frontend-node-24.20.0-npm-11.19.0.BpJuvR/node/bin:$PATH\" ./gradlew --no-daemon -x verifyFrontendToolchain test --tests 'decompengine.web.UploadServerTest.HTTP job status remains responsive throughout a slow multi-record dashboard listing'",
   "suite": "decompengine.web.UploadServerTest",
   "test": "HTTP job status remains responsive throughout a slow multi-record dashboard listing",
   "junitXml": "issue-162-http-status-during-dashboard-listing-2026-11-13.xml",
-  "junitXmlSha256": "a810adf90e25b83f2eeddf70f3d9133d7be8073a41190fef9064c01d6237886c",
+  "junitXmlSha256": "bf8e1762ad62b62829c96971718e4f78e1a4d7186b90f359f6c4e51887c2cfe6",
   "totals": {
     "tests": 1,
     "failures": 0,
@@ -16,14 +16,16 @@
     "skipped": 0
   },
   "observed": {
-    "statusResponses": 144,
-    "overlappedDashboard": 143,
+    "statusResponses": 153,
+    "overlappedDashboard": 151,
     "dashboardPhysicalMetadataReads": 16,
-    "statusLatencyP95Millis": 56,
-    "statusLatencyMaximumMillis": 60,
+    "distinctDashboardRecords": 8,
+    "heldProgressCheckpoints": [1, 3, 6],
+    "statusLatencyP95Millis": 53,
+    "statusLatencyMaximumMillis": 59,
     "maximumAllowedStatusLatencyMillis": 2000
   },
-  "scope": "Local deterministic HTTP qualification: two status clients continue real GET /api/jobs/{id} requests while the dashboard traverses eight uploaded jobs with a 250 ms delay at each physical job.json read. Every response must be HTTP 200 under two seconds; at least 16 responses and a response completing mid-inventory are required; final dashboard output must include all eight jobs. JUnit system-out retains each request latency, listing-read count and dashboard completion state.",
+  "scope": "Local deterministic HTTP qualification: two status clients continue real GET /api/jobs/{id} requests while the dashboard traverses eight uploaded jobs with a 250 ms delay at each physical job.json read. Four successful status responses are required while the first, third, and sixth distinct records are held; all responses must be HTTP 200 under two seconds, and final dashboard output must include all eight jobs. JUnit system-out retains each request latency, distinct-record progress and dashboard completion state.",
   "limitations": [
     "The artificial metadata delay is in-process; this does not measure physical-disk contention or deployment throughput.",
     "Does not qualify live deployment behavior or hosted CI.",
