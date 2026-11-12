@@ -3334,6 +3334,32 @@ class TraceGuidedRepairTest {
 
     @Test
     @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair enforces cumulative UTF-8 regression argument bytes across calls`() {
+        val acceptedInputs = listOf(
+            ProcessInput("a", args = listOf("é"), stdin = byteArrayOf()),
+            ProcessInput("b", args = listOf("界"), stdin = byteArrayOf()),
+        )
+        val acceptedBytes = acceptedInputs.sumOf { input ->
+            input.id.toByteArray(Charsets.UTF_8).size.toLong() + input.stdin.size +
+                input.args.sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() }
+        }
+        assertEquals(7L, acceptedBytes, "UTF-8 bytes from arguments contribute to the retained corpus limit")
+        val budget = RepairResourceBudget(
+            maximumRegressionInputs = 10,
+            maximumRegressionInputBytes = acceptedBytes,
+            maximumRegressionArguments = 10,
+            maximumRequestBytes = 64 * 1024,
+        )
+        assertActiveRepairCumulativeRegressionAdmission(
+            acceptedInputs = acceptedInputs,
+            rejectedInput = ProcessInput("c", args = listOf("x"), stdin = byteArrayOf()),
+            budget = budget,
+            expectedFailure = "retained regression inputs contain 9 bytes; limit=7",
+        )
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `active repair enforces cumulative retained regression argument limit across calls`() {
         assertActiveRepairCumulativeRegressionAdmission(
             acceptedInputs = listOf(
