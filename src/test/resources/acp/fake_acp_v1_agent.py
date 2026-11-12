@@ -85,6 +85,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
     "repair-active-output-limit",
     "repair-active-declared-role-token-limit-after-write",
+    "repair-active-declared-role-refusal-after-write",
     "repair-active-declared-role-missing-usage-after-write",
     "repair-active-declared-role-negative-usage-after-write",
     "repair-active-declared-role-tool-limit-after-write",
@@ -291,6 +292,7 @@ expected_fs = {
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-token-limit-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-refusal-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-missing-usage-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-negative-usage-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-tool-limit-after-write": {"readTextFile": True, "writeTextFile": True},
@@ -889,6 +891,7 @@ if MODE == "repair-active-declared-role-cancel-after-write":
             respond(prompt, {"stopReason": "cancelled"})
             raise SystemExit(0)
 if MODE in (
+    "repair-active-declared-role-refusal-after-write",
     "repair-active-declared-role-token-limit-after-write",
     "repair-active-declared-role-missing-usage-after-write",
     "repair-active-declared-role-negative-usage-after-write",
@@ -896,10 +899,15 @@ if MODE in (
     source = join_path(cwd, "src/modules/reconstructed.c")
     write_workspace_file(
         source,
-        "/* token-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        "/* active refusal candidate */\nint decomp_engine_main(void) { return 1; }\n"
+        if MODE == "repair-active-declared-role-refusal-after-write"
+        else "/* token-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
         149,
     )
     time.sleep(0.05)
+    if MODE == "repair-active-declared-role-refusal-after-write":
+        respond(prompt, {"stopReason": "refusal"})
+        raise SystemExit(0)
     prompt_result = {"stopReason": "end_turn"}
     if MODE != "repair-active-declared-role-missing-usage-after-write":
         prompt_result["usage"] = {

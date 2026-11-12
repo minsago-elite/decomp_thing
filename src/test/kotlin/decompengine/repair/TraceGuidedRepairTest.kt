@@ -2071,6 +2071,7 @@ class TraceGuidedRepairTest {
             val limits: AgentExecutionLimits,
             val exhausted: Boolean,
             val invalidUsageMessage: String? = null,
+            val refused: Boolean = false,
         )
 
         val cases = listOf(
@@ -2096,6 +2097,10 @@ class TraceGuidedRepairTest {
                 "negative-usage", "repair-active-declared-role-negative-usage-after-write",
                 AgentExecutionLimits(maxInputTokens = 10), exhausted = false,
                 invalidUsageMessage = "invalid prompt usage",
+            ),
+            TokenCase(
+                "refusal", "repair-active-declared-role-refusal-after-write",
+                AgentExecutionLimits(), exhausted = false, refused = true,
             ),
         )
         cases.forEach { case ->
@@ -2167,6 +2172,12 @@ class TraceGuidedRepairTest {
                 }, "${case.label} ceiling failure: ${generateSequence<Throwable>(failure) { it.cause }
                     .mapNotNull { it.message }.toList()}")
                 assertEquals(0, validationCalls)
+            } else if (case.refused) {
+                assertTrue(generateSequence<Throwable>(failure) { it.cause }.any {
+                    it.message.orEmpty().contains("repair agent stopped with refused")
+                }, "${case.label} refusal: ${generateSequence<Throwable>(failure) { it.cause }
+                    .mapNotNull { it.message }.toList()}")
+                assertEquals(0, validationCalls)
             } else {
                 assertSame(validationFailure, failure)
                 assertEquals(1, validationCalls)
@@ -2179,7 +2190,11 @@ class TraceGuidedRepairTest {
             ).jsonObject
             assertEquals(JsonNull, rawGraph.getValue("pending"), case.label)
             assertEquals(baselineHead, rawGraph.getValue("headId").jsonPrimitive.content, case.label)
-            val expectedRun = if (case.exhausted) "resource_exhausted" else "validation_failed"
+            val expectedRun = when {
+                case.exhausted -> "resource_exhausted"
+                case.refused -> "rejected"
+                else -> "validation_failed"
+            }
             assertEquals(expectedRun, rawGraph.getValue("runs").jsonArray.last()
                 .jsonObject.getValue("status").jsonPrimitive.content, case.label)
 
@@ -2187,7 +2202,11 @@ class TraceGuidedRepairTest {
                 assertNull(graph.snapshot.pendingAttemptId, case.label)
                 assertEquals(baselineHead, graph.snapshot.headId, case.label)
                 assertEquals(
-                    if (case.exhausted) RepairRunStatus.RESOURCE_EXHAUSTED else RepairRunStatus.VALIDATION_FAILED,
+                    when {
+                        case.exhausted -> RepairRunStatus.RESOURCE_EXHAUSTED
+                        case.refused -> RepairRunStatus.REJECTED
+                        else -> RepairRunStatus.VALIDATION_FAILED
+                    },
                     graph.snapshot.runs.last().status,
                     case.label,
                 )
@@ -2197,6 +2216,7 @@ class TraceGuidedRepairTest {
                 val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
                 val expectedTerminal = when {
                     case.exhausted -> "returned-limit-exhausted"
+                    case.refused -> "returned-refused"
                     case.invalidUsageMessage != null -> "failed-protocol"
                     else -> "returned-completed"
                 }
@@ -2225,15 +2245,36 @@ class TraceGuidedRepairTest {
                     assertEquals("returned", outcome.getValue("type").jsonPrimitive.content, case.label)
                     val result = outcome.getValue("result").jsonObject
                     assertEquals(
-                        if (case.exhausted) "limit-exhausted" else "completed",
+                        when {
+                            case.exhausted -> "limit-exhausted"
+                            case.refused -> "refused"
+                            else -> "completed"
+                        },
                         result.getValue("stopReason").jsonPrimitive.content,
                         case.label,
                     )
-                    val usage = result.getValue("usage").jsonObject
-                    assertEquals(11, usage.getValue("inputTokens").jsonPrimitive.int, case.label)
-                    assertEquals(7, usage.getValue("outputTokens").jsonPrimitive.int, case.label)
-                    assertEquals(3, usage.getValue("cachedInputTokens").jsonPrimitive.int, case.label)
-                    assertEquals(!case.exhausted, binding.receiptReleaseComplete, case.label)
+                    if (!case.refused) {
+                        val usage = result.getValue("usage").jsonObject
+                        assertEquals(11, usage.getValue("inputTokens").jsonPrimitive.int, case.label)
+                        assertEquals(7, usage.getValue("outputTokens").jsonPrimitive.int, case.label)
+                        assertEquals(3, usage.getValue("cachedInputTokens").jsonPrimitive.int, case.label)
+                        assertEquals(!case.exhausted, binding.receiptReleaseComplete, case.label)
+                    }
+                    if (case.refused) {
+                        val changes = result.getValue("changes").jsonObject
+                        assertEquals(1, changes.getValue("observedCount").jsonPrimitive.int, case.label)
+                        val change = changes.getValue("records").jsonArray.single().jsonObject
+                        assertEquals("modified", change.getValue("kind").jsonPrimitive.content, case.label)
+                        val relativePath = change.getValue("relativePath").jsonObject
+                        assertEquals(sha256("src/modules/reconstructed.c".toByteArray(Charsets.UTF_8)),
+                            relativePath.getValue("sha256").jsonPrimitive.content, case.label)
+                        assertEquals(sha256(acceptedSource),
+                            change.getValue("beforeSha256").jsonPrimitive.content, case.label)
+                        val candidate = "/* active refusal candidate */\nint decomp_engine_main(void) { return 1; }\n"
+                            .toByteArray(Charsets.UTF_8)
+                        assertEquals(sha256(candidate), change.getValue("afterSha256").jsonPrimitive.content, case.label)
+                        assertEquals(candidate.size.toLong(), change.getValue("sizeBytes").jsonPrimitive.content.toLong(), case.label)
+                    }
                 }
                 val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
                 val record = filesystem.getValue("records").jsonArray.single().jsonObject
@@ -2243,7 +2284,7 @@ class TraceGuidedRepairTest {
                 val process = receipt.getValue("process").jsonObject
                 assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int, case.label)
                 assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean, case.label)
-                if (case.exhausted || case.invalidUsageMessage != null) {
+                if (case.exhausted || case.invalidUsageMessage != null || case.refused) {
                     val assessmentBytes = project.resolve(requireNotNull(binding.assessmentPath)).readBytes()
                     assertEquals(binding.assessmentSha256, sha256(assessmentBytes), case.label)
                     val assessment = decompengine.project.AcpChangeAssessment.parse(assessmentBytes)
@@ -2254,6 +2295,11 @@ class TraceGuidedRepairTest {
                         assessment.eligibility,
                         case.label,
                     )
+                    if (case.refused) {
+                        assertEquals(AgentStopReason.REFUSED, assessment.normalizedStopReason, case.label)
+                        assertEquals(listOf("candidate-rejected"), assessment.reasonCodes, case.label)
+                        assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus, case.label)
+                    }
                 }
             }
         }
