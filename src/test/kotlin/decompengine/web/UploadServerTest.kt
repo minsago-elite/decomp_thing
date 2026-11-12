@@ -293,6 +293,7 @@ class UploadServerTest {
             assertEquals(200, response.status)
             assertEquals(body, response.body.decodeToString())
             assertEquals(expectedContentType, response.contentType)
+            assertEquals("no-store", response.cacheControl)
             assertEquals("sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'", response.contentSecurityPolicy)
             assertEquals("nosniff", response.contentTypeOptions)
             assertEquals("no-referrer", response.referrerPolicy)
@@ -2011,6 +2012,8 @@ class UploadServerTest {
             val traversal = request(server, "GET", "/jobs/$jobId/source/%2e%2e%2Foutside.c")
 
             assertEquals(303, launch.status)
+            assertEquals("no-store", source.cacheControl)
+            assertEquals("no-store", archive.cacheControl)
             assertTrue(page.body.decodeToString().contains("Archival source tree"))
             assertTrue(page.body.decodeToString().contains("src/modules/core.c"))
             assertTrue(page.body.decodeToString().contains("0.750 heuristic"))
