@@ -1660,6 +1660,30 @@ providers, other profiles, hosted exact-head CI, production validation under
 #236, publication crash recovery under #732, durable provenance under #733, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Public reconstruction max-turn-request stop after write — 2026-11-12
+
+The public Generated C Make path now has a distinct `max_turn_requests`
+control after an authorized source write is acknowledged. The workflow maps
+the returned stop to `LIMIT_EXHAUSTED` and refuses publication. The request
+and receipt identities match; the receipt records the observed `CREATED`
+change with its exact source digest and byte count. Invocation evidence
+records final-snapshot completion and verified cleanup, and the previously
+accepted publication remains unchanged without transaction residue. This
+complements the existing `max_tokens` active-path case; harness-only stop
+mapping is not the sole evidence for this outcome.
+
+The focused local scripted-ACP method passed with one test and zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-max-turn-requests-2026-11-12.xml)
+has SHA-256
+`e0d97cf72619e7b9332acea67ea70b4b2487dd6781cbeaea7762c7c523844356`;
+the [provenance record](evidence/issue-734-public-reconstruction-max-turn-requests-2026-11-12.json)
+binds the source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence for Generated C Make. It does not qualify
+live providers, production repair validation under #236, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Public reconstruction model refusal after acknowledged write — 2026-11-12
 
 The Generated C Make public reconstruction fixture now returns the ACP
