@@ -53,6 +53,8 @@ import decompengine.project.budgetedAnalyzer
 import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.UserDefinedFileAttributeView
 import java.security.MessageDigest
 import java.time.Duration
@@ -1308,6 +1310,7 @@ class AcpAgentHarnessTest {
             requestTimeoutMillis: Long? = null,
             executionLimits: AgentExecutionLimits? = null,
             snapshotLimits: WorkspaceSnapshotLimits? = null,
+            seedExistingTarget: ByteArray? = null,
             gatePromptCompletion: Boolean = false,
             cancelAfterAcknowledgedMessage: String? = null,
             afterPromptCompletion: ((Path) -> Unit)? = null,
@@ -1324,9 +1327,8 @@ class AcpAgentHarnessTest {
                     taskCount++
                     requestSha256s += AgentExecutionRequestBinding.capture(request).requestSha256
                     val rule = request.accessPolicy.pathRules.single()
-                    implementationPathAtDispatch = request.workspaceRoots.single { it.id == rule.path.rootId }
-                        .path.resolve(rule.path.relativePath)
-                    implementationExistedAtDispatch = implementationPathAtDispatch!!.let(Files::isRegularFile)
+                    val workspaceRoot = request.workspaceRoots.single { it.id == rule.path.rootId }.path
+                    implementationPathAtDispatch = workspaceRoot.resolve(rule.path.relativePath)
                     return object : AgentTaskProgress {
                         override fun event(event: AgentExecutionEvent) {
                             if (event is AgentMessageEvent && event.textDelta == cancelAfterAcknowledgedMessage) {
@@ -1355,6 +1357,19 @@ class AcpAgentHarnessTest {
                 } ?: timeouts(),
                 workspaceSnapshotLimits = snapshotLimits,
             ).also { configured ->
+                configured.withInitialWorkspaceSnapshotHookForTesting {
+                    val target = requireNotNull(implementationPathAtDispatch)
+                    seedExistingTarget?.let { bytes ->
+                        Files.write(
+                            target,
+                            bytes,
+                            StandardOpenOption.CREATE_NEW,
+                            StandardOpenOption.WRITE,
+                            LinkOption.NOFOLLOW_LINKS,
+                        )
+                    }
+                    implementationExistedAtDispatch = target.let(Files::isRegularFile)
+                }
                 if (gatePromptCompletion || afterPromptCompletion != null) {
                     configured.withPromptLoopGateForTesting { promptJob ->
                         kotlinx.coroutines.withTimeout(5_000) { promptJob.join() }
@@ -1529,15 +1544,18 @@ class AcpAgentHarnessTest {
         assertNoReconstructionPublicationResidue(output)
 
         // The public reconstruction grant is one non-recursive target path. Its rule and two
-        // parents make initial entry-count refusal reachable. The target itself is absent at
-        // dispatch, so byte ceilings are exercised by the final snapshot after creation.
+        // parents make initial entry-count refusal reachable. The workflow normally starts with
+        // an absent target, so the one-shot snapshot hook seeds a target only for initial byte
+        // ceiling cases; final byte ceilings separately cover candidate creation.
         data class SnapshotLimitCase(
             val dimension: String,
             val limits: WorkspaceSnapshotLimits,
             val phase: String,
             val lifecyclePhase: AcpExecutionLifecyclePhase,
             val mode: String,
+            val seedExistingTarget: ByteArray? = null,
         )
+        val seededImplementation = "int decomp_engine_main(void) { return 0; }\n".toByteArray(Charsets.UTF_8)
         val snapshotLimitCases = listOf(
             SnapshotLimitCase(
                 "entry-count",
@@ -1545,6 +1563,22 @@ class AcpAgentHarnessTest {
                 "initial-workspace-snapshot",
                 AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT,
                 "reconstruction-mutation-grant",
+            ),
+            SnapshotLimitCase(
+                "file-bytes",
+                WorkspaceSnapshotLimits(fileBytes = seededImplementation.size.toLong() - 1),
+                "initial-workspace-snapshot",
+                AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT,
+                "reconstruction-mutation-grant",
+                seedExistingTarget = seededImplementation,
+            ),
+            SnapshotLimitCase(
+                "total-bytes",
+                WorkspaceSnapshotLimits(totalBytes = seededImplementation.size.toLong() - 1),
+                "initial-workspace-snapshot",
+                AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT,
+                "reconstruction-mutation-grant",
+                seedExistingTarget = seededImplementation,
             ),
             SnapshotLimitCase(
                 "file-bytes",
@@ -1562,19 +1596,22 @@ class AcpAgentHarnessTest {
             ),
         )
         for ((offset, scenario) in snapshotLimitCases.withIndex()) {
-            val (dimension, limits, phase, lifecyclePhase, mode) = scenario
+            val (dimension, limits, phase, lifecyclePhase, mode, seedExistingTarget) = scenario
             val limitedSnapshot = runAttempt(
                 mode,
                 index = 10 + offset,
                 snapshotLimits = limits,
+                seedExistingTarget = seedExistingTarget,
             )
             assertNotNull(limitedSnapshot.failure, "$dimension snapshot limit must refuse publication")
             assertEquals(1, limitedSnapshot.taskCount)
-            assertEquals(false, limitedSnapshot.implementationExistedAtDispatch)
+            assertEquals(seedExistingTarget != null, limitedSnapshot.implementationExistedAtDispatch)
             val snapshotReceipt = limitedSnapshot.receipts.single()
             val snapshotFailure = assertIs<AgentExecutionOutcome.Failed>(snapshotReceipt.outcome).failure
-            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, snapshotFailure.kind)
-            assertEquals(dimension, snapshotFailure.details["limit"])
+            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, snapshotFailure.kind,
+                "${snapshotFailure.message}; details=${snapshotFailure.details}")
+            assertEquals(dimension, snapshotFailure.details["limit"],
+                "${snapshotFailure.message}; details=${snapshotFailure.details}")
             assertEquals(phase, snapshotFailure.details["phase"])
             val snapshotEvidence = assertIs<AcpInvocationEvidenceSnapshot>(snapshotReceipt.providerEvidence)
             assertEquals(lifecyclePhase, snapshotEvidence.phaseReached)

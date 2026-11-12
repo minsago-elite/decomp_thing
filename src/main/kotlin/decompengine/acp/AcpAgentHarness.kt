@@ -135,6 +135,7 @@ class AcpAgentHarness(
     private val workspaceSnapshotLimitsLock = Any()
     private var configuredWorkspaceSnapshotLimits = WorkspaceSnapshotLimits()
     private var workspaceSnapshotLimitsFrozen = false
+    private val initialWorkspaceSnapshotHookForTesting = AtomicReference<(() -> Unit)?>(null)
     private val promptLoopGateForTesting = AtomicReference<(suspend (Job) -> Unit)?>(null)
     private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
@@ -150,6 +151,13 @@ class AcpAgentHarness(
         synchronized(workspaceSnapshotLimitsLock) {
             check(!workspaceSnapshotLimitsFrozen) { "workspace snapshot limits are already in use" }
             configuredWorkspaceSnapshotLimits = limits
+        }
+    }
+
+    /** Internal-only setup hook for deterministic initial-snapshot admission tests. */
+    internal fun withInitialWorkspaceSnapshotHookForTesting(hook: () -> Unit): AcpAgentHarness = apply {
+        check(initialWorkspaceSnapshotHookForTesting.compareAndSet(null, hook)) {
+            "initial workspace snapshot test hook is already configured"
         }
     }
 
@@ -447,6 +455,7 @@ class AcpAgentHarness(
         val before = if (capturedFilesystem == null && preflightWorkflow == null) {
             evidenceState.reach(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT)
             try {
+                initialWorkspaceSnapshotHookForTesting.getAndSet(null)?.invoke()
                 WorkspaceSnapshot.capture(
                     request,
                     WorkspaceSnapshotBudget(
