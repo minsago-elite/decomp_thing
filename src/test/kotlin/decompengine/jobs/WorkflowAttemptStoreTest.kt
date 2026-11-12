@@ -25,8 +25,10 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -76,6 +78,87 @@ class WorkflowAttemptStoreTest {
                     Files.readAllBytes(root.resolve(relative))
                 }) { it })
             }
+        }
+    }
+
+    @Test fun `pre-filesystem clock errors and cancellation invalidate listing captures`() {
+        for (injected in listOf(AssertionError("synthetic clock error"),
+            java.util.concurrent.CancellationException("synthetic clock cancellation"))) withRoot { root ->
+            val job = upload(root)
+            val original = WorkflowAttemptStore.open(root, CLOCK)
+            val queued = original.create(job, original.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = original.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val finished = original.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            original.close()
+            val clock = object : Clock() {
+                override fun instant(): Instant = throw injected
+                override fun getZone() = ZoneOffset.UTC
+                override fun withZone(zone: java.time.ZoneId): Clock = this
+            }
+            WorkflowAttemptStore.open(root, clock).use { owner ->
+                val failure = assertFailsWith<WorkflowStoreException> {
+                    owner.inspectForListing(job, { relative, maximum ->
+                        Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+                    }) { captured ->
+                        val retentionFailure = assertFailsWith<Throwable> {
+                            owner.expireProgressJournal(job, finished.runId, false)
+                        }
+                        if (injected is java.util.concurrent.CancellationException) {
+                            val wrapped = assertIs<WorkflowStoreException>(retentionFailure)
+                            assertEquals("PROGRESS_RETENTION_FAILED", wrapped.code)
+                            assertSame(injected, wrapped.cause)
+                        } else assertSame(injected, retentionFailure)
+                        captured
+                    }
+                }
+                assertEquals("JOB_RECORD_UNAVAILABLE", failure.code)
+                val nextCapture = owner.inspectForListing(job, { relative, maximum ->
+                    Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+                }) { it }
+                assertIs<WorkflowJobInspection.Available>(nextCapture)
+            }
+        }
+    }
+
+    @Test fun `successful early retention does not restore epoch after nested same-stripe mutation`() = withRoot { root ->
+        val job = upload(root)
+        val start = Instant.parse("2026-09-05T00:00:00Z")
+        var now = start
+        var onInstant: (() -> Unit)? = null
+        val clock = object : Clock() {
+            override fun instant(): Instant {
+                onInstant?.let { callback -> onInstant = null; callback() }
+                return now
+            }
+            override fun getZone() = ZoneOffset.UTC
+            override fun withZone(zone: java.time.ZoneId): Clock = this
+        }
+        WorkflowAttemptStore.open(root, clock).use { owner ->
+            val queued = owner.create(job, owner.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = owner.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val finished = owner.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            onInstant = {
+                owner.setProgressRetentionPinned(job, finished.runId, finished.version, true)
+            }
+            val refused = assertFailsWith<WorkflowStoreException> {
+                owner.inspectForListing(job, { relative, maximum ->
+                    Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+                }) { captured ->
+                    assertEquals(ProgressRetentionResult.RETAINED, owner.expireProgressJournal(
+                        job, finished.runId, false, java.time.Duration.ofDays(365)))
+                    captured
+                }
+            }
+            assertEquals("JOB_RECORD_UNAVAILABLE", refused.code)
+            assertTrue(owner.withAttemptSnapshot(job, finished.runId) { it.progressRetentionPinned })
+            val fresh = owner.inspectForListing(job, { relative, maximum ->
+                Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+            }) { it }
+            assertIs<WorkflowJobInspection.Available>(fresh)
         }
     }
 
@@ -658,6 +741,46 @@ class WorkflowAttemptStoreTest {
             assertEquals(finished.copy(version = unpinned.version, progressRetentionPinned = false), unpinned)
             assertEquals(ProgressRetentionResult.EXPIRED, store.expireProgressJournal(job, finished.runId, false))
             assertEquals(unpinned, store.withAttemptSnapshot(job, unpinned.runId) { it })
+        }
+    }
+
+    @Test fun `no-op progress retention preserves optimistic listing while expiry invalidates it`() = withRoot { root ->
+        val job = upload(root)
+        lateinit var finished: WorkflowAttempt
+        lateinit var progressFile: Path
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = store.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            finished = store.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            val reportDirectory = root.resolve("$job/reports/runs/${finished.runId}")
+            AgentProgressJournal(reportDirectory, "explore").use { }
+            progressFile = reportDirectory.resolve(AgentProgressJournal.FILE_NAME)
+
+            val observed = store.inspectForListing(job, { relative, maximum ->
+                Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+            }) { captured ->
+                assertEquals(ProgressRetentionResult.RETAINED,
+                    store.expireProgressJournal(job, finished.runId, protectedFromRetention = false))
+                captured
+            }
+            assertEquals(job, observed.snapshot.jobId)
+            assertFalse(Json.parseToJsonElement(progressFile.readText()).jsonObject.containsKey("retentionExpiredAt"))
+        }
+
+        // An actual retention replacement still invalidates a listing that captured the old journal.
+        WorkflowAttemptStore.open(root, Clock.offset(CLOCK, java.time.Duration.ofHours(25))).use { store ->
+            assertCode("JOB_RECORD_UNAVAILABLE") {
+                store.inspectForListing(job, { relative, maximum ->
+                    Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+                }) { captured ->
+                    assertEquals(ProgressRetentionResult.EXPIRED,
+                        store.expireProgressJournal(job, finished.runId, protectedFromRetention = false))
+                    captured
+                }
+            }
+            assertTrue(Json.parseToJsonElement(progressFile.readText()).jsonObject.containsKey("retentionExpiredAt"))
         }
     }
 

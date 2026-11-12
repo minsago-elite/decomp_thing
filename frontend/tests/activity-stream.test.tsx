@@ -81,12 +81,19 @@ it('falls back to bounded polling after two short failed connections without res
   const one = connection(); const two = connection();
   fetcher.mockResolvedValueOnce(one.response).mockResolvedValueOnce(two.response);
   await start();
-  transport.get.mockResolvedValue(snapshot);
+  transport.get.mockImplementation((kind) => Promise.resolve(kind === 'snapshot' ? snapshot : {
+    data: { items: [], nextCursor: page.data.nextCursor, hasMore: false },
+  }));
   await act(async () => { await Promise.resolve(); one.close(); });
   await advance(1000);
   await act(async () => { await Promise.resolve(); two.close(); });
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce({ data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } });
-  await advance(2000);
+  await advance(0);
+  expect(screen.getByRole('status').textContent).toContain('retry 2 of 4');
+  const readsBeforeRetry = transport.get.mock.calls.length;
+  await advance(1999);
+  expect(transport.get.mock.calls).toHaveLength(readsBeforeRetry);
+  await advance(1);
   expect(fetcher).toHaveBeenCalledTimes(2);
   expect(transport.get.mock.calls.at(-1)![1]).toContain(`transport=poll&limit=199&after=${page.data.nextCursor}`);
   expect(screen.getByRole('status').textContent).toContain('Using periodic refresh');
@@ -160,7 +167,7 @@ it('uses polling when the server explicitly reports exhausted stream capacity', 
   error.error.code = 'STREAM_LIMIT';
   fetcher.mockResolvedValueOnce(new Response(JSON.stringify(error), { status: 429,
     headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } }));
-  transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } });
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce({ data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } });
   await start();
   expect(screen.getByRole('status').textContent).toContain('Using periodic refresh');
   expect(screen.queryByRole('alert')).toBeNull();
@@ -270,7 +277,8 @@ it('flushes pending context rows on pause and discards a later pending display o
 
 it('publishes the full context page immediately and continues after its last checked cursor', async () => {
   const evidence = JSON.stringify({ snapshot, page });
-  const live = connection(); fetcher.mockResolvedValueOnce(live.response);
+  const live = connection(); const continued = connection();
+  fetcher.mockResolvedValueOnce(live.response).mockResolvedValueOnce(continued.response);
   await start();
   await act(async () => { await Promise.resolve(); live.send(...Array.from({ length: 200 }, (_, index) => contextUpdate(index + 1))); }); await advance(0);
   expect(screen.getAllByRole('listitem')).toHaveLength(200);
@@ -282,6 +290,7 @@ it('publishes the full context page immediately and continues after its last che
   expect(screen.getByText(`Sequence ${contextUpdate(200).sequence}`)).toBeTruthy();
   await advance(100);
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
-  expect(fetcher).toHaveBeenCalledOnce();
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(new Headers(fetcher.mock.calls[1]![1]?.headers).get('Last-Event-ID')).toBe(contextUpdate(200).cursor);
   expect(JSON.stringify({ snapshot, page })).toBe(evidence);
 });
