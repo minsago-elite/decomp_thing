@@ -61,6 +61,13 @@ class LinuxBubblewrapBoundaryTest {
                 val first = assertFailsWith<IOException> { admitMountObservation(check, changed, phase) }
                 assertEquals("host mounts changed during runtime manifest", first.message)
                 val diagnostic = mountDiagnostic(first)
+                val timing = (diagnostic as AcpMountEventWitness).timingRecord
+                assertEquals(timing, validatedAcpMountTiming(timing))
+                assertTrue(requireNotNull(timing).contains("cleanPolls=1"))
+                assertTrue("createdNs=${mountCheckField(check, "createdNs")}" in timing)
+                assertTrue("lastCleanNs=${mountCheckField(check, "lastCleanNs")}" in timing)
+                assertTrue("firstObservedNs=${mountCheckField(check, "firstObservedNs")}" in timing)
+                assertEquals(!admitted, "admittedNs=NA" in timing)
                 val message = requireNotNull(diagnostic.message)
                 assertTrue(message.contains("phase=$phase "))
                 assertTrue(message.contains("generation=" +
@@ -76,6 +83,8 @@ class LinuxBubblewrapBoundaryTest {
                 val sticky = assertFailsWith<IOException> { requireMountEventUnchanged(check, "REFRESH") }
                 assertEquals(first.message, sticky.message)
                 assertTrue(mountDiagnostic(sticky) === diagnostic)
+                assertEquals(timing, (mountDiagnostic(sticky) as AcpMountEventWitness).timingRecord)
+                assertEquals(1L, mountCheckField(check, "cleanPollCount"))
                 assertEquals(admission, mountCheckField(mountDiagnostic(sticky), "admissionContext"))
                 assertEquals(1, sticky.suppressed.size)
                 assertEquals(2, calls)
@@ -98,6 +107,10 @@ class LinuxBubblewrapBoundaryTest {
                 attachMountPollFailure(check, failure, "CONTROL_ADMISSION")
                 attachMountPollFailure(check, failure, "CHECKPOINT") // Retain one witness per primary.
                 assertEquals(1, failure.suppressed.size)
+                val timing = requireNotNull((mountDiagnostic(failure) as AcpMountEventWitness).timingRecord)
+                assertEquals(timing, validatedAcpMountTiming(timing))
+                assertEquals(events == 16, "admittedNs=NA" in timing)
+                assertEquals(events == 16, "lastCleanNs=NA" in timing)
                 assertTrue(requireNotNull(mountDiagnostic(failure).message).endsWith(
                     "outcome=INVALID_DESCRIPTOR rc=1 revents=$events errno=NA"))
                 assertTrue(requireNotNull(mountDiagnostic(failure).message).contains("phase=CONTROL_ADMISSION "))
@@ -148,9 +161,17 @@ class LinuxBubblewrapBoundaryTest {
     fun `mount diagnostics are bounded stackless best effort and never cleanup authority`() {
         LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-205)).use { scratch ->
             val check = newMountEventCheck(scratch)
+            check.javaClass.getDeclaredField("createdNs").apply { isAccessible = true }.setLong(check, Long.MIN_VALUE)
+            check.javaClass.getDeclaredField("cleanPollCount").apply { isAccessible = true }.setLong(check, Long.MAX_VALUE - 1)
+            repeat(2) { admitMountObservation(check, 0L, "CHECKPOINT") }
+            assertEquals(Long.MAX_VALUE, mountCheckField(check, "cleanPollCount"))
             val failure = assertFailsWith<IOException> { admitMountObservation(check, (1L shl 32) or 10L, "REFRESH") }
             val diagnostic = mountDiagnostic(failure)
             assertEquals(null, mountCheckField(diagnostic, "admissionContext")) // No authored admission facts.
+            val timing = requireNotNull((diagnostic as AcpMountEventWitness).timingRecord)
+            assertEquals(timing, validatedAcpMountTiming(timing))
+            assertTrue("createdNs=-9223372036854775808 admittedNs=NA" in timing)
+            assertTrue(timing.endsWith("cleanPolls=9223372036854775807"))
             val text = requireNotNull(diagnostic.message)
             assertTrue(text.length <= 512 && text.all { it.code in 32..126 })
             assertEquals(null, diagnostic.cause)
