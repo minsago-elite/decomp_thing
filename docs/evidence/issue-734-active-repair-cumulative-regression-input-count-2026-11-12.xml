@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T09:14:04.053Z" hostname="whatsername" time="4.486">
+  <properties/>
+  <testcase name="active repair enforces cumulative retained regression input count across calls()" classname="decompengine.repair.TraceGuidedRepairTest" time="4.477"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

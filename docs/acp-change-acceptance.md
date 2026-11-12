@@ -2224,3 +2224,26 @@ This is local scripted-ACP evidence. It does not qualify live providers,
 production validation under #236, publication crash recovery under #732,
 durable provenance under #733, hosted exact-head CI, or the complete #734/#63
 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair cumulative regression-input admission — 2026-11-12
+
+The active repair loop now exercises regression-input admission across
+successive calls using one project and one retained corpus. Two distinct
+inputs are added in separate ACP-backed repair calls; each call reaches the
+injected validator, and the second is admitted at the exact two-input ceiling.
+A third distinct input is then refused with the aggregate count diagnostic
+before another dispatch, validation call, or run is created. The earlier two
+inputs and their corpus digest remain retained, while accepted source/head
+remain unchanged and no attempt is pending.
+
+The focused scripted-ACP method passed with one test and zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-active-repair-cumulative-regression-input-count-2026-11-12.xml)
+has SHA-256
+`a5aa296a5500a10be5ca5f08b97245273d3f0d94356f419172aa48f3723e3318`; the
+[provenance record](evidence/issue-734-active-repair-cumulative-regression-input-count-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
