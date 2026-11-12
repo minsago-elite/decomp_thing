@@ -1740,3 +1740,24 @@ this proves active-path result consumption and evidence retention, not a real
 compiler execution or successful production validation under #236. It does
 not qualify live-provider behavior, hosted exact-head CI, or complete #734/#63
 acceptance. Keep #734 and #63 open.
+
+## Public reconstruction multibyte over-limit grant refusal — 2026-11-12
+
+Source commit `2b4ae45f24f124582a87bf4d1a82f4ae87525d23` updates the scripted
+public reconstruction mutation-grant case to attempt a UTF-8 payload of exactly
+262,145 bytes: 262,140 bytes of `é` padding plus the five ASCII comment
+delimiters. This is one byte over the 256 KiB mutation grant. The request uses
+a 1 MiB protocol-frame ceiling so JSON escaping does not mask broker-level byte
+accounting; the fixture checks the encoded payload length before sending it,
+and the receipt audit retains the target-path `POLICY_DENIED` refusal.
+
+The focused public reconstruction test passed with one test and zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-reconstruction-utf8-overlimit-2026-11-12.xml)
+has SHA-256 `783d27d9ecac232a69c9e07fce327b420121716faa4e5fb240c1ca2408419d12`;
+the accompanying [provenance record](evidence/issue-734-reconstruction-utf8-overlimit-2026-11-12.json)
+binds the source commit, tree, focused command, and result.
+
+This adds local scripted-ACP evidence for one multibyte over-limit refusal in
+the Generated C Make profile. It does not qualify other profiles, live-provider
+behavior, production validation under #236, hosted exact-head CI, or the full
+#734/#63 acceptance matrix. Keep #734 and #63 open.
