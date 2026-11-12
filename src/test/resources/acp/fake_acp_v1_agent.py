@@ -94,6 +94,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-no-change",
     "repair-active-declared-role-candidate",
     "repair-active-declared-role-quota-retry",
+    "repair-active-declared-role-invalid-unicode-after-write",
     "repair-active-declared-role-read-limit-after-write",
     "repair-active-declared-role-patch-count-retry",
     "repair-active-declared-role-timeout-after-write",
@@ -297,6 +298,7 @@ expected_fs = {
     "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-candidate": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-quota-retry": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-invalid-unicode-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-read-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-patch-count-retry": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
@@ -1004,6 +1006,24 @@ if MODE == "repair-active-declared-role-quota-retry":
     readback = read_workspace_file(source, 156)
     if "error" in readback or readback.get("result", {}).get("content") != candidate:
         raise SystemExit(157)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-invalid-unicode-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    prefix = "/* exact repair quota-byte boundary: "
+    suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+    padding_bytes = REPAIR_QUOTA_BOUNDARY_BYTES - len(prefix.encode()) - len(suffix.encode())
+    padding = "é" * (padding_bytes // 2) + ("x" if padding_bytes % 2 else "")
+    candidate = prefix + padding + suffix
+    if len(candidate.encode()) != REPAIR_QUOTA_BOUNDARY_BYTES:
+        raise SystemExit(165)
+    write_workspace_file(source, candidate, 164)
+    malformed = try_write_workspace_file(source, "/*\ud800*/\n", 165)
+    if malformed.get("error", {}).get("code") != -32602:
+        raise SystemExit(166)
+    readback = read_workspace_file(source, 166)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(167)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-read-limit-after-write":

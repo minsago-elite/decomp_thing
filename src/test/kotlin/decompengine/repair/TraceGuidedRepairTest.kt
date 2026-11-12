@@ -4199,17 +4199,25 @@ class TraceGuidedRepairTest {
         activeAcpRepairPreservesExactCandidateAfterRefusedRetry(ActiveAcpRepairQuota.SOURCE_FILE_BYTES)
     }
 
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active ACP repair rejects malformed Unicode after retaining the valid candidate`() {
+        activeAcpRepairPreservesExactCandidateAfterRefusedRetry(ActiveAcpRepairQuota.INVALID_UNICODE)
+    }
+
     private enum class ActiveAcpRepairQuota {
         PATCH_BYTES,
         FILESYSTEM_READ_BYTES,
         FILESYSTEM_WRITE_BYTES,
         SOURCE_FILE_BYTES,
+        INVALID_UNICODE,
     }
 
     private fun activeAcpRepairPreservesExactCandidateAfterRefusedRetry(quota: ActiveAcpRepairQuota) {
         val readQuota = quota == ActiveAcpRepairQuota.FILESYSTEM_READ_BYTES
         val enforceAcpWriteLimit = quota == ActiveAcpRepairQuota.FILESYSTEM_WRITE_BYTES
         val sourceFileQuota = quota == ActiveAcpRepairQuota.SOURCE_FILE_BYTES
+        val rejectInvalidUnicode = quota == ActiveAcpRepairQuota.INVALID_UNICODE
         val testRoot = Path.of("build/test-tmp").createDirectories()
         val project = createProject(
             Files.createTempDirectory(
@@ -4237,9 +4245,9 @@ class TraceGuidedRepairTest {
         val candidateText = prefix + padding + suffix
         val candidateSource = candidateText.toByteArray(Charsets.UTF_8)
         assertEquals(candidateLimit, candidateSource.size.toLong())
-        if (sourceFileQuota) {
+        if (sourceFileQuota || rejectInvalidUnicode) {
             assertTrue(candidateText.length < candidateSource.size,
-                "the source-file grant case must distinguish UTF-8 bytes from character count")
+                "the active malformed-text case uses a bounded multibyte UTF-8 candidate")
             assertTrue('é' in candidateText)
         }
         val budget = RepairResourceBudget(
@@ -4265,6 +4273,7 @@ class TraceGuidedRepairTest {
         }
         val acp = AcpAgentHarnessTest().harness(
             if (readQuota) "repair-active-declared-role-read-limit-after-write"
+            else if (rejectInvalidUnicode) "repair-active-declared-role-invalid-unicode-after-write"
             else "repair-active-declared-role-quota-retry",
             filesystemLimits = filesystemLimits,
         )
@@ -4319,6 +4328,7 @@ class TraceGuidedRepairTest {
                 ActiveAcpRepairQuota.FILESYSTEM_READ_BYTES -> "filesystem-read-limit-preserved candidate reached validator"
                 ActiveAcpRepairQuota.FILESYSTEM_WRITE_BYTES -> "filesystem-write-limit-preserved candidate reached validator"
                 ActiveAcpRepairQuota.SOURCE_FILE_BYTES -> "source-file-grant-preserved candidate reached validator"
+                ActiveAcpRepairQuota.INVALID_UNICODE -> "invalid-Unicode refusal preserved candidate reached validator"
             },
         )
         val validation = object : RepairValidationStrategy {
@@ -4416,10 +4426,14 @@ class TraceGuidedRepairTest {
             assertEquals(sha256(candidateSource), change.getValue("afterSha256").jsonPrimitive.content)
             assertEquals(candidateLimit, change.getValue("sizeBytes").jsonPrimitive.content.toLong())
             val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
-            val expectedOutcomes = if (readQuota) listOf("allowed", "denied") else listOf("allowed", "denied", "allowed")
-            val expectedReasons = if (readQuota) listOf("completed", "resource-limit") else if (sourceFileQuota)
-                listOf("completed", "policy-denied", "completed") else
-                listOf("completed", "resource-limit", "completed")
+            val expectedOutcomes = if (readQuota) listOf("allowed", "denied") else
+                listOf("allowed", "denied", "allowed")
+            val expectedReasons = when {
+                readQuota -> listOf("completed", "resource-limit")
+                sourceFileQuota -> listOf("completed", "policy-denied", "completed")
+                rejectInvalidUnicode -> listOf("completed", "invalid-text", "completed")
+                else -> listOf("completed", "resource-limit", "completed")
+            }
             assertEquals(expectedOutcomes.size, filesystem.getValue("recordCount").jsonPrimitive.int)
             val auditRecords = filesystem.getValue("records").jsonArray.map { it.jsonObject }
             assertEquals(expectedOutcomes, auditRecords.map {
