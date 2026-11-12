@@ -274,6 +274,12 @@ class UploadServer(
         durableAdapters = durableAdapters ?: if (uiMode == WebUiMode.SPA) productionDurableWebWorkflows(sensitiveValues = sensitiveValues) else emptyList(),
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") },
         sourceProfiles = admittedSourceProfiles)
+    /** Test seam for holding a physical dashboard metadata read while exercising the HTTP routes. */
+    @Volatile internal var listingReadObserver: (String) -> Unit = {}
+        set(value) {
+            field = value
+            jobs.listingReadObserver = value
+        }
     private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
