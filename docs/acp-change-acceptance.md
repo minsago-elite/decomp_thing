@@ -2785,3 +2785,38 @@ injected validator. It does not qualify production validation under #236, live
 providers, publication recovery under #732, durable provenance under #733,
 hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
 #63 open.
+
+## Active repair aggregate index-evidence byte boundary — 2026-11-12
+
+The active repair path now has an exact `maximumIndexEvidenceBytes` boundary
+using Generated C module-plan and program-model evidence. `SourceTreeGenerator`
+creates a valid fixture containing one function, one global, and one type. The
+program model carries 32 KiB of trailing JSON whitespace so the raw evidence
+budget can be isolated from the parsed layout. The plan is 394 bytes and the
+program model is 33,639 bytes, for an aggregate exact limit of 34,033 bytes.
+
+At 34,033 bytes, the active path admits both documents, dispatches scripted ACP,
+records an acknowledged implementation replacement and readback, and reaches
+the injected validator. The validator checks all candidate source paths and
+bytes, plus the profile, index and candidate-revision bindings, before throwing
+its expected sentinel. The correlated receipt reaches final workspace snapshot
+and reports verified process/sandbox cleanup. At 34,032 bytes, the plan remains
+within budget but only 33,638 bytes remain for the 33,639-byte program model.
+The active graph-opening path returns the exact typed stable-file diagnostic
+before ACP dispatch or validation. Source and evidence bytes remain unchanged;
+no run, pending attempt, or repair-history record is retained. A subsequent
+graph open at the exact limit succeeds, confirming admission released its
+resources.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-index-evidence-byte-boundary-2026-11-12.xml)
+has SHA-256
+`ae9673bae4b86fc8524ba8dda457beac88de2f3d66ca50dab02a7382044313db`; the
+[provenance record](evidence/issue-734-active-index-evidence-byte-boundary-2026-11-12.json)
+binds the tested source commit/tree, selector, command, and result.
+
+This is local scripted-ACP admission and validator-handoff evidence using an
+injected validator. It does not qualify production validation under #236, live
+providers, publication recovery under #732, durable provenance under #733,
+hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
+#63 open.
