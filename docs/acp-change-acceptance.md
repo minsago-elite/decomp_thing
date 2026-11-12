@@ -2609,3 +2609,33 @@ This is local scripted-ACP evidence for the Generated C repair profile. It does
 not qualify production validation under #236, live providers, publication
 crash recovery under #732, durable provenance under #733, hosted exact-head CI,
 or the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair state-directory entry boundary — 2026-11-12
+
+The active repair loop now tests candidate blob-directory admission at the exact
+entry-count boundary. Two fresh Generated C repair projects have the same
+baseline blob-name set `S`. The test derives `B` from that set and uses separate
+budgets: `maximumStateDirectoryEntries=B+1` admits the candidate, while `B`
+refuses its one additional blob entry. Both scripted ACP attempts acknowledge
+the same 4,096-byte replacement and read it back. The equality receipt binds
+one `MODIFIED` record to the accepted preimage and candidate postimage; the
+candidate reaches the injected validator, which checks its bytes and revision
+digest before throwing its sentinel. The lower budget fails with the exact
+projected-entry diagnostic before the candidate blob is retained and does not
+invoke validation. Both cases verify callback outcomes, process/sandbox cleanup,
+receipt/assessment linkage, preserved accepted source/head, rejected graph
+state, and cleared pending state. Final blob inventory is `S` plus the candidate
+at equality and exactly `S` on refusal.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-state-directory-entry-boundary-2026-11-12.xml)
+has SHA-256
+`025b44433497cea01c4a45da96d298911bac792317aae1a0c3493621053f1923`; the
+[provenance record](evidence/issue-734-active-repair-state-directory-entry-boundary-2026-11-12.json)
+binds the tested source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify compilation, behavior validation, production validation under #236,
+live providers, successful publication, publication crash recovery under #732,
+durable provenance under #733, hosted exact-head CI, or the complete #734/#63
+acceptance matrix. Keep #734 and #63 open.
