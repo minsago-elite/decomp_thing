@@ -104,6 +104,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-read-limit-after-write",
     "repair-active-declared-role-patch-count-retry",
     "repair-active-declared-role-patch-byte-reuse",
+    "repair-active-declared-role-staging-byte-reuse",
     "repair-active-declared-role-timeout-after-write",
 }
 RECONSTRUCTION_MAXIMUM_SOURCE_BYTES = 256 * 1024
@@ -315,6 +316,7 @@ expected_fs = {
     "repair-active-declared-role-read-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-patch-count-retry": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-patch-byte-reuse": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-staging-byte-reuse": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
@@ -1168,6 +1170,69 @@ if MODE == "repair-active-declared-role-patch-byte-reuse":
         raise SystemExit(186)
     if read_workspace_file(second, 193).get("result", {}).get("content") != second_exact:
         raise SystemExit(187)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-staging-byte-reuse":
+    first = join_path(cwd, "src/modules/reconstructed.c")
+    second = join_path(cwd, "src/modules/secondary.c")
+
+    def padded_candidate(prefix, suffix, size):
+        padding_bytes = size - len((prefix + suffix).encode())
+        if padding_bytes < 0:
+            raise SystemExit(194)
+        candidate = prefix + ("x" * padding_bytes) + suffix
+        if len(candidate.encode()) != size:
+            raise SystemExit(195)
+        return candidate
+
+    first_original = "/* first-original " + ("o" * (1025 - len(("/* first-original " + " */\nint decomp_engine_main(void) { return 0; }\n").encode()))) + " */\nint decomp_engine_main(void) { return 0; }\n"
+    second_original = padded_candidate("/* second-original ", " */\nint secondary(void) { return 0; }\n", 2048)
+    first_large = padded_candidate("/* first-large ", " */\nint decomp_engine_main(void) { return 1; }\n", 2048)
+    first_small = padded_candidate("/* first-small ", " */\nint decomp_engine_main(void) { return 1; }\n", 1024)
+    second_small = padded_candidate("/* second-small ", " */\nint secondary(void) { return 1; }\n", 2048)
+    second_over = padded_candidate("/* second-over ", " */\nint secondary(void) { return 1; }\n", 2049)
+    second_large = padded_candidate("/* second-large ", " */\nint secondary(void) { return 1; }\n", 3072)
+    second_large_over = padded_candidate("/* second-large-over ", " */\nint secondary(void) { return 1; }\n", 3073)
+    second_shrunk = padded_candidate("/* second-shrunk ", " */\nint secondary(void) { return 1; }\n", 3071)
+    if len(first_original.encode()) != 1025:
+        raise SystemExit(196)
+
+    write_workspace_file(first, first_large, 197)
+    write_workspace_file(second, second_small, 198)
+    refused = try_write_workspace_file(second, second_over, 199)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(197)
+    if read_workspace_file(first, 200).get("result", {}).get("content") != first_large:
+        raise SystemExit(198)
+    if read_workspace_file(second, 201).get("result", {}).get("content") != second_small:
+        raise SystemExit(199)
+
+    write_workspace_file(first, first_small, 202)
+    write_workspace_file(second, second_large, 203)
+    refused = try_write_workspace_file(second, second_large_over, 204)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(200)
+    if read_workspace_file(first, 205).get("result", {}).get("content") != first_small:
+        raise SystemExit(201)
+    if read_workspace_file(second, 206).get("result", {}).get("content") != second_large:
+        raise SystemExit(202)
+
+    # Baseline restoration would release patch bytes but add one staging byte.
+    refused = try_write_workspace_file(first, first_original, 207)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(203)
+    if read_workspace_file(first, 208).get("result", {}).get("content") != first_small:
+        raise SystemExit(204)
+    if read_workspace_file(second, 209).get("result", {}).get("content") != second_large:
+        raise SystemExit(205)
+
+    # Free one staging byte by shrinking B, then restore A exactly at the ceiling.
+    write_workspace_file(second, second_shrunk, 210)
+    write_workspace_file(first, first_original, 211)
+    if read_workspace_file(first, 212).get("result", {}).get("content") != first_original:
+        raise SystemExit(206)
+    if read_workspace_file(second, 213).get("result", {}).get("content") != second_shrunk:
+        raise SystemExit(207)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-timeout-after-write":
