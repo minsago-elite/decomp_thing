@@ -2,27 +2,29 @@
   "schemaVersion": 1,
   "issue": 734,
   "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
-  "sourceCommit": "1d9e9234163f8b0cbf3978072ce173754f0a54ad",
-  "sourceParent": "7078751ac724b68a69f3cf6af4d6931c0b729b1b",
-  "sourceTree": "d0753df259a6a1bfb7da0dc4fda9d9d547d5fa5b",
+  "sourceCommit": "8bf1af3847137063355c2c233161ed80efb37e77",
+  "sourceParent": "eae8a23b5facc743135c7cb0ac0e8d190a592cfd",
+  "sourceTree": "e720bf5cab2700b3afbf87f7c824c4ab035bcb03",
   "tests": [
-    "decompengine.repair.TraceGuidedRepairTest.active legacy repair admits exact response byte limit and refuses one byte under before validation"
+    "decompengine.repair.TraceGuidedRepairTest.active legacy repair admits exact response byte limit and refuses one byte under before validation",
+    "decompengine.repair.TraceGuidedRepairTest.agent termination closes the pending graph and releases its root lock",
+    "decompengine.repair.TraceGuidedRepairTest.staging rejects oversized agent output before allocation beyond its budget"
   ],
-  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x buildAnalysisIoHelper --tests 'decompengine.repair.TraceGuidedRepairTest.active legacy repair admits exact response byte limit and refuses one byte under before validation'",
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x buildAnalysisIoHelper --tests 'decompengine.repair.TraceGuidedRepairTest.agent termination closes the pending graph and releases its root lock' --tests 'decompengine.repair.TraceGuidedRepairTest.staging rejects oversized agent output before allocation beyond its budget' --tests 'decompengine.repair.TraceGuidedRepairTest.active legacy repair admits exact response byte limit and refuses one byte under before validation'",
   "result": {
-    "tests": 1,
+    "tests": 3,
     "failures": 0,
     "errors": 0,
     "skipped": 0,
-    "testSeconds": 1.267,
-    "suiteSeconds": 1.278,
-    "timestamp": "2026-11-12T06:36:23.224Z",
-    "junitSha256": "9868a40b3752a7efbe1cf97b61867011799a348090cda9158edabb070635b50d"
+    "testSeconds": 2.049,
+    "suiteSeconds": 2.049,
+    "timestamp": "2026-11-12T06:41:07.661Z",
+    "junitSha256": "7ecb4ba3314e342e5801ca082180e33a751dd06d64f5cbb32a3c6ed1737af191"
   },
   "scope": {
     "profile": "Generated C repair index profile",
     "provider": "Local HTTP fixture through the active RepairClientAgentHarness and HttpOpenAiCompatibleRepairClient path",
-    "coverage": "The exact response-body byte length is accepted at maximumResponseBytes and reaches the injected candidate validator; the test requires its sentinel validation failure and persists the run as VALIDATION_FAILED. A second active attempt sets the response ceiling one byte below the same body and requires RESOURCE_EXHAUSTED with the transport-limit diagnostic before validation. Both attempts preserve accepted source/head and clear pending state; the refusal run is retained as RESOURCE_EXHAUSTED.",
+    "coverage": "The exact response-body byte length is accepted at maximumResponseBytes and reaches the injected candidate validator; the test requires its sentinel validation failure and persists the run as VALIDATION_FAILED. A second active attempt with a response ceiling one byte below the same body requires RESOURCE_EXHAUSTED with the transport-limit diagnostic before validation. Both attempts preserve accepted source/head and clear pending state. The same focused run verifies two repair fixtures use the repository-local build/test-tmp root.",
     "qualificationLimits": [
       "active legacy OpenAI-compatible repair adapter only; this does not exercise ACP response transport",
       "local HTTP fixture only, not a live provider",
