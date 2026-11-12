@@ -48,6 +48,13 @@ still load. "SPA" means the SPA presentation (`--ui spa`) on the same data direc
 | MIG-16 | `GET /api/v1/jobs/{J}` | 404 | 200 | The v1 job DTO exists only in the SPA presentation; legacy mode advertises no successor prematurely. | PAR-17 |
 | MIG-17 | `GET /api/v1/recovery` | 404 | 200 | As MIG-16. | PAR-08 |
 
+For PAR-04, the legacy job page classifies the selected exploration report with the same
+`unknown` / `partial` / `unsupported` / `invalid` / `available` mapping as the versioned
+exploration adapter. It renders summary metrics and candidate rows only for `available`; that state
+means structurally checked observations, not accepted or behaviorally equivalent output. The page
+captures at most 1 MiB once for presentation. Human-readable byte sizes retain the exact byte count,
+for example `1.5 MiB (1572864 bytes)`.
+
 Every 404 above is a JSON `NOT_FOUND` envelope (or the legacy HTML error page for MIG-14/MIG-15 in the legacy
 presentation); API, attachment and source requests never receive the SPA shell. No answer copies a stored
 `status_message`, host path or exception text. The legacy `GET /api/jobs/J` body has exactly the documented keys
