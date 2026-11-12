@@ -986,6 +986,29 @@ already completed response, while the two-call/two-call-limit case still
 reaches candidate validation. This removes the earlier scheduling-dependent
 50 ms timing claim.
 
+## Active repair delayed tool-limit response checkpoint — 2026-11-12
+
+Commit `acc27a014ab9ab658ef1aa634f3735de87a85a40` adds a separate ordering
+control for the case where the host observes tool-call exhaustion before the
+prompt response arrives. A test-only gate is reached after the harness has
+snapshotted the exhaustion outcome and before it cancels the prompt. The
+scripted peer then completes the prompt with usage while cancellation is held.
+After the bounded cancellation drain, the harness re-reads the recorded
+response, preserving the available input/output counters while retaining
+`LIMIT_EXHAUSTED` as the stop reason.
+
+The companion case withholds the final prompt response until host cancellation
+and verifies that tool exhaustion remains `LIMIT_EXHAUSTED` even when configured
+token ceilings cannot be checked because usage is absent. The returned receipt
+retains the observed tool-call count and leaves input/output usage null; missing
+usage remains a protocol failure for ordinary completed turns.
+
+Both cases passed the focused `TraceGuidedRepairTest` invocation at the source
+commit above (two tests, zero failures/errors/skips). These are scripted ACP
+controls through active repair; they do not qualify live-provider behavior,
+production validation under #236, or hosted exact-head CI. #734 and #63 remain
+open.
+
 The same commit adds `TraceGuidedRepairTest.active ACP repair cancellation
 after acknowledged write preserves accepted state`. The fixture waits for the
 host's successful write acknowledgement, emits a correlated ready event, and
