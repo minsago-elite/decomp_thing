@@ -2786,6 +2786,40 @@ providers, publication recovery under #732, durable provenance under #733,
 hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
 #63 open.
 
+## Active repair Generated C discovery-directory boundary — 2026-11-13
+
+The active repair path now qualifies `maximumDiscoveryDirectories`, including
+directory traversal beneath an excluded `.repair` subtree. The fixture has one
+editable implementation and an `ignored.c` file beneath
+`src/modules/stale.repair/nested`. Generated C discovery charges `src`,
+`src/modules`, `stale.repair`, and `nested`, but excludes the nested C file from
+the admitted source inventory and mutation authority. Other discovery limits
+have headroom: the entry ceiling is 64 and the depth ceiling is 16.
+
+At a directory limit of four, scripted ACP replaces and reads back the
+implementation. The candidate reaches an injected validator that verifies the
+complete admitted source set and profile, index, and revision bindings before
+throwing its expected sentinel. The receipt records final-snapshot completion,
+two successful filesystem callbacks, and verified process/sandbox cleanup. The
+accepted source/head remain unchanged after rejection, and the file beneath the
+excluded subtree remains unchanged and absent from the candidate source set.
+At a limit of three, discovery enters the excluded `.repair` directory and
+refuses at `src/modules/stale.repair/nested` before ACP dispatch or validation.
+No run, pending attempt, or repair-history record is retained, and reopening at
+four succeeds.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-discovery-directory-boundary-2026-11-13.xml)
+has SHA-256 `66b748a1a176f87b249879a277bf1f1ecde41d41dc0995c123be664acf90adc5`; the
+[provenance record](evidence/issue-734-active-discovery-directory-boundary-2026-11-13.json)
+binds the tested source commit/tree, selector, command, and result.
+
+This is local scripted-ACP admission and validator-handoff evidence using an
+injected validator. It does not qualify production validation under #236, live
+providers, publication recovery under #732, durable provenance under #733,
+hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
+#63 open.
+
 ## Active repair generated-C fallback-module count boundary — 2026-11-13
 
 The active repair path now qualifies `maximumIndexedModules` with a minimal
