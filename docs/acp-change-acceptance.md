@@ -1804,6 +1804,33 @@ the Generated C Make profile. It does not qualify other profiles, live-provider
 behavior, production validation under #236, hosted exact-head CI, or the full
 #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Public reconstruction exact multibyte grant boundary — 2026-11-12
+
+Source commit `8774d4ed557106813ad540bd690b9e831d46d1d1` adds explicit receipt
+and publication checks to the exact UTF-8 source-size case. The scripted ACP
+candidate is exactly 262,144 encoded bytes and contains multibyte `é` padding;
+the public workflow must produce a single `CREATED` change for the declared
+implementation path with no preimage digest, the exact byte count, and an
+`afterSha256` matching the expected bytes. The reconstructed project, published
+`source-tree`, and verified extracted archive must all contain those bytes, and
+the extracted project rebuilds successfully.
+
+The same active test retains the paired 262,145-byte UTF-8 attempt against the
+256 KiB grant. Its frame ceiling is 1 MiB; the fixture verifies the encoded
+payload size, and the host audit requires `POLICY_DENIED` for the target before
+the normal admitted candidate is written. No extra source file appears.
+
+The focused local scripted-ACP run passed one JUnit method with zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-reconstruction-utf8-boundary-2026-11-12.xml)
+has SHA-256 `75be7ba7bec3657824f487f52fca277cfc40dbcd532b6d6ee918b1cc4f42f745`;
+the [provenance record](evidence/issue-734-reconstruction-utf8-boundary-2026-11-12.json)
+binds the source commit/tree, command, and result.
+
+This is local scripted evidence for Generated C Make only. It does not qualify
+live providers, other profiles, hosted exact-head CI, production validation
+under #236, publication recovery under #732, durable provenance under #733, or
+the full #734/#63 matrix. Keep #734 and #63 open.
+
 ## Active repair retained-regression input byte boundary — 2026-11-12
 
 Source commit `43023ffe8beec1d550d9a61f84359bbc958949c7` adds an active-loop
