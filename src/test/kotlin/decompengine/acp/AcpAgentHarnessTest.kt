@@ -1920,6 +1920,29 @@ class AcpAgentHarnessTest {
             evidence.launches.map { it.purpose },
         )
 
+        val failingHarness = harness(
+            "terminal-lifecycle-crash-after-output",
+            sentinel = "wire",
+            timeouts = timeouts(request = 5_000),
+            terminalPolicy = terminalPolicy,
+        )
+        val failedAttemptEvents = mutableListOf<decompengine.agent.AgentExecutionEvent>()
+        val failedReceipt = failingHarness.executeReceipt(request, failedAttemptEvents::add)
+        val failedOutcome = assertIs<AgentExecutionOutcome.Failed>(failedReceipt.outcome)
+        assertEquals(AgentFailureKind.PROCESS_CRASH, failedOutcome.failure.kind)
+        val failedOutputEvent = failedAttemptEvents.filterIsInstance<AgentTerminalOutputEvent>().single()
+        assertEquals(14, failedOutputEvent.retainedByteCount)
+        assertEquals(14L, failedOutputEvent.producedByteCount)
+        val failedOutputAudit = failingHarness.latestTerminalAudit().single {
+            it.reason == AcpTerminalAuditReason.OUTPUT_OBSERVED
+        }
+        assertEquals(failedOutputAudit.terminalIdSha256, failedOutputEvent.terminalIdSha256)
+        val failedInvocation = assertIs<AcpInvocationEvidenceSnapshot>(failedReceipt.providerEvidence)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, failedInvocation.cleanupDisposition)
+        assertNull(failedInvocation.completeExecutionEvidence)
+        assertTrue(failedInvocation.diagnostics?.remainingProcessIds.isNullOrEmpty())
+        assertEquals(FORBIDDEN_CANARY_CONTENT, forbiddenCanary.readText())
+
         val orphanHarness = harness(
             "terminal-cancelled-orphan",
             sentinel = "wire",

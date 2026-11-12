@@ -35,6 +35,7 @@ GENERIC_CONTRACT_MODES = {
     "forbidden-write",
     "physical-newline-in-string",
     "terminal-lifecycle",
+    "terminal-lifecycle-crash-after-output",
     "terminal-kill-lifecycle",
     "terminal-cancelled-orphan",
     "terminal-cross-session-hang",
@@ -756,7 +757,7 @@ if MODE == "permission-default-deny":
         raise SystemExit(102)
     if outcome.get("outcome") != "selected" or outcome.get("optionId") != "reject":
         raise SystemExit(103)
-if MODE == "terminal-lifecycle":
+if MODE in {"terminal-lifecycle", "terminal-lifecycle-crash-after-output"}:
     terminal_argument = "wire-terminal"
     send({
         "jsonrpc": "2.0",
@@ -835,6 +836,9 @@ if MODE == "terminal-lifecycle":
     release_response = read_message()
     if release_response is None or release_response.get("id") != 108 or "error" in release_response:
         raise SystemExit(112)
+    if MODE == "terminal-lifecycle-crash-after-output":
+        # Preserve the output observation, then fail before a normal prompt result exists.
+        raise SystemExit(90)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "terminal-kill-lifecycle":
