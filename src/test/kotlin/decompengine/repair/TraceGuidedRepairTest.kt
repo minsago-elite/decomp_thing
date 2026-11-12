@@ -1726,7 +1726,7 @@ class TraceGuidedRepairTest {
     }
 
     @Test
-    fun `active ACP repair preserves tool-call exhaustion when prompt completes immediately`() {
+    fun `active ACP repair preserves tool-call exhaustion when final usage arrives during cancellation`() {
         val project = createProject(
             createRepairTempDirectory("repair-active-acp-tool-limit-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
@@ -1743,8 +1743,12 @@ class TraceGuidedRepairTest {
             maxOutputTokens = 7,
         )
         val harness = AcpAgentHarnessTest().harness(
-            "repair-active-declared-role-tool-limit-after-write",
-        ).withPromptLoopGateForTesting { promptJob -> withTimeout(5_000) { promptJob.join() } }
+            "repair-active-declared-role-tool-limit-delayed-response-after-write",
+        ).withToolLimitResponseGateForTesting { promptJob ->
+            // This gate is reached only after the host snapshots tool exhaustion. Holding
+            // cancellation until the delayed response completes reproduces the stale snapshot.
+            withTimeout(5_000) { promptJob.join() }
+        }
 
         val failure = assertFailsWith<Exception> {
             generatedCRepairLoop(
@@ -1755,7 +1759,8 @@ class TraceGuidedRepairTest {
         }
         assertTrue(generateSequence<Throwable>(failure) { it.cause }.any {
             it.message.orEmpty().contains("repair agent stopped with limit_exhausted")
-        }, generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.toList().toString())
+        }, "${generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.toList()}\n" +
+            "ACP stderr=${harness.latestDiagnostics()?.stderr}")
         assertTrue(failure.suppressed.isEmpty(), failure.suppressed.joinToString())
         assertContentEquals(acceptedSource, target.readBytes())
         assertContentEquals(acceptedMakefile, project.resolve("Makefile").readBytes())
@@ -1807,6 +1812,49 @@ class TraceGuidedRepairTest {
             assertEquals(binding.receiptSha256, assessment.receiptSha256)
             assertEquals(decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
                 assessment.eligibility)
+        }
+    }
+
+    @Test
+    fun `active ACP repair preserves tool exhaustion when cancellation yields no final usage`() {
+        val project = createProject(
+            createRepairTempDirectory("repair-active-acp-tool-limit-no-final-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val target = project.resolve("src/modules/reconstructed.c")
+        val acceptedSource = target.readBytes()
+        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+        val harness = AcpAgentHarnessTest().harness(
+            "repair-active-declared-role-tool-limit-no-final-response-after-write",
+        )
+        val failure = assertFailsWith<Exception> {
+            generatedCRepairLoop(
+                harness,
+                RepairHistory(project.resolve("reports/repair_history.json")),
+                limits = AgentExecutionLimits(maxToolCalls = 1, maxInputTokens = 11, maxOutputTokens = 7),
+            ).repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+        val chain = generateSequence<Throwable>(failure) { it.cause }.toList()
+        assertTrue(chain.any { it.message.orEmpty().contains("repair agent stopped with limit_exhausted") },
+            "${chain.mapNotNull { it.message }}\nACP stderr=${harness.latestDiagnostics()?.stderr}")
+        assertFalse(chain.any { it is AgentExecutionException && it.failure.kind == AgentFailureKind.PROTOCOL })
+        assertContentEquals(acceptedSource, target.readBytes())
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+            val binding = requireNotNull(graph.snapshot.nodes.last().repairMetadata?.agentInvocation)
+            assertEquals("returned-limit-exhausted", binding.terminalOutcome)
+            val receipt = Json.parseToJsonElement(project.resolve(binding.receiptPath).readText()).jsonObject
+            val outcome = receipt.getValue("outcome").jsonObject
+            assertEquals("returned", outcome.getValue("type").jsonPrimitive.content)
+            val result = outcome.getValue("result").jsonObject
+            assertEquals("limit-exhausted", result.getValue("stopReason").jsonPrimitive.content)
+            val usage = result.getValue("usage").jsonObject
+            assertEquals(2, usage.getValue("toolCalls").jsonPrimitive.int)
+            assertEquals(JsonNull, usage.getValue("inputTokens"))
+            assertEquals(JsonNull, usage.getValue("outputTokens"))
         }
     }
 

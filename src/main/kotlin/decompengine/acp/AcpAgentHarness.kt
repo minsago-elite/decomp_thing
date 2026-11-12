@@ -136,6 +136,7 @@ class AcpAgentHarness(
     private var configuredWorkspaceSnapshotLimits = WorkspaceSnapshotLimits()
     private var workspaceSnapshotLimitsFrozen = false
     private val promptLoopGateForTesting = AtomicReference<(suspend (Job) -> Unit)?>(null)
+    private val toolLimitResponseGateForTesting = AtomicReference<(suspend (Job) -> Unit)?>(null)
     private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
     private val latestDiagnosticsReference = AtomicReference<AcpProcessDiagnostics?>()
@@ -156,6 +157,13 @@ class AcpAgentHarness(
     /** Internal-only barrier for deterministic prompt-completion ordering tests. */
     internal fun withPromptLoopGateForTesting(gate: suspend (Job) -> Unit): AcpAgentHarness = apply {
         check(promptLoopGateForTesting.compareAndSet(null, gate)) { "prompt loop test gate is already configured" }
+    }
+
+    /** Internal-only barrier after host tool exhaustion is observed and before cancellation. */
+    internal fun withToolLimitResponseGateForTesting(gate: suspend (Job) -> Unit): AcpAgentHarness = apply {
+        check(toolLimitResponseGateForTesting.compareAndSet(null, gate)) {
+            "tool-limit response gate is already configured"
+        }
     }
 
     private fun freezeWorkspaceSnapshotLimits(): WorkspaceSnapshotLimits = synchronized(workspaceSnapshotLimitsLock) {
@@ -866,8 +874,14 @@ class AcpAgentHarness(
                 )
             }
         } ?: AgentUsage(toolCalls = translator.toolCallCount(), wallClock = elapsed)
-        requireConfiguredTokenUsage(request, usage, translator.sessionReference())
-        val limited = tokenLimitExceeded(request, usage)
+        val toolExhaustionWithoutFinalResponse =
+            finished.stopReason == AgentStopReason.LIMIT_EXHAUSTED &&
+                finished.response == null &&
+                translator.limitFailure.get() != null
+        if (!toolExhaustionWithoutFinalResponse) {
+            requireConfiguredTokenUsage(request, usage, translator.sessionReference())
+        }
+        val limited = toolExhaustionWithoutFinalResponse || tokenLimitExceeded(request, usage)
 
         val result = AgentExecutionResult(
             stopReason = if (limited) AgentStopReason.LIMIT_EXHAUSTED else stopReason,
@@ -1529,8 +1543,12 @@ class AcpAgentHarness(
                 throw callbackFailure
             }
             exhaustedOutcome()?.let { exhausted ->
+                toolLimitResponseGateForTesting.getAndSet(null)?.invoke(promptJob)
                 cancelPrompt(session, promptJob, operationScope)
-                return exhausted
+                // A peer may deliver its final response while acknowledging cancellation.
+                // Re-read after the bounded drain so available usage is retained, while a
+                // host-enforced tool limit remains authoritative if no response arrives.
+                return exhausted.copy(response = promptResponse.get() ?: exhausted.response)
             }
             if (promptJob.isCompleted) {
                 val response = promptJob.await()
@@ -3571,8 +3589,8 @@ private fun renderPrompt(request: AgentExecutionRequest): String =
     decompengine.agent.renderAgentPrompt(request.objective, request.contextInputs)
 
 private fun tokenLimitExceeded(request: AgentExecutionRequest, usage: AgentUsage): Boolean =
-    request.limits.maxInputTokens?.let { requireNotNull(usage.inputTokens) > it } == true ||
-        request.limits.maxOutputTokens?.let { requireNotNull(usage.outputTokens) > it } == true
+    request.limits.maxInputTokens?.let { usage.inputTokens?.let { used -> used > it } } == true ||
+        request.limits.maxOutputTokens?.let { usage.outputTokens?.let { used -> used > it } } == true
 
 private fun requireConfiguredTokenUsage(
     request: AgentExecutionRequest,
