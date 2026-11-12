@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T14:22:37.837Z" hostname="whatsername" time="4.294">
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T14:27:53.261Z" hostname="whatsername" time="2.69">
   <properties/>
-  <testcase name="active ACP repair bounds the complete candidate source tree including an unselected sibling()" classname="decompengine.repair.TraceGuidedRepairTest" time="4.281"/>
+  <testcase name="active ACP repair bounds the complete candidate source tree including an unselected sibling()" classname="decompengine.repair.TraceGuidedRepairTest" time="2.678"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "issue": 734,
   "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
-  "sourceCommit": "4f6ec3942c9ab2a08564051e0fdafffbca48901c",
+  "sourceCommit": "25d32ebcadc2f84d9f92706d1b073a602bbd72be",
   "sourceParent": "08dc39ee1a1b815ae3352fd149fd2cbeb5190419",
-  "sourceTree": "1de44cb51920e224a03b5409f9467962af072604",
+  "sourceTree": "5229e1a4fdb210d2e124f0b8f146695b9c8e6240",
   "tests": [
     "decompengine.repair.TraceGuidedRepairTest.active ACP repair bounds the complete candidate source tree including an unselected sibling"
   ],
@@ -14,15 +14,15 @@
     "failures": 0,
     "errors": 0,
     "skipped": 0,
-    "testSeconds": 4.281,
-    "suiteSeconds": 4.294,
-    "timestamp": "2026-11-12T14:22:37.837Z",
-    "junitSha256": "d33ce8036e8271809b33540b5f53b4d59d86734dc591566612fc4b18d4f19f2d"
+    "testSeconds": 2.678,
+    "suiteSeconds": 2.69,
+    "timestamp": "2026-11-12T14:27:53.261Z",
+    "junitSha256": "2467dd16596bbca05374bd727f120c9320255572dc33126e27471f8adea7a3c4"
   },
   "scope": {
     "profile": "Generated C repair index profile",
     "provider": "scripted ACP process through the active repair loop",
-    "coverage": "Paired fresh projects stage only src/modules/reconstructed.c while retaining src/modules/secondary.c as an unchanged source outside that staging context. A 128-byte replacement reaches the injected validator at an aggregate maximumSourceBytes ceiling measured from the complete candidate source tree, including the sibling. A 129-byte replacement is acknowledged and read back through ACP, then refused while constructing the complete immutable validator request. The refusal is typed as candidate-source resource exhaustion, produces RESOURCE_EXHAUSTED with a NOT_RUN validation assessment and resource-exhausted reason, and does not invoke the validator. Both arms verify exact candidate-source digests, receipt changes, receipt/assessment binding, accepted source/head preservation, rejected node, no pending attempt, and sandbox/process cleanup.",
+    "coverage": "Paired fresh projects stage only src/modules/reconstructed.c while retaining src/modules/secondary.c as an unchanged source outside that staging context. Both seeded source files are valid C with size padding inside comments. A 128-byte replacement reaches the injected validator at an aggregate maximumSourceBytes ceiling measured from the complete candidate source tree, including the sibling. A 129-byte replacement is acknowledged and read back through ACP, then refused while constructing the complete immutable validator request. The refusal is typed as candidate-source resource exhaustion, produces RESOURCE_EXHAUSTED with a NOT_RUN validation assessment and resource-exhausted reason, and does not invoke the validator. Both arms verify exact candidate-source digests, receipt changes, receipt/assessment binding, accepted source/head preservation, rejected node, no pending attempt, and sandbox/process cleanup.",
     "qualificationLimits": [
       "local scripted ACP evidence only",
       "uses an injected validator rather than production validation under #236",
