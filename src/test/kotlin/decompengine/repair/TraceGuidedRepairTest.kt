@@ -3133,7 +3133,9 @@ class TraceGuidedRepairTest {
         val candidateSource = "/* validated candidate */\nint decomp_engine_main(void) { return 1; }\n"
             .toByteArray(Charsets.UTF_8)
         val outcomeName = if (compileValid) "compile-valid" else "compile-failed"
-        val baselineHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+        val (baselineHead, baselineFullyAcceptedHeadId) = ModuleRevisionGraph.open(
+            project, GeneratedCRepairIndexProfile,
+        ).use { it.snapshot.headId to it.snapshot.fullyAcceptedHeadId }
         val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-candidate")
         var dispatches = 0
         val harness = object : CapturedRepairAgentHarness {
@@ -3190,8 +3192,12 @@ class TraceGuidedRepairTest {
                 observedCandidateDigest = candidateDigest
                 observedInvocation = invocation
 
+                val rebuiltBinarySha256 = if (compileValid) {
+                    sha256("fixture-rebuilt-binary".toByteArray(Charsets.UTF_8))
+                } else null
                 val evidenceBytes = (
-                    "{\"schemaVersion\":1,\"outcome\":\"$outcomeName\",\"sourceRevisionSha256\":\"$candidateDigest\"}\n"
+                    "{\"schemaVersion\":1,\"outcome\":\"$outcomeName\",\"sourceRevisionSha256\":\"$candidateDigest\"," +
+                        "\"rebuiltBinarySha256\":${rebuiltBinarySha256?.let { "\"$it\"" } ?: "null"}}\n"
                     ).toByteArray(Charsets.UTF_8)
                 request.reportsDir.createDirectories()
                 val evidencePath = request.reportsDir.resolve("${request.label}.validation.json")
@@ -3202,7 +3208,7 @@ class TraceGuidedRepairTest {
                     indexSha256 = request.indexSha256,
                     regressionCorpusSha256 = request.regressionCorpusSha256,
                     originalBinarySha256 = null,
-                    rebuiltBinarySha256 = null,
+                    rebuiltBinarySha256 = rebuiltBinarySha256,
                     runtimeSha256 = sha256(
                         "typed-${outcomeName}-fixture".toByteArray(Charsets.UTF_8),
                     ),
@@ -3274,7 +3280,7 @@ class TraceGuidedRepairTest {
                 if (compileValid) RepairRunStatus.COMPILE_VALID else RepairRunStatus.REJECTED,
                 graph.snapshot.runs.last().status,
             )
-            assertEquals(baselineHead, graph.snapshot.fullyAcceptedHeadId)
+            assertEquals(baselineFullyAcceptedHeadId, graph.snapshot.fullyAcceptedHeadId)
             val rejected = graph.snapshot.nodes.last()
             assertEquals(
                 if (compileValid) ModuleRevisionStatus.PROVISIONAL else ModuleRevisionStatus.REJECTED,
@@ -3308,7 +3314,10 @@ class TraceGuidedRepairTest {
             )
             assertEquals(binding.receiptSha256, assessment.receiptSha256)
             assertEquals(candidateDigest, assessment.afterSha256)
-            assertEquals(listOf(validationProof.evidenceSha256), assessment.validationProofSha256)
+            assertEquals(
+                if (compileValid) listOf(validationProof.evidenceSha256) else emptyList(),
+                assessment.validationProofSha256,
+            )
             assertEquals(
                 if (compileValid) decompengine.project.AcpChangePublicationEligibility.PROVISIONAL
                 else decompengine.project.AcpChangePublicationEligibility.REJECTED,
