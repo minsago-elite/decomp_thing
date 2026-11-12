@@ -3332,6 +3332,25 @@ class TraceGuidedRepairTest {
         )
     }
 
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair enforces cumulative retained regression argument limit across calls`() {
+        assertActiveRepairCumulativeRegressionAdmission(
+            acceptedInputs = listOf(
+                ProcessInput("a", args = listOf(""), stdin = byteArrayOf()),
+                ProcessInput("b", args = listOf("", ""), stdin = byteArrayOf()),
+            ),
+            rejectedInput = ProcessInput("c", args = listOf(""), stdin = byteArrayOf()),
+            budget = RepairResourceBudget(
+                maximumRegressionInputs = 10,
+                maximumRegressionArguments = 3,
+                maximumRegressionInputBytes = 64,
+                maximumRequestBytes = 64 * 1024,
+            ),
+            expectedFailure = "retained regression corpus contains 4 arguments; limit=3",
+        )
+    }
+
     private fun assertActiveRepairCumulativeRegressionAdmission(
         acceptedInputs: List<ProcessInput>,
         rejectedInput: ProcessInput,
