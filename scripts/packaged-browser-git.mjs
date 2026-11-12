@@ -120,19 +120,29 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   await verifyHistoryWindow(20);
   const historyStart = tab.requests.length;
   let historyPages = 1;
+  let historyFocusChecks = 0;
   for (let count = 20; count < fixture.repository.historyLength; count += 20) {
-    await evaluate(tab, `${button('Older commits')}.focus()`);
+    assert.equal(await evaluate(tab, `(() => {
+      const continuation = ${button('Older commits')};
+      continuation?.focus();
+      return !!continuation && document.activeElement === continuation;
+    })()`), true, 'Keyboard pagination must start with focus on Older commits');
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
     const loadedCount = Math.min(count + 20, fixture.repository.historyLength);
     const expectedStart = Math.max(0, loadedCount - maximumRenderedHistoryRows);
     const expectedWindow = expectedHistoryIds.slice(expectedStart, loadedCount);
+    const focusAfterPage = loadedCount < fixture.repository.historyLength
+      ? `document.activeElement === ${button('Older commits')}`
+      : `document.activeElement === document.querySelector('#git-history-title')`;
     await ready(tab, `(() => {
       const rows = [...${historyRows}];
       return rows.length === ${expectedWindow.length} &&
         rows[0]?.querySelector('code')?.title === ${JSON.stringify(expectedWindow[0])} &&
-        rows.at(-1)?.querySelector('code')?.title === ${JSON.stringify(expectedWindow.at(-1))};
+        rows.at(-1)?.querySelector('code')?.title === ${JSON.stringify(expectedWindow.at(-1))} &&
+        ${focusAfterPage};
     })()`, 'next anchored history page');
     await verifyHistoryWindow(loadedCount);
+    historyFocusChecks++;
     historyPages++;
   }
   const historyIds = [...observedHistoryIds];
@@ -140,6 +150,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   assert.deepEqual(historyIds, expectedHistoryIds, 'Every displayed history window must match the admitted repository, in order');
   assert.equal(historyIds[0], fixture.repository.commits.local);
   assert.equal(historyIds.at(-1), fixture.repository.commits.base);
+  assert.equal(historyFocusChecks, historyPages - 1, 'Every history continuation must assert its post-navigation focus target');
   assert.equal(await evaluate(tab, `!!${button('Older commits')}`), false, 'Exhausted history must not offer another page');
   assert.ok(tab.requests.slice(historyStart).every(request => ['GET', 'HEAD'].includes(request.method)), 'History pagination sent a mutation');
   assert.equal(countGitHistoryReads(tab.requests.slice(historyStart)), historyPages - 1,
@@ -200,6 +211,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   assert.equal(mutations.length, 3, 'Expected exactly the import, stage and commit requests');
   return { path, objectId, exportSha256: shown, exportEntries: names, viewReadRequests: viewRequests.length, mutationRequests: mutations.length,
     historyCommits: historyIds.length, historyPages, historyKeyboardPagination: true,
+    historyFocus: { checks: historyFocusChecks, continuationRetainedOnNonterminalPages: true, movedToHeadingOnExhaustion: true },
     keyboardSelection: true, keyboardActivation: true, hooksInert: true, sourceRepositoryUnchanged: true, policyExcludedCounted: 1 };
 }
 
