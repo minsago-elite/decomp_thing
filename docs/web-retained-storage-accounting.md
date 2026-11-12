@@ -69,15 +69,19 @@ Verification adds reservation overlap/release, exact free-space boundaries,
 accounting-error recovery, retained-report refusal before body reads, status reads
 during blocked transfers, and mutual exclusion between uploads and workflows.
 
-`UploadServerTest` also stalls a physical legacy `job.json` read during a three-job
-dashboard request, then sends eight real `GET /api/jobs/{id}` requests before
-releasing the listing. Each status response must return 200 in under two seconds;
-the dashboard must remain blocked until release and then return all three rows.
-The focused local regression passed on its recorded test run ([evidence record](evidence/issue-162-http-status-during-dashboard-listing-2026-11-13.json),
+`UploadServerTest` also holds the first physical legacy `job.json` read, then
+continues two concurrent real HTTP status clients while a dashboard inventory
+reads eight uploaded jobs with a 250 ms delay at each metadata read. The test
+requires at least 16 status responses, every response under two seconds, a status
+response completing in the middle of the inventory, and the final dashboard to
+contain every job. In the retained local run, 143 of 144 responses overlapped the
+listing; observed p95 was 56 ms and maximum was 60 ms. The focused regression and
+raw per-request timings are retained ([evidence record](evidence/issue-162-http-status-during-dashboard-listing-2026-11-13.json),
 [JUnit XML](evidence/issue-162-http-status-during-dashboard-listing-2026-11-13.xml)).
-This qualifies HTTP routing and serialization during one deliberately stalled listing; it is not a
-sustained-load benchmark, does not measure physical-disk contention, and does not
-complete the broader #162 upload/listing quota matrix or hosted qualification.
+This qualifies bounded HTTP status responsiveness during a deliberately slowed
+in-process metadata scan. It does not measure physical-disk contention or
+deployment throughput, and it does not complete the broader #162 upload/listing
+quota matrix or hosted qualification.
 
 The packaged upload browser qualification passed against `51ff358`, using the
 pinned Chrome driver with test-only `--no-sandbox`. It covered session restoration,
