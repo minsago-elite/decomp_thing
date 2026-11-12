@@ -281,6 +281,131 @@ it('adopts an untouched field from a refreshed job version during accepted readb
   stop();
 });
 
+function deferred() {
+  let settle!: (step: Step) => void;
+  const pending = new Promise<Response>((ok, no) => { settle = step => { try { ok(step()); } catch (e) { no(e instanceof Error ? e : new Error('step failed')); } }; });
+  return { step: (() => pending) as unknown as Step, settle };
+}
+
+it('accepted-readback refresh adopts an other-tab archive without erasing a label edited after submission', async () => {
+  const accepted = { ...base, version: 'job_version_2', label: 'Mine' };
+  const concurrent = { ...accepted, version: 'job_version_3', archived: true };
+  const after = { ...concurrent, version: 'job_version_4', label: 'Mine2' };
+  const readback = deferred();
+  const f = seq(doc(accepted), readback.step, doc(after), doc(after));
+  render(<Org fetcher={f} />);
+  fireEvent.input(input(), { target: { value: 'Mine' } }); save();
+  await waitFor(() => expect(f).toHaveBeenCalledTimes(2));
+  fireEvent.input(input(), { target: { value: 'Mine2' } });
+  await act(() => { current!.setJob(concurrent); });
+  await waitFor(() => expect(box().checked).toBe(true));
+  expect(input().value).toBe('Mine2');
+  await act(() => { readback.settle(fail(503, 'INTERNAL')); });
+  await settled();
+  expect(status()).toContain(copy.unconfirmed);
+  expect(input().value).toBe('Mine2'); expect(box().checked).toBe(true);
+  expect(f).toHaveBeenCalledTimes(2);
+  save();
+  expect(await screen.findByText(copy.saved)).toBeTruthy();
+  expect(header(f, 2, 'If-Match')).toBe('"job_version_3"');
+  expect(body(f, 2)).toEqual({ label: 'Mine2' });
+  expect(header(f, 2, 'Idempotency-Key')).not.toBe(header(f, 0, 'Idempotency-Key'));
+  expect(f).toHaveBeenCalledTimes(4);
+});
+
+it('a successful readback after an adopted intermediate version follows the later server value, not stale refresh state', async () => {
+  const accepted = { ...base, version: 'job_version_2', label: 'Mine' };
+  const intermediate = { ...accepted, version: 'job_version_3', archived: true };
+  const later = { ...accepted, version: 'job_version_4', archived: false };
+  const readback = deferred();
+  const f = seq(doc(accepted), readback.step);
+  render(<Org fetcher={f} />);
+  fireEvent.input(input(), { target: { value: 'Mine' } }); save();
+  await waitFor(() => expect(f).toHaveBeenCalledTimes(2));
+  await act(() => { current!.setJob(intermediate); });
+  await waitFor(() => expect(box().checked).toBe(true));
+  await act(() => { readback.settle(doc(later)); });
+  await settled();
+  expect(status()).toBe(copy.saved);
+  expect(screen.queryByText(copy.changed)).toBeNull();
+  expect(box().checked).toBe(false);
+  expect(input().value).toBe('Mine');
+  save();
+  await waitFor(() => expect(status()).toBe(copy.unchanged));
+  expect(f).toHaveBeenCalledTimes(2);
+  expect(log(f)).toEqual([`PATCH /api/v1/jobs/${jobId}`, `GET /api/v1/jobs/${jobId}`]);
+});
+
+it('an aborted accepted readback does not treat a later foreign version as its own save', async () => {
+  const accepted = { ...base, version: 'job_version_2', label: 'Mine' };
+  const foreign = { ...base, version: 'job_version_3', label: 'Other', archived: true };
+  let aborted = false;
+  const f = vi.fn<typeof fetch>()
+    .mockImplementationOnce(() => Promise.resolve(doc(accepted)()))
+    .mockImplementationOnce((_url, init) => new Promise((_ok, no) => {
+      init?.signal?.addEventListener('abort', () => { aborted = true; no(new DOMException('aborted', 'AbortError')); });
+    }));
+  render(<Org fetcher={f} />);
+  fireEvent.input(input(), { target: { value: 'Mine' } }); save();
+  await waitFor(() => expect(f).toHaveBeenCalledTimes(2));
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+  await act(() => { window.dispatchEvent(new Event('offline')); });
+  await waitFor(() => expect(aborted).toBe(true));
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  await act(() => { window.dispatchEvent(new Event('online')); });
+  await settled();
+  expect(status()).toBe(copy.unconfirmed);
+  await act(() => { current!.setJob(foreign); });
+  await waitFor(() => expect(status()).toContain(copy.changed));
+  expect(input().value).toBe('Mine');
+  expect(box().checked).toBe(true);
+  expect(screen.getByText(/current label is: Other/)).toBeTruthy();
+  expect(f).toHaveBeenCalledTimes(2);
+});
+
+it('accepted-readback refresh keeps a submitted label that the newer other-tab version does not carry', async () => {
+  const accepted = { ...base, version: 'job_version_2', label: 'Mine' };
+  const concurrent = { ...base, version: 'job_version_3', label: 'Other', archived: true };
+  const after = { ...concurrent, version: 'job_version_4', label: 'Mine' };
+  const readback = deferred();
+  const f = seq(doc(accepted), readback.step, doc(after), doc(after));
+  render(<Org fetcher={f} />);
+  fireEvent.input(input(), { target: { value: 'Mine' } }); save();
+  await waitFor(() => expect(f).toHaveBeenCalledTimes(2));
+  await act(() => { current!.setJob(concurrent); });
+  await waitFor(() => expect(box().checked).toBe(true));
+  await act(() => { readback.settle(fail(503, 'INTERNAL')); });
+  await settled();
+  expect(input().value).toBe('Mine');
+  expect(f).toHaveBeenCalledTimes(2);
+  save();
+  expect(await screen.findByText(copy.saved)).toBeTruthy();
+  expect(header(f, 2, 'If-Match')).toBe('"job_version_3"');
+  expect(body(f, 2)).toEqual({ label: 'Mine' });
+  expect(f).toHaveBeenCalledTimes(4);
+});
+
+it('a delayed same-tab refresh after a failed readback keeps post-save drafts', async () => {
+  const accepted = { ...base, version: 'job_version_2', label: 'Mine' };
+  const after = { ...accepted, version: 'job_version_3', label: 'Mine2', archived: true };
+  const f = seq(doc(accepted), fail(503, 'INTERNAL'), doc(after), doc(after));
+  render(<Org fetcher={f} />);
+  fireEvent.input(input(), { target: { value: 'Mine' } }); save();
+  await settled();
+  expect(status()).toContain(copy.unconfirmed);
+  fireEvent.input(input(), { target: { value: 'Mine2' } }); fireEvent.click(box());
+  await act(() => { current!.setJob(accepted); });
+  await new Promise(r => setTimeout(r, 20));
+  expect(input().value).toBe('Mine2'); expect(box().checked).toBe(true);
+  expect(screen.queryByText(copy.changed)).toBeNull();
+  expect(f).toHaveBeenCalledTimes(2);
+  save();
+  expect(await screen.findByText(copy.saved)).toBeTruthy();
+  expect(header(f, 2, 'If-Match')).toBe('"job_version_2"');
+  expect(body(f, 2)).toEqual({ label: 'Mine2', archived: true });
+  expect(f).toHaveBeenCalledTimes(4);
+});
+
 it('decoded 422 VALIDATION_FAILED for a submitted label is field-attached and cleared by input', async () => {
   const f = seq(fail(422, 'VALIDATION_FAILED'));
   const { container } = render(<Org fetcher={f} />);

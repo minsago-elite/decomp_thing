@@ -62,6 +62,8 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
   // Edited fields survive a newer server version of the same job; a different job or session starts clean.
   const dirty = useRef({ label: false, archived: false });
   const activeSubmission = useRef<{ label: string; archived: boolean } | null>(null);
+  // Real user input after submission. Refresh adoption rewrites `latest`, so it can never be inferred from values.
+  const editedAfterSubmit = useRef({ label: false, archived: false });
   const owner = useRef({ jobId: job.jobId, basePath, session });
   const observed = useRef({ jobId: job.jobId, version: job.version, label: job.label ?? null, archived: job.archived ?? false });
   const renderedOwner = useRef(owner.current);
@@ -77,7 +79,8 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
       notifiedVersion.current = null;
       observed.current = { jobId: job.jobId, version: job.version, label: job.label ?? null, archived: job.archived ?? false };
       dirty.current = { label: false, archived: false };
-      activeSubmission.current = null;
+      activeSubmission.current = null; activePhase.current = null;
+      editedAfterSubmit.current = { label: false, archived: false };
       latest.current = { label: job.label ?? '', archived: job.archived ?? false };
       setLabel(job.label ?? ''); setArchived(job.archived ?? false);
       setNotice(''); setLabelError(''); setServerState(null);
@@ -91,13 +94,22 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
       // The 2xx path broadcasts before its own readback. A same-tab route refresh
       // can arrive first; adopt untouched fields without misreporting our own save as a conflict.
       if (ownAcknowledgedVersion) notifiedVersion.current = null;
+      // While the save is in flight, keep fields edited after submission and submitted
+      // fields this version does not carry. Once the save settled (a delayed same-tab
+      // refresh), the form's drafts are measured against the last observed server state.
       const submission = activeSubmission.current;
-      const preserveLabel = submission !== null && latest.current.label !== submission.label;
-      const preserveArchive = submission !== null && latest.current.archived !== submission.archived;
-      const nextLabel = preserveLabel ? latest.current.label : job.label ?? '';
-      const nextArchived = preserveArchive ? latest.current.archived : job.archived ?? false;
+      const serverLabel = job.label ?? '';
+      const serverArchived = job.archived ?? false;
+      const preserveLabel = submission === null ? labelDirty
+        : editedAfterSubmit.current.label
+          || (submission.label.trim() !== (previousServer.label ?? '') && submission.label.trim() !== serverLabel);
+      const preserveArchive = submission === null ? archivedDirty
+        : editedAfterSubmit.current.archived
+          || (submission.archived !== previousServer.archived && submission.archived !== serverArchived);
+      const nextLabel = preserveLabel ? latest.current.label : serverLabel;
+      const nextArchived = preserveArchive ? latest.current.archived : serverArchived;
       latest.current = { label: nextLabel, archived: nextArchived };
-      dirty.current = { label: preserveLabel, archived: preserveArchive };
+      dirty.current = { label: nextLabel !== serverLabel, archived: nextArchived !== serverArchived };
       if (!preserveLabel) setLabel(nextLabel);
       if (!preserveArchive) setArchived(nextArchived);
       observed.current = { jobId: job.jobId, version: job.version, label: job.label ?? null, archived: job.archived ?? false };
@@ -124,14 +136,19 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
   useEffect(() => () => {
     const controller = active.current;
     if (!controller) return;
+    const phase = activePhase.current;
     active.current = null;
     controller.abort();
+    // The observation is over: later versions are reconciled as ordinary refreshes. Only the
+    // exact acknowledged version (notifiedVersion) still identifies this tab's own write.
+    activePhase.current = null; activeSubmission.current = null;
+    editedAfterSubmit.current = { label: false, archived: false };
     setBusy(false);
     // Cancellation stops observation, not a change already sent. Never carry that
     // outcome into another job, deployment or session.
     const current = renderedOwner.current;
     if (current.jobId === job.jobId && current.basePath === basePath && current.session === session) {
-      setNotice(activePhase.current === 'conflict-readback' ? copy.changedUnreadable : copy.unconfirmed);
+      setNotice(phase === 'conflict-readback' ? copy.changedUnreadable : copy.unconfirmed);
     }
   }, [job.jobId, basePath, available, client, session, copy.unconfirmed]);
   const trimmed = label.trim();
@@ -152,6 +169,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
     const before = job.version; const jobId = job.jobId;
     const submitted = { label, archived };
     activeSubmission.current = submitted;
+    editedAfterSubmit.current = { label: false, archived: false };
     let answered = false;
     setBusy(true); setNotice(copy.saving); setLabelError('');
     try {
@@ -171,8 +189,8 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
       const fresh = confirms((await client.get('job', `/jobs/${jobId}`, { signal: controller.signal })).data, jobId, before, change);
       if (controller.signal.aborted) return;
       // Confirmed fields adopt the server form; anything edited after submission stays the user's.
-      const labelEditedAfterSubmit = latest.current.label !== submitted.label;
-      const archiveEditedAfterSubmit = latest.current.archived !== submitted.archived;
+      const labelEditedAfterSubmit = editedAfterSubmit.current.label;
+      const archiveEditedAfterSubmit = editedAfterSubmit.current.archived;
       dirty.current = { label: labelEditedAfterSubmit, archived: archiveEditedAfterSubmit };
       const nextLabel = labelEditedAfterSubmit ? latest.current.label : fresh.label ?? '';
       const nextArchived = archiveEditedAfterSubmit ? latest.current.archived : fresh.archived ?? false;
@@ -208,8 +226,8 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
           if (controller.signal.aborted || fresh.version === before) return;
           // The next deliberate Save is guarded by this version; edited fields are kept, nothing is resent.
           observed.current = { jobId: fresh.jobId, version: fresh.version, label: fresh.label ?? null, archived: fresh.archived ?? false };
-          const keepLabel = latest.current.label !== submitted.label || 'label' in change;
-          const keepArchive = latest.current.archived !== submitted.archived || 'archived' in change;
+          const keepLabel = editedAfterSubmit.current.label || 'label' in change;
+          const keepArchive = editedAfterSubmit.current.archived || 'archived' in change;
           const nextLabel = keepLabel ? latest.current.label : fresh.label ?? '';
           const nextArchived = keepArchive ? latest.current.archived : fresh.archived ?? false;
           dirty.current = { label: nextLabel !== (fresh.label ?? ''), archived: nextArchived !== (fresh.archived ?? false) };
@@ -223,7 +241,8 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
       }
     } finally {
       if (active.current === controller) {
-        active.current = null; activePhase.current = null; activeSubmission.current = null; setBusy(false);
+        active.current = null; activePhase.current = null; activeSubmission.current = null;
+        editedAfterSubmit.current = { label: false, archived: false }; setBusy(false);
       }
     }
   }
@@ -243,12 +262,12 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
         <input name="label" value={label} maxLength={240}
           aria-describedby={errorShown ? 'job-label-help job-label-error' : 'job-label-help'}
           aria-invalid={invalid || errorShown || undefined} aria-errormessage={errorShown ? 'job-label-error' : undefined}
-          onInput={event => { dirty.current.label = true; setLabelError(''); setLabel(event.currentTarget.value); }} disabled={busy} />
+          onInput={event => { dirty.current.label = true; if (active.current) editedAfterSubmit.current.label = true; setLabelError(''); setLabel(event.currentTarget.value); }} disabled={busy} />
       </label>
       <p id="job-label-help">{copy.labelHelp}</p>
       {errorShown && <p id="job-label-error" role="alert">{labelError}</p>}
       <label class="job-archive-toggle"><input type="checkbox" name="archived" checked={archived} disabled={busy}
-        onChange={event => { dirty.current.archived = true; setArchived(event.currentTarget.checked); }} /> {copy.archived}</label>
+        onChange={event => { dirty.current.archived = true; if (active.current) editedAfterSubmit.current.archived = true; setArchived(event.currentTarget.checked); }} /> {copy.archived}</label>
       <div class="job-actions"><button type="submit" disabled={busy || !available}>{copy.save}</button></div>
     </form>
     <p role="status">{!available ? copy.paused : notice}</p>
