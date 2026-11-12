@@ -1929,8 +1929,9 @@ binds the exact source commit/tree, selectors, command, and result.
 
 This is local scripted-ACP evidence with an injected validator, not production
 validation under #236 or live-provider acceptance. Each over-limit control
-starts from a separate empty-corpus project, so cumulative growth across calls
-remains unqualified. Hosted exact-head CI, remaining resource limits, and the
+starts from a separate empty-corpus project, so that checkpoint alone did not
+cover cumulative growth across calls. Later cumulative count and byte controls
+are recorded below. Hosted exact-head CI, remaining resource limits, and the
 complete #734/#63 matrix remain open. Keep #734 and #63 open.
 
 ## Active repair diagnostic-character admission boundary — 2026-11-12
@@ -2151,6 +2152,31 @@ source-file grant retry tests. The retained [JUnit report](evidence/issue-734-ac
 has SHA-256
 `373184a410650d849fc6e20afb84e91b641ab1be43ce4510633c01b3dabb7525`;
 the [provenance record](evidence/issue-734-active-repair-invalid-unicode-2026-11-12.json)
+binds the exact source commit/tree, selectors, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair cumulative regression-input byte admission — 2026-11-12
+
+The paired cumulative controls use one project and retained corpus across
+successive active repair calls. In the byte case, the first input contributes
+3 bytes and the second contributes 12, so the second ACP dispatch reaches the
+exact 15-byte aggregate ceiling and its candidate reaches the injected
+validator. A third input contributes one identifier byte and is refused at
+16 bytes with the exact dimension-specific diagnostic, before dispatch,
+validation, or run creation. The previously retained inputs and corpus digest,
+accepted source/head, and no-pending-attempt state are checked after refusal.
+The paired count case similarly accepts two calls at the exact two-input
+ceiling and refuses a third before dispatch.
+
+Both focused scripted-ACP tests passed with zero failures, errors, or skips.
+The retained [JUnit report](evidence/issue-734-active-repair-cumulative-regression-limits-2026-11-12.xml)
+has SHA-256
+`d7c22c89f6dc80aa15378ede259d09fc12443f9098a87c46c883a5ca1aeb4b99`; the
+[provenance record](evidence/issue-734-active-repair-cumulative-regression-limits-2026-11-12.json)
 binds the exact source commit/tree, selectors, command, and result.
 
 This is local scripted-ACP evidence using an injected validator. It does not
