@@ -57,6 +57,23 @@ class WorkspaceChangeSetTest {
     }
 
     @Test
+    fun `one deletion matching multiple creations remains explicit without a move candidate`() {
+        val deletion = deletion(path("src/old"), "d".repeat(64), 12)
+        val creationA = creation(path("src/new-a"), "d".repeat(64), 12)
+        val creationB = creation(path("src/new-b"), "d".repeat(64), 12)
+
+        val first = WorkspaceChangeSetClassifier.classify(listOf(creationB, deletion, creationA))
+        val second = WorkspaceChangeSetClassifier.classify(listOf(creationA, creationB, deletion))
+
+        assertEquals(first, second)
+        assertTrue(first.moveCandidates.isEmpty())
+        assertEquals(listOf("src/new-a", "src/new-b", "src/old"),
+            first.changes.map { it.path.relativePath })
+        assertEquals(listOf(AgentFileChangeKind.CREATED, AgentFileChangeKind.CREATED, AgentFileChangeKind.DELETED),
+            first.changes.map { it.kind })
+    }
+
+    @Test
     fun `empty content is never used to infer a move`() {
         val changeSet = WorkspaceChangeSetClassifier.classify(
             listOf(deletion(path("src/empty-old"), "e".repeat(64), 0), creation(path("src/empty-new"), "e".repeat(64), 0)),
