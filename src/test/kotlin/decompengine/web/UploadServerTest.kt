@@ -611,6 +611,63 @@ class UploadServerTest {
     }
 
     @Test
+    fun `dashboard HTTP listing remains responsive to status HTTP reads across slow records`() = withServer { server, _ ->
+        val jobIds = (1..5).map { uploadedJobId(server) }
+        val statusJobId = jobIds.last()
+        val slowedJobIds = jobIds.dropLast(1).toSet()
+        val service = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }
+            .get(server) as WebJobService
+        val firstPhysicalRead = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val enteredReads = java.util.concurrent.LinkedBlockingQueue<String>()
+        val readPermits = java.util.concurrent.Semaphore(0)
+        service.listingReadObserver = { relative ->
+            val jobId = relative.substringBefore('/')
+            if (jobId in slowedJobIds && firstPhysicalRead.add(jobId)) {
+                enteredReads.put(jobId)
+                check(readPermits.tryAcquire(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                    "Timed out waiting to release the dashboard read for $jobId"
+                }
+            }
+        }
+
+        val callers = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            // Prime the shared legacy session before concurrent requests touch the fixture map.
+            val baseline = request(server, "GET", "/api/jobs/$statusJobId")
+            assertEquals(200, baseline.status)
+
+            val dashboard = callers.submit<Response> { request(server, "GET", "/") }
+            val observedSlowRecords = mutableSetOf<String>()
+            repeat(slowedJobIds.size) {
+                val listedJob = enteredReads.poll(5, java.util.concurrent.TimeUnit.SECONDS)
+                assertNotNull(listedJob, "The dashboard did not reach each controlled legacy record read")
+                observedSlowRecords += listedJob
+
+                val startedAt = System.nanoTime()
+                val status = callers.submit<Response> { request(server, "GET", "/api/jobs/$statusJobId") }
+                    .get(2, java.util.concurrent.TimeUnit.SECONDS)
+                val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+                assertEquals(200, status.status, "status request during dashboard read for $listedJob")
+                assertTrue(status.body.decodeToString().contains(statusJobId), "status response must identify its requested job")
+                assertTrue(elapsedMs <= 2_000, "status HTTP request took ${elapsedMs}ms during a stalled listing record")
+                assertTrue(!dashboard.isDone, "the dashboard must still be collecting records while status remains responsive")
+                readPermits.release()
+            }
+
+            assertEquals(slowedJobIds, observedSlowRecords, "the dashboard should remain active across distinct records")
+            val completedDashboard = dashboard.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(200, completedDashboard.status)
+            assertTrue(completedDashboard.body.decodeToString().contains("boundary.elf"))
+        } finally {
+            // Unpark any physical read even when an assertion fails, then let the server drain.
+            readPermits.release(slowedJobIds.size + 1)
+            service.listingReadObserver = {}
+            callers.shutdownNow()
+            assertTrue(callers.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
     fun `shutdown discards caller-queued work and late delivery cannot alter a new owner state`() {
         val dataDir = createTempDirectory("web-caller-queue-")
         val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
