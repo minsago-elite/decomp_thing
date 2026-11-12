@@ -5078,7 +5078,7 @@ class TraceGuidedRepairTest {
 
     @Test
     fun `agent termination closes the pending graph and releases its root lock`() {
-        val tempDir = createTempDirectory("repair-agent-termination-")
+        val tempDir = createRepairTempDirectory("repair-agent-termination-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
         val target = projectDir.resolve("src/modules/reconstructed.c")
         val before = target.readBytes()
@@ -5116,7 +5116,7 @@ class TraceGuidedRepairTest {
 
     @Test
     fun `staging rejects oversized agent output before allocation beyond its budget`() {
-        val tempDir = createTempDirectory("repair-staging-oversize-")
+        val tempDir = createRepairTempDirectory("repair-staging-oversize-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
         val target = projectDir.resolve("src/modules/reconstructed.c")
         val before = target.readBytes()
