@@ -46,3 +46,35 @@ it.each([
     ['storageSummary', '/storage'], ['maintenancePreview', '/storage/maintenance-preview'],
   ]);
 });
+
+it('aborts storage reads when the panel unmounts', () => {
+  const signals: AbortSignal[] = [];
+  transport.get.mockImplementation((_kind, _path, { signal }) => {
+    signals.push(signal);
+    return new Promise(() => {});
+  });
+  const view = render(<StorageSummary basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+  expect(signals).toHaveLength(2);
+  view.unmount();
+  expect(signals.every(signal => signal.aborted)).toBe(true);
+});
+
+it('clears results in place and aborts pending reads when the session invalidates', () => {
+  const signals: AbortSignal[] = [];
+  transport.get.mockImplementation((_kind, _path, { signal }) => {
+    signals.push(signal);
+    return new Promise(() => {});
+  });
+  const view = render(<StorageSummary basePath="/nested" invalidationVersion={0} />);
+  const read = screen.getByRole('button', { name: 'Read storage and maintenance preview' });
+  read.focus();
+  fireEvent.click(read);
+  expect(signals).toHaveLength(2);
+  view.rerender(<StorageSummary basePath="/nested" invalidationVersion={1} />);
+  expect(signals.every(signal => signal.aborted)).toBe(true);
+  expect(screen.queryByText('Maintenance preview (dry run)')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Read storage and maintenance preview' })).toBe(read);
+  expect(document.activeElement).toBe(read);
+  expect(screen.getByRole('status').textContent).toContain('Storage results were cleared because the local session changed.');
+});

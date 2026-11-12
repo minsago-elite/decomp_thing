@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Job, Recovery } from '../src/api/generated';
@@ -93,6 +93,51 @@ it('clears a previous recovery snapshot when refreshed access is denied', async 
   denied = true; fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   expect(await screen.findByText(/Recovery state is unknown/)).toBeTruthy();
   expect(screen.queryByText(/Observed 1 upload stages/)).toBeNull();
+});
+
+it('keeps a focused job row and its selected text in place when a failed read adds stale notices', async () => {
+  let fail = false;
+  transport.get.mockImplementation(kind => kind === 'jobs' ? fail
+    ? Promise.reject(new ApiClientError('network_error'))
+    : Promise.resolve(jobs()) : Promise.resolve({ data: retained }));
+  render(<Dashboard basePath="" />);
+  const row = await screen.findByRole('link', { name: 'recovery-example.elf' });
+  const scroller = document.scrollingElement ?? document.documentElement;
+  scroller.scrollTop = 300;
+  const rect = vi.spyOn(row, 'getBoundingClientRect').mockImplementation(() => {
+    const top = 1000 + (document.querySelector('.metadata-stale') ? 210 : 0) - scroller.scrollTop;
+    return { x: 0, y: top, top, right: 300, bottom: top + 30, left: 0, width: 300, height: 30, toJSON: () => ({}) };
+  });
+  row.focus();
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(row);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  const originalTop = row.getBoundingClientRect().top;
+  const selectedText = selection?.toString();
+  expect(originalTop).toBeGreaterThanOrEqual(0);
+  expect(originalTop + 30).toBeLessThanOrEqual(window.innerHeight);
+
+  fail = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText(/Previously loaded metadata may be outdated/)).toBeTruthy();
+  expect(document.activeElement).toBe(row);
+  expect(selection?.toString()).toBe(selectedText);
+  expect(row.getBoundingClientRect().top).toBe(originalTop);
+  expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
+  expect(scroller.scrollTop).toBeGreaterThan(300);
+
+  fail = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  await waitFor(() => expect(screen.queryByText(/Previously loaded metadata may be outdated/)).toBeNull());
+  expect(document.activeElement).toBe(row);
+  expect(selection?.toString()).toBe(selectedText);
+  expect(row.getBoundingClientRect().top).toBe(originalTop);
+  expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
+  expect(scroller.scrollTop).toBe(300);
+  expect(calls('jobs')).toHaveLength(3);
+  rect.mockRestore();
 });
 
 it('pauses recovery inspection during uploads and waits for explicit refresh after they settle', async () => {

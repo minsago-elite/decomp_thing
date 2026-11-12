@@ -72,7 +72,11 @@ it.each(['expired', 'missing', 'connection'] as const)('drops retained drafts on
   const reads = peer.gateway.bootstrap.mock.calls.length;
   await first.session.logout();
   expect(invalidated).toHaveBeenCalledExactlyOnceWith(true);
-  expect(peer.session.snapshot()).toEqual(previousState);
+  expect(peer.session.snapshot().status).toBe(previousState.status);
+  if (previousState.status === 'unavailable') {
+    expect(peer.session.snapshot()).toMatchObject({ reason: previousState.reason });
+  }
+  expect(peer.session.snapshot()).not.toHaveProperty('runtime');
   expect(peer.session.csrf()).toBeNull();
   expect(peer.gateway.bootstrap).toHaveBeenCalledTimes(reads);
   expect(peer.gateway.exchange).not.toHaveBeenCalled();

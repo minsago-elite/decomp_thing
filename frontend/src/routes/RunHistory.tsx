@@ -12,7 +12,7 @@ import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
-import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { MetadataReceipt, StaleMetadataNotice } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
 
@@ -37,6 +37,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
   const data = observation?.value;
   const [refresh, setRefresh] = useState(0);
   const heading = useRef<HTMLHeadingElement>(null);
+  const retryButton = useRef<HTMLButtonElement>(null);
   const moveFocus = useRef(false);
   const path = `${jobPath(basePath, jobId)}/runs`;
   // A deletion in another tab must clear this history instead of leaving its attempts on screen.
@@ -61,6 +62,9 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
       if (moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
     }).catch((failure: unknown) => {
       if (!current()) return;
+      // A failed navigation must not leave a pending focus request that moves the
+      // user away from their retained row when a later retry succeeds.
+      moveFocus.current = false;
       const expired = failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '');
       const kind = metadataFailureKind(failure);
       const message = expired ? copy.attemptHistoryChangedOrThisPageExpiredRefreshHistoryTo : isDeletedJob(failure) ? copy.thisJobWasDeleted : {
@@ -76,14 +80,15 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
     });
     return () => { controller.abort(); };
   }, [binding, client, jobId, cursor, validQuery, refresh]);
-  function first() { moveFocus.current = true; location.route(path); setRefresh(value => value + 1); }
+  function first(focusOnSuccess = false) { moveFocus.current = focusOnSuccess; location.route(path); setRefresh(value => value + 1); }
   return <>
     <p>{copy.newestRecordedAttemptsFirstThisListIsNotACount}</p>
-    <button type="button" disabled={loading} onClick={first}>{copy.refreshHistory}</button>
+    <button type="button" disabled={loading} onClick={() => first()}>{copy.refreshHistory}</button>
     {error && <p role="alert">{error}</p>}
-    {error && data && <p>{copy.previouslyLoadedAttemptsMayBeOutdated}</p>}
-    {error && retryable && <button type="button" disabled={loading} onClick={() => {
-      moveFocus.current = true; setRefresh(value => value + 1);
+    {error && data && <StaleMetadataNotice />}
+    {error && retryable && <button ref={retryButton} type="button" disabled={loading} onClick={() => {
+      if (document.activeElement === retryButton.current) heading.current?.focus();
+      setRefresh(value => value + 1);
     }}>{copy.retryHistoryPage}</button>}
     <h2 ref={heading} tabIndex={-1}>{copy.recordedAttempts}</h2>
     <p role="status">{loading ? data ? copy.refreshingAttemptHistory : copy.loadingAttemptHistory : data ? displayMessage(copy.pageCount, { count: data.items.length }) : ''}</p>
@@ -95,7 +100,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
       <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time>
     </li>)}</ul>}
     <nav aria-label={copy.attemptHistoryPages}>
-      <button type="button" disabled={loading || !cursor} onClick={first}>{copy.firstPage}</button>
+      <button type="button" disabled={loading || !cursor} onClick={() => first(true)}>{copy.firstPage}</button>
       <button type="button" disabled={loading || !!error || !data?.page.nextCursor} onClick={() => {
         if (data?.page.nextCursor) { moveFocus.current = true; location.route(`${path}?cursor=${encodeURIComponent(data.page.nextCursor)}`); }
       }}>{copy.nextAttempts}</button>

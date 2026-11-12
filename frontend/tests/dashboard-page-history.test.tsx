@@ -113,6 +113,41 @@ it('replaces an expired page entry with one filter-preserving first-page read an
   expect(() => jobLocation('?status=failed&unexpected=private')).toThrow();
 });
 
+it('retains dashboard row, focus, selection, scroll and receipt through transient failure without age-triggered reads', async () => {
+  const first = page([job(21)], 'Page_Stable', null, null, 1);
+  let rejectRead: (reason: unknown) => void = () => undefined;
+  transport.get.mockResolvedValueOnce(first)
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectRead = reject; }))
+    .mockResolvedValueOnce(first);
+  render(<Dashboard basePath="/nested" />);
+  const link = await screen.findByRole('link', { name: 'snapshot-21.elf' });
+  const row = link.closest('li');
+  const receipt = screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+  link.focus();
+  const range = document.createRange(); range.selectNodeContents(link);
+  window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range);
+  document.documentElement.scrollTop = 321;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+  await act(async () => { rejectRead(new TypeError('offline')); await Promise.resolve(); });
+  expect(await screen.findByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'snapshot-21.elf' })).toBe(link);
+  expect(link.closest('li')).toBe(row);
+  expect(document.activeElement).toBe(link);
+  expect(window.getSelection()?.toString()).toBe('snapshot-21.elf');
+  expect(document.documentElement.scrollTop).toBe(321);
+  expect(screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(receipt);
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
+  expect(await screen.findByRole('link', { name: 'snapshot-21.elf' })).toBe(link);
+  expect(link.closest('li')).toBe(row);
+  expect(document.activeElement).toBe(link);
+  expect(window.getSelection()?.toString()).toBe('snapshot-21.elf');
+  expect(document.documentElement.scrollTop).toBe(321);
+});
+
 it('pins the first snapshot before opening a job so history returns to the same authorized page', async () => {
   const auth = createBrowserSession({
     bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
