@@ -2786,6 +2786,38 @@ providers, publication recovery under #732, durable provenance under #733,
 hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
 #63 open.
 
+## Active repair generated-C fallback-module count boundary — 2026-11-13
+
+The active repair path now qualifies `maximumIndexedModules` with a minimal
+Generated C project that has no module-plan or program-model evidence. The
+source inventory is exactly `Makefile`, `src/modules/reconstructed.c`, and
+`src/modules/secondary.c`. Both C files receive distinct fallback module IDs;
+the Makefile is shared build context. The test holds
+`maximumContextModules=1` for both cases so the selected index-module ceiling is
+the deciding budget.
+
+At a limit of two, scripted ACP replaces the declared implementation, reads it
+back, and completes final snapshot capture. The candidate reaches an injected
+validator that checks all source paths and bytes, including the unchanged
+secondary module, and verifies profile, index, and source-revision bindings
+before throwing the expected sentinel. The receipt records verified process
+and sandbox cleanup. At a limit of one, graph admission rejects with the exact
+`repair index has 2 modules; limit=1` diagnostic before any harness dispatch or
+validation call. Sources remain byte-identical; no run, pending attempt, or
+repair-history record is retained, and reopening at a limit of two succeeds.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-indexed-module-boundary-2026-11-13.xml)
+has SHA-256 `e5f640aaed2e9472493a488bb473c092d05a5eca2619dc015409be6ac80e4b53`; the
+[provenance record](evidence/issue-734-active-indexed-module-boundary-2026-11-13.json)
+binds the tested source commit/tree, selector, command, and result.
+
+This is local scripted-ACP admission and validator-handoff evidence using an
+injected validator. It does not qualify production validation under #236, live
+providers, publication recovery under #732, durable provenance under #733,
+hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
+#63 open.
+
 ## Active repair aggregate index-evidence byte boundary — 2026-11-12
 
 The active repair path now has an exact `maximumIndexEvidenceBytes` boundary
@@ -2811,7 +2843,7 @@ resources.
 The focused test passed with one test and zero failures, errors, or skips. The
 retained [JUnit report](evidence/issue-734-active-index-evidence-byte-boundary-2026-11-12.xml)
 has SHA-256
-`ae9673bae4b86fc8524ba8dda457beac88de2f3d66ca50dab02a7382044313db`; the
+`8a6c18db6d749f15d028a3244331414cdad13ec42f2b800f72b0d8db995fc03f`; the
 [provenance record](evidence/issue-734-active-index-evidence-byte-boundary-2026-11-12.json)
 binds the tested source commit/tree, selector, command, and result.
 

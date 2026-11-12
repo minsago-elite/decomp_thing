@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "a5814b6effc899f511b6d15c5bbb06cc7ba53a45",
+  "sourceParent": "7918c4f6ade0fcf511ff72142ec86a54c3310506",
+  "sourceTree": "93cdca9d7d8b06a02bd125b2b85e1b814dec28f8",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact generated C indexed module count including fallback modules"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact generated C indexed module count including fallback modules' --no-daemon",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.367,
+    "suiteSeconds": 2.385,
+    "timestamp": "2026-11-12T15:55:44.081Z",
+    "junitSha256": "e5f640aaed2e9472493a488bb473c092d05a5eca2619dc015409be6ac80e4b53"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "indexedModules": {
+      "explicitModules": 0,
+      "fallbackModules": 2,
+      "sourcePaths": [
+        "Makefile",
+        "src/modules/reconstructed.c",
+        "src/modules/secondary.c"
+      ],
+      "exactLimit": 2,
+      "oneUnderLimit": 1,
+      "contextModuleLimit": 1
+    },
+    "coverage": "The generated C fixture has no module-plan or program-model evidence and resolves two distinct fallback module mappings for the reconstructed and secondary C files. At maximumIndexedModules=2, the scripted ACP peer replaces and reads back the declared target; the receipt records completed final-snapshot capture and verified process/sandbox cleanup, and an injected validator verifies every candidate source byte plus profile/index/revision bindings before throwing its expected sentinel. At maximumIndexedModules=1, the active graph-opening path rejects with the exact 'repair index has 2 modules; limit=1' diagnostic before any harness dispatch or validator call. Source bytes remain unchanged, no run, pending attempt, or repair history is retained, and reopening at limit 2 succeeds. maximumContextModules=1 in both scenarios keeps the separate context limit nonbinding and satisfies the budget invariant.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator; does not qualify production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}
