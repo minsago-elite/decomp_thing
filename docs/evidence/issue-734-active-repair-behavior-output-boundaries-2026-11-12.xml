@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T11:28:32.598Z" hostname="whatsername" time="15.954">
+  <properties/>
+  <testcase name="active behavior repair enforces exact stdout stderr and aggregate output byte boundaries()" classname="decompengine.repair.TraceGuidedRepairTest" time="15.944"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

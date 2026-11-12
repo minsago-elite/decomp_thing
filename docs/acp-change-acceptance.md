@@ -2441,3 +2441,29 @@ launch an ACP process. It does not qualify production validation under #236,
 live-provider behavior, publication crash recovery under #732, durable
 provenance under #733, hosted exact-head CI, or the complete #734/#63
 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair behavior-output byte boundaries — 2026-11-12
+
+The behavior-repair fixture now distinguishes the four output-accounting
+boundaries used by its test-only validation adapter. Exact and one-over pairs
+exercise stdout (64/65 bytes), stderr (64/65 bytes), combined output from one
+candidate process (100/101 bytes), and comparison-wide output across the
+reference and candidate (128/129 bytes). The pairs assert their distinct
+limit diagnostics. Matching exact stdout/stderr and comparison-wide candidates
+complete validation; the exact single-process aggregate candidate reaches the
+comparison and is rejected only for its intentionally different behavior.
+Every one-over refusal preserves the accepted source and graph head and clears
+pending state.
+
+The focused method passed with one test and zero failures, errors, or skips.
+The retained [JUnit report](evidence/issue-734-active-repair-behavior-output-boundaries-2026-11-12.xml)
+has SHA-256
+`7aeb8baa3e47b868fbfcdb5b67ce40285c190f0ab7d0e93d90458e4238f2360b`; the
+[provenance record](evidence/issue-734-active-repair-behavior-output-boundaries-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local fake-client evidence through the test-only host validation
+boundary. It does not qualify `LinuxGeneratedCRepairValidationBoundary`,
+production validation under #236, live providers, publication crash recovery
+under #732, durable provenance under #733, hosted exact-head CI, or the
+complete #734/#63 acceptance matrix. Keep #734 and #63 open.
