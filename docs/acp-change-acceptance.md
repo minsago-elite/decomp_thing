@@ -2258,6 +2258,35 @@ qualify production validation under #236, live providers, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Active repair shared stored-blob deduplication — 2026-11-12
+
+The paired active-repair control modifies two separately authorized source
+paths and reads both candidate bodies back through ACP. Both paths carry the
+same 4,096-byte body in the equality case, so the revision graph admits the
+candidate at the baseline unique-blob byte count plus 4,096 and invokes the
+injected validator. Reopening the graph confirms one unique candidate blob was
+added while the receipt retains two separate `MODIFIED` path records. In the
+paired refusal, the second body differs by one byte but has the same length:
+both filesystem callbacks complete, then graph admission refuses the two
+distinct candidate digests at the same byte ceiling before validation. The
+reopened graph contains only the baseline blobs. Both outcomes check receipt
+and assessment linkage, path/preimage/postimage/size commitments, cleanup,
+unchanged accepted source/head, and cleared pending state.
+
+The focused scripted-ACP test passed with one test and zero failures, errors,
+or skips. The retained [JUnit report](evidence/issue-734-active-repair-stored-blob-dedup-2026-11-12.xml)
+has SHA-256
+`59abcb0179fdf48a794790d91902f4fb28b4cf4576de0f713751738642d33a5e`; the
+[provenance record](evidence/issue-734-active-repair-stored-blob-dedup-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This qualifies unique stored-blob accounting through the scripted active ACP
+repair path only. It uses an injected validator and does not qualify production
+validation under #236, live providers, hosted exact-head CI, publication crash
+recovery under #732, durable provenance under #733, physical storage limits,
+successful publication, or the complete #734/#63 acceptance matrix. Keep #734
+and #63 open.
+
 ## Active repair cumulative regression-input byte admission — 2026-11-12
 
 The paired cumulative controls use one project and retained corpus across

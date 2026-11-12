@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T14:01:29.311Z" hostname="whatsername" time="4.465">
+  <properties/>
+  <testcase name="active ACP repair deduplicates shared candidate blobs before stored byte admission()" classname="decompengine.repair.TraceGuidedRepairTest" time="4.455"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
