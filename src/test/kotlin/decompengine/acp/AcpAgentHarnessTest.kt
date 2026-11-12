@@ -1316,6 +1316,10 @@ class AcpAgentHarnessTest {
             executionLimits: AgentExecutionLimits? = null,
             snapshotLimits: WorkspaceSnapshotLimits? = null,
             seedExistingTarget: ByteArray? = null,
+            seedSourceBeforeDispatch: ByteArray? = null,
+            decompiledBody: String = "int decomp_engine_main(void) { return 0; }",
+            appendScenarioMarker: Boolean = true,
+            outputPath: Path = output,
             gatePromptCompletion: Boolean = false,
             cancelAfterAcknowledgedMessage: String? = null,
             afterPromptCompletion: ((Path) -> Unit)? = null,
@@ -1387,7 +1391,7 @@ class AcpAgentHarnessTest {
                 "decomp_engine_main",
                 0x1000UL,
                 "int decomp_engine_main(void)",
-                "int decomp_engine_main(void) { return 0; } /* scenario-$index */",
+                decompiledBody + if (appendScenarioMarker) " /* scenario-$index */" else "",
             )
             val model = RecoveredProgramModel(inputSha256 = sha256(binaryBytes), functions = listOf(function))
             val provenance = AcpHarnessProvenance(
@@ -1399,16 +1403,38 @@ class AcpAgentHarnessTest {
                 configurationSha256 = "0".repeat(64),
                 deprecated = false,
             )
+            val boundedReconstructor = BoundedLlmModuleReconstructor(
+                acp,
+                harnessProvenanceDescriptor = provenance.stableDescriptor,
+                progress = progress,
+            ).also { reconstructor -> executionLimits?.let(reconstructor::withExecutionLimitsForTesting) }
+            val reconstructor = if (seedSourceBeforeDispatch == null) {
+                boundedReconstructor
+            } else {
+                object : decompengine.project.ModuleReconstructor by boundedReconstructor {
+                    override fun reconstruct(
+                        request: decompengine.project.ModuleReconstructionRequest,
+                    ): decompengine.project.ReconstructedModule {
+                        val target = request.workspaceRoot.resolve(request.module.sourcePath).normalize()
+                        require(target.startsWith(request.workspaceRoot.toAbsolutePath().normalize()))
+                        target.parent.createDirectories()
+                        Files.write(
+                            target,
+                            seedSourceBeforeDispatch,
+                            StandardOpenOption.CREATE_NEW,
+                            StandardOpenOption.WRITE,
+                            LinkOption.NOFOLLOW_LINKS,
+                        )
+                        return boundedReconstructor.reconstruct(request)
+                    }
+                }
+            }
             val service = ArchivalReconstructionService(
                 analyzer = budgetedAnalyzer { supplied, _ ->
                     assertEquals(binary, supplied)
                     model
                 },
-                reconstructor = BoundedLlmModuleReconstructor(
-                    acp,
-                    harnessProvenanceDescriptor = provenance.stableDescriptor,
-                    progress = progress,
-                ).also { reconstructor -> executionLimits?.let(reconstructor::withExecutionLimitsForTesting) },
+                reconstructor = reconstructor,
                 profile = profile,
                 progress = progress,
             )
@@ -1416,11 +1442,11 @@ class AcpAgentHarnessTest {
             var failure: Exception? = null
             var workerInterruptFlagAtExit: Boolean? = null
             fun reconstructOnCurrentThread() {
-                ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+                ReconstructionOutputWorkspace.open(outputPath, binary).use { workspace ->
                     try {
                         result = service.reconstructWithWorkspace(
                             binary,
-                            output,
+                            outputPath,
                             workspace,
                             workflowRunId = "public-reconstruction-mutation-$index",
                         )
@@ -1562,6 +1588,65 @@ class AcpAgentHarnessTest {
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactBoundaryExtracted, profile).returnCode)
         acceptedMetadata = capturePublishedMetadata(output)
         assertNoReconstructionPublicationResidue(output)
+
+        val priorModifiedSource = (
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+            ).toByteArray(Charsets.UTF_8)
+        val expectedModifiedSource = priorModifiedSource.decodeToString()
+            .replace("return 0;", "return 1;")
+            .toByteArray(Charsets.UTF_8)
+        val modifiedExisting = runAttempt(
+            "reconstruction-modify-existing-source",
+            index = 19,
+            seedSourceBeforeDispatch = priorModifiedSource,
+            decompiledBody = "int decomp_engine_main(void) { return 1; }",
+            appendScenarioMarker = false,
+            outputPath = fixture.resolve("modified-output"),
+        )
+        assertNull(modifiedExisting.failure, "the public workflow must admit a bounded modification of an existing target")
+        assertEquals(1, modifiedExisting.taskCount)
+        assertEquals(1, modifiedExisting.receipts.size)
+        assertEquals(true, modifiedExisting.implementationExistedAtDispatch)
+        val modifiedResult = assertNotNull(modifiedExisting.result)
+        assertEquals(0, modifiedResult.build.returnCode)
+        assertTrue(requireNotNull(modifiedResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        val modifiedInvocationReceipt = modifiedExisting.receipts.single()
+        assertEquals(modifiedExisting.requestSha256s.single(), modifiedInvocationReceipt.requestBinding.requestSha256)
+        val modifiedExecution = modifiedInvocationReceipt.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, modifiedExecution.stopReason)
+        assertEquals(1, modifiedExecution.changes.size)
+        val modifiedChange = modifiedExecution.changes.single()
+        assertEquals(implementationPath, modifiedChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.MODIFIED, modifiedChange.kind)
+        assertEquals(sha256(priorModifiedSource), modifiedChange.beforeSha256)
+        assertEquals(sha256(expectedModifiedSource), modifiedChange.afterSha256)
+        assertEquals(expectedModifiedSource.size.toLong(), modifiedChange.sizeBytes)
+        assertContentEquals(
+            expectedModifiedSource,
+            Files.readAllBytes(modifiedResult.projectDir.resolve(implementationPath)),
+        )
+        assertFalse(modifiedResult.projectDir.resolve("src/modules/decomp_extra.c").exists())
+        val modifiedAudit = modifiedExisting.harness.latestFilesystemAudit()
+        assertEquals(7, modifiedAudit.size, modifiedAudit.toString())
+        val modifiedWrite = modifiedAudit.last()
+        assertEquals(implementationPath, assertNotNull(modifiedWrite.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, modifiedWrite.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, modifiedWrite.reason)
+        val modifiedExtracted = fixture.resolve("verified-modified-existing-source")
+        ArchivalBundleVerifier.extractAndVerify(
+            modifiedResult.bundle.archivePath,
+            modifiedExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedModifiedSource, Files.readAllBytes(modifiedExtracted.resolve(implementationPath)))
+        assertContentEquals(
+            expectedModifiedSource,
+            Files.readAllBytes(fixture.resolve("modified-output/source-tree").resolve(implementationPath)),
+        )
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(modifiedExtracted, profile).returnCode)
+        assertNoReconstructionPublicationResidue(fixture.resolve("modified-output"))
 
         // The public reconstruction grant is one non-recursive target path. Its rule and two
         // parents make initial entry-count refusal reachable. The workflow normally starts with
