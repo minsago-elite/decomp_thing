@@ -100,6 +100,8 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-quota-retry",
     "repair-active-declared-role-stored-blob-exact",
     "repair-active-declared-role-stored-blob-over",
+    "repair-active-declared-role-stored-blob-shared",
+    "repair-active-declared-role-stored-blob-distinct",
     "repair-active-declared-role-invalid-unicode-after-write",
     "repair-active-declared-role-read-limit-after-write",
     "repair-active-declared-role-patch-count-retry",
@@ -312,6 +314,8 @@ expected_fs = {
     "repair-active-declared-role-quota-retry": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-stored-blob-exact": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-stored-blob-over": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-stored-blob-shared": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-stored-blob-distinct": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-invalid-unicode-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-read-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-patch-count-retry": {"readTextFile": True, "writeTextFile": True},
@@ -1055,6 +1059,36 @@ if MODE in {
     readback = read_workspace_file(source, 169)
     if "error" in readback or readback.get("result", {}).get("content") != candidate:
         raise SystemExit(170)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE in {
+    "repair-active-declared-role-stored-blob-shared",
+    "repair-active-declared-role-stored-blob-distinct",
+}:
+    first = join_path(cwd, "src/modules/reconstructed.c")
+    second = join_path(cwd, "src/modules/secondary.c")
+    prefix = "/* shared content-addressed candidate: "
+    suffix = " */\nstatic int shared_candidate(void) { return 1; }\n"
+    candidate_bytes = 4096
+    padding_bytes = candidate_bytes - len(prefix.encode()) - len(suffix.encode())
+    shared_candidate = prefix + "s" * padding_bytes + suffix
+    distinct_candidate = shared_candidate[:len(prefix)] + "t" + shared_candidate[len(prefix) + 1:]
+    if len(shared_candidate.encode()) != candidate_bytes:
+        raise SystemExit(208)
+    if len(distinct_candidate.encode()) != candidate_bytes:
+        raise SystemExit(209)
+    if sum(left != right for left, right in zip(shared_candidate, distinct_candidate)) != 1:
+        raise SystemExit(210)
+    second_candidate = shared_candidate if MODE == "repair-active-declared-role-stored-blob-shared" \
+        else distinct_candidate
+    write_workspace_file(first, shared_candidate, 214)
+    write_workspace_file(second, second_candidate, 215)
+    first_readback = read_workspace_file(first, 216)
+    if "error" in first_readback or first_readback.get("result", {}).get("content") != shared_candidate:
+        raise SystemExit(211)
+    second_readback = read_workspace_file(second, 217)
+    if "error" in second_readback or second_readback.get("result", {}).get("content") != second_candidate:
+        raise SystemExit(212)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-invalid-unicode-after-write":
