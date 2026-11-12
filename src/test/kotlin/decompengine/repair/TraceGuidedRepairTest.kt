@@ -3299,8 +3299,47 @@ class TraceGuidedRepairTest {
     @Test
     @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `active repair enforces cumulative retained regression input count across calls`() {
+        assertActiveRepairCumulativeRegressionAdmission(
+            acceptedInputs = listOf(
+                ProcessInput("first", args = listOf("alpha"), stdin = byteArrayOf(1)),
+                ProcessInput("second", args = listOf("beta"), stdin = byteArrayOf(2)),
+            ),
+            rejectedInput = ProcessInput("third", args = listOf("gamma"), stdin = byteArrayOf(3)),
+            budget = RepairResourceBudget(
+                maximumRegressionInputs = 2,
+                maximumRegressionInputBytes = 64,
+                maximumRequestBytes = 64 * 1024,
+            ),
+            expectedFailure = "retained regression corpus contains 3 inputs; limit=2",
+        )
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair enforces cumulative retained regression byte limit across calls`() {
+        assertActiveRepairCumulativeRegressionAdmission(
+            acceptedInputs = listOf(
+                ProcessInput("a", args = listOf("x"), stdin = byteArrayOf(1)),
+                ProcessInput("b", args = listOf("1234567890"), stdin = byteArrayOf(2)),
+            ),
+            rejectedInput = ProcessInput("c", args = emptyList(), stdin = byteArrayOf()),
+            budget = RepairResourceBudget(
+                maximumRegressionInputs = 10,
+                maximumRegressionInputBytes = 15,
+                maximumRequestBytes = 64 * 1024,
+            ),
+            expectedFailure = "retained regression inputs contain 16 bytes; limit=15",
+        )
+    }
+
+    private fun assertActiveRepairCumulativeRegressionAdmission(
+        acceptedInputs: List<ProcessInput>,
+        rejectedInput: ProcessInput,
+        budget: RepairResourceBudget,
+        expectedFailure: String,
+    ) {
         val project = createProject(
-            createRepairTempDirectory("repair-active-regression-cumulative-count-").resolve("project"),
+            createRepairTempDirectory("repair-active-regression-cumulative-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
         )
         val targetPath = "src/modules/reconstructed.c"
@@ -3308,15 +3347,6 @@ class TraceGuidedRepairTest {
         val acceptedSource = target.readBytes()
         val candidateSource = "/* validated candidate */\nint decomp_engine_main(void) { return 1; }\n"
             .toByteArray(Charsets.UTF_8)
-        val exactInputs = listOf(
-            ProcessInput("first", args = listOf("alpha"), stdin = byteArrayOf(1)),
-            ProcessInput("second", args = listOf("beta"), stdin = byteArrayOf(2)),
-        )
-        val budget = RepairResourceBudget(
-            maximumRegressionInputs = exactInputs.size,
-            maximumRegressionInputBytes = 64,
-            maximumRequestBytes = 64 * 1024,
-        )
         val baseline = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
             Triple(graph.snapshot.headId, graph.snapshot.nodes.size, graph.snapshot.runs.size)
         }
@@ -3361,7 +3391,7 @@ class TraceGuidedRepairTest {
                 request: RepairCandidateValidationRequest,
             ): RepairCandidateValidationOutcome {
                 validationCalls++
-                val expectedInputs = exactInputs.take(validationCalls)
+                val expectedInputs = acceptedInputs.take(validationCalls)
                 assertEquals(expectedInputs.map { it.id }, request.inputs.map { it.id })
                 assertEquals(
                     decompengine.repair.repairRegressionCorpusSha256(expectedInputs),
@@ -3428,7 +3458,7 @@ class TraceGuidedRepairTest {
         )
 
         try {
-            exactInputs.forEachIndexed { index, input ->
+            acceptedInputs.forEachIndexed { index, input ->
                 val iteration = loop.repairCompileError(
                     project,
                     CompileFailure(listOf("make"), 2, "", "$targetPath: fixture compile error $index"),
@@ -3438,28 +3468,28 @@ class TraceGuidedRepairTest {
                 assertEquals(RepairAttemptDisposition.REJECTED, iteration.disposition)
                 assertContentEquals(acceptedSource, target.readBytes())
             }
-            assertEquals(2, dispatches)
-            assertEquals(2, validationCalls)
+            assertEquals(acceptedInputs.size, dispatches)
+            assertEquals(acceptedInputs.size, validationCalls)
 
             val failure = assertFailsWith<RepairBudgetExceededException> {
                 loop.repairCompileError(
                     project,
                     CompileFailure(listOf("make"), 2, "", "$targetPath: over-limit input"),
-                    listOf(ProcessInput("third", args = listOf("gamma"), stdin = byteArrayOf(3))),
+                    listOf(rejectedInput),
                 )
             }
-            assertEquals("retained regression corpus contains 3 inputs; limit=2", failure.message)
-            assertEquals(2, dispatches, "cumulative overflow must be refused before ACP dispatch")
-            assertEquals(2, validationCalls, "cumulative overflow must be refused before validation")
+            assertEquals(expectedFailure, failure.message)
+            assertEquals(acceptedInputs.size, dispatches, "cumulative overflow must be refused before ACP dispatch")
+            assertEquals(acceptedInputs.size, validationCalls, "cumulative overflow must be refused before validation")
             assertContentEquals(acceptedSource, target.readBytes())
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
                 assertNull(graph.snapshot.pendingAttemptId)
                 assertEquals(baseline.first, graph.snapshot.headId)
-                assertEquals(baseline.second + 2, graph.snapshot.nodes.size)
-                assertEquals(baseline.third + 2, graph.snapshot.runs.size)
-                assertEquals(exactInputs.map { it.id }, graph.retainedRegressionCorpus().inputs.map { it.id })
+                assertEquals(baseline.second + acceptedInputs.size, graph.snapshot.nodes.size)
+                assertEquals(baseline.third + acceptedInputs.size, graph.snapshot.runs.size)
+                assertEquals(acceptedInputs.map { it.id }, graph.retainedRegressionCorpus().inputs.map { it.id })
                 assertEquals(
-                    decompengine.repair.repairRegressionCorpusSha256(exactInputs),
+                    decompengine.repair.repairRegressionCorpusSha256(acceptedInputs),
                     graph.retainedRegressionCorpus().sha256,
                 )
             }
