@@ -682,6 +682,20 @@ also verifies the target implementation file is absent when the request is
 dispatched, the accepted output metadata remains identical, and no publication
 residue is left behind.
 
+Commit `1c4b00f94a302d0001dc48de38b98445e6ab9d1d` adds a one-shot internal
+test hook immediately before the initial snapshot. The public workflow uses it
+to seed a valid existing implementation after session reconciliation, then
+separately sets `fileBytes` and `totalBytes` to one byte below that file's exact
+size. Both cases reach `RESOURCE_EXHAUSTED` at
+`phase=initial-workspace-snapshot`, before ACP process launch. Their receipts
+report `WORKSPACE_SNAPSHOT` and `NOT_REQUIRED` cleanup, with no process
+diagnostics, sandbox evidence, filesystem audit, or complete execution
+evidence. They also verify unchanged accepted output metadata and no
+publication residue. The retained [JUnit report](evidence/issue-734-public-reconstruction-initial-snapshot-byte-limits-2026-11-12.xml)
+has SHA-256 `631c212053c81ea57e0699e16ef43d1e8b3a1313ae2a5545b3646cda45667853`;
+the [provenance record](evidence/issue-734-public-reconstruction-initial-snapshot-byte-limits-2026-11-12.json)
+binds the source commit, tree, focused command, and result.
+
 Commit `a39dfd350` extends this control to the final snapshot. The same
 public-path request now runs an authorized scripted write, then separately
 exceeds the final snapshot's `file-bytes` and `total-bytes` budgets. Both
@@ -693,13 +707,14 @@ target-write audit, unchanged prior output metadata, and no publication
 residue. The focused live-sandbox test passed locally at `a39dfd350`: one test
 method, zero failures, errors or skips.
 
-Together these cases exercise initial entry-count and final file-byte/total-byte
-limits through the public reconstruction workflow. The single declared file
-means the snapshot file-count ceiling is not reachable in this path, and the
-target is absent before dispatch so initial file-byte/total-byte ceilings are
-not reachable there. This does not qualify every snapshot limit, every
-resource ceiling, production validation under #236, live-provider behavior, or
-hosted exact-head CI. #734 and #63 remain open.
+Together these cases exercise initial entry-count, initial file-byte/total-byte,
+and final file-byte/total-byte limits through the public reconstruction
+workflow. The single declared file means the snapshot file-count ceiling is not
+reachable in this path. The initial byte controls use a deterministic existing-
+target fixture; normal public reconstruction still starts with an absent
+target. This does not qualify every snapshot limit, every resource ceiling,
+production validation under #236, live-provider behavior, or hosted exact-head
+CI. #734 and #63 remain open.
 
 ## Reconstruction change-claim consistency checkpoint — 2026-11-11
 
