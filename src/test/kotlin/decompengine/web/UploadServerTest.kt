@@ -1930,8 +1930,11 @@ class UploadServerTest {
             val document = ModuleRevisionGraphTest().completeAcpReceiptDocument(
                 jobDir, ModuleRevisionAttempt(attemptId), "src/modules/alpha.c",
                 "original source".toByteArray(), "accepted source".toByteArray(),
+                turnWorkflowId = "upload-server-test-run",
             )
             assertTrue(document.releaseComplete)
+            assertEquals(3, document.schemaVersion)
+            val turnId = requireNotNull(document.turnIdentity).turnId
             val receiptBytes = document.json.toByteArray()
             assertEquals(TRACE_REPAIR_ACP_RECEIPT_KIND,
                 Json.parseToJsonElement(document.json).jsonObject["kind"].toString().trim('"'))
@@ -1945,7 +1948,7 @@ class UploadServerTest {
                 "agentInvocation":{"receiptPath":"$receiptPath","receiptSha256":"${document.sha256}",
                 "receiptSchemaVersion":${document.schemaVersion},"requestSha256":"$requestSha256",
                 "resultChangesSha256":"$resultChangesSha256","terminalOutcome":"${document.terminalOutcome}",
-                "receiptReleaseComplete":true,"assessmentStatus":"accepted"}}
+                "receiptReleaseComplete":true,"assessmentStatus":"accepted","turnId":"$turnId"}}
             """.trimIndent()
             val history = reports.resolve("repair_history.json")
             history.writeText("""

@@ -123,19 +123,47 @@ class AgentProgressJournal private constructor(
     }
 
     override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress =
-        beginCorrelatedTask(taskId, request, null)
+        beginCorrelatedTask(taskId, request, null, AgentTurnIdentity.create(taskId, request))
+
+    override fun beginTask(
+        taskId: String,
+        request: AgentExecutionRequest,
+        turnIdentity: AgentTurnIdentity,
+    ): AgentTaskProgress = beginCorrelatedTask(taskId, request, turnIdentity.workflowRunId, turnIdentity)
 
     override fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress {
         require(workflowRunId.isNotBlank() && workflowRunId.length <= 4096)
-        return beginCorrelatedTask(taskId, request, workflowRunId)
+        return beginCorrelatedTask(
+            taskId,
+            request,
+            workflowRunId,
+            AgentTurnIdentity.create(taskId, request, workflowRunId),
+        )
     }
 
-    private fun beginCorrelatedTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String?): AgentTaskProgress {
+    override fun beginTask(
+        taskId: String,
+        request: AgentExecutionRequest,
+        workflowRunId: String,
+        turnIdentity: AgentTurnIdentity,
+    ): AgentTaskProgress {
+        require(turnIdentity.workflowRunId == workflowRunId) { "agent turn identity belongs to another workflow run" }
+        return beginCorrelatedTask(taskId, request, workflowRunId, turnIdentity)
+    }
+
+    private fun beginCorrelatedTask(
+        taskId: String,
+        request: AgentExecutionRequest,
+        workflowRunId: String?,
+        identity: AgentTurnIdentity,
+    ): AgentTaskProgress {
         val safeTaskId = redactor.text(taskId)
+        require(identity.taskId == taskId) { "agent turn identity belongs to another task" }
         val binding = AgentExecutionRequestBinding.capture(request)
+        identity.requireBoundTo(binding)
         val taskIdSha256 = digest(taskId)
         val workflowRun = workflowRunId?.let { redactor.text(it) to digest(it) }
-        val turnId = UUID.randomUUID().toString()
+        val turnId = identity.turnId
         fun post(kind: String, body: JsonObjectBuilder.() -> Unit) = enqueue(kind) {
             put("taskId", safeTaskId)
             put("taskIdSha256", taskIdSha256)
@@ -149,6 +177,7 @@ class AgentProgressJournal private constructor(
         }
         post("task_started") { put("phase", "agent_running") }
         return object : AgentTaskProgress {
+            override val turnIdentity: AgentTurnIdentity = identity
             private var finished = false
             private var previousSequence = -1L
             // Raw chunks stay bounded and are not persisted. Whole-message redaction prevents a
@@ -250,6 +279,9 @@ class AgentProgressJournal private constructor(
             override fun complete(receipt: AgentExecutionReceipt) {
                 check(!finished) { "progress task already completed" }
                 require(receipt.requestBinding == binding) { "progress receipt belongs to another request" }
+                require(receipt.turnIdentity == null || receipt.turnIdentity == identity) {
+                    "progress receipt belongs to another turn"
+                }
                 finished = true
                 messages.clear()
                 post("agent_finished") {

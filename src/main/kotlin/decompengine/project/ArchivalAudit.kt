@@ -6,6 +6,8 @@ import decompengine.validation.BehaviorEvidence
 import decompengine.validation.BehaviorProjectContext
 import decompengine.validation.boolean
 import decompengine.validation.string
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -516,7 +518,8 @@ object ArchivalProjectAuditor {
                     val checkpointText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
                     UniqueJsonObjectKeyValidator(checkpointText).validate()
                     val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
-                    require(checkpoint.getValue("schemaVersion") == JsonPrimitive(6)) {
+                    val checkpointSchema = checkpoint.getValue("schemaVersion").jsonPrimitive.intOrNull
+                    require(checkpointSchema in setOf(6, 7)) {
                         "module checkpoint lacks the supported compiler acceptance schema"
                     }
                     require(checkpoint.string("inputBinarySha256") == model.inputSha256 &&
@@ -525,6 +528,20 @@ object ArchivalProjectAuditor {
                         "module checkpoint input identity differs from the audited model or profile"
                     }
                     require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
+                    if (checkpointSchema == 7) {
+                        val turnLimits = StrictJsonLimits(maximumInputBytes = 1024 * 1024, maximumCanonicalBytes = 1024 * 1024)
+                        val intent = AgentTurnIntent.parse(OracleJson.canonicalBytes(checkpoint.getValue("turnIntent"), turnLimits))
+                        val assessment = AcpChangeAssessment.parse(OracleJson.canonicalBytes(checkpoint.getValue("changeAssessment"), turnLimits))
+                        require(intent.sha256 == checkpoint.string("turnIntentSha256") &&
+                            assessment.sha256 == checkpoint.string("changeAssessmentSha256") &&
+                            assessment.intentSha256 == intent.sha256 && assessment.turnId == intent.turnId &&
+                            assessment.receiptSha256 == checkpoint.string("turnReceiptSha256") &&
+                            checkpoint.string("turnReceiptPath") ==
+                                "${ReconstructionTurnEvidenceStore.DIRECTORY}/${model.inputSha256}/$identifier/${intent.turnId}/${ReconstructionTurnEvidenceStore.RECEIPT_FILE}" &&
+                            assessment.eligibility == AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION) {
+                            "module checkpoint turn assessment does not bind accepted source"
+                        }
+                    }
                     val claimsAgentExecution = moduleClaimsAgentExecution(
                         checkpoint.string("generator"), checkpoint.string("reconstructorIdentity"),
                     )

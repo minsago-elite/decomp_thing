@@ -57,6 +57,7 @@ internal interface WebWorkflowEngines {
         mode: WebReconstructionMode,
         progress: AgentWorkflowProgress,
         workspace: ReconstructionOutputWorkspace,
+        workflowRunId: String?,
         publicationAdmission: () -> Unit,
         onCommittedPublication: () -> Unit,
     )
@@ -75,6 +76,7 @@ internal interface WebWorkflowEngines {
                 mode: WebReconstructionMode,
                 progress: AgentWorkflowProgress,
                 workspace: ReconstructionOutputWorkspace,
+                workflowRunId: String?,
                 publicationAdmission: () -> Unit,
                 onCommittedPublication: () -> Unit,
             ) {
@@ -86,6 +88,7 @@ internal interface WebWorkflowEngines {
                 ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
                     profile = strategy.profile, progress = progress).reconstructWithWorkspace(
                     binary, reportsDirectory, workspace, publicationAdmission, onCommittedPublication,
+                    workflowRunId,
                 )
             }
 
@@ -223,7 +226,8 @@ internal class ReconstructWorkflowAdapter(
                 BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->
                     val progress = MeteredWorkflowProgress(journal, meter)
                     try {
-                        engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress, workspace, {
+                        engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress, workspace,
+                            context.attempt.runId, {
                             if (Thread.currentThread().isInterrupted) throw InterruptedException("reconstruction cancelled before publication")
                             meter.admitPublication(context.attempt.limits)
                         }, context.onReconstructionPublicationCommitted ?: {})

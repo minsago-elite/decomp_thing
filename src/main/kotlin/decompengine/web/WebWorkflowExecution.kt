@@ -5,6 +5,7 @@ import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentTaskProgress
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
@@ -211,8 +212,23 @@ internal class MeteredWorkflowProgress(
     override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
         meter.activity(); return metered(delegate.beginTask(taskId, request))
     }
+    override fun beginTask(
+        taskId: String,
+        request: AgentExecutionRequest,
+        turnIdentity: AgentTurnIdentity,
+    ): AgentTaskProgress {
+        meter.activity(); return metered(delegate.beginTask(taskId, request, turnIdentity))
+    }
     override fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress {
         meter.activity(); return metered(delegate.beginTask(taskId, request, workflowRunId))
+    }
+    override fun beginTask(
+        taskId: String,
+        request: AgentExecutionRequest,
+        workflowRunId: String,
+        turnIdentity: AgentTurnIdentity,
+    ): AgentTaskProgress {
+        meter.activity(); return metered(delegate.beginTask(taskId, request, workflowRunId, turnIdentity))
     }
     override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
         meter.activity(); delegate.phase(phase, taskId, acceptedRevisionSha256)
@@ -223,6 +239,7 @@ internal class MeteredWorkflowProgress(
     private fun metered(task: AgentTaskProgress): AgentTaskProgress {
         val invocation = meter.invocation()
         return object : AgentTaskProgress {
+            override val turnIdentity: AgentTurnIdentity? get() = task.turnIdentity
             override fun event(event: AgentExecutionEvent) { invocation.observe(event); task.event(event) }
             override fun complete(receipt: AgentExecutionReceipt) { invocation.receipt(receipt); task.complete(receipt) }
         }

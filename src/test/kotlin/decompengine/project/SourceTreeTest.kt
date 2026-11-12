@@ -2109,6 +2109,20 @@ class SourceTreeTest {
         checkpoint.writeText(updated)
     }
 
+    @Test
+    fun `turn provenance additions preserve public reconstruction constructor and copy descriptors`() {
+        val request = ModuleReconstructionRequest::class.java
+        assertEquals(14, request.declaredConstructors.single {
+            it.parameterCount == 14
+        }.parameterCount)
+        assertEquals(14, request.declaredMethods.single { it.name == "copy" }.parameterCount)
+        val reconstructed = ReconstructedModule::class.java
+        assertEquals(8, reconstructed.declaredConstructors.single {
+            it.parameterCount == 8
+        }.parameterCount)
+        assertEquals(8, reconstructed.declaredMethods.single { it.name == "copy" }.parameterCount)
+    }
+
     private fun oneModuleModel(): RecoveredProgramModel = model().copy(
         functions = listOf(model().functions.first().copy(calls = emptySet())),
         globals = emptyList(),

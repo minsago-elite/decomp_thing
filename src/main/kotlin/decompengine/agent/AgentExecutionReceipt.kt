@@ -70,8 +70,10 @@ class AgentExecutionReceipt(
     val outcome: AgentExecutionOutcome,
     val providerEvidence: AgentExecutionProviderEvidence? = null,
     internal val failureCause: Throwable? = null,
+    val turnIdentity: AgentTurnIdentity? = null,
 ) {
     init {
+        turnIdentity?.requireBoundTo(requestBinding)
         providerEvidence?.let { evidence ->
             require(evidence.providerId.matches(Regex("[a-z][a-z0-9.-]{0,63}"))) {
                 "execution receipt provider id is invalid"
@@ -91,6 +93,19 @@ class AgentExecutionReceipt(
             receipt = this,
         )
     }
+}
+
+/** Attach host correlation without changing the outcome or provider evidence. */
+internal fun AgentExecutionReceipt.withTurnIdentity(identity: AgentTurnIdentity): AgentExecutionReceipt {
+    identity.requireBoundTo(requestBinding)
+    require(turnIdentity == null || turnIdentity == identity) { "execution receipt already has another turn identity" }
+    return if (turnIdentity == identity) this else AgentExecutionReceipt(
+        requestBinding = requestBinding,
+        outcome = outcome,
+        providerEvidence = providerEvidence,
+        failureCause = failureCause,
+        turnIdentity = identity,
+    )
 }
 
 /** Compatibility wrapper used by provider-neutral version-1 harness implementations. */

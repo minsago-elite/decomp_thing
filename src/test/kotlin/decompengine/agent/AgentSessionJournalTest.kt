@@ -3,7 +3,12 @@ package decompengine.agent
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.UUID
 import kotlin.test.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.io.TempDir
 
 class AgentSessionJournalTest {
@@ -200,6 +205,70 @@ class AgentSessionJournalTest {
             assertFails { AgentSessionJournal.open(continuation) }
         }
         AgentSessionJournal.open(continuation).close()
+    }
+
+    @Test
+    fun `schema two journal requires the exact host turn identity in its receipt`() {
+        val fixture = fixture()
+        val continuation = fixture.continuation()
+        val request = fixture.request(continuation)
+        val binding = AgentExecutionRequestBinding.capture(request)
+        val turnId = UUID.randomUUID().toString()
+        AgentSessionJournal.open(continuation).use { journal ->
+            journal.reconcileWorkspace(listOf(fixture.root))
+            journal.processStarting(binding.requestSha256, turnId)
+            journal.chooseSession(identity, true)
+            journal.sessionReady("remote-session", false)
+            journal.promptStarting()
+
+            val beforeMismatch = Files.readAllBytes(continuation.directory.resolve("session.json"))
+            val mismatched = AgentExecutionReceipt(
+                binding,
+                AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.COMPLETED)),
+                turnIdentity = AgentTurnIdentity(UUID.randomUUID().toString(), "module", binding.requestSha256),
+            )
+            assertFailsWith<IllegalArgumentException> { journal.finishTurn(mismatched, true) }
+            assertContentEquals(beforeMismatch, Files.readAllBytes(continuation.directory.resolve("session.json")))
+
+            val matching = AgentExecutionReceipt(
+                binding,
+                AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.COMPLETED)),
+                turnIdentity = AgentTurnIdentity(turnId, "module", binding.requestSha256),
+            )
+            journal.finishTurn(matching, true)
+        }
+        val firstTurnId = turnId
+        val resumedTurn = AgentTurnIdentity.create("module", request)
+        assertEquals(binding.requestSha256, resumedTurn.requestSha256)
+        assertNotEquals(firstTurnId, resumedTurn.turnId)
+        AgentSessionJournal.open(continuation).use { journal ->
+            journal.reconcileWorkspace(listOf(fixture.root))
+            assertEquals(1, journal.completedTurns)
+            journal.processStarting(binding.requestSha256, resumedTurn.turnId)
+            assertEquals("remote-session", journal.chooseSession(identity, true))
+            journal.sessionReady("remote-session", true)
+            journal.promptStarting()
+            journal.finishTurn(
+                AgentExecutionReceipt(
+                    binding,
+                    AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.COMPLETED)),
+                    turnIdentity = resumedTurn,
+                ),
+                true,
+            )
+        }
+        val state = Json.parseToJsonElement(Files.readString(continuation.directory.resolve("session.json"))).jsonObject
+        assertEquals(2, state.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        assertEquals(firstTurnId, state.getValue("turns").jsonArray.first().jsonObject.getValue("turnId").jsonPrimitive.content)
+        val turns = state.getValue("turns").jsonArray.map { it.jsonObject }
+        assertEquals(2, turns.size)
+        assertEquals(resumedTurn.turnId, state.getValue("pendingTurnId").jsonPrimitive.content)
+        assertEquals(listOf(firstTurnId, resumedTurn.turnId), turns.map { it.getValue("turnId").jsonPrimitive.content })
+        assertTrue(turns.all { it.getValue("requestSha256").jsonPrimitive.content == binding.requestSha256 })
+        AgentSessionJournal.open(continuation).use { journal ->
+            journal.reconcileWorkspace(listOf(fixture.root))
+            assertEquals(2, journal.completedTurns)
+        }
     }
 
     @Test

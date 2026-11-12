@@ -20,10 +20,19 @@ internal class RepairProgressProjection(
 
     init { observe { journal = journalFactory(reportsDirectory) } }
 
-    fun task(id: String, request: AgentExecutionRequest, graph: ModuleRevisionGraph): AgentTaskProgress {
+    fun task(
+        id: String,
+        request: AgentExecutionRequest,
+        graph: ModuleRevisionGraph,
+        turnIdentity: AgentTurnIdentity,
+    ): AgentTaskProgress {
         var task: AgentTaskProgress = AgentTaskProgress.NONE
-        observe { task = journal?.beginTask(id, request, graph.snapshot.runs.last().id) ?: AgentTaskProgress.NONE }
+        observe {
+            task = journal?.beginTask(id, request, graph.snapshot.runs.last().id, turnIdentity)
+                ?: AgentTaskProgress.NONE
+        }
         return object : AgentTaskProgress {
+            override val turnIdentity: AgentTurnIdentity = turnIdentity
             override fun event(event: AgentExecutionEvent) = observe { task.event(event) }
             override fun complete(receipt: AgentExecutionReceipt) = observe { task.complete(receipt) }
         }

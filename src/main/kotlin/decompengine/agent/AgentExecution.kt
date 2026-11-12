@@ -536,6 +536,16 @@ fun interface AgentHarness {
         execute(request, onEvent)
     }
 
+    /** Correlated invocation seam; old harness implementations retain their existing behavior. */
+    fun executeReceipt(
+        request: AgentExecutionRequest,
+        turnIdentity: AgentTurnIdentity,
+        onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionReceipt {
+        turnIdentity.requireBoundTo(AgentExecutionRequestBinding.capture(request))
+        return executeReceipt(request, onEvent).withTurnIdentity(turnIdentity)
+    }
+
     fun implementationIdentifier(): String? = null
 }
 

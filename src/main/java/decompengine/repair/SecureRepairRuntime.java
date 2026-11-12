@@ -142,7 +142,8 @@ public final class SecureRepairRuntime {
     static ModuleRevisionGraph openGraph(
         Object profileHandle,
         Path projectRoot,
-        RepairResourceBudget budget
+        RepairResourceBudget budget,
+        ModuleRevisionFaultInjector faultInjector
     ) {
         RegisteredProfile profile = requireKnownHandle(profileHandle);
         GraphAuthority graphAuthority = new GraphAuthority(profile.profile);
@@ -152,7 +153,7 @@ public final class SecureRepairRuntime {
             projectRoot,
             profile.profile,
             budget,
-            null
+            faultInjector
         );
     }
 

@@ -17,11 +17,14 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.receiptCommitmentBytes
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
@@ -69,7 +72,21 @@ data class ModuleReconstructionRequest(
     val compilerDiagnostics: String? = null,
     /** Recovered ownership used to select only required cross-module interfaces. */
     val modulePlan: ModulePlan? = null,
-)
+) {
+    /** Durable pre-dispatch workflow identity; evidence must be written before the harness call. */
+    internal var persistAgentTurnIntent: ((AgentTurnIntent) -> Unit)? = null
+        private set
+    internal var workflowRunId: String? = null
+        private set
+
+    internal fun withAgentTurnContext(
+        workflowRunId: String?,
+        persistAgentTurnIntent: ((AgentTurnIntent) -> Unit)?,
+    ): ModuleReconstructionRequest = apply {
+        this.workflowRunId = workflowRunId
+        this.persistAgentTurnIntent = persistAgentTurnIntent
+    }
+}
 
 data class ReconstructedModule(
     val source: String,
@@ -80,7 +97,14 @@ data class ReconstructedModule(
     val issues: List<ModuleReconstructionIssue> = emptyList(),
     val retryable: Boolean = true,
     val agentExecutionEvidence: ReconstructionAgentExecutionEvidence? = null,
-)
+) {
+    internal var agentTurnIntent: AgentTurnIntent? = null
+        private set
+
+    internal fun withAgentTurnIntent(intent: AgentTurnIntent?): ReconstructedModule = apply {
+        agentTurnIntent = intent
+    }
+}
 
 data class ModuleReconstructionIssue(
     val code: String,
@@ -95,7 +119,9 @@ internal fun requestForCheckpointReconciliation(
     checkpointReused: Boolean,
 ): ModuleReconstructionRequest = if (checkpointReused &&
     request.sessionEvidenceFingerprint != checkpointFingerprint) {
-    request.copy(sessionEvidenceFingerprint = checkpointFingerprint)
+    request.copy(sessionEvidenceFingerprint = checkpointFingerprint).also { copied ->
+        copied.withAgentTurnContext(request.workflowRunId, request.persistAgentTurnIntent)
+    }
 } else request
 
 fun interface ModuleReconstructor {
@@ -290,6 +316,7 @@ class BoundedLlmModuleReconstructor(
         val before = sourcePath.takeIf { it.exists() }?.readBytes()
         val targetOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)
         var invocationEvidence: ReconstructionAgentExecutionEvidence? = null
+        var turnIntent: AgentTurnIntent? = null
         try {
             val agentRequest = AgentExecutionRequest(
                 objective = objective,
@@ -319,8 +346,22 @@ class BoundedLlmModuleReconstructor(
                 sessionContinuation = sessionContinuation(request),
             )
             val eventRecorder = BoundedAgentExecutionEventRecorder()
-            val taskProgress = progress.beginTask(request.module.id, agentRequest)
-            val receipt = harness.executeReceipt(agentRequest) { event ->
+            val turnIdentity = AgentTurnIdentity.create(request.module.id, agentRequest, request.workflowRunId)
+            request.persistAgentTurnIntent?.let { persistIntent ->
+                val requestBinding = decompengine.agent.AgentExecutionRequestBinding.capture(agentRequest)
+                val beforeSha256 = before?.let(::sha256) ?: sha256("absent-v1:$target".toByteArray(Charsets.UTF_8))
+                turnIntent = AgentTurnIntent.create(
+                    identity = turnIdentity,
+                    workflowId = request.workflowRunId ?: "reconstruction",
+                    attemptId = turnIdentity.turnId,
+                    profileSha256 = request.profile.sha256,
+                    policySha256 = requestBinding.accessPolicySha256,
+                    beforeSha256 = beforeSha256,
+                )
+                persistIntent(requireNotNull(turnIntent))
+            }
+            val taskProgress = progress.beginTask(request.module.id, agentRequest, turnIdentity)
+            val receipt = harness.executeReceipt(agentRequest, turnIdentity) { event ->
                 eventRecorder.record(event)
                 taskProgress.event(event)
             }
@@ -348,6 +389,7 @@ class BoundedLlmModuleReconstructor(
                     promptSha256,
                     contextSize,
                     contextBudget,
+                    turnIntent,
                 )
             }
             require(execution.stopReason == AgentStopReason.COMPLETED) {
@@ -375,7 +417,7 @@ class BoundedLlmModuleReconstructor(
                 promptCharacters = contextSize,
                 promptBudgetCharacters = contextBudget,
                 agentExecutionEvidence = invocationEvidence,
-            )
+            ).withAgentTurnIntent(turnIntent)
         } catch (failure: Exception) {
             if (generateSequence<Throwable>(failure) { it.cause }.any { it is AgentSessionRecoveryException }) throw failure
             if (before == null) sourcePath.deleteIfExists() else sourcePath.writeBytes(before)
@@ -391,6 +433,7 @@ class BoundedLlmModuleReconstructor(
                 promptSha256 = promptSha256,
                 promptCharacters = contextSize,
                 promptBudgetCharacters = contextBudget,
+                agentTurnIntent = turnIntent,
                 cause = failure,
             )
         }
@@ -424,6 +467,7 @@ class ModuleReconstructionInterruptedException(
     internal val promptSha256: String? = null,
     internal val promptCharacters: Int? = null,
     internal val promptBudgetCharacters: Int? = null,
+    internal val agentTurnIntent: AgentTurnIntent? = null,
 ) : IllegalStateException(
     "module $moduleId reconstruction was interrupted with ${stopReason.name.lowercase()}",
 )
@@ -439,6 +483,7 @@ private class ModuleReconstructionAgentOutcomeException(
     val promptSha256: String,
     val promptCharacters: Int,
     val promptBudgetCharacters: Int,
+    val agentTurnIntent: AgentTurnIntent?,
     cause: Exception,
 ) : IllegalStateException(
     "module $moduleId agent invocation ended with ${evidence.terminalOutcome}",
@@ -653,11 +698,14 @@ object SourceTreeGenerator {
         onCompilerFeedback: (ModuleCompilerFeedback) -> Unit = {},
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
         publicationLock: ReconstructionPublicationLock? = null,
+        workflowRunId: String? = null,
     ): ReconstructionGenerationResult {
         hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
         requireWorkflowOwnedPathsAreReserved(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        val reconstructionWorkflowId = workflowRunId ?: java.util.UUID.randomUUID().toString()
+        require(reconstructionWorkflowId.isNotBlank() && reconstructionWorkflowId.toByteArray(Charsets.UTF_8).size <= 4096)
         val publicationRequirement = selectedReconstructor.publicationRequirement()
         require(publicationRequirement != ReconstructionPublicationRequirement.TRANSACTIONAL || publicationLock != null) {
             "agent-backed reconstruction requires a lease-owned staged publication session"
@@ -667,6 +715,10 @@ object SourceTreeGenerator {
         } else {
             publicationLock?.validate()
         }
+        // Validate the lease's admitted input before binding any sidecar writer to the caller's
+        // model. Besides preserving the original refusal boundary, this ensures a rejected
+        // invocation cannot create even an empty evidence namespace.
+        val turnEvidenceStore = publicationLock?.let { ReconstructionTurnEvidenceStore(it, model.inputSha256) }
         adapter.admitGeneration(projectDir, profile, selectedReconstructor)
         val unresolvedOutput = adapter.requiresUnresolvedOutput(profile)
         val compilationPolicy = adapter.compilation
@@ -791,6 +843,12 @@ object SourceTreeGenerator {
             val configuredExecutionEvidenceFile = configuredExecutionEvidencePath?.let(projectDir::resolve)
             val attemptPath = projectDir.resolve("reports/modules/${module.id}.attempt.json")
             var persistedExecutionEvidence: PersistedReconstructionExecutionEvidence? = null
+            var persistedTurnIntent: AgentTurnIntent? = null
+            var persistedTurnIntentPath: String? = null
+            var persistedTurnReceiptPath: String? = null
+            var persistedTurnReceiptSha256: String? = null
+            var persistedChangeAssessment: AcpChangeAssessment? = null
+            var persistedChangeAssessmentPath: String? = null
             fun persistExecutionEvidence(
                 evidence: ReconstructionAgentExecutionEvidence,
             ): PersistedReconstructionExecutionEvidence = try {
@@ -814,7 +872,7 @@ object SourceTreeGenerator {
                     sourcePath.readText()).isEmpty()
             }
             fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
-                !unresolvedOutput && schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
+                !unresolvedOutput && schemaVersion in setOf(6, 7) && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
                     modulePromptAttributionIsValid(
@@ -830,7 +888,10 @@ object SourceTreeGenerator {
                     currentSourcePassesAdapter
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
                 it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
-                    it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
+                    it.hasCurrentExecutionEvidence(
+                        projectDir, configuredExecutionEvidencePath, false, turnEvidenceStore, module.id,
+                        profile, module.sourcePath,
+                    )
             }
             val request = ModuleReconstructionRequest(
                 module,
@@ -841,16 +902,42 @@ object SourceTreeGenerator {
                 dependencyHeaders,
                 projectDir,
                 observedBehavior,
-                persistAgentExecutionEvidence = { evidence -> persistExecutionEvidence(evidence) },
+                persistAgentExecutionEvidence = { evidence ->
+                    val persisted = persistExecutionEvidence(evidence)
+                    if (turnEvidenceStore != null) {
+                        val intent = requireNotNull(persistedTurnIntent) {
+                            "ACP receipt arrived without a durable turn intent"
+                        }
+                        val receiptBytes = evidence.toReceiptJson(module.id).toByteArray(Charsets.UTF_8)
+                        val receipt = try {
+                            turnEvidenceStore.persistReceipt(intent, receiptBytes)
+                        } catch (failure: Exception) {
+                            throw ModuleReconstructionEvidencePersistenceException(failure)
+                        }
+                        require(receipt.second == persisted.sha256) {
+                            "turn receipt sidecar differs from the checkpoint execution evidence"
+                        }
+                        persistedTurnReceiptPath = receipt.first
+                        persistedTurnReceiptSha256 = receipt.second
+                    }
+                },
                 profile = profile,
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
                 compilerDiagnostics = priorCompilerDiagnostics,
                 modulePlan = plan,
+            ).withAgentTurnContext(
+                workflowRunId = reconstructionWorkflowId,
+                persistAgentTurnIntent = if (turnEvidenceStore == null) null else { intent ->
+                    turnEvidenceStore.let { store ->
+                        persistedTurnIntentPath = store.persistIntent(intent)
+                        persistedTurnIntent = intent
+                    }
+                },
             )
             val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
-                checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
+                checkpoint.schemaVersion in setOf(6, 7) && checkpoint.inputBinarySha256 == model.inputSha256 &&
                     checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
                     (checkpoint.fingerprint == fingerprint ||
                         checkpoint.accepted && checkpoint.fingerprint == retainedFeedbackFingerprint) &&
@@ -861,6 +948,10 @@ object SourceTreeGenerator {
                         projectDir = projectDir,
                         configuredEvidencePath = configuredExecutionEvidencePath,
                         evidenceRequired = selectedReconstructor.requiresExecutionEvidenceForCheckpointReuse(),
+                        turnEvidenceStore = turnEvidenceStore,
+                        moduleId = module.id,
+                        profile = profile,
+                        sourcePath = module.sourcePath,
                     ) &&
                     (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
@@ -886,10 +977,18 @@ object SourceTreeGenerator {
                     return attemptEvidence
                 }
                 var workflowOrigin = "reconstructor-return"
-                val attempted = try {
+                val attemptedRaw = try {
                     selectedReconstructor.reconstruct(request)
                 } catch (interrupted: ModuleReconstructionInterruptedException) {
                     interrupted.agentExecutionEvidence?.let(::persistExecutionEvidence)
+                    val turnIntent = interrupted.agentTurnIntent ?: persistedTurnIntent
+                    if (turnIntent != null) {
+                        persistInterruptedChangeAssessment(turnEvidenceStore, turnIntent,
+                            interrupted.agentExecutionEvidence, interrupted.stopReason).also {
+                            persistedChangeAssessment = it.first
+                            persistedChangeAssessmentPath = it.second
+                        }
+                    }
                     val executionEvidence = restoreAcceptedRevision()
                     writeInterruptionReport(
                         attemptPath,
@@ -900,6 +999,12 @@ object SourceTreeGenerator {
                         recordedCheckpoint,
                         interrupted,
                         executionEvidence,
+                        persistedTurnIntentPath,
+                        persistedTurnReceiptPath,
+                        persistedTurnReceiptSha256,
+                        persistedChangeAssessmentPath,
+                        turnIntent,
+                        persistedChangeAssessment,
                     )
                     throw interrupted
                 } catch (failure: ModuleReconstructionEvidencePersistenceException) {
@@ -914,7 +1019,12 @@ object SourceTreeGenerator {
                         "pre-dispatch-context-budget-fallback" else "exception-fallback"
                     unresolvedFallback(request, cacheIdentity, failure)
                 }
-                val normalizedSource = attempted.source.trimEnd() + "\n"
+                val attempted = if (attemptedRaw.agentTurnIntent == null && persistedTurnIntent != null)
+                    attemptedRaw.withAgentTurnIntent(persistedTurnIntent) else attemptedRaw
+                // ACP change commitments identify exact staged bytes. Host-side newline
+                // normalization would otherwise make the committed after hash diverge.
+                val normalizedSource = if (attempted.agentExecutionEvidence != null) attempted.source
+                    else attempted.source.trimEnd() + "\n"
                 adapter.validateSourceContent(profile, normalizedSource.toByteArray(), module.sourcePath)
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     ?: persistedExecutionEvidence
@@ -933,12 +1043,22 @@ object SourceTreeGenerator {
                         val interrupted = ModuleReconstructionInterruptedException(
                             module.id, AgentStopReason.CANCELLED, "module compiler validation interrupted",
                             attempted.agentExecutionEvidence, attempted.promptSha256,
-                            attempted.promptCharacters, attempted.promptBudgetCharacters,
+                            attempted.promptCharacters, attempted.promptBudgetCharacters, attempted.agentTurnIntent,
                         ).also { it.initCause(failure) }
                         try {
                             val retainedEvidence = restoreAcceptedRevision()
+                            attempted.agentTurnIntent?.let { intent ->
+                                persistInterruptedChangeAssessment(
+                                    turnEvidenceStore, intent, attempted.agentExecutionEvidence, AgentStopReason.CANCELLED,
+                                ).also {
+                                    persistedChangeAssessment = it.first
+                                    persistedChangeAssessmentPath = it.second
+                                }
+                            }
                             writeInterruptionReport(attemptPath, module, fingerprint, cacheIdentity,
-                                sourcePath, recordedCheckpoint, interrupted, retainedEvidence)
+                                sourcePath, recordedCheckpoint, interrupted, retainedEvidence,
+                                persistedTurnIntentPath, persistedTurnReceiptPath, persistedTurnReceiptSha256,
+                                persistedChangeAssessmentPath, attempted.agentTurnIntent, persistedChangeAssessment)
                         } finally {
                             Thread.currentThread().interrupt()
                         }
@@ -964,7 +1084,22 @@ object SourceTreeGenerator {
                 } else null
                 val accepted = !unresolvedOutput && issues.isEmpty()
                 val normalizedSourceSha256 = sha256(normalizedSource.toByteArray())
+                val changeAssessment = attempted.agentTurnIntent?.let { intent ->
+                    persistReconstructionChangeAssessment(
+                        store = turnEvidenceStore,
+                        intent = intent,
+                        evidence = attempted.agentExecutionEvidence,
+                        issues = issues,
+                        compilation = compilation,
+                        accepted = accepted,
+                        unresolvedOutput = unresolvedOutput,
+                    ).also {
+                        persistedChangeAssessment = it.first
+                        persistedChangeAssessmentPath = it.second
+                    }.first
+                }
                 val candidateCheckpoint = ModuleCheckpoint(
+                    schemaVersion = if (attempted.agentTurnIntent != null) 7 else 6,
                     inputBinarySha256 = model.inputSha256,
                     modelSchemaVersion = model.schemaVersion,
                     profileSha256 = profile.sha256,
@@ -991,6 +1126,14 @@ object SourceTreeGenerator {
                     executionTerminalOutcome = executionEvidence?.terminalOutcome,
                     executionReleaseComplete = executionEvidence?.releaseComplete,
                     compilation = compilation,
+                    turnIntentPath = persistedTurnIntentPath,
+                    turnIntentSha256 = attempted.agentTurnIntent?.sha256,
+                    turnIntent = attempted.agentTurnIntent,
+                    turnReceiptPath = persistedTurnReceiptPath,
+                    turnReceiptSha256 = persistedTurnReceiptSha256,
+                    changeAssessmentPath = persistedChangeAssessmentPath,
+                    changeAssessmentSha256 = changeAssessment?.sha256,
+                    changeAssessment = changeAssessment,
                 )
                 if (!accepted && previousAccepted != null) {
                     val attemptEvidence = restoreAcceptedRevision()
@@ -1341,11 +1484,44 @@ object SourceTreeGenerator {
         val inputBinarySha256: String? = null,
         val modelSchemaVersion: Int? = null,
         val profileSha256: String? = null,
+        val turnIntentPath: String? = null,
+        val turnIntentSha256: String? = null,
+        val turnIntent: AgentTurnIntent? = null,
+        val turnReceiptPath: String? = null,
+        val turnReceiptSha256: String? = null,
+        val changeAssessmentPath: String? = null,
+        val changeAssessmentSha256: String? = null,
+        val changeAssessment: AcpChangeAssessment? = null,
     ) {
         init {
             require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2, 3, 4) &&
                 profileSha256?.matches(Regex("[0-9a-f]{64}")) == true)) { "module checkpoint lacks input identity" }
-            require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
+            require(schemaVersion in 2..7) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
+            val requiredTurnFields = listOf(turnIntentPath, turnIntentSha256, turnIntent,
+                changeAssessmentPath, changeAssessmentSha256, changeAssessment)
+            val receiptFieldsPaired = (turnReceiptPath == null) == (turnReceiptSha256 == null)
+            require(if (schemaVersion == 7) requiredTurnFields.all { it != null } && receiptFieldsPaired
+                else requiredTurnFields.all { it == null } && turnReceiptPath == null && turnReceiptSha256 == null) {
+                "module checkpoint turn provenance binding is incomplete for schema $schemaVersion"
+            }
+            if (schemaVersion == 7) {
+                val intent = requireNotNull(turnIntent)
+                val assessment = requireNotNull(changeAssessment)
+                require(intent.sha256 == turnIntentSha256 && assessment.sha256 == changeAssessmentSha256 &&
+                    intent.turnId == assessment.turnId && assessment.intentSha256 == intent.sha256 &&
+                    assessment.receiptSha256 == executionEvidenceSha256 &&
+                    assessment.receiptSha256 == turnReceiptSha256 &&
+                    (if (executionEvidenceSha256 == null) executionRequestSha256 == null
+                    else intent.requestSha256 == executionRequestSha256)) {
+                    "module checkpoint turn provenance does not match its execution receipt"
+                }
+                requireNormalizedProjectPath(requireNotNull(turnIntentPath), "module turn intent path")
+                turnReceiptPath?.let { requireNormalizedProjectPath(it, "module turn receipt path") }
+                requireNormalizedProjectPath(requireNotNull(changeAssessmentPath), "module change assessment path")
+                require(accepted == (changeAssessment.eligibility == AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION)) {
+                    "module acceptance differs from its durable change assessment"
+                }
+            }
             require(workflowOrigin in setOf("reconstructor-return", "exception-fallback",
                 "pre-dispatch-context-budget-fallback")) { "unsupported module checkpoint workflow origin" }
             require(preDispatchObservedBehavior == null ||
@@ -1407,6 +1583,10 @@ object SourceTreeGenerator {
             projectDir: Path,
             configuredEvidencePath: String?,
             evidenceRequired: Boolean,
+            turnEvidenceStore: ReconstructionTurnEvidenceStore?,
+            moduleId: String,
+            profile: ReconstructionProfile,
+            sourcePath: String,
         ): Boolean {
             val checkpointClaimsAgentExecution =
                 moduleClaimsAgentExecution(generator, reconstructorIdentity)
@@ -1418,7 +1598,28 @@ object SourceTreeGenerator {
             if (configuredEvidencePath == null || evidencePath != configuredEvidencePath) return false
             val expectedDigest = requireNotNull(executionEvidenceSha256)
             if (schemaVersion >= 4 && accepted && executionReleaseComplete != true) return false
-            return boundedCheckpointExecutionEvidenceSha256(projectDir, evidencePath) == expectedDigest
+            if (boundedCheckpointExecutionEvidenceSha256(projectDir, evidencePath) != expectedDigest) return false
+            if (schemaVersion < 7) return true
+            return turnEvidenceStore?.verifyCheckpointProvenance(
+                moduleId = moduleId,
+                profileSha256 = profile.sha256,
+                sourcePath = sourcePath,
+                sourceSha256 = sourceSha256,
+                accepted = accepted,
+                intentPath = turnIntentPath,
+                intentSha256 = turnIntentSha256,
+                intent = turnIntent,
+                receiptPath = turnReceiptPath,
+                receiptSha256 = turnReceiptSha256,
+                executionEvidenceSha256 = executionEvidenceSha256,
+                assessmentPath = changeAssessmentPath,
+                assessmentSha256 = changeAssessmentSha256,
+                assessment = changeAssessment,
+                compilation = compilation,
+                executionRequestSha256 = executionRequestSha256,
+                executionTerminalOutcome = executionTerminalOutcome,
+                executionReleaseComplete = executionReleaseComplete,
+            ) == true
         }
 
         fun toJson(): String = buildString {
@@ -1464,6 +1665,18 @@ object SourceTreeGenerator {
                 append("\n  \"modelSchemaVersion\": ").append(modelSchemaVersion).append(',')
                 append("\n  \"profileSha256\": ").append(kotlinx.serialization.json.JsonPrimitive(profileSha256)).append(',')
             }
+            if (schemaVersion >= 7) {
+                append("\n  \"turnIntentPath\": \"").append(requireNotNull(turnIntentPath).jsonEscape()).append('\"').append(',')
+                append("\n  \"turnIntentSha256\": \"").append(requireNotNull(turnIntentSha256)).append('\"').append(',')
+                append("\n  \"turnIntent\": ").append(String(requireNotNull(turnIntent).canonicalBytes(), Charsets.UTF_8)).append(',')
+                append("\n  \"turnReceiptPath\": ")
+                append(turnReceiptPath?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
+                append("\n  \"turnReceiptSha256\": ")
+                append(turnReceiptSha256?.let { "\"$it\"" } ?: "null").append(',')
+                append("\n  \"changeAssessmentPath\": \"").append(requireNotNull(changeAssessmentPath).jsonEscape()).append('\"').append(',')
+                append("\n  \"changeAssessmentSha256\": \"").append(requireNotNull(changeAssessmentSha256)).append('\"').append(',')
+                append("\n  \"changeAssessment\": ").append(String(requireNotNull(changeAssessment).canonicalBytes(), Charsets.UTF_8)).append(',')
+            }
             append("\n  \"accepted\": ").append(accepted).append(',')
             if (schemaVersion >= 5) {
                 append("\n  \"compilation\": ").append(compilation?.toJson() ?: "null").append(',')
@@ -1489,11 +1702,31 @@ object SourceTreeGenerator {
     private fun readCheckpoint(path: Path): ModuleCheckpoint? {
         if (!path.exists()) return null
         return runCatching {
-            val root = Json.parseToJsonElement(path.readText()).jsonObject
-            val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull ?: return null
-            if (schemaVersion !in setOf(2, 3, 4, 5, 6)) return null
+            val checkpointBytes = path.readBytes()
+            val initialRoot = Json.parseToJsonElement(checkpointBytes.toString(Charsets.UTF_8)).jsonObject
+            val schemaVersion = initialRoot["schemaVersion"]?.jsonPrimitive?.intOrNull ?: return null
+            if (schemaVersion !in setOf(2, 3, 4, 5, 6, 7)) return null
+            val root = if (schemaVersion >= 6) {
+                val strict = OracleJson.parse(checkpointBytes, StrictJsonLimits(
+                    maximumInputBytes = MAXIMUM_AGENT_CHECKPOINT_BYTES,
+                    maximumCanonicalBytes = MAXIMUM_AGENT_CHECKPOINT_BYTES,
+                )) as? kotlinx.serialization.json.JsonObject
+                    ?: throw IllegalArgumentException("module checkpoint must be a JSON object")
+                val validFields = if (schemaVersion == 7) {
+                    setOf(CHECKPOINT_V7_REQUIRED_FIELDS,
+                        CHECKPOINT_V7_REQUIRED_FIELDS + CHECKPOINT_V7_OPTIONAL_FALLBACK_FIELDS)
+                } else {
+                    setOf(CHECKPOINT_V6_REQUIRED_FIELDS,
+                        CHECKPOINT_V6_REQUIRED_FIELDS + "workflowOrigin",
+                        CHECKPOINT_V6_REQUIRED_FIELDS + "workflowOrigin" + CHECKPOINT_V7_OPTIONAL_FALLBACK_FIELDS)
+                }
+                require(strict.keys in validFields) {
+                    "schema-$schemaVersion module checkpoint has missing or unsupported fields"
+                }
+                strict
+            } else initialRoot
             if (schemaVersion >= 6) {
-                require(root.getValue("schemaVersion") == kotlinx.serialization.json.JsonPrimitive(6))
+                require(root.getValue("schemaVersion") == kotlinx.serialization.json.JsonPrimitive(schemaVersion))
                 require(root.getValue("inputBinarySha256").jsonPrimitive.isString)
                 require(root.getValue("profileSha256").jsonPrimitive.isString)
                 require(!root.getValue("modelSchemaVersion").jsonPrimitive.isString)
@@ -1511,6 +1744,18 @@ object SourceTreeGenerator {
                 inputBinarySha256 = if (schemaVersion >= 6) optionalString("inputBinarySha256") else null,
                 modelSchemaVersion = if (schemaVersion >= 6) root["modelSchemaVersion"]?.jsonPrimitive?.intOrNull else null,
                 profileSha256 = if (schemaVersion >= 6) optionalString("profileSha256") else null,
+                turnIntentPath = if (schemaVersion >= 7) optionalString("turnIntentPath") else null,
+                turnIntentSha256 = if (schemaVersion >= 7) optionalString("turnIntentSha256") else null,
+                turnIntent = if (schemaVersion >= 7) {
+                    AgentTurnIntent.parse(OracleJson.canonicalBytes(root.getValue("turnIntent"), StrictJsonLimits()))
+                } else null,
+                turnReceiptPath = if (schemaVersion >= 7) optionalString("turnReceiptPath") else null,
+                turnReceiptSha256 = if (schemaVersion >= 7) optionalString("turnReceiptSha256") else null,
+                changeAssessmentPath = if (schemaVersion >= 7) optionalString("changeAssessmentPath") else null,
+                changeAssessmentSha256 = if (schemaVersion >= 7) optionalString("changeAssessmentSha256") else null,
+                changeAssessment = if (schemaVersion >= 7) {
+                    AcpChangeAssessment.parse(OracleJson.canonicalBytes(root.getValue("changeAssessment"), StrictJsonLimits()))
+                } else null,
                 fingerprint = root.getValue("fingerprint").jsonPrimitive.content,
                 sourceSha256 = root.getValue("sourceSha256").jsonPrimitive.content,
                 generator = root.getValue("generator").jsonPrimitive.content,
@@ -1611,6 +1856,113 @@ object SourceTreeGenerator {
         return persisted
     }
 
+    private fun persistReconstructionChangeAssessment(
+        store: ReconstructionTurnEvidenceStore?,
+        intent: AgentTurnIntent,
+        evidence: ReconstructionAgentExecutionEvidence?,
+        issues: List<ModuleReconstructionIssue>,
+        compilation: ModuleCompilationEvidence?,
+        accepted: Boolean,
+        unresolvedOutput: Boolean,
+    ): Pair<AcpChangeAssessment, String> {
+        val policyRejected = evidence == null || issues.any { issue ->
+            issue.code.startsWith("agent-") || issue.code.contains("policy") || issue.code.contains("role") ||
+                issue.code.contains("ownership") || issue.code.contains("mutation")
+        }
+        val policyVerdict = if (policyRejected) AcpChangePolicyVerdict.REJECT else AcpChangePolicyVerdict.ALLOW
+        val validationStatus = when {
+            compilation == null -> AcpChangeValidationStatus.NOT_RUN
+            compilation.passed -> AcpChangeValidationStatus.PASSED
+            else -> AcpChangeValidationStatus.FAILED
+        }
+        val validationProofs = compilation?.let {
+            listOf(sha256(OracleJson.canonicalBytes(
+                Json.parseToJsonElement(it.toJson()),
+                StrictJsonLimits(maximumInputBytes = 1024 * 1024, maximumCanonicalBytes = 1024 * 1024),
+            )))
+        }.orEmpty()
+        val after = evidence?.resultAfterSha256
+        val observation = when {
+            evidence == null -> AcpChangeObservationStatus.UNKNOWN
+            after != null -> AcpChangeObservationStatus.COMPLETE
+            else -> AcpChangeObservationStatus.INCOMPLETE
+        }
+        val eligibility = when {
+            accepted -> AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION
+            policyRejected || validationStatus == AcpChangeValidationStatus.FAILED -> AcpChangePublicationEligibility.REJECTED
+            unresolvedOutput -> AcpChangePublicationEligibility.PROVISIONAL
+            else -> AcpChangePublicationEligibility.REJECTED
+        }
+        val assessment = AcpChangeAssessment.create(
+            intent = intent,
+            receiptSha256 = evidence?.let { sha256(it.toReceiptJson(intent.taskId).toByteArray(Charsets.UTF_8)) },
+            sessionIdSha256 = evidence?.sessionIdCommitmentSha256?.let {
+                sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+            },
+            changesSha256 = evidence?.resultChangesSha256,
+            beforeSha256 = intent.beforeSha256,
+            afterSha256 = after,
+            observation = observation,
+            protocolStopCode = null,
+            normalizedStopReason = evidence?.normalizedStopReason,
+            policyVerdict = policyVerdict,
+            reasonCodes = buildList {
+                if (policyRejected) add("mutation-policy-rejected")
+                issues.forEach { issue ->
+                    val code = issue.code.lowercase().replace(Regex("[^a-z0-9_-]"), "-").trim('-')
+                    if (code.isNotEmpty()) add("issue-${code.take(58)}")
+                }
+                if (!accepted && unresolvedOutput && isEmpty()) add("unresolved-output-profile")
+                if (validationStatus == AcpChangeValidationStatus.FAILED && isEmpty()) add("validation-failed")
+            }.distinct().take(256),
+            validationStatus = validationStatus,
+            validationProofSha256 = validationProofs,
+            eligibility = eligibility,
+            updatesSha256 = evidence?.updatesSha256,
+        )
+        val path = requireNotNull(store) { "agent turn assessment requires durable turn evidence storage" }
+            .persistAssessment(intent, assessment)
+        return assessment to path
+    }
+
+    private fun persistInterruptedChangeAssessment(
+        store: ReconstructionTurnEvidenceStore?,
+        intent: AgentTurnIntent,
+        evidence: ReconstructionAgentExecutionEvidence?,
+        stopReason: AgentStopReason,
+    ): Pair<AcpChangeAssessment, String> {
+        val after = evidence?.resultAfterSha256
+        val assessment = AcpChangeAssessment.create(
+            intent = intent,
+            receiptSha256 = evidence?.let { sha256(it.toReceiptJson(intent.taskId).toByteArray(Charsets.UTF_8)) },
+            sessionIdSha256 = evidence?.sessionIdCommitmentSha256?.let {
+                sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+            },
+            changesSha256 = evidence?.resultChangesSha256,
+            beforeSha256 = intent.beforeSha256,
+            afterSha256 = after,
+            observation = when {
+                evidence == null -> AcpChangeObservationStatus.UNKNOWN
+                after != null -> AcpChangeObservationStatus.COMPLETE
+                else -> AcpChangeObservationStatus.INCOMPLETE
+            },
+            protocolStopCode = null,
+            normalizedStopReason = evidence?.normalizedStopReason ?: stopReason,
+            policyVerdict = AcpChangePolicyVerdict.NOT_EVALUATED,
+            reasonCodes = listOf("workflow-interrupted"),
+            validationStatus = if (evidence?.normalizedStopReason in setOf(AgentStopReason.COMPLETED, AgentStopReason.NO_CHANGES) &&
+                stopReason in setOf(AgentStopReason.CANCELLED, AgentStopReason.LIMIT_EXHAUSTED)) {
+                AcpChangeValidationStatus.INCOMPLETE
+            } else AcpChangeValidationStatus.NOT_RUN,
+            validationProofSha256 = emptyList(),
+            eligibility = AcpChangePublicationEligibility.INTERRUPTED,
+            updatesSha256 = evidence?.updatesSha256,
+        )
+        val path = requireNotNull(store) { "interrupted agent turn requires durable turn evidence storage" }
+            .persistAssessment(intent, assessment)
+        return assessment to path
+    }
+
     private fun executionTextCommitment(value: String): Pair<String, Long> {
         val bytes = receiptCommitmentBytes(value)
         return sha256(bytes) to bytes.size.toLong()
@@ -1625,10 +1977,25 @@ object SourceTreeGenerator {
         previousCheckpoint: ModuleCheckpoint?,
         interruption: ModuleReconstructionInterruptedException,
         executionEvidence: PersistedReconstructionExecutionEvidence?,
+        turnIntentPath: String?,
+        turnReceiptPath: String?,
+        turnReceiptSha256: String?,
+        changeAssessmentPath: String?,
+        turnIntent: AgentTurnIntent?,
+        changeAssessment: AcpChangeAssessment?,
     ) {
+        require((turnIntent == null) == (turnIntentPath == null) &&
+            (turnIntent == null) == (changeAssessment == null) &&
+            (turnIntent == null) == (changeAssessmentPath == null)) {
+            "interruption report turn provenance is incomplete"
+        }
+        require((turnReceiptPath == null) == (turnReceiptSha256 == null) &&
+            (turnReceiptSha256 == null || turnReceiptSha256 == changeAssessment?.receiptSha256)) {
+            "interruption report receipt binding is incomplete"
+        }
         val currentSourceSha256 = sourcePath.takeIf { it.exists() }?.readBytes()?.let(::sha256)
         val report = buildString {
-            append("{\n  \"schemaVersion\": 2,")
+            append("{\n  \"schemaVersion\": ").append(if (turnIntent == null) 2 else 3).append(',')
             append("\n  \"moduleId\": \"").append(module.id.jsonEscape()).append("\",")
             append("\n  \"fingerprint\": \"").append(fingerprint).append("\",")
             append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
@@ -1647,6 +2014,16 @@ object SourceTreeGenerator {
             append(executionEvidence?.requestSha256?.let { "\"$it\"" } ?: "null").append(',')
             append("\n  \"executionTerminalOutcome\": ")
             append(executionEvidence?.terminalOutcome?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
+            if (turnIntent != null) {
+                append("\n  \"turnIntentPath\": \"").append(requireNotNull(turnIntentPath).jsonEscape()).append("\",")
+                append("\n  \"turnIntentSha256\": \"").append(turnIntent.sha256).append("\",")
+                append("\n  \"turnReceiptPath\": ")
+                append(turnReceiptPath?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
+                append("\n  \"turnReceiptSha256\": ")
+                append(turnReceiptSha256?.let { "\"$it\"" } ?: "null").append(',')
+                append("\n  \"changeAssessmentPath\": \"").append(requireNotNull(changeAssessmentPath).jsonEscape()).append("\",")
+                append("\n  \"changeAssessmentSha256\": \"").append(requireNotNull(changeAssessment).sha256).append("\",")
+            }
             append("\n  \"currentSourceSha256\": ")
             append(currentSourceSha256?.let { "\"$it\"" } ?: "null").append(',')
             append("\n  \"previousAcceptedSourceSha256\": ")
@@ -1779,6 +2156,25 @@ object SourceTreeGenerator {
             temporary.deleteIfExists()
         }
     }
+
+    private const val MAXIMUM_AGENT_CHECKPOINT_BYTES = 4 * 1024 * 1024
+    private val CHECKPOINT_V7_REQUIRED_FIELDS = setOf(
+            "schemaVersion", "fingerprint", "sourceSha256", "generator", "workflowOrigin",
+            "reconstructorIdentity", "promptSha256", "promptCharacters", "promptBudgetCharacters",
+            "executionEvidencePath", "executionEvidenceSha256", "executionEvidenceSchemaVersion",
+            "executionRequestSha256", "executionTerminalOutcome", "executionReleaseComplete",
+            "inputBinarySha256", "modelSchemaVersion", "profileSha256", "turnIntentPath",
+            "turnIntentSha256", "turnIntent", "turnReceiptPath", "turnReceiptSha256",
+            "changeAssessmentPath", "changeAssessmentSha256", "changeAssessment", "accepted",
+            "compilation", "retryable", "entityStatuses", "issues",
+        )
+    private val CHECKPOINT_V7_OPTIONAL_FALLBACK_FIELDS = setOf(
+        "preDispatchObservedBehavior", "preDispatchCompilerFeedback",
+    )
+    private val CHECKPOINT_V6_REQUIRED_FIELDS = CHECKPOINT_V7_REQUIRED_FIELDS - setOf(
+        "workflowOrigin", "turnIntentPath", "turnIntentSha256", "turnIntent", "changeAssessmentPath",
+            "turnReceiptPath", "turnReceiptSha256", "changeAssessmentSha256", "changeAssessment",
+    )
 
     internal fun moduleFingerprint(
         module: PlannedModule,

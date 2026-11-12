@@ -921,8 +921,9 @@ class ArchivalReconstructionService(
         workspace: ReconstructionOutputWorkspace,
         publicationAdmission: () -> Unit = {},
         onCommittedPublication: () -> Unit = {},
+        workflowRunId: String? = null,
     ): ArchivalReconstructionResult = reconstructInternal(binaryPath, outputDir, workspace, publicationAdmission,
-        onCommittedPublication)
+        onCommittedPublication, workflowRunId)
 
     private fun reconstructInternal(
         binaryPath: Path,
@@ -930,6 +931,7 @@ class ArchivalReconstructionService(
         workspace: ReconstructionOutputWorkspace?,
         publicationAdmission: () -> Unit = {},
         onCommittedPublication: () -> Unit = {},
+        workflowRunId: String? = null,
     ): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         // Canonicalize the caller's supplied root before comparing it with the lease. This
@@ -985,6 +987,7 @@ class ArchivalReconstructionService(
                     progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
                 },
                 publicationLock = workspace?.publicationLock,
+                workflowRunId = workflowRunId,
             )
             require(generated.disposition.publicationRequirement == publicationRequirement) {
                 "reconstruction publication requirement changed during generation"

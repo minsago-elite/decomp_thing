@@ -62,16 +62,37 @@ internal class BestEffortProgressJournal(
         }
     }
 
-    override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress =
-        task { it.beginTask(taskId, request) }
+    override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
+        val identity = AgentTurnIdentity.create(taskId, request)
+        return task(identity) { it.beginTask(taskId, request, identity) }
+    }
 
-    override fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress =
-        task { it.beginTask(taskId, request, workflowRunId) }
+    override fun beginTask(
+        taskId: String,
+        request: AgentExecutionRequest,
+        turnIdentity: AgentTurnIdentity,
+    ): AgentTaskProgress = task(turnIdentity) { it.beginTask(taskId, request, turnIdentity) }
 
-    private fun task(begin: (AgentProgressJournal) -> AgentTaskProgress): AgentTaskProgress {
+    override fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress {
+        val identity = AgentTurnIdentity.create(taskId, request, workflowRunId)
+        return task(identity) { it.beginTask(taskId, request, workflowRunId, identity) }
+    }
+
+    override fun beginTask(
+        taskId: String,
+        request: AgentExecutionRequest,
+        workflowRunId: String,
+        turnIdentity: AgentTurnIdentity,
+    ): AgentTaskProgress = task(turnIdentity) { it.beginTask(taskId, request, workflowRunId, turnIdentity) }
+
+    private fun task(
+        identity: AgentTurnIdentity? = null,
+        begin: (AgentProgressJournal) -> AgentTaskProgress,
+    ): AgentTaskProgress {
         var progress = AgentTaskProgress.NONE
         observe { journal?.let { progress = begin(it) } }
         return object : AgentTaskProgress {
+            override val turnIdentity: AgentTurnIdentity? get() = identity ?: progress.turnIdentity
             override fun event(event: AgentExecutionEvent) = observe { progress.event(event) }
             override fun complete(receipt: AgentExecutionReceipt) = observe { progress.complete(receipt) }
         }

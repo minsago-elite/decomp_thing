@@ -4,14 +4,17 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.ACP_CAPTURED_REPAIR_WORKSPACE
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentHarness
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.captureAgentExecutionReceipt
+import decompengine.agent.withTurnIdentity
 import java.nio.file.Path
 import java.util.Collections
 import java.util.LinkedHashMap
@@ -59,10 +62,27 @@ interface RepairStagingAuthority {
             { root -> requestFactory(root).also { request = it } },
             onEvent,
         )
-        return RepairStagingExecution(
-            captureAgentExecutionReceipt(request) { execution.result },
-            execution.files,
+        return RepairStagingExecution(captureAgentExecutionReceipt(request) { execution.result }, execution.files)
+    }
+
+    /** Invocation-correlated overload; legacy authorities remain source compatible. */
+    fun executeReceipt(
+        harness: AgentHarness,
+        initialFiles: Map<String, ByteArray>,
+        writablePaths: Set<String>,
+        budget: RepairResourceBudget,
+        requestFactory: (AgentWorkspaceRoot) -> AgentExecutionRequest,
+        onEvent: (AgentExecutionEvent) -> Unit,
+        turnIdentity: (AgentExecutionRequest) -> AgentTurnIdentity?,
+    ): RepairStagingExecution {
+        lateinit var request: AgentExecutionRequest
+        val result = executeReceipt(
+            harness, initialFiles, writablePaths, budget,
+            { root -> requestFactory(root).also { request = it } }, onEvent,
         )
+        val identity = turnIdentity(request)
+        val receipt = identity?.let(result.receipt::withTurnIdentity) ?: result.receipt
+        return RepairStagingExecution(receipt, result.files)
     }
 }
 
@@ -98,6 +118,17 @@ interface CapturedRepairAgentHarness : AgentHarness {
         onEvent: (AgentExecutionEvent) -> Unit,
     ): AgentExecutionReceipt = captureAgentExecutionReceipt(request) {
         executeCaptured(request, initialFiles, output, onEvent)
+    }
+
+    fun executeCapturedReceipt(
+        request: AgentExecutionRequest,
+        turnIdentity: AgentTurnIdentity,
+        initialFiles: Map<String, ByteArray>,
+        output: BoundedRepairOutput,
+        onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionReceipt {
+        turnIdentity.requireBoundTo(AgentExecutionRequestBinding.capture(request))
+        return executeCapturedReceipt(request, initialFiles, output, onEvent).withTurnIdentity(turnIdentity)
     }
 }
 
@@ -285,6 +316,56 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
         )
         val receipt = try {
             captured.executeCapturedReceipt(request, harnessView, output, onEvent)
+        } catch (failure: Throwable) {
+            output.finish()
+            throw failure
+        }
+        val files = frozenInitial.mapValuesTo(TreeMap()) { (_, bytes) -> bytes.copyOf() as ByteArray? }
+        output.finish().forEach { (path, bytes) -> files[path] = bytes }
+        return RepairStagingExecution(receipt, files)
+    }
+
+    override fun executeReceipt(
+        harness: AgentHarness,
+        initialFiles: Map<String, ByteArray>,
+        writablePaths: Set<String>,
+        budget: RepairResourceBudget,
+        requestFactory: (AgentWorkspaceRoot) -> AgentExecutionRequest,
+        onEvent: (AgentExecutionEvent) -> Unit,
+        turnIdentity: (AgentExecutionRequest) -> AgentTurnIdentity?,
+    ): RepairStagingExecution {
+        val captured = harness as? CapturedRepairAgentHarness
+            ?: throw IllegalArgumentException(
+                "strict repair staging requires a CapturedRepairAgentHarness or another strict authority",
+            )
+        require(initialFiles.keys == initialFiles.keys.map(::normalizedCapturedPath).distinct().toSet())
+        require(writablePaths.all { it in initialFiles }) { "repair writable paths must be staged source inputs" }
+        require(initialFiles.size <= budget.maximumContextFiles) { "repair staging exceeds the file-entry budget" }
+        val directories = buildSet {
+            add("")
+            initialFiles.keys.forEach { relative ->
+                val components = relative.split('/').dropLast(1)
+                components.indices.forEach { index -> add(components.take(index + 1).joinToString("/")) }
+            }
+        }
+        require(directories.size <= budget.maximumStagingDirectories) {
+            "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}"
+        }
+        val initialBytes = initialFiles.values.fold(0L) { total, bytes -> Math.addExact(total, bytes.size.toLong()) }
+        if (initialBytes > budget.maximumStagingBytes) {
+            throw RepairBudgetExceededException(
+                "repair staging requires $initialBytes bytes; limit=${budget.maximumStagingBytes}",
+            )
+        }
+        val frozenInitial = immutableRequiredCapturedFiles(initialFiles)
+        val frozenWritable = Collections.unmodifiableSet(TreeSet(writablePaths))
+        val harnessView = immutableRequiredCapturedFiles(frozenInitial)
+        val request = requestFactory(AgentWorkspaceRoot("project", ACP_CAPTURED_REPAIR_WORKSPACE))
+        val output = BoundedRepairOutput(frozenInitial, frozenWritable, budget, request.accessPolicy)
+        val receipt = try {
+            val identity = turnIdentity(request)
+            if (identity == null) captured.executeCapturedReceipt(request, harnessView, output, onEvent)
+            else captured.executeCapturedReceipt(request, identity, harnessView, output, onEvent)
         } catch (failure: Throwable) {
             output.finish()
             throw failure

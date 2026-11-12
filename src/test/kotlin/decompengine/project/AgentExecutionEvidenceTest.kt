@@ -343,7 +343,13 @@ class AgentExecutionEvidenceTest {
         assertTrue(evidenceFile.exists())
         val text = evidenceFile.readText()
         val evidence = Json.parseToJsonElement(text).jsonObject
-        assertEquals(2, evidence.getValue("schemaVersion").jsonPrimitive.int)
+        assertEquals(3, evidence.getValue("schemaVersion").jsonPrimitive.int)
+        val turnIdentity = evidence.getValue("turnIdentity").jsonObject
+        assertTrue(turnIdentity.getValue("turnId").jsonPrimitive.content.matches(
+            Regex("[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"),
+        ))
+        assertEquals("parse", turnIdentity.getValue("taskId").jsonPrimitive.content)
+        assertEquals(harness.requestBinding.requestSha256, turnIdentity.getValue("requestSha256").jsonPrimitive.content)
         assertEquals("acp", evidence.getValue("factoryProvenance").jsonObject.getValue("harness").jsonPrimitive.content)
         assertEquals(ACP_STABLE_PROTOCOL_VERSION, evidence.getValue("protocol").jsonObject.getValue("version").jsonPrimitive.int)
         val negotiatedImplementation = evidence.getValue("agent").jsonObject
@@ -409,10 +415,11 @@ class AgentExecutionEvidenceTest {
         assertFalse(text.contains(toolTitle))
         assertFalse(text.contains("stderr peer output"))
 
-        val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("\"schemaVersion\": 6"))
-        assertTrue(checkpoint.contains("\"executionEvidencePath\": \"$evidencePath\""))
-        assertTrue(checkpoint.contains(sha256(evidenceFile.readBytes())))
+        val checkpointText = project.resolve("reports/modules/parse.json").readText()
+        val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
+        assertEquals(7, checkpoint.getValue("schemaVersion").jsonPrimitive.int)
+        assertEquals(evidencePath, checkpoint.getValue("executionEvidencePath").jsonPrimitive.content)
+        assertEquals(sha256(evidenceFile.readBytes()), checkpoint.getValue("executionEvidenceSha256").jsonPrimitive.content)
         val manifestEntry = manifest.files.single { it.path == evidencePath }
         assertEquals(sha256(evidenceFile.readBytes()), manifestEntry.sha256)
         assertEquals("acp-execution-receipt:v2", manifestEntry.generator)
@@ -677,7 +684,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `agent candidate changed by publication normalization is rejected`() {
+    fun `agent candidate assessment binds exact provider-produced source bytes`() {
         val temp = createTempDirectory("acp-normalization-binding-")
         val output = temp.resolve("project")
         val harness = EvidenceHarness("session", "message", "tool", appendFinalNewline = false)
@@ -692,12 +699,25 @@ class AgentExecutionEvidenceTest {
         )
 
         val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("\"accepted\": false"))
-        assertTrue(checkpoint.contains("agent-source-normalization-changed-bytes"))
-        assertTrue("fn_0000000000401000" in manifest.unresolvedImplementationIds)
-        assertFailsWith<Exception> {
-            ArchivalPackager.create(project, temp.resolve("rejected.zip"))
-        }
+        assertTrue(checkpoint.contains("\"accepted\": true"))
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        val checkpointValue = Json.parseToJsonElement(checkpoint).jsonObject
+        val assessmentBytes = output.resolve(checkpointValue.getValue("changeAssessmentPath").jsonPrimitive.content).readBytes()
+        val assessment = AcpChangeAssessment.parse(assessmentBytes)
+        val receiptBytes = output.resolve(checkpointValue.getValue("turnReceiptPath").jsonPrimitive.content).readBytes()
+        val verified = verifyAcpExecutionReceiptDocument(
+            receiptBytes,
+            "decomp-engine.reconstruction-acp-execution-receipt",
+            "moduleId",
+            "parse",
+        )
+        assertEquals(verified.turnIdentity?.turnId, assessment.turnId)
+        val intent = AgentTurnIntent.parse(
+            output.resolve(checkpointValue.getValue("turnIntentPath").jsonPrimitive.content).readBytes(),
+        )
+        assertEquals(verified.turnIdentity?.turnId, intent.turnId)
+        assertEquals(verified.releaseFacts?.changes?.single()?.afterSha256, assessment.afterSha256)
+        assertEquals(sha256(project.resolve("src/modules/parse.c").readBytes()), assessment.afterSha256)
     }
 
     @Test
@@ -878,6 +898,36 @@ class AgentExecutionEvidenceTest {
         assertFalse(evidence.releaseComplete)
         assertTrue(text.contains("\"releaseComplete\": false"))
         assertTrue(text.contains("\"truncationReason\": \"artifact-byte-limit\""))
+    }
+
+    @Test
+    fun `reconstruction receipt normalizes hyphenated stop reasons`() {
+        val temp = createTempDirectory("acp-stop-reason-binding-")
+        val root = AgentWorkspaceRoot("root", temp)
+        val target = AgentWorkspacePath("root", "src/modules/parse.c")
+        val request = AgentExecutionRequest(
+            objective = "reconstruct",
+            workspaceRoots = listOf(root),
+            accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(
+                target,
+                setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+            ))),
+        )
+        val harness = EvidenceHarness(
+            "session-no-changes", "message", "tool", terminalStopReason = AgentStopReason.NO_CHANGES,
+        )
+        val recorder = BoundedAgentExecutionEventRecorder()
+        val receipt = harness.executeReceipt(request, recorder::record)
+        val evidence = requireNotNull(ReconstructionAgentExecutionEvidence.captureOrNull(
+            request = request,
+            moduleId = "parse",
+            promptSha256 = "a".repeat(64),
+            receipt = receipt,
+            events = recorder.receiptSnapshot(),
+        ))
+
+        assertEquals(AgentStopReason.NO_CHANGES, evidence.normalizedStopReason)
+        assertTrue(evidence.toReceiptJson("parse").contains("\"stopReason\":\"no-changes\""))
     }
 
     private class EvidenceHarness(

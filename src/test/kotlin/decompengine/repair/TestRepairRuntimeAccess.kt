@@ -78,6 +78,7 @@ internal object TestRepairRuntimeAccess {
         onAgentEvent: (AgentExecutionEvent) -> Unit,
         resourceBudget: RepairResourceBudget,
         allowTestOnlyValidation: Boolean,
+        faultInjector: ModuleRevisionFaultInjector?,
     ): TraceGuidedRepairLoop = TraceGuidedRepairLoop.openAuthorized(
         runtimeIdentity,
         harness,
@@ -90,6 +91,7 @@ internal object TestRepairRuntimeAccess {
         onAgentEvent,
         resourceBudget,
         allowTestOnlyValidation,
+        faultInjector,
     )
 }
 
@@ -144,6 +146,7 @@ internal fun TraceGuidedRepairLoop.Companion.forTesting(
     cancellation: AgentCancellation = AgentCancellation.NONE,
     onAgentEvent: (AgentExecutionEvent) -> Unit = {},
     resourceBudget: RepairResourceBudget = RepairResourceBudget(),
+    faultInjector: ModuleRevisionFaultInjector? = null,
 ): TraceGuidedRepairLoop = TestRepairRuntimeAccess.openLoop(
     harness,
     history,
@@ -155,4 +158,5 @@ internal fun TraceGuidedRepairLoop.Companion.forTesting(
     onAgentEvent,
     resourceBudget,
     allowTestOnlyValidation = true,
+    faultInjector = faultInjector,
 )

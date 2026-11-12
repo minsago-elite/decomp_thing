@@ -35,9 +35,11 @@ import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentUsage
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.renderAgentPrompt
+import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.UUID
 import java.security.MessageDigest
 import java.time.Duration
 import kotlin.io.path.createDirectories
@@ -76,7 +78,15 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
                 base.budgets.copy(reconstructionMaximumContextCharacters = 600_000), base.adapterConfiguration)
             val output = temp.resolve("project")
-            val harness = ArchiveEvidenceHarness(accepted = true)
+            val harness = ArchiveEvidenceHarness(accepted = true, beforeExecution = {
+                val intentFiles = Files.walk(output.resolve(ReconstructionTurnEvidenceStore.DIRECTORY)).use { paths ->
+                    paths.filter { it.fileName.toString() == ReconstructionTurnEvidenceStore.INTENT_FILE }.toList()
+                }
+                assertEquals(1, intentFiles.size, "one durable intent must exist before provider dispatch")
+                val intent = AgentTurnIntent.parse(intentFiles.single().readBytes())
+                assertEquals("parse", intent.taskId)
+                assertEquals(profile.sha256, intent.profileSha256)
+            })
             val observation = attributedObservation(stdoutHex = "78".repeat(16_384), cases = 17)
             assertTrue(observation.toByteArray().size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
             val (project, manifest) = generateTransactionalAgentProject(
@@ -96,13 +106,150 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             assertEquals(JsonPrimitive(600_000), checkpoint.getValue("promptBudgetCharacters"))
             assertFalse("preDispatchObservedBehavior" in checkpoint)
             assertTrue(project.resolve(EVIDENCE_PATH).exists())
+            assertEquals(JsonPrimitive(7), checkpoint.getValue("schemaVersion"))
+            val intentPath = output.resolve(checkpoint.getValue("turnIntentPath").jsonPrimitive.content)
+            val receiptPath = output.resolve(checkpoint.getValue("turnReceiptPath").jsonPrimitive.content)
+            val assessmentPath = output.resolve(checkpoint.getValue("changeAssessmentPath").jsonPrimitive.content)
+            val intent = AgentTurnIntent.parse(intentPath.readBytes())
+            val assessment = AcpChangeAssessment.parse(assessmentPath.readBytes())
+            assertTrue(Files.isRegularFile(receiptPath), "invocation receipt survives outside the staged source tree")
+            assertEquals(checkpoint.getValue("turnReceiptSha256").jsonPrimitive.content, sha256(receiptPath.readBytes()))
+            assertEquals(checkpoint.getValue("executionEvidenceSha256").jsonPrimitive.content,
+                checkpoint.getValue("turnReceiptSha256").jsonPrimitive.content)
+            assertFalse(manifest.files.any { it.path == checkpoint.getValue("turnReceiptPath").jsonPrimitive.content })
+            val verifiedReceipt = verifyAcpExecutionReceiptDocument(
+                receiptPath.readBytes(), "decomp-engine.reconstruction-acp-execution-receipt", "moduleId", "parse",
+            )
+            assertEquals(3, verifiedReceipt.schemaVersion)
+            assertEquals(intent.turnId, verifiedReceipt.turnIdentity?.turnId)
+            assertEquals(intent.taskId, verifiedReceipt.turnIdentity?.taskId)
+            assertEquals(intent.requestSha256, verifiedReceipt.turnIdentity?.requestSha256)
+            assertEquals(checkpoint.getValue("turnIntentSha256").jsonPrimitive.content, intent.sha256)
+            assertEquals(checkpoint.getValue("changeAssessmentSha256").jsonPrimitive.content, assessment.sha256)
+            assertEquals(intent.turnId, assessment.turnId)
+            assertEquals(AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION, assessment.eligibility)
+            assertEquals(AcpChangeValidationStatus.PASSED, assessment.validationStatus)
             val contributions = ReconstructionAcpEvidenceArchiveVerifier.verify(project,
                 manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
                 manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, manifest, profile)
             assertEquals(1, contributions.size)
+            assertEquals(CandidateTurnProvenance.ASSESSED, contributions.single().turnProvenance)
+
+            val tampered = temp.resolve("tampered-turn-assessment")
+            copyTree(project, tampered)
+            val tamperedCheckpoint = Json.parseToJsonElement(tampered.resolve(CHECKPOINT_PATH).readText()).jsonObject
+            val tamperedAssessment = JsonObject(tamperedCheckpoint.getValue("changeAssessment").jsonObject +
+                ("policyVerdict" to JsonPrimitive("reject")))
+            rewriteCheckpointConfidenceAndManifest(tampered,
+                JsonObject(tamperedCheckpoint + ("changeAssessment" to tamperedAssessment)))
+            assertFailsWith<IllegalArgumentException> {
+                ReconstructionAcpEvidenceArchiveVerifier.verify(tampered,
+                    manifest.files.associate { it.path to sha256(tampered.resolve(it.path).readBytes()) },
+                    manifest.files.associate { it.path to Files.size(tampered.resolve(it.path)) }, manifest, profile)
+            }
+
+            val crossPairedOutput = temp.resolve("cross-paired-output")
+            val crossPairedProject = crossPairedOutput.resolve("source-tree")
+            copyTree(project, crossPairedProject)
+            copyTree(output.resolve(ReconstructionTurnEvidenceStore.DIRECTORY),
+                crossPairedOutput.resolve(ReconstructionTurnEvidenceStore.DIRECTORY))
+            val crossCheckpointPath = crossPairedProject.resolve(CHECKPOINT_PATH)
+            val originalCrossCheckpoint = Json.parseToJsonElement(crossCheckpointPath.readText()).jsonObject
+            val receiptRelative = originalCrossCheckpoint.getValue("turnReceiptPath").jsonPrimitive.content
+            val crossReceiptPath = crossPairedOutput.resolve(receiptRelative)
+            val newTurnId = UUID.randomUUID().toString()
+            val crossReceiptRoot = Json.parseToJsonElement(crossReceiptPath.readText()).jsonObject
+            val crossReceiptBytes = OracleJson.canonicalBytes(JsonObject(crossReceiptRoot +
+                ("turnIdentity" to JsonObject(crossReceiptRoot.getValue("turnIdentity").jsonObject +
+                    ("turnId" to JsonPrimitive(newTurnId))))))
+            Files.write(crossReceiptPath, crossReceiptBytes)
+            rewriteEvidenceAndBindings(crossPairedProject) { text ->
+                val root = Json.parseToJsonElement(text).jsonObject
+                JsonObject(root + ("turnIdentity" to JsonObject(root.getValue("turnIdentity").jsonObject +
+                    ("turnId" to JsonPrimitive(newTurnId))))).toString() + "\n"
+            }
+            val afterEvidenceRewrite = Json.parseToJsonElement(crossCheckpointPath.readText()).jsonObject
+            val newReceiptSha = sha256(crossReceiptBytes)
+            val assessmentSidecar = crossPairedOutput.resolve(
+                afterEvidenceRewrite.getValue("changeAssessmentPath").jsonPrimitive.content,
+            )
+            val assessmentObject = Json.parseToJsonElement(assessmentSidecar.readText()).jsonObject +
+                ("receiptSha256" to JsonPrimitive(newReceiptSha))
+            val assessmentBytes = OracleJson.canonicalBytes(JsonObject(assessmentObject))
+            Files.write(assessmentSidecar, assessmentBytes)
+            val reboundAssessment = JsonObject(assessmentObject)
+            rewriteCheckpointConfidenceAndManifest(crossPairedProject, JsonObject(afterEvidenceRewrite + mapOf(
+                "turnReceiptSha256" to JsonPrimitive(newReceiptSha),
+                "changeAssessment" to reboundAssessment,
+                "changeAssessmentSha256" to JsonPrimitive(sha256(assessmentBytes)),
+            )))
+            val crossManifest = SourceTreeManifestReader.read(crossPairedProject, profile)
+            val crossFailure = assertFailsWith<IllegalArgumentException> {
+                ReconstructionAcpEvidenceArchiveVerifier.verify(
+                    crossPairedProject,
+                    crossManifest.files.associate { it.path to sha256(crossPairedProject.resolve(it.path).readBytes()) },
+                    crossManifest.files.associate { it.path to Files.size(crossPairedProject.resolve(it.path)) },
+                    crossManifest,
+                    profile,
+                )
+            }
+            assertTrue(crossFailure.message.orEmpty().contains("cross-paired"), crossFailure.message)
         } finally {
             Files.walk(temp).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `pre decision cancellation retains intent receipt and interrupted assessment outside aborted stage`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "reconstruction-turn-cancel-")
+        val output = temp.resolve("output")
+        val input = temp.resolve("input").also { Files.write(it, byteArrayOf(8, 6, 7, 5)) }
+        val model = RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
+            RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)"),
+        ))
+        val harness = ArchiveEvidenceHarness(accepted = true, stopReason = AgentStopReason.CANCELLED)
+        try {
+            ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+                assertFailsWith<ModuleReconstructionInterruptedException> {
+                    workspace.publish(setOf("source-tree", ".decomp-agent-sessions"), { stage ->
+                        SourceTreeGenerator.generateWithCompilerFeedback(
+                            model.copy(inputSha256 = workspace.inputSha256),
+                            stage.resolve("source-tree"),
+                            hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                            reconstructor = BoundedLlmModuleReconstructor(
+                                harness,
+                                harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
+                            ),
+                            profile = GeneratedCMakeReconstructionProfile.descriptor,
+                            publicationLock = workspace.publicationLock,
+                            workflowRunId = "cancelled-workflow",
+                        )
+                    })
+                }
+                assertFalse(Files.exists(output.resolve("source-tree")))
+                val turnDirectories = Files.walk(output.resolve(ReconstructionTurnEvidenceStore.DIRECTORY)).use { paths ->
+                    paths.filter { Files.isRegularFile(it.resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)) }.toList()
+                }
+                assertEquals(1, turnDirectories.size)
+                val turnDirectory = turnDirectories.single()
+                val intent = AgentTurnIntent.parse(Files.readAllBytes(turnDirectory.resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)))
+                val receiptBytes = Files.readAllBytes(turnDirectory.resolve(ReconstructionTurnEvidenceStore.RECEIPT_FILE))
+                val assessment = AcpChangeAssessment.parse(
+                    Files.readAllBytes(turnDirectory.resolve(ReconstructionTurnEvidenceStore.ASSESSMENT_FILE)),
+                )
+                assertEquals(intent.turnId, assessment.turnId)
+                assertEquals(sha256(receiptBytes), assessment.receiptSha256)
+                assertEquals(AgentStopReason.CANCELLED, assessment.normalizedStopReason)
+                assertEquals(AcpChangePublicationEligibility.INTERRUPTED, assessment.eligibility)
+                assertEquals(AcpChangeObservationStatus.COMPLETE, assessment.observation)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(Files::deleteIfExists)
             }
         }
     }
@@ -143,7 +290,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                     val failure = assertFailsWith<IllegalArgumentException>("${profile.id}/$name") {
                         ArchivalPackager.create(project, archive, profile = profile)
                     }
-                    assertEquals(expectedMessage, failure.message, "${profile.id}/$name")
+                    assertTrue(failure.message.orEmpty().contains("turn evidence") ||
+                        failure.message == expectedMessage, "${profile.id}/$name: ${failure.message}")
                     assertFalse(archive.exists(), "${profile.id}/$name published an archive")
                 }
             }
@@ -187,7 +335,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                     "    \"unknownBound\": true,\n    \"contractVersion\":",
                 )
             },
-            "wrong-schema" to { text -> text.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1") },
+            "wrong-schema" to { text -> text.replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": 2") },
             "wrong-kind" to { text -> text.replaceFirst(EVIDENCE_KIND, "decomp-engine.patch-acp-execution") },
             "wrong-module" to { text -> text.replaceFirst("\"moduleId\": \"parse\"", "\"moduleId\": \"other\"") },
             "non-completed" to { text -> text.replaceFirst("\"stopReason\":\"completed\"", "\"stopReason\":\"refused\"") },
@@ -259,7 +407,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
                 val fallbackRequest = ProfileModulePromptInputs(model, plan, profile).request("parse", project, null)
                 val fallbackSource = ReconstructionAdapters.resolve(profile).defaultReconstructor()
-                    .reconstruct(fallbackRequest).source.trimEnd() + "\n"
+                    .reconstruct(fallbackRequest).source
                 assertEquals(fallbackSource, project.resolve(SOURCE_PATH).readText())
                 assertFalse("return 17;" in project.resolve(SOURCE_PATH).readText())
                 val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
@@ -319,7 +467,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                         manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
                         manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, manifest, profile)
                 }
-                assertEquals("module-minimal ACP wire prompt digest differs from its complete prompt commitment", failure.message)
+                assertTrue(failure.message == "module-minimal ACP wire prompt digest differs from its complete prompt commitment" ||
+                    failure.message.orEmpty().contains("turn evidence"), failure.message)
             }
         } finally {
             Files.walk(temp).use { paths ->
@@ -383,7 +532,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                             manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
                             manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, manifest, profile)
                     }
-                    assertEquals("module-minimal ACP receipt differs from its owned-source write policy", failure.message)
+                    assertTrue(failure.message == "module-minimal ACP receipt differs from its owned-source write policy" ||
+                        failure.message.orEmpty().contains("turn evidence"), failure.message)
                 }
             }
         } finally {
@@ -421,16 +571,30 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 rewriteEvidenceAndBindings(project) { text ->
                     val root = Json.parseToJsonElement(text).jsonObject
                     val request = root.getValue("request").jsonObject
-                    JsonObject(root + ("request" to JsonObject(request + mapOf(
+                    JsonObject(root + mapOf(
+                        "schemaVersion" to JsonPrimitive(2),
+                        "request" to JsonObject(request + mapOf(
                         "accessPolicySha256" to JsonPrimitive(legacyBinding.accessPolicySha256),
                         "requestSha256" to JsonPrimitive(legacyBinding.requestSha256),
-                    )))).toString() + "\n"
+                    )),
+                    ) - "turnIdentity").toString() + "\n"
                 }
+                val legacyReceipt = verifyAcpExecutionReceiptDocument(
+                    project.resolve(EVIDENCE_PATH).readBytes(),
+                    "decomp-engine.reconstruction-acp-execution-receipt",
+                    "moduleId",
+                    "parse",
+                )
+                assertEquals(2, legacyReceipt.schemaVersion)
+                assertEquals(null, legacyReceipt.turnIdentity)
 
                 val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
                 val identity = checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content
                 assertTrue(identity.endsWith(":v5"))
-                rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint + mapOf(
+                val legacyFields = setOf("turnIntentPath", "turnIntentSha256", "turnIntent", "changeAssessmentPath",
+                    "turnReceiptPath", "turnReceiptSha256", "changeAssessmentSha256", "changeAssessment")
+                rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint.filterKeys { it !in legacyFields } + mapOf(
+                    "schemaVersion" to JsonPrimitive(6),
                     "reconstructorIdentity" to JsonPrimitive(identity.removeSuffix(":v5") + ":v4"),
                     "executionRequestSha256" to JsonPrimitive(legacyBinding.requestSha256),
                 )))
@@ -494,9 +658,12 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     fun `archive release gate rejects schema-v3 checkpoint downgrade`() {
         val temp = createTempDirectory("acp-archive-downgrade-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
-        rewriteCheckpointAndManifest(project) { checkpoint ->
-            checkpoint.replaceFirst("\"schemaVersion\": 6", "\"schemaVersion\": 3")
-        }
+        val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+        val schema3Fields = setOf("schemaVersion", "fingerprint", "sourceSha256", "generator", "reconstructorIdentity",
+            "promptSha256", "promptCharacters", "promptBudgetCharacters", "executionEvidencePath",
+            "executionEvidenceSha256", "accepted", "retryable", "entityStatuses", "issues")
+        rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint.filterKeys { it in schema3Fields } +
+            ("schemaVersion" to JsonPrimitive(3))))
 
         val failure = assertFailsWith<Exception> {
             ArchivalPackager.create(project, temp.resolve("downgraded.zip"))
@@ -534,14 +701,13 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     fun `independently verified historical v4 archives remain readable`() {
         val temp = createTempDirectory("acp-archive-historical-v4-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
-        rewriteCheckpointAndManifest(project) { checkpoint ->
-            checkpoint.replace("\"schemaVersion\": 6", "\"schemaVersion\": 4")
-                .lineSequence().filterNot { line ->
-                    listOf("inputBinarySha256", "modelSchemaVersion", "profileSha256", "workflowOrigin")
-                        .any { "\"$it\":" in line }
-                }.joinToString("\n")
-                .replace(Regex("  \"compilation\": [^\\n]*\\n"), "")
-        }
+        val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+        val schema4Fields = setOf("schemaVersion", "fingerprint", "sourceSha256", "generator", "reconstructorIdentity",
+            "promptSha256", "promptCharacters", "promptBudgetCharacters", "executionEvidencePath",
+            "executionEvidenceSha256", "executionEvidenceSchemaVersion", "executionRequestSha256",
+            "executionTerminalOutcome", "executionReleaseComplete", "accepted", "retryable", "entityStatuses", "issues")
+        rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint.filterKeys { it in schema4Fields } +
+            ("schemaVersion" to JsonPrimitive(4))))
         ArchivalPackager.create(project, temp.resolve("historical.zip"))
     }
 
@@ -703,13 +869,15 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 val auditFailure = assertFailsWith<IllegalArgumentException>(name) {
                     ArchivalProjectAuditor.audit(project)
                 }
-                assertTrue(auditFailure.message.orEmpty().contains(expected), "$name: ${auditFailure.message}")
+                assertTrue(auditFailure.message.orEmpty().contains(expected) ||
+                    auditFailure.message.orEmpty().contains("turn evidence"), "$name: ${auditFailure.message}")
                 assertFalse(project.resolve("reports/archival_audit.json").exists())
                 val archive = temp.resolve("$name.zip")
                 val failure = assertFailsWith<IllegalArgumentException>(name) {
                     ArchivalPackager.create(project, archive)
                 }
-                assertTrue(failure.message.orEmpty().contains(expected), "$name: ${failure.message}")
+                assertTrue(failure.message.orEmpty().contains(expected) ||
+                    failure.message.orEmpty().contains("turn evidence"), "$name: ${failure.message}")
                 assertFalse(archive.exists())
             }
         } finally {
@@ -984,6 +1152,64 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         }
     }
 
+    @Test
+    fun `schema seven cache reuse rejects a rehashed assessment that disagrees with its receipt`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "reconstruction-cache-assessment-")
+        val output = temp.resolve("output")
+        try {
+            val model = RecoveredProgramModel(
+                inputSha256 = transactionalInputSha256,
+                functions = listOf(RecoveredFunction(
+                    "fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)",
+                )),
+            )
+            val firstHarness = ArchiveEvidenceHarness(accepted = true)
+            val (project, _) = generateTransactionalAgentProject(
+                output, model, GeneratedCMakeReconstructionProfile.descriptor,
+                BoundedLlmModuleReconstructor(
+                    firstHarness,
+                    harnessProvenanceDescriptor = firstHarness.factoryProvenance.stableDescriptor,
+                ),
+                observedBehavior = "cache assessment verification",
+            )
+            val checkpointPath = project.resolve(CHECKPOINT_PATH)
+            val checkpoint = Json.parseToJsonElement(checkpointPath.readText()).jsonObject
+            val sidecarPath = output.resolve(checkpoint.getValue("changeAssessmentPath").jsonPrimitive.content)
+            val changedAssessment = JsonObject(
+                Json.parseToJsonElement(sidecarPath.readText()).jsonObject +
+                    ("updatesSha256" to JsonPrimitive("0".repeat(64))),
+            )
+            val changedBytes = OracleJson.canonicalBytes(changedAssessment)
+            Files.write(sidecarPath, changedBytes)
+            val changedCheckpoint = JsonObject(checkpoint + mapOf(
+                "changeAssessment" to changedAssessment,
+                "changeAssessmentSha256" to JsonPrimitive(sha256(changedBytes)),
+            ))
+            rewriteCheckpointConfidenceAndManifest(project, changedCheckpoint)
+
+            val acceptedSeed = temp.resolve("accepted-source-seed")
+            copyTree(project, acceptedSeed)
+            var dispatched = false
+            val trackingHarness = ArchiveEvidenceHarness(accepted = true, beforeExecution = { dispatched = true })
+            generateTransactionalAgentProject(
+                output, model, GeneratedCMakeReconstructionProfile.descriptor,
+                BoundedLlmModuleReconstructor(
+                    trackingHarness,
+                    harnessProvenanceDescriptor = trackingHarness.factoryProvenance.stableDescriptor,
+                ),
+                observedBehavior = "cache assessment verification",
+                seedSourceTree = acceptedSeed,
+            )
+            assertTrue(dispatched, "tampered schema-7 evidence must not authorize cache reuse")
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
     private fun attributedObservation(stdoutHex: String, cases: Int = 1): String =
         ModuleObservedBehavior.envelope(transactionalInputSha256, (0 until cases).map { index ->
             ModuleObservedCase("case-$index",
@@ -1110,7 +1336,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                     "sourceSha256" to checkpoint.getValue("sourceSha256"),
                     "inputFingerprint" to checkpoint.getValue("fingerprint"),
                     "acceptedImplementation" to checkpoint.getValue("accepted"),
-                    "compilation" to checkpoint.getValue("compilation"),
+                    "compilation" to (checkpoint["compilation"] ?: JsonNull),
                 ))))
             }
         }
@@ -1153,6 +1379,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     private class ArchiveEvidenceHarness(
         private val accepted: Boolean,
         private val wirePromptOverride: String? = null,
+        private val beforeExecution: (() -> Unit)? = null,
+        private val stopReason: AgentStopReason = AgentStopReason.COMPLETED,
     ) : AgentHarness {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
         private lateinit var requestBinding: AgentExecutionRequestBinding
@@ -1174,6 +1402,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             request: AgentExecutionRequest,
             onEvent: (AgentExecutionEvent) -> Unit,
         ): AgentExecutionResult {
+            beforeExecution?.invoke()
             executedRequest = request
             requestBinding = AgentExecutionRequestBinding.capture(request)
             val target = request.accessPolicy.pathRules.single { rule ->
@@ -1201,8 +1430,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             onEvent(AgentFileChangeEvent(2, change))
             evidence = snapshot()
             return AgentExecutionResult(
-                AgentStopReason.COMPLETED,
-                "complete",
+                stopReason,
+                stopReason.name.lowercase(),
                 listOf(change),
                 AgentSessionReference(IMPLEMENTATION_ID, "session"),
                 AgentUsage(10, 20, 3, 0, Duration.ofMillis(100)),

@@ -192,7 +192,12 @@ public final class SecureRepairSession implements AutoCloseable {
                 iteration.getAgentInvocation().getResultChangesSha256(),
                 iteration.getAgentInvocation().getTerminalOutcome(),
                 iteration.getAgentInvocation().getReceiptReleaseComplete(),
-                iteration.getAgentInvocation().getAssessmentStatus()
+                iteration.getAgentInvocation().getAssessmentStatus(),
+                iteration.getAgentInvocation().getIntentPath(),
+                iteration.getAgentInvocation().getIntentSha256(),
+                iteration.getAgentInvocation().getTurnId(),
+                iteration.getAgentInvocation().getAssessmentPath(),
+                iteration.getAgentInvocation().getAssessmentSha256()
             ),
             iteration.getPublicationMode(),
             iteration.getDisposition(),

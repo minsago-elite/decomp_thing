@@ -512,6 +512,24 @@ internal class RepairStateStore private constructor(
 
     fun cleanupGraphTemporary() = cleanupAtomicTemporary(revisions, GRAPH_NAME)
 
+    /**
+     * Remove only unpublished atomic temporaries for immutable invocation evidence. A crash
+     * before the final-name exchange never committed that document, so recovery must not
+     * promote it or leave archive-blocking residue behind. The enclosing graph lock serializes
+     * this bounded descriptor-relative cleanup with all cooperating writers.
+     */
+    fun cleanupRevisionEvidenceTemporaries(maximumEntries: Int) {
+        require(maximumEntries > 0)
+        val names = LinuxFilesystemSyscalls.directoryEntryNames(revisions, maximumEntries)
+        val targetNames = names.mapNotNull { name ->
+            REVISION_EVIDENCE_TEMPORARY.matchEntire(name)?.groupValues?.get(1)
+        }.sorted()
+        targetNames.forEach { targetName ->
+            requireRevisionFileName(targetName)
+            cleanupAtomicTemporary(revisions, targetName)
+        }
+    }
+
     fun cleanupBindingTemporary() = cleanupAtomicTemporary(revisions, RECOVERY_BINDING_NAME)
 
     fun cleanupBlobTemporary(digest: String) {
@@ -893,7 +911,8 @@ private const val BLOBS_NAME = "blobs"
 private const val PUBLICATION_STAGING_DIRECTORY = "publication-staging"
 private const val GRAPH_NAME = "graph.json"
 private const val RECOVERY_BINDING_NAME = "recovery-binding.json"
-private val REVISION_EVIDENCE_NAME = Regex("revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")
+private val REVISION_EVIDENCE_NAME = Regex("revision_[A-Za-z0-9_]+\\.acp-(?:receipt|intent|assessment)\\.json")
+private val REVISION_EVIDENCE_TEMPORARY = Regex("\\.(revision_[A-Za-z0-9_]+\\.acp-(?:receipt|intent|assessment)\\.json)\\.repair-atomic\\.tmp")
 private const val OWNER_ALL = 0x1c0 // 0700
 private const val OWNER_READ_WRITE = 0x180 // 0600
 private const val GROUP_OR_OTHER_WRITE = 0x12 // 0022

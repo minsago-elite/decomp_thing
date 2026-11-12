@@ -10,10 +10,12 @@ import decompengine.agent.AgentExecutionReceipt;
 import decompengine.agent.AgentExecutionRequestBinding;
 import decompengine.agent.AgentFailure;
 import decompengine.agent.AgentFailureKind;
+import decompengine.agent.AgentTurnIdentity;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /** Authored values only: no harness, process, filesystem, authentication or model invocation. */
 public final class AcpCompatibilityPreflightEvidenceControls {
@@ -72,8 +74,11 @@ public final class AcpCompatibilityPreflightEvidenceControls {
 
     private static AgentExecutionException receiptFailure(AgentExecutionProviderEvidence provider) {
         var failure = new AgentFailure(AgentFailureKind.TIMEOUT, "PRIVATE-failure", false, null, Map.of());
-        var receipt = new AgentExecutionReceipt(new AgentExecutionRequestBinding(1, "a".repeat(64), "b".repeat(64)),
-            new AgentExecutionOutcome.Failed(failure), provider, new IllegalStateException("PRIVATE-cause"));
+        var binding = new AgentExecutionRequestBinding(1, "a".repeat(64), "b".repeat(64));
+        var identity = new AgentTurnIdentity(UUID.randomUUID().toString(), "preflight-control",
+            binding.getRequestSha256(), null);
+        var receipt = new AgentExecutionReceipt(binding, new AgentExecutionOutcome.Failed(failure), provider,
+            new IllegalStateException("PRIVATE-cause"), identity);
         try {
             receipt.requireResult();
         } catch (AgentExecutionException expected) {

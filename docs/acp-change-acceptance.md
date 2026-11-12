@@ -81,6 +81,40 @@ process/sandbox cleanup and without complete execution evidence or a returned
 partial change list. This is deterministic fault injection, not a claim that an
 agent bypassed the independent filesystem or protocol-frame limits.
 
+### Turn correlation
+
+Workflow callers that record progress create one host-owned `AgentTurnIdentity`
+before dispatch. Its UUID, task identity and request commitment are passed to the
+progress projection and execution receipt, including captured repair dispatch.
+Invocation receipt schema 3 persists the UUID, task identity and request digest as
+an exact binding; schema-2 receipts remain readable as historical evidence and do
+not receive synthetic turn IDs. Repair schema-7 graphs and reconstruction
+schema-7 checkpoints require the serialized identity to match the separately
+persisted pre-dispatch intent before reuse, recovery, or archive verification.
+ACP session journals write schema 2 when a correlated turn starts and retain that
+turn UUID with a cleanup-verified completed turn. Schema-1 journals remain
+readable; their historical records are not assigned synthetic turn IDs.
+
+This is correlation metadata, not durable workflow intent or an acceptance
+decision. Progress remains display-only. A turn UUID, completed receipt or
+provider stop reason does not prove a complete change observation, authorize a
+candidate, establish validation, or commit publication. Durable intent and
+workflow-assessment records bound to publication recovery remain the separate
+#733 acceptance boundary.
+
+Before dispatching any new captured repair turn, the workflow upgrades an
+existing non-pending schema-4, -5, or -6 repair graph to schema 7. Existing
+revision and invocation records retain null turn/assessment references and
+remain historical; the upgrade does not synthesize provenance or change their
+acceptance authority. A turn admitted after the upgrade must persist and bind
+its own intent, receipt, and assessment. A graph with pending recovery is not
+upgraded for a new dispatch.
+
+Schema-7 accepted decisions retain those provenance bindings in the committed
+node. Startup authenticates the bound intent, receipt, and validated assessment
+before exchanging any candidate source bytes; missing, cross-paired, or
+corrupt evidence leaves the durable decision and source tree untouched.
+
 ## Captured repair
 
 `CapturedRepairStagingAuthority` freezes the selected readable source bytes and
@@ -125,6 +159,9 @@ previous target bytes, or removes a newly created target.
 `SourceTreeGenerator` applies the module/profile checks and compiler gate before
 publishing an accepted checkpoint. It records invocation and compiler evidence
 and restores the previous accepted checkpoint when a replacement is rejected.
+For ACP-produced source, publication preserves the exact staged bytes so the
+assessment's after hash remains the hash observed in the invocation receipt;
+non-agent generators retain the existing host newline normalization.
 The current module compiler receipt is local validation evidence, not a contained
 production full-project build or complete behavioral-equivalence proof. Those
 limits remain tracked by #64, #84 and the archive/release issues.
@@ -328,6 +365,100 @@ race resistance.
 
 ## Remaining scope of #63
 
+## Durable invocation provenance checkpoint for #733
+
+The captured repair workflow and the generated-C reconstruction workflow now
+have implementation paths for host-authored turn intents and workflow
+assessments. Each writes a canonical intent before provider dispatch, then binds
+the receipt to that intent and the unique turn UUID. Each writes an immutable
+assessment after its available policy and validation checks. Repair schema-7
+graph records and schema-4 history records carry content-addressed references;
+reconstruction agent checkpoints use schema 7 and embed the referenced intent
+and assessment. Legacy repair schema-6 records and reconstruction checkpoint
+schemas 4–6 remain unassessed; no turn IDs or verdicts are synthesized for
+historical evidence.
+
+The assessment distinguishes observation completeness, observed stop reason,
+change-set digest, policy verdict, validation proof references, and workflow
+eligibility. Eligibility is not a publication decision: the existing durable
+repair publication transaction remains the only source of committed revision
+authority. Intent-only or receipt-only attempts do not claim acceptance.
+
+Reconstruction stores the append-only sidecars in the leased output root under
+`.agent-turn-evidence/<input-sha256>/<module>/<turn-uuid>/`, outside the staged
+`source-tree` and the four-member #732 publication set. This preserves
+pre-dispatch and rejected/interrupted evidence when a source generation is
+rolled back. The accepted checkpoint embeds the exact canonical intent and
+assessment bytes and names their output-root paths. Checkpoint reuse and the
+archive verifier reject malformed, duplicate-field, digest-mismatched,
+cross-paired, request/policy/session/change/update-mismatched records. Accepted
+schema-7 checkpoints also bind the assessment's validation proof digest to the
+exact compiler evidence. Interruption reports reference any persisted intent
+and assessment; an intent without a receipt remains unknown, and an assessment
+without completed validation remains ineligible. These records do not extend
+#732's rollback set, establish a publication decision, or authorize readers to
+bypass its recovery lease.
+
+If repair recovery finds a schema-7 intent and receipt but no assessment, it
+first persists and authenticates a conservative `INTERRUPTED` assessment before
+terminalizing the attempt. If that write or its readback fails, graph opening
+fails closed and retains the pending recovery state. A focused workflow test
+injects a graph-binding failure after the immutable rejected-assessment sidecar
+is written, then verifies startup reconciles that exact assessment and retains
+the original source bytes. A graph-level control also verifies that a
+receipt-bound schema-7 attempt cannot be rejected without a bound assessment.
+These are deterministic failure-injection checks, not process-death
+qualification of the entire repair workflow.
+
+After a `PROVISIONAL` or `VALIDATED_FOR_PUBLICATION` assessment is durable, an
+exception before the graph disposition also leaves the attempt pending. The
+immutable assessment cannot be rewritten as an ordinary rejection; startup
+recovery performs the verified rollback or roll-forward and records the
+terminal disposition.
+
+The current ACP adapter exposes its normalized stop reason in the invocation
+receipt, but does not expose the raw protocol stop code. Reconstruction
+assessments therefore leave `protocolStopCode` null instead of deriving or
+inventing a wire-level value.
+
+The repair implementation checkpoint at `6cd76bd30d1bec7fad81fcad6617f51248333af3`
+passed local compilation and 242 focused tests: the assessment codec (2),
+repair graph (199), repair history reader (35), and ACP repair integration (6).
+These tests cover repair intent/receipt/assessment binding, graph recovery,
+archive/history consistency, and canonical assessment parsing. They are local
+evidence only; no hosted run or independent crash-after-each-evidence-write
+campaign has qualified this commit.
+
+At the original reconstruction checkpoint, the implementation passed local
+compilation and 133 focused tests across
+`ReconstructionAcpEvidenceArchiveVerifierTest` (20),
+`ReconstructionTurnEvidenceStoreTest` (3), `AcpChangeAssessmentTest` (2),
+`WebProductionWorkflowsTest` (45), and `SourceTreeTest` (63). Coverage includes
+pre-dispatch intent persistence, private immutable sidecars,
+interrupted/unknown assessments, schema-7 archive binding, tamper refusal, and
+legacy checkpoint compatibility. These are local tests against the current
+implementation at that checkpoint, not hosted qualification. The repair checkpoint at
+`6cd76bd30d1bec7fad81fcad6617f51248333af3` separately passed its 242 focused
+tests; that result predates the reconstruction changes and is not exact-head
+verification of the combined implementation.
+
+The current combined local source passed a focused Gradle run of 236 tests:
+`ReconstructionTurnEvidenceStoreTest` (6),
+`ReconstructionAcpEvidenceArchiveVerifierTest` (21), and
+`ModuleRevisionGraphTest` (209). This includes receipt admission rejection
+without consuming the immutable slot, reconstruction receipt/intent
+cross-pairing refusal, and recovery that writes an interrupted assessment
+before terminalizing a schema-7 receipt-only attempt. The run compiled the
+current implementation and tests; it is local evidence, not hosted or
+production qualification.
+
+This remains an implementation checkpoint, not full #733 qualification or
+closure evidence. The process-death matrix below covers repair evidence writes
+and graph binding, but does not qualify production-provider acceptance.
+Production repair acceptance is also blocked on the qualified validator under
+#236. #733, #63, #236, and #732 remain open; do not use these source changes to
+claim production repair or reconstruction acceptance.
+
 This cleanup removes an unused competing policy path; it does not complete #63.
 The actual workflow contracts still need the requested shared profile-driven
 acceptance coverage, including an explicit supported-operation matrix and
@@ -350,3 +481,45 @@ operation sets. Ordinary valid-edit checks at those existing boundaries remain
 the relevant regression tests for removal of the unused helper.
 
 Final ordinary snapshot diff failures retain the ACP session reference and the `final-workspace-snapshot` phase for both metadata-policy and path-operation rejection. A benign completed text-edit test injects a permission change at the final observation boundary and verifies `WORKSPACE_VIOLATION`, session correlation, verified cleanup and absent complete execution evidence. This is host fault injection; it does not establish agent metadata access or workflow rollback.
+
+## Reconstruction turn-evidence process-death matrix — 2026-11-11
+
+`ReconstructionTurnEvidenceStoreTest.hard process death during each turn evidence write leaves a restartable prefix` passed locally. It launches 12 child JVMs: intent, receipt, and assessment publication each halt with `Runtime.halt(86)` at all four store checkpoints (directory opened, before temporary link, immediately after final-name publication, and before readback). The parent reopens the same workspace and verifies either that the target document is absent and can be written, or that the exact canonical bytes are visible and a second immutable write refuses. Prerequisite intent bytes are also checked for receipt and assessment attempts. The test terminates each child without running `finally` or orderly descriptor cleanup.
+
+This is process-death evidence for the reconstruction evidence store only. It does not prove power-loss durability, every end-to-end workflow crash boundary, repair graph recovery, or crashes around the #732 publication decision. Exact-head hosted qualification, those remaining decision/recovery cases, and production-validator evidence from #236 are still required.
+
+At implementation commit `42d58a55aaf49b43b0ac9305e6071f5a92083fb0`,
+`ReconstructionTurnEvidenceStoreTest.turn evidence directory substitution
+never writes through the replacement symlink` additionally checks cleanup after
+the publication directory is detached. Cleanup quarantines the final-name entry
+before authenticating its file identity, preserves an entry that is not the
+current write's inode, and includes a throwing post-rename hook in the cleanup
+guard. These writer races are serialized for operations using the same
+workspace publication capability; they do not establish protection from a
+hostile same-UID process that bypasses that capability.
+
+At the same exact commit, one local Gradle run passed four focused suites with
+no failures, errors, or skips: `ReconstructionTurnEvidenceStoreTest` (6),
+`ReconstructionAcpEvidenceArchiveVerifierTest` (21),
+`ModuleRevisionGraphTest` (209), and `TraceGuidedRepairTest` (40), for 276
+tests total. The command selected only these suites and excluded frontend
+toolchain/build/install tasks. This is exact-source local evidence; hosted
+qualification, production-provider acceptance, power-loss behavior, and
+hostile same-UID interference remain unqualified.
+
+At exact source commit `d9dbe56577105521b7bd082180ee605c344341a2`, the following
+six focused regression tests also passed locally, with no failures, errors, or
+skips: markerless historical repair input remains readable without activating
+it; repair admission remains
+interruptible under its enclosing deadline; the job page stays responsive
+while publication withholds report evidence; output metering preserves source
+directory atimes; archival reconstruction rejects mismatched workspace paths
+before analysis; and CLI repair configuration preflight failure creates no
+repair-in-progress marker. These tests verify the current #732 review fixes in
+the #733 stack. They do not establish production-provider or hosted acceptance.
+
+## Repair turn-evidence process-death matrix — 2026-11-11
+
+`ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally with the existing schema-7 recovery authentication test. It launches 26 child JVMs and uses `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. Each synthetic candidate changes two source files. For each prefix, the parent checks exact document bytes and temporary/final-name state before reopening, then checks recovered binding hashes and paths, source bytes and metadata, and temporary/staging cleanup. A predecision-stage crash confirms the undecided candidate is rejected and its stage discarded without source changes. Decision recovery is interrupted after the first source exchange, then interrupted again in a second process after the second exchange; a third open completes roll-forward and accepts the exact two-file candidate. Additional process deaths cover the already-committed graph head and recovery's accepted-graph persistence boundary. A tampered assessment after the durable decision is refused before source exchange, with graph and staging recovery state retained.
+
+These are process-death tests on the local filesystem, not power-loss tests. They cover the schema-7 repair graph and its evidence sidecars, not the end-to-end repair workflow with a live provider, every rollback/cleanup failure, the independent #732 reconstruction publication journal, or production validation under #236. The decision cases include one two-file partial roll-forward and one repeated recovery interruption; they do not establish every possible interruption point or filesystem/architecture combination. The prior local repair result at `6cd76bd30d1bec7fad81fcad6617f51248333af3` predates this matrix and is not exact-head hosted evidence.

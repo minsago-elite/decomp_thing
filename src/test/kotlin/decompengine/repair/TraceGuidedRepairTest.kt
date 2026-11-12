@@ -68,6 +68,7 @@ import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TraceGuidedRepairTest {
@@ -77,6 +78,120 @@ class TraceGuidedRepairTest {
         assertFalse(repairFailureCanBeFinalized(unexpectedAfterDecision, "attempt_123"))
         assertFalse(repairFailureCanBeFinalized(RepairAcceptancePendingException("roll-forward required"), null))
         assertTrue(repairFailureCanBeFinalized(unexpectedAfterDecision, null))
+    }
+
+    @Test
+    fun `repair abort preserves pending state after an immutable assessment is persisted`() {
+        val cancellation = IllegalStateException("cancelled after assessment publication")
+        assertFalse(repairAttemptCanBeRejected(finalized = false, assessmentPersisted = true, failure = cancellation))
+        assertFalse(repairAttemptCanBeRejected(
+            finalized = false,
+            assessmentPersisted = false,
+            RepairAgentEvidencePersistenceException("assessment write failed"),
+        ))
+        assertFalse(repairAttemptCanBeRejected(
+            finalized = false,
+            assessmentPersisted = false,
+            RepairAcceptancePendingException("decision outcome is ambiguous"),
+        ))
+        assertFalse(repairAttemptCanBeRejected(finalized = true, assessmentPersisted = false, failure = cancellation))
+        assertFalse(repairAttemptCanBeRejected(
+            finalized = false,
+            assessmentPersisted = false,
+            failure = cancellation,
+            assessmentPersistenceFailed = true,
+        ))
+        assertTrue(repairAttemptCanBeRejected(
+            finalized = false,
+            assessmentPersisted = false,
+            cancellation,
+        ))
+    }
+
+    @Test
+    fun `rejection assessment binding failure leaves receipt pending for startup recovery`() {
+        val project = createProject(
+            createTempDirectory("trace-rejection-assessment-recovery-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val sourcePath = project.resolve("src/modules/reconstructed.c")
+        val before = sourcePath.readBytes()
+        var harnessReturned = false
+        val injector = ModuleRevisionFaultInjector { point ->
+            if (harnessReturned && point == ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync(
+                    "revision-state",
+                    "graph.json",
+                ) && Files.newDirectoryStream(
+                    project.resolve("reports/repair-revisions"),
+                    "*.acp-assessment.json",
+                ).use { entries -> entries.iterator().hasNext() }
+            ) {
+                throw IllegalStateException("injected rejection-assessment graph-binding failure")
+            }
+        }
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("receipt-aware repair must not discard invocation evidence")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("receipt-aware repair must not discard invocation evidence")
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt {
+                harnessReturned = true
+                return partialAcpOutcomeHarness(
+                    AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "peer failure")),
+                ).executeCapturedReceipt(request, initialFiles, output, onEvent)
+            }
+        }
+        val loop = TraceGuidedRepairLoop.forTesting(
+            harness,
+            RepairHistory(project.resolve("reports/repair_history.json")),
+            GeneratedCRepairIndexProfile,
+            GeneratedCRepairValidationStrategy(TestOnlyGeneratedCRepairValidationBoundary),
+            CapturedRepairStagingAuthority,
+            faultInjector = injector,
+        )
+
+        val persistenceFailure = assertFailsWith<RepairAgentEvidencePersistenceException> {
+            loop.repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+        assertTrue(persistenceFailure.message.orEmpty().contains("assessment"))
+        assertTrue(persistenceFailure.suppressed.any { it is AgentExecutionException })
+        val assessmentPath = Files.newDirectoryStream(
+            project.resolve("reports/repair-revisions"),
+            "*.acp-assessment.json",
+        ).use { entries -> entries.iterator().asSequence().single() }
+        assertTrue(Files.isRegularFile(assessmentPath))
+        val pendingGraph = project.resolve("reports/repair-revisions/graph.json").readText()
+        val attemptId = assessmentPath.fileName.toString().removeSuffix(".acp-assessment.json")
+        val pendingState = Json.parseToJsonElement(pendingGraph).jsonObject
+        assertEquals(attemptId, pendingState.getValue("pending").jsonObject.getValue("id").jsonPrimitive.content)
+        assertEquals("running", pendingState.getValue("runs").jsonArray.single()
+            .jsonObject.getValue("status").jsonPrimitive.content)
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertNull(recovered.snapshot.pendingAttemptId)
+            val rejected = recovered.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            assertTrue(rejected.recoveredAfterCrash)
+            val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+            val assessment = decompengine.project.AcpChangeAssessment.parse(Files.readAllBytes(assessmentPath))
+            assertEquals(decompengine.project.AcpChangePublicationEligibility.REJECTED, assessment.eligibility)
+            assertEquals(binding.assessmentSha256, assessment.sha256)
+            assertContentEquals(before, sourcePath.readBytes())
+        }
     }
 
     @Test
@@ -822,6 +937,7 @@ class TraceGuidedRepairTest {
                 null,
                 null,
                 false,
+                null,
             )
         }
 
