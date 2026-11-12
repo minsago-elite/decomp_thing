@@ -15,6 +15,7 @@ import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
+import { COMMAND_PAUSED, COMMAND_VERIFIED, OFFLINE_CLAIMS, OFFLINE_SCHEMA, assertOffline, isHttpUrl, createServiceWorkerInventory, recordServiceWorkerRegistration, recordServiceWorkerVersion, serviceWorkerScopeEvidence } from './packaged-browser-offline.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -31,9 +32,10 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit|offline] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('offline: seeded job page with the HTTP cache enabled; real CDP Network.emulateNetworkConditions offline/online, trusted window events, no-store/service-worker/CacheStorage checks, refused offline edits, offline reload without private text, bounded reconnect without mutation replay. Browser-level emulation only; no upgrade or cross-engine claim.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
@@ -49,7 +51,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit', 'offline'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy, audit or offline');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -167,6 +169,16 @@ class Protocol {
     const key = `${sessionId ?? ''}:${method}`;
     if (!this.listeners.has(key)) this.listeners.set(key, []);
     this.listeners.get(key).push(listener);
+  }
+  off(method, listener, sessionId) {
+    const key = `${sessionId ?? ''}:${method}`;
+    const listeners = this.listeners.get(key);
+    if (!listeners) return false;
+    const index = listeners.indexOf(listener);
+    if (index === -1) return false;
+    listeners.splice(index, 1);
+    if (listeners.length === 0) this.listeners.delete(key);
+    return true;
   }
 }
 
@@ -427,6 +439,382 @@ async function ready(target, expression, label) {
   }, label);
 }
 
+// #632 offline/sensitive-data scenario. Evidence collection only; the verdict lives in
+// packaged-browser-offline.mjs. Every listener, emulation and target owned here is
+// released in the finally block even when a step fails.
+async function qualifyOfflineMode({ origin, manifest, fixture }) {
+  const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(origin + '/nested/#bootstrap=')), 'offline local bootstrap handoff');
+  sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
+  const workflowState = JSON.parse(fixture.retained['workflow-state.json']);
+  const latestAttempt = workflowState.attempts.at(-1);
+  assert.ok(latestAttempt && latestAttempt.state === 'failed', 'Offline scenario requires a seeded latest failed attempt');
+  const runId = latestAttempt.runId;
+  // Keep the evidence panels out of this offline trace; they are unrelated to connectivity and
+  // their synthetic reports are deliberately not populated for every history row.
+  const runUrl = `${origin}/nested/jobs/${fixture.jobId}/runs/${runId}/activity`;
+  const filename = JSON.parse(fixture.retained['job.json']).filename;
+  const markers = [fixture.jobId, runId];
+  const tab = await makeTarget({ cacheEnabled: true });
+  const sessionId = tab.sessionId;
+  let phase = 'baseline';
+  let recording = false;
+  let overflow = false;
+  const requests = [];
+  const responses = [];
+  const failedRequests = [];
+  const setupRequests = [];
+  const setupResponses = [];
+  const setupFailedRequests = [];
+  const events = [];
+  const subscriptions = [];
+  const subscribe = (method, listener) => {
+    cdp.on(method, listener, sessionId);
+    subscriptions.push([method, listener]);
+  };
+  const failedRequestIds = new Map();
+  const documentRequestIds = new Map();
+  const observedRequestPhases = new Map();
+  const setupRequestIds = new Map();
+  const responseRecords = new Map();
+  const completedRequestIds = new Set();
+  const setupFailedRequestIds = new Set();
+  const swState = createServiceWorkerInventory();
+  const sessionExchange = { requestCount: 0, status: null, cacheControl: null, fromDiskCache: false, fromServiceWorker: false, unexpectedMutations: 0 };
+  let sessionExchangeRequestId = null;
+  const emulation = { method: 'Network.emulateNetworkConditions', offlineCalls: 0, onlineCalls: 0, restored: false };
+  const cleanup = { networkRestored: false, listenersDetached: false, targetClosed: false };
+  const screenshots = [];
+  const observedHttpUrl = (url) => {
+    if (!isHttpUrl(url)) return null;
+    try { return new URL(url).origin === origin ? url.split('#')[0].split('?')[0] : url.split('#')[0].split('?')[0]; }
+    catch { return null; }
+  };
+  const captureOfflineEvidence = async (name) => {
+    await capture(tab, name);
+    const bytes = await fs.readFile(join(root, name));
+    assert.ok(bytes.length > 24 && bytes.length <= 8 * 1024 * 1024, `Offline screenshot ${name} has an invalid size`);
+    assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `Offline screenshot ${name} is not PNG`);
+    assert.equal(bytes.toString('ascii', 12, 16), 'IHDR', `Offline screenshot ${name} has no PNG IHDR`);
+    assert.equal(bytes.readUInt32BE(16), 1280, `Offline screenshot ${name} width changed`);
+    assert.equal(bytes.readUInt32BE(20), 900, `Offline screenshot ${name} height changed`);
+    const record = { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+    screenshots.push(record);
+    return record;
+  };
+  subscribe('Network.requestWillBeSent', (event) => {
+    const url = observedHttpUrl(event.request.url);
+    if (!url) return;
+    if (!recording) {
+      let parsed;
+      try { parsed = new URL(url); } catch { return; }
+      if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(event.request.method)) {
+        if (parsed.origin === origin && event.request.method === 'POST' && parsed.pathname === '/nested/api/v1/session' && sessionExchangeRequestId === null) {
+          sessionExchange.requestCount += 1;
+          sessionExchangeRequestId = event.requestId;
+        } else sessionExchange.unexpectedMutations += 1;
+      }
+      const setupPath = parsed.origin === origin ? parsed.pathname : null;
+      if (parsed.origin !== origin || event.type === 'Document' || (setupPath !== null && setupPath.startsWith('/nested/api/'))) {
+        if (setupRequests.length >= 600) { overflow = true; return; }
+        setupRequests.push({ requestId: event.requestId, method: event.request.method, url, type: event.type ?? 'Other' });
+        setupRequestIds.set(event.requestId, url);
+      }
+      return;
+    }
+    if (observedRequestPhases.size >= 600 && !observedRequestPhases.has(event.requestId)) { overflow = true; return; }
+    observedRequestPhases.set(event.requestId, phase);
+    if (documentRequestIds.size >= 600 && !documentRequestIds.has(event.requestId)) { overflow = true; return; }
+    if (event.type === 'Document') documentRequestIds.set(event.requestId, phase);
+    if (failedRequestIds.size >= 600 && !failedRequestIds.has(event.requestId)) { overflow = true; return; }
+    if (requests.length >= 600) { overflow = true; return; }
+    requests.push({ requestId: event.requestId, phase, method: event.request.method, url, type: event.type ?? 'Other' });
+  });
+  subscribe('Network.responseReceived', (event) => {
+    if (event.requestId === sessionExchangeRequestId) {
+      sessionExchange.status = event.response.status;
+      sessionExchange.cacheControl = responseHeader(event.response, 'cache-control');
+      sessionExchange.fromDiskCache = event.response.fromDiskCache === true;
+      sessionExchange.fromServiceWorker = event.response.fromServiceWorker === true;
+    }
+    const setupUrl = setupRequestIds.get(event.requestId);
+    if (setupUrl !== undefined) {
+      const url = observedHttpUrl(event.response.url);
+      if (!url) { overflow = true; return; }
+      if (setupResponses.length >= 600) { overflow = true; return; }
+      const response = { requestId: event.requestId, url, status: event.response.status, type: event.type ?? 'Other',
+        cacheControl: responseHeader(event.response, 'cache-control'), fromDiskCache: event.response.fromDiskCache === true,
+        fromServiceWorker: event.response.fromServiceWorker === true, loadingFinished: completedRequestIds.has(event.requestId) };
+      setupResponses.push(response);
+      responseRecords.set(event.requestId, response);
+      return;
+    }
+    if (!recording || !observedRequestPhases.has(event.requestId)) return;
+    if (responses.length >= 600) { overflow = true; return; }
+    const url = observedHttpUrl(event.response.url);
+    if (!url) return;
+    const response = { requestId: event.requestId, phase: observedRequestPhases.get(event.requestId), url, status: event.response.status, type: event.type ?? 'Other',
+      cacheControl: responseHeader(event.response, 'cache-control'), fromDiskCache: event.response.fromDiskCache === true,
+      fromServiceWorker: event.response.fromServiceWorker === true, loadingFinished: completedRequestIds.has(event.requestId) };
+    responses.push(response);
+    responseRecords.set(event.requestId, response);
+  });
+  subscribe('Network.loadingFinished', (event) => {
+    if (!setupRequestIds.has(event.requestId) && !observedRequestPhases.has(event.requestId)) return;
+    if (completedRequestIds.size >= 2000 && !completedRequestIds.has(event.requestId)) { overflow = true; return; }
+    completedRequestIds.add(event.requestId);
+    const response = responseRecords.get(event.requestId);
+    if (response) response.loadingFinished = true;
+  });
+  subscribe('Network.loadingFailed', (event) => {
+    if (setupRequestIds.has(event.requestId)) {
+      if (setupFailedRequests.length >= 600) { overflow = true; return; }
+      setupFailedRequests.push({ requestId: event.requestId, error: /^net::ERR_[A-Z0-9_]+$/.test(event.errorText ?? '') ? event.errorText : 'other' });
+      setupFailedRequestIds.add(event.requestId);
+      return;
+    }
+    if (!recording || !observedRequestPhases.has(event.requestId)) return;
+    if (failedRequests.length >= 600) { overflow = true; return; }
+    const error = /^net::ERR_[A-Z0-9_]+$/.test(event.errorText ?? '') ? event.errorText : 'other';
+    const failure = { requestId: event.requestId, phase: observedRequestPhases.get(event.requestId), type: event.type ?? 'Other', error,
+      blockedReason: event.blockedReason ?? null };
+    failedRequests.push(failure);
+    failedRequestIds.set(event.requestId, failure);
+  });
+  subscribe('Runtime.bindingCalled', (event) => {
+    if (!recording || event.name !== '__decompOfflineEvent') return;
+    if (events.length >= 100) { overflow = true; return; }
+    try {
+      const payload = JSON.parse(event.payload);
+      events.push({ phase, type: String(payload.type), isTrusted: payload.isTrusted === true, onLine: payload.onLine === true });
+    } catch { events.push({ phase, type: 'malformed', isTrusted: false, onLine: false }); }
+  });
+  subscribe('ServiceWorker.workerRegistrationUpdated', ({ registrations }) => {
+    for (const registration of registrations ?? []) {
+      if (swState.observed.size >= 100 && !swState.observed.has(registration.registrationId) && !registration.isDeleted) overflow = true;
+      else recordServiceWorkerRegistration(swState, registration);
+    }
+  });
+  subscribe('ServiceWorker.workerVersionUpdated', ({ versions }) => { for (const version of versions ?? []) {
+    if (swState.versions.size >= 100 && !swState.versions.has(version.versionId)) overflow = true;
+    else recordServiceWorkerVersion(swState, version);
+  } });
+  const setOffline = async (offline) => {
+    await cdp.call('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+    if (offline) emulation.offlineCalls += 1; else emulation.onlineCalls += 1;
+  };
+  const pageState = () => evaluate(tab, `({ url: location.href, historyLength: history.length, pageToken: globalThis.__decompOfflinePageToken ?? null })`);
+  const browserStores = () => evaluate(tab, `(async () => ({
+    cacheNames: await caches.keys(), registrations: (await navigator.serviceWorker.getRegistrations()).length,
+    controlled: navigator.serviceWorker.controller !== null, localEntries: localStorage.length, sessionEntries: sessionStorage.length,
+    indexedDatabases: (await indexedDB.databases()).length }))()`);
+  const sessionGeneration = async () => {
+    const { cookies } = await cdp.call('Network.getCookies', { urls: [origin + '/nested/'] }, sessionId);
+    const cookie = cookies.find((entry) => entry.path === '/nested/' && entry.httpOnly);
+    assert.ok(cookie, 'Expected the HttpOnly local session cookie');
+    return { generation: createHash('sha256').update(cookie.value).digest('hex').slice(0, 16), httpOnly: cookie.httpOnly };
+  };
+  const notice = `(document.querySelector('.connection-notice h2')?.textContent ?? null)`;
+  const readActionsButton = `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Read available actions')`;
+  const attemptSection = `document.querySelector(${JSON.stringify(`section[aria-labelledby="attempt-controls-title-${runId}"]`)})`;
+  const attemptStatus = `((${attemptSection})?.querySelector('[role="status"]')?.textContent ?? null)`;
+  const retryAvailability = `(() => {
+    const section = ${attemptSection};
+    const heading = [...(section?.querySelectorAll('dt') ?? [])].find((item) => item.textContent.trim() === 'Retry');
+    const detail = heading?.nextElementSibling;
+    return { retryAvailable: !!detail?.querySelector('button'), retryReasonText: detail?.textContent.trim() ?? null };
+  })()`;
+  const commandButtonCount = `(() => {
+    const section = ${attemptSection};
+    return [...(section?.querySelectorAll('button') ?? [])].filter((button) =>
+      ['Request cancellation', 'Retry as a new attempt', 'Resume from checkpoint'].includes(button.textContent.trim())).length;
+  })()`;
+  const stores = { cacheNames: new Set(), checkedPhases: [], registrations: 0, controlled: false, localEntries: 0, sessionEntries: 0, indexedDatabases: 0 };
+  const recordStores = async () => {
+    const observed = await browserStores();
+    for (const name of observed.cacheNames) stores.cacheNames.add(name);
+    stores.checkedPhases.push(phase);
+    stores.registrations = Math.max(stores.registrations, observed.registrations);
+    stores.controlled ||= observed.controlled;
+    for (const key of ['localEntries', 'sessionEntries', 'indexedDatabases']) stores[key] = Math.max(stores[key], observed[key]);
+  };
+  let evidence;
+  try {
+    await cdp.call('ServiceWorker.enable', {}, sessionId);
+    await cdp.call('Runtime.addBinding', { name: '__decompOfflineEvent' }, sessionId);
+    await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      Object.defineProperty(globalThis, '__decompOfflinePageToken', { value: crypto.randomUUID() });
+      for (const type of ['offline', 'online']) addEventListener(type, (event) => globalThis.__decompOfflineEvent?.(JSON.stringify({ type, isTrusted: event.isTrusted, onLine: navigator.onLine })));
+    })();` }, sessionId);
+    await cdp.call('Page.navigate', { url: bootstrapUrl }, sessionId);
+    await ready(tab, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes(${JSON.stringify(filename)})`, 'offline-mode authenticated dashboard');
+    assert.equal(sessionExchange.requestCount, 1, 'Expected exactly one session exchange during authenticated setup');
+    assert.equal(sessionExchange.status, 200, 'Session exchange did not return HTTP 200');
+    assert.equal(sessionExchange.unexpectedMutations, 0, 'Authenticated setup issued an unexpected mutation');
+    await waitFor(() => setupRequests.every((request) => completedRequestIds.has(request.requestId) || setupFailedRequestIds.has(request.requestId)), 'authenticated setup sensitive responses settled');
+    assert.equal(setupFailedRequests.length, 0, 'Authenticated setup had a failed document or API request');
+    recording = true;
+    await cdp.call('Page.navigate', { url: runUrl }, sessionId);
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Attempt activity' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'seeded failed attempt online');
+    await evaluate(tab, `(${readActionsButton}).click()`);
+    await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).retryReasonText === 'Unavailable: this workflow is not available on this server.'`, 'server-verified unavailable retry');
+    await delay(500);
+    const before = await sessionGeneration();
+    await recordStores();
+    const baseline = { ...(await pageState()), privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
+      controlStatus: await evaluate(tab, attemptStatus), ...await evaluate(tab, retryAvailability), executionCommandButtons: await evaluate(tab, commandButtonCount) };
+    await captureOfflineEvidence('offline-baseline.png');
+
+    phase = 'offline';
+    await setOffline(true);
+    await ready(tab, `navigator.onLine === false && ${notice} === 'Browser reports offline' && (${readActionsButton})?.disabled === true && ${attemptStatus} === ${JSON.stringify(COMMAND_PAUSED)}`,
+      'offline label and paused attempt controls');
+    const commandState = await evaluate(tab, `(() => {
+      const button = (${readActionsButton});
+      if (!button) return { found: false, disabled: false };
+      button.click();
+      return { found: true, disabled: button.disabled };
+    })()`);
+    assert.equal(commandState.found, true, 'Offline action-read probe did not find the real control');
+    assert.equal(commandState.disabled, true, 'Offline action-read control became enabled');
+    assert.equal(await evaluate(tab, commandButtonCount), 0, 'The unregistered production workflow unexpectedly exposed a command');
+    await delay(1500);
+    await recordStores();
+    const offline = { ...(await pageState()), noticeHeading: await evaluate(tab, notice),
+      privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
+      controlStatus: await evaluate(tab, attemptStatus), ...await evaluate(tab, retryAvailability),
+      executionCommandButtons: await evaluate(tab, commandButtonCount),
+      controlAction: 'read-available-actions', controlDisabled: await evaluate(tab, `(${readActionsButton}).disabled`), disabledClickProbeAttempts: 1,
+      requestsAfterRefusal: requests.filter((request) => request.phase === 'offline').length, screenshot: 'offline-controls.png' };
+    await captureOfflineEvidence(offline.screenshot);
+
+    phase = 'reconnect';
+    const reconnectStarted = performance.now();
+    await setOffline(false);
+    await ready(tab, `navigator.onLine === true && ${notice} === 'Refresh loaded information' && (${readActionsButton})?.disabled === false`, 'reconnect label and recovered controls');
+    const reconnectMs = Math.round(performance.now() - reconnectStarted);
+    await delay(2500); // Bounded window for the jittered session revalidation and any replay.
+    const reconnect = { ...(await pageState()), noticeHeading: await evaluate(tab, notice),
+      readActionsEnabled: await evaluate(tab, `(${readActionsButton}).disabled === false`), ...await evaluate(tab, retryAvailability),
+      executionCommandButtons: await evaluate(tab, commandButtonCount), recoveryMs: reconnectMs };
+
+    phase = 'offline-reload';
+    await setOffline(true);
+    await ready(tab, `navigator.onLine === false`, 'second offline transition');
+    await recordStores();
+    await cdp.call('Page.reload', {}, sessionId);
+    await waitFor(() => [...documentRequestIds].some(([id, at]) => at === 'offline-reload' && failedRequestIds.has(id)), 'offline reload document failure');
+    await ready(tab, `document.readyState === 'complete' && !document.querySelector('meta[name="decomp-ui-build"]')`, 'offline reload error document');
+    await delay(500);
+    const reloadState = await pageState();
+    const offlineReload = { ...reloadState, renderedText: String(await evaluate(tab, `document.body?.innerText ?? ''`)).slice(0, 8192),
+      documentFailed: [...documentRequestIds].filter(([, at]) => at === 'offline-reload').every(([id]) => failedRequestIds.has(id)),
+      screenshot: 'offline-reload.png' };
+    await captureOfflineEvidence(offlineReload.screenshot);
+
+    phase = 'recovery';
+    const recoveryStarted = performance.now();
+    await setOffline(false);
+    await cdp.call('Page.navigate', { url: runUrl }, sessionId);
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Attempt activity' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'attempt re-read after recovery');
+    await evaluate(tab, `(${readActionsButton}).click()`);
+    await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).retryReasonText === 'Unavailable: this workflow is not available on this server.'`, 'actions re-read after recovery');
+    const recoveryMs = Math.round(performance.now() - recoveryStarted);
+    const observationStarted = performance.now();
+    await delay(3000);
+    await recordStores();
+    const after = await sessionGeneration();
+    const recovery = { ...(await pageState()), onLine: await evaluate(tab, 'navigator.onLine === true'), privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
+      controlStatus: await evaluate(tab, attemptStatus), ...await evaluate(tab, retryAvailability),
+      executionCommandButtons: await evaluate(tab, commandButtonCount), recoveryMs,
+      observationMs: Math.round(performance.now() - observationStarted) };
+    await captureOfflineEvidence('offline-recovered.png');
+    const serviceWorkerEvidence = serviceWorkerScopeEvidence(swState, origin, '/nested/');
+    evidence = { schema: OFFLINE_SCHEMA, origin, basePath: '/nested/',
+      identity: { buildId: manifest.buildId, applicationVersion: manifest.applicationVersion, archiveSha256: report.archiveSha256,
+        chromeProduct: report.browser.product, chromeSha256: report.tools.chromeSha256, driverCommit: report.driverCommit },
+      privateMarkers: markers,
+      setupRequests, setupResponses, setupFailedRequests,
+      sessionExchange,
+      serviceWorker: { registrations: stores.registrations, controlled: stores.controlled, cdpRegistrations: serviceWorkerEvidence.registrations,
+        cdpVersions: serviceWorkerEvidence.versions, controllingScopes: serviceWorkerEvidence.controllingScopes,
+        unknownScopeRegistrations: serviceWorkerEvidence.unknownScopeRegistrations, unknownScopeVersions: serviceWorkerEvidence.unknownScopeVersions,
+        fromServiceWorkerResponses: responses.filter((response) => response.fromServiceWorker).length },
+      cacheStorage: { pageNames: [...stores.cacheNames], checkedPhases: stores.checkedPhases },
+      storage: { localEntries: stores.localEntries, sessionEntries: stores.sessionEntries, indexedDatabases: stores.indexedDatabases },
+      session: { generationBefore: before.generation, generationAfter: after.generation, cookieHttpOnly: before.httpOnly && after.httpOnly },
+      requests, responses, failedRequests, events, phases: { baseline, offline, reconnect, offlineReload, recovery }, screenshots, emulation, cleanup,
+      claims: structuredClone(OFFLINE_CLAIMS) };
+  } catch (error) {
+    let page = null;
+    try {
+      page = await evaluate(tab, `(() => {
+        const section = ${attemptSection};
+        const retryHeading = [...(section?.querySelectorAll('dt') ?? [])].find((item) => item.textContent.trim() === 'Retry');
+        const readButton = [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Read available actions');
+        return {
+          readyState: document.readyState,
+          routePath: location.pathname,
+          attemptStatus: section?.querySelector('[role="status"]')?.textContent.trim() ?? null,
+          retryReasonText: retryHeading?.nextElementSibling?.textContent.trim() ?? null,
+          executionCommandButtons: [...(section?.querySelectorAll('button') ?? [])].filter((button) =>
+            ['Request cancellation', 'Retry as a new attempt', 'Resume from checkpoint'].includes(button.textContent.trim())).length,
+          actionReadDisabled: readButton?.disabled ?? null,
+        };
+      })()`);
+    } catch { /* retain network diagnostics if page state is no longer readable */ }
+    const safePath = (url) => { try { return new URL(url).pathname.slice(0, 512); } catch { return null; } };
+    report.offlineFailureDiagnostics = {
+      phase,
+      error: String(error?.message ?? error).slice(0, 512),
+      page,
+      setupCounts: { requests: setupRequests.length, responses: setupResponses.length, failed: setupFailedRequests.length },
+      sessionExchange: { requestCount: sessionExchange.requestCount, status: sessionExchange.status,
+        noStore: sessionExchange.cacheControl === 'no-store', fromDiskCache: sessionExchange.fromDiskCache,
+        fromServiceWorker: sessionExchange.fromServiceWorker, unexpectedMutations: sessionExchange.unexpectedMutations },
+      requests: requests.slice(-100).map(({ requestId, phase: at, method, url, type }) => ({ requestId, phase: at, method, path: safePath(url), type })),
+      responses: responses.slice(-100).map(({ requestId, phase: at, url, status, type }) => ({ requestId, phase: at, path: safePath(url), status, type })),
+      failedRequests: failedRequests.slice(-100),
+      truncated: requests.length > 100 || responses.length > 100 || failedRequests.length > 100,
+    };
+    throw error;
+  } finally {
+    recording = false;
+    let listenersDetached = true;
+    for (const [method, listener] of subscriptions) {
+      try { if (!cdp.off(method, listener, sessionId)) listenersDetached = false; }
+      catch { listenersDetached = false; }
+    }
+    cleanup.listenersDetached = listenersDetached;
+    try {
+      await cdp.call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+      emulation.restored = true;
+      cleanup.networkRestored = await ready(tab, 'navigator.onLine === true', 'offline network emulation restored');
+    } catch { /* recorded as not restored */ }
+    await cdp.call('ServiceWorker.disable', {}, sessionId).catch(() => {});
+    // The offline reload's failed Document hop has no response by design; keep it out of the
+    // global CSP request/response correlation while still recording it in the offline evidence.
+    const offlineFailures = new Set([...documentRequestIds].filter(([id, at]) => at === 'offline-reload' && failedRequestIds.has(id)).map(([id]) => id));
+    tab.documentRequests = tab.documentRequests.filter((request) => !offlineFailures.has(request.requestId));
+    for (const id of offlineFailures) tab.pendingDocumentRequests.delete(id);
+    try { await cdp.call('Target.closeTarget', { targetId: tab.targetId }); cleanup.targetClosed = true; } catch { /* recorded */ }
+    if (lastTarget === tab) lastTarget = undefined;
+    report.offlineExcludedFailedDocumentHops = offlineFailures.size;
+  }
+  for (const screenshot of screenshots) {
+    const bytes = await fs.readFile(join(root, screenshot.name));
+    assert.equal(bytes.length, screenshot.bytes, `Offline screenshot ${screenshot.name} changed after capture`);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), screenshot.sha256,
+      `Offline screenshot ${screenshot.name} hash changed after capture`);
+  }
+  report.offline = safeEvidence(evidence);
+  report.offlineScreenshots = screenshots;
+  assert.equal(overflow, false, 'Offline network trace exceeded its 600-entry bound; refusing a partial verdict');
+  report.offlineVerdict = assertOffline(evidence);
+  report.requests.offline = requests.length;
+  report.jobDataCreated = true;
+  console.log('Packaged offline/sensitive-data scenario verified (#632).');
+}
+
 async function capture(target, name) {
   const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
   await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
@@ -508,10 +896,29 @@ try {
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
+  const offlineFixture = values.mode === 'offline' ? await seedHistory(data) : null;
+  if (offlineFixture) {
+    // The 55-row history seed ends in a completed attempt. For this separate offline scenario,
+    // make only its latest synthetic attempt failed so the real server exposes a retry command.
+    const workflowState = JSON.parse(offlineFixture.retained['workflow-state.json']);
+    const latest = workflowState.attempts.at(-1);
+    latest.state = 'failed';
+    latest.terminalReason = 'FAILED';
+    latest.candidate = null;
+    const bytes = JSON.stringify(workflowState);
+    offlineFixture.retained['workflow-state.json'] = bytes;
+    await fs.writeFile(join(offlineFixture.directory, 'workflow-state.json'), bytes, { flag: 'w', mode: 0o600 });
+    // The activity view performs a real snapshot read on mount. Give this synthetic latest
+    // attempt the same inert, display-only journal used by the history control rather than
+    // treating an intentionally absent report as an offline/cache response.
+    const latestReports = join(offlineFixture.directory, 'reports', 'runs', latest.runId);
+    await fs.mkdir(latestReports, { recursive: true, mode: 0o700 });
+    await fs.writeFile(join(latestReports, 'agent-progress.json'), offlineFixture.progress, { flag: 'wx', mode: 0o600 });
+  }
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
-  const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+  const populated = !!(historyFixture || restartFixture || offlineFixture || scaleFixture || liveFixture);
+  const libraryText = historyFixture || restartFixture || offlineFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
@@ -727,6 +1134,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
+  if (offlineFixture) await qualifyOfflineMode({ origin, manifest, fixture: offlineFixture });
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
