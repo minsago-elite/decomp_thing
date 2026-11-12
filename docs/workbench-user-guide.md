@@ -63,8 +63,8 @@ build/install/llm_bin_patch/bin/llm_bin_patch web --ui spa --data-dir /srv/decom
 | `--ui` | `legacy` | `legacy` or `spa`. |
 | `--base-path` | `/` | Serve under a prefix such as `/workbench/`. **Only with `--ui spa`**: the legacy workbench refuses to start with `--base-path is supported by --ui spa`. |
 
-`llm_bin_patch --help` lists every option. There is no `--version` option, and `web --help` is not an option (it fails
-with `--help requires a value`). The build identities are on the preview's **Runtime status** page.
+`web --help` prints these options and exits; `llm_bin_patch --version` prints the packaged version.
+The build identities are also shown on the preview's **Runtime status** page.
 
 On start the launcher prints two lines:
 
@@ -338,13 +338,15 @@ that matters.
 | You see | Meaning and what to do |
 |---|---|
 | `Cannot bind web server to 127.0.0.1:8000. Check --host or choose an unused --port.` | The port is busy. Pick another with `--port`. |
+| `Cannot start web server: <reason>` | The launcher refused its configuration before accepting any job (for example a non-loopback `--host`, or `--base-path` without `--ui spa`). Correct the named option; `web --help` lists them. |
+| `llm_bin_patch web: <option> …` followed by the usage line | An option is unknown or has an invalid value. Nothing was started. |
 | `Job store already has a live web server owner` | Another server owns this data directory. Stop it, or use a different `--data-dir`. |
 | `the SPA preview currently requires a loopback host` | `--ui spa` was started with a non-loopback `--host`. Use the default `127.0.0.1`. |
 | `--base-path is supported by --ui spa` | `--base-path` was given to the legacy workbench. Add `--ui spa` or drop the option. |
-| `--help requires a value` | `web --help` is not an option. Use `llm_bin_patch --help`. |
-| Reconstruction ends `FAILED`; `ghidra_stderr.log` says *"Path element starting with '.' is not permitted"* | The data directory path has a dot-prefixed component ([#1785](https://github.com/minsago-elite/decomp_thing/issues/1785)). Stop the server and start it on a directory without one. Existing jobs stay where they are. |
 | Exploration ends `FAILED` on a host without angr | `doctor --tools-only` reports `[failed] angr`. Install angr or set `ANGR_PYTHON`, restart the launcher and start exploration again. |
 | *"Stored diagnostic details are withheld because they may contain private data."* | Expected for every failed legacy job. Use `doctor` and, if you must, the job's report logs on the server. |
+| **Generate source tree** fails and `reports/analysis/reports/ghidra_stderr.log` shows `Path element starting with '.' is not permitted` | Builds before the fix for #1785 placed the Ghidra project under the data directory verbatim, and Ghidra rejects any path component that starts with `.` (including the default `.decomp_engine/jobs`). Current builds hand Ghidra the job's own directory through the analysis worker's working directory, so the default data directory works; update the distribution. |
+| `Ghidra cannot open a project at …: a path component starts with '.' or uses a character outside …` | The job directory could not be passed to Ghidra by the worker-directory route (it is only available on Linux). Choose a `--data-dir` (or `reconstruct --output`) whose path uses only letters, digits and `.-=@ _()[]~`, with no component starting with `.`. |
 | `BOOTSTRAP_REQUIRED` / "Open a newly issued local browser link." | The link was already used (or does not match). Restart the launcher and open the new link. |
 | `BOOTSTRAP_EXPIRED` / "The local browser link expired. Issue a new link." | More than five minutes passed before the link was opened. Restart the launcher and open the new link. |
 | `SESSION_REQUIRED` / "Open a local browser link to start a session." | You are not signed in. Open the launcher's link. |

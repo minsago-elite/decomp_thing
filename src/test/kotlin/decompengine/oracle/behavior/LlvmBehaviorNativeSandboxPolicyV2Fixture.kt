@@ -92,7 +92,7 @@ internal class LlvmBehaviorNativeSandboxPolicyV2Fixture private constructor(
                 "kind" to JsonPrimitive("llvm-behavior-native-helper-build-record"),
                 "compiler" to JsonObject(
                     mapOf(
-                        "executable" to JsonPrimitive("/usr/bin/cc"),
+                        "executable" to JsonPrimitive(NATIVE_HELPER_RECORDED_COMPILER),
                         "version" to JsonPrimitive("cc journal fixture 1.0"),
                     ),
                 ),
