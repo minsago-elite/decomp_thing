@@ -1648,6 +1648,103 @@ class AcpAgentHarnessTest {
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(modifiedExtracted, profile).returnCode)
         assertNoReconstructionPublicationResidue(fixture.resolve("modified-output"))
 
+        val exactModifiedBoundary = runAttempt(
+            "reconstruction-exact-source-byte-boundary",
+            index = 30,
+            maximumFrameBytes = 1024 * 1024,
+            snapshotLimits = WorkspaceSnapshotLimits(
+                entries = 3,
+                files = 1,
+                fileBytes = 256L * 1024,
+                totalBytes = 256L * 1024,
+            ),
+            seedSourceBeforeDispatch = priorModifiedSource,
+        )
+        assertNull(exactModifiedBoundary.failure, "an existing target must accept an exact-limit replacement")
+        assertEquals(1, exactModifiedBoundary.taskCount)
+        assertEquals(1, exactModifiedBoundary.receipts.size)
+        assertEquals(true, exactModifiedBoundary.implementationExistedAtDispatch)
+        val exactModifiedResult = assertNotNull(exactModifiedBoundary.result)
+        assertEquals(0, exactModifiedResult.build.returnCode)
+        assertTrue(requireNotNull(exactModifiedResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        val exactModifiedInvocation = exactModifiedBoundary.receipts.single()
+        assertEquals(exactModifiedBoundary.requestSha256s.single(), exactModifiedInvocation.requestBinding.requestSha256)
+        val exactModifiedExecution = exactModifiedInvocation.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, exactModifiedExecution.stopReason)
+        assertEquals(1, exactModifiedExecution.changes.size)
+        val exactModifiedChange = exactModifiedExecution.changes.single()
+        assertEquals(implementationPath, exactModifiedChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.MODIFIED, exactModifiedChange.kind)
+        assertEquals(sha256(priorModifiedSource), exactModifiedChange.beforeSha256)
+        assertEquals(sha256(expectedSource), exactModifiedChange.afterSha256)
+        assertEquals(expectedSource.size.toLong(), exactModifiedChange.sizeBytes)
+        assertContentEquals(expectedSource, Files.readAllBytes(exactModifiedResult.projectDir.resolve(implementationPath)))
+        assertEquals(7, exactModifiedBoundary.harness.latestFilesystemAudit().size)
+        val exactModifiedExtracted = fixture.resolve("verified-exact-modified-source-boundary")
+        ArchivalBundleVerifier.extractAndVerify(
+            exactModifiedResult.bundle.archivePath,
+            exactModifiedExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedSource, Files.readAllBytes(exactModifiedExtracted.resolve(implementationPath)))
+        assertContentEquals(expectedSource, Files.readAllBytes(output.resolve("source-tree").resolve(implementationPath)))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactModifiedExtracted, profile).returnCode)
+        acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
+
+        val modifiedOverlimitSeed = priorModifiedSource.decodeToString()
+            .replace("return 0;", "return 1;")
+            .toByteArray(Charsets.UTF_8)
+        val overlimitModified = runAttempt(
+            "reconstruction-mutation-grant",
+            index = 31,
+            maximumFrameBytes = 1024 * 1024,
+            seedSourceBeforeDispatch = modifiedOverlimitSeed,
+        )
+        assertNull(overlimitModified.failure, "a denied oversized replacement must leave the existing target writable")
+        assertEquals(1, overlimitModified.taskCount)
+        assertEquals(1, overlimitModified.receipts.size)
+        assertEquals(true, overlimitModified.implementationExistedAtDispatch)
+        val overlimitModifiedResult = assertNotNull(overlimitModified.result)
+        assertEquals(0, overlimitModifiedResult.build.returnCode)
+        assertTrue(requireNotNull(overlimitModifiedResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        val overlimitModifiedInvocation = overlimitModified.receipts.single()
+        assertEquals(overlimitModified.requestSha256s.single(), overlimitModifiedInvocation.requestBinding.requestSha256)
+        val overlimitModifiedExecution = overlimitModifiedInvocation.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, overlimitModifiedExecution.stopReason)
+        assertEquals(1, overlimitModifiedExecution.changes.size)
+        val overlimitModifiedChange = overlimitModifiedExecution.changes.single()
+        assertEquals(implementationPath, overlimitModifiedChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.MODIFIED, overlimitModifiedChange.kind)
+        assertEquals(sha256(modifiedOverlimitSeed), overlimitModifiedChange.beforeSha256)
+        assertEquals(sha256(expectedCreatedSource), overlimitModifiedChange.afterSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), overlimitModifiedChange.sizeBytes)
+        assertContentEquals(
+            expectedCreatedSource,
+            Files.readAllBytes(overlimitModifiedResult.projectDir.resolve(implementationPath)),
+        )
+        val overlimitModifiedAudit = overlimitModified.harness.latestFilesystemAudit()
+        assertEquals(9, overlimitModifiedAudit.size, overlimitModifiedAudit.toString())
+        assertEquals(implementationPath, assertNotNull(overlimitModifiedAudit[7].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, overlimitModifiedAudit[7].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, overlimitModifiedAudit[7].reason)
+        assertEquals(implementationPath, assertNotNull(overlimitModifiedAudit[8].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, overlimitModifiedAudit[8].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, overlimitModifiedAudit[8].reason)
+        assertFalse(overlimitModifiedResult.projectDir.resolve("src/modules/decomp_extra.c").exists())
+        val overlimitModifiedExtracted = fixture.resolve("verified-overlimit-modified-source")
+        ArchivalBundleVerifier.extractAndVerify(
+            overlimitModifiedResult.bundle.archivePath,
+            overlimitModifiedExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(overlimitModifiedExtracted.resolve(implementationPath)))
+        assertFalse(overlimitModifiedExtracted.resolve("src/modules/decomp_extra.c").exists())
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(output.resolve("source-tree").resolve(implementationPath)))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(overlimitModifiedExtracted, profile).returnCode)
+        acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
+
         // The public reconstruction grant is one non-recursive target path. Its rule and two
         // parents make initial entry-count refusal reachable. The workflow normally starts with
         // an absent target, so the one-shot snapshot hook seeds a target only for initial byte
