@@ -2374,6 +2374,36 @@ under #236, live providers, publication crash recovery under #732, durable
 provenance under #733, hosted exact-head CI, or the complete #734/#63
 acceptance matrix. Keep #734 and #63 open.
 
+## Active repair staging-byte reuse across rewrites — 2026-11-12
+
+The active scripted-ACP repair test derives the unchanged selected-context
+bytes `U` from the actual dispatch inventory, then sets
+`maximumStagingBytes=U+4,096`. It accepts 2,048-byte changes to both declared
+files, refuses a 2,049-byte retry, shrinks the first replacement, and grows the
+second to 3,072 bytes at the exact staging ceiling. A 3,073-byte retry is
+refused and immediate reads preserve both candidates. Returning the first file
+to its 1,025-byte baseline is also refused: that restoration would free patch
+bytes but increase staging by one byte. After shrinking the second file by one
+byte, the baseline restoration succeeds at exact staging equality. The
+completed receipt and injected validator show only the second file remains
+modified, with its exact preimage/postimage hashes and byte count. All 17
+ordered filesystem callbacks, cleanup, accepted-source/head preservation,
+receipt/assessment binding and cleared pending state are asserted.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-staging-byte-reuse-2026-11-12.xml)
+has SHA-256
+`fac84817959152658a04992c8ddee789bb6186adeaa4947f0c201a5b1484a761`; the
+[provenance record](evidence/issue-734-active-repair-staging-byte-reuse-2026-11-12.json)
+binds the tested source commit/tree, selector, command and result.
+
+This is local scripted-ACP evidence for logical captured-workspace staging
+accounting, using an injected validator that throws. It does not qualify
+physical memory or disk use, production validation under #236, live providers,
+publication crash recovery under #732, durable provenance under #733, hosted
+exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and #63
+open.
+
 ## Active repair max-turn-request stop after acknowledged write — 2026-11-12
 
 The active repair fixture now returns the ACP `max_turn_requests` stop after

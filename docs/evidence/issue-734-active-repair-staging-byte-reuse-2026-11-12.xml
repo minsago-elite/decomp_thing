@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T13:44:21.392Z" hostname="whatsername" time="2.97">
+  <properties/>
+  <testcase name="active ACP repair enforces staging bytes across rewrites and baseline restoration()" classname="decompengine.repair.TraceGuidedRepairTest" time="2.96"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
