@@ -5,7 +5,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
+import { assertAudit, auditFixtures, auditProfileEvidence, auditViewports, engineSupplementalInteractionContexts, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
@@ -685,10 +685,12 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
     return { samples: list.length, median: at(0.5), p95: at(0.95) }; };
   const workerTargets = records.flatMap((record) => record.workers ?? []);
   const responses = records.flatMap((record) => record.responses);
-  const result = { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
+  const interactionTimes = interactions.map(({ elapsedMs }) => elapsedMs);
+  const result = { profile: auditProfileEvidence('reference'), fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens,
       targets: workerTargets.map((worker) => ({ ...worker, responses: responses.filter((response) => response.url === worker.url) })) },
-    keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
+    keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+      interactions: summary(interactionTimes), raw: { cold, feedback, data, interactions: interactionTimes } } };
   return { result, records, responses, origin };
 }
 
@@ -706,7 +708,8 @@ try {
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin, undefined,
-    { connectionNotice: false }); // #1896 trusted-network evidence is qualified by Chrome DevTools only.
+    { connectionNotice: false, interactionPages: auditFixtures(repo, installation.manifest.buildId).pages,
+      extraInteractionContexts: engineSupplementalInteractionContexts }); // #1896 trusted-network evidence is qualified by Chrome DevTools only.
   const records = [smoked.record, ...audited.records];
   const cspEvents = records.flatMap((record) => record.csp);
   const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);
