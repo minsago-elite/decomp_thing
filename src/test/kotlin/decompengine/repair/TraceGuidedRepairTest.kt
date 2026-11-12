@@ -4478,12 +4478,17 @@ class TraceGuidedRepairTest {
             targetPath,
         )
         val acceptedFiles = acceptedPaths.associateWith { project.resolve(it).readBytes() }
-        val candidateSource = ("/* exact repair quota-byte boundary: " +
-            "q".repeat(candidateBytes.toInt() -
-                "/* exact repair quota-byte boundary: ".toByteArray(Charsets.UTF_8).size -
-                " */\nint decomp_engine_main(void) { return 1; }\n".toByteArray(Charsets.UTF_8).size) +
-            " */\nint decomp_engine_main(void) { return 1; }\n").toByteArray(Charsets.UTF_8)
+        val candidatePrefix = "/* exact repair quota-byte boundary: "
+        val candidateSuffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+        val candidatePaddingBytes = candidateBytes.toInt() -
+            candidatePrefix.toByteArray(Charsets.UTF_8).size - candidateSuffix.toByteArray(Charsets.UTF_8).size
+        val candidatePadding = "é".repeat(candidatePaddingBytes / 2) +
+            if (candidatePaddingBytes % 2 == 1) "x" else ""
+        val candidateText = candidatePrefix + candidatePadding + candidateSuffix
+        val candidateSource = candidateText.toByteArray(Charsets.UTF_8)
         assertEquals(candidateBytes, candidateSource.size.toLong())
+        assertTrue(candidateText.length < candidateSource.size,
+            "the active staging fixture must compare encoded UTF-8 bytes, not character count")
         val budget = RepairResourceBudget(maximumStagingBytes = stagingLimit)
         assertEquals(otherContextBytes + candidateBytes, budget.maximumStagingBytes)
         assertTrue(budget.maximumSourceFileBytes > candidateBytes + 1)
