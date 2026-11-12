@@ -25,6 +25,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -250,6 +251,8 @@ class AcpTerminalBrokerTest {
             val firstCallbackEntered = CountDownLatch(1)
             val releaseFirstCallback = CountDownLatch(1)
             val secondCallbackEntered = CountDownLatch(1)
+            val secondCallStarted = CountDownLatch(1)
+            val secondThread = AtomicReference<Thread?>()
             val callbackOrder = Collections.synchronizedList(mutableListOf<String>())
             val executor = Executors.newFixedThreadPool(2)
             try {
@@ -264,6 +267,8 @@ class AcpTerminalBrokerTest {
                 }
                 assertTrue(firstCallbackEntered.await(3, TimeUnit.SECONDS), "first output observation never began")
                 val second = executor.submit {
+                    secondThread.set(Thread.currentThread())
+                    secondCallStarted.countDown()
                     runBlocking {
                         broker.output(SESSION, terminalId) {
                             callbackOrder += "second"
@@ -271,10 +276,22 @@ class AcpTerminalBrokerTest {
                         }
                     }
                 }
-
-                assertFalse(
-                    secondCallbackEntered.await(150, TimeUnit.MILLISECONDS),
-                    "later output observation overtook the first event callback",
+                assertTrue(secondCallStarted.await(3, TimeUnit.SECONDS), "second output call was not scheduled")
+                val contentionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+                var blockedInsideOutput = false
+                while (System.nanoTime() < contentionDeadline && secondCallbackEntered.count != 0L) {
+                    val thread = secondThread.get()
+                    if (thread?.state == Thread.State.BLOCKED && thread.stackTrace.any {
+                            it.className == AcpTerminalBroker::class.java.name && it.methodName.startsWith("output")
+                        }) {
+                        blockedInsideOutput = true
+                        break
+                    }
+                    Thread.yield()
+                }
+                assertTrue(
+                    blockedInsideOutput,
+                    "second output call neither contended inside output() nor overtook the first callback",
                 )
                 releaseFirstCallback.countDown()
                 first.get(5, TimeUnit.SECONDS)
