@@ -15,9 +15,11 @@ function driverFunction(name, nextDeclaration) {
   assert.ok(start >= 0 && end > start, `Existing driver ${name} boundary changed`);
   return driver.slice(start, end);
 }
-// Execute the actual unchanged deadline/polling and readiness functions, not copies of their policy.
-const readySource = driverFunction('waitFor', 'class Protocol') + '\n' +
-  driverFunction('ready', 'async function capture');
+// Execute the driver's actual deadline/polling and readiness functions, not copies of their policy.
+// Protocol and capture were extracted into packaged-browser-capture.mjs; these function boundaries
+// remain in the driver and are anchored to their next declarations instead.
+const readySource = driverFunction('waitFor', 'async function snapshot') + '\n' +
+  driverFunction('ready', 'async function loadSessionSemanticsGate');
 const scratchParent = resolve('build/task-tmp');
 await fs.mkdir(scratchParent, { recursive: true });
 const data = await fs.mkdtemp(join(scratchParent, 'upload-readiness-'));
