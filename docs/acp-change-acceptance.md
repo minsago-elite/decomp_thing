@@ -2010,3 +2010,11 @@ This is local scripted evidence for Generated C Make only. It does not qualify
 live providers, other profiles, hosted exact-head CI, production repair
 validation under #236, publication recovery under #732, durable provenance
 under #733, or the complete #734/#63 matrix.
+
+The exact-limit `MODIFIED` grant control was rerun after review to assert the
+write audit explicitly reports `ALLOWED/COMPLETED` for the declared target.
+The rerun passed one method with zero failures, errors, or skips. Its retained
+[JUnit report](evidence/issue-734-public-reconstruction-modified-grant-audit-rerun-2026-11-12.xml)
+has SHA-256 `6ba74c900fa4818db3c2246ba8c54b34ae8c540a829ca9e9f0fc1681d480744f`;
+the [provenance record](evidence/issue-734-public-reconstruction-modified-grant-audit-rerun-2026-11-12.json)
+binds the exact test source and result.

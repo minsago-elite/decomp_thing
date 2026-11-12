@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "64c3472317d2c2f409678bcf3e8fb7095b19ed29",
+  "sourceParent": "c1a3c65d9d81e059de104b9f4f917141067c487d",
+  "sourceTree": "9e9e718344fd2d5255876250dbf30eaf60724423",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x buildAnalysisIoHelper --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 68.314,
+    "suiteSeconds": 68.33,
+    "timestamp": "2026-11-12T07:44:21.905Z",
+    "junitSha256": "6ba74c900fa4818db3c2246ba8c54b34ae8c540a829ca9e9f0fc1681d480744f"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction profile with a 256 KiB file grant and snapshot ceiling",
+    "provider": "Scripted ACP process through ArchivalReconstructionService.reconstructWithWorkspace",
+    "coverage": "This rerun adds a direct ALLOWED/COMPLETED audit assertion to the exact-262144-byte MODIFIED case. It also retains the paired 262145-byte modification attempt requiring a POLICY_DENIED callback before a later allowed replacement, receipt/preimage/postimage binding, successful Make validation, expected published and extracted bytes, rebuild, and absence of extra source files. The method also retains exact and one-byte-over CREATE grant controls.",
+    "qualificationLimits": [
+      "local scripted ACP evidence for Generated C Make only",
+      "does not qualify live-provider behavior, other profiles, or hosted exact-head CI",
+      "does not qualify production repair validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "complete #734/#63 mutation and resource acceptance remains open"
+    ]
+  }
+}
