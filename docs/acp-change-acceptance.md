@@ -2304,7 +2304,7 @@ preservation, no pending attempt, and process/sandbox cleanup.
 The focused scripted-ACP test passed with one test and zero failures, errors,
 or skips. The retained [JUnit report](evidence/issue-734-active-repair-complete-source-bytes-2026-11-12.xml)
 has SHA-256
-`d33ce8036e8271809b33540b5f53b4d59d86734dc591566612fc4b18d4f19f2d`; the
+`2467dd16596bbca05374bd727f120c9320255572dc33126e27471f8adea7a3c4`; the
 [provenance record](evidence/issue-734-active-repair-complete-source-bytes-2026-11-12.json)
 binds the exact source commit/tree, selector, command, and result.
 
