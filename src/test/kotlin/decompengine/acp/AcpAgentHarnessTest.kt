@@ -1527,8 +1527,12 @@ class AcpAgentHarnessTest {
         assertEquals(0, exactBoundaryResult.build.returnCode)
         val exactBoundaryReceipt = exactSourceBoundary.receipts.single().requireResult()
         assertEquals(AgentStopReason.COMPLETED, exactBoundaryReceipt.stopReason)
-        assertEquals(AgentFileChangeKind.CREATED, exactBoundaryReceipt.changes.single().kind)
-        assertEquals(256L * 1024, exactBoundaryReceipt.changes.single().sizeBytes)
+        assertEquals(1, exactBoundaryReceipt.changes.size)
+        val exactBoundaryChange = exactBoundaryReceipt.changes.single()
+        assertEquals(implementationPath, exactBoundaryChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, exactBoundaryChange.kind)
+        assertNull(exactBoundaryChange.beforeSha256)
+        assertEquals(256L * 1024, exactBoundaryChange.sizeBytes)
         val expectedSourcePrefix =
             "#include \"modules/decomp.h\"\n" +
                 "/* fn_0000000000001000 */\n" +
@@ -1541,6 +1545,7 @@ class AcpAgentHarnessTest {
         val expectedSource = (expectedSourcePrefix + "/*" + expectedPadding + "*/\n")
             .toByteArray(Charsets.UTF_8)
         assertEquals(256 * 1024, expectedSource.size)
+        assertEquals(sha256(expectedSource), exactBoundaryChange.afterSha256)
         assertContentEquals(expectedSource, Files.readAllBytes(exactBoundaryResult.projectDir.resolve(implementationPath)))
         val exactBoundaryAudit = exactSourceBoundary.harness.latestFilesystemAudit().last()
         assertEquals(implementationPath, assertNotNull(exactBoundaryAudit.policyPath).relativePath)
@@ -1553,6 +1558,7 @@ class AcpAgentHarnessTest {
             profile = profile,
         )
         assertContentEquals(expectedSource, Files.readAllBytes(exactBoundaryExtracted.resolve(implementationPath)))
+        assertContentEquals(expectedSource, Files.readAllBytes(output.resolve("source-tree").resolve(implementationPath)))
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactBoundaryExtracted, profile).returnCode)
         acceptedMetadata = capturePublishedMetadata(output)
         assertNoReconstructionPublicationResidue(output)
