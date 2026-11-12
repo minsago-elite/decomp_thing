@@ -5064,6 +5064,329 @@ class TraceGuidedRepairTest {
 
     @Test
     @org.junit.jupiter.api.Timeout(value = 180, unit = TimeUnit.SECONDS)
+    fun `active ACP repair bounds the complete candidate source tree including an unselected sibling`() {
+        val targetPath = "src/modules/reconstructed.c"
+        val siblingPath = "src/modules/secondary.c"
+        val failureText = "$targetPath: compiler error"
+        val candidateSize = 128
+
+        fun paddedSource(prefix: String, suffix: String, size: Int, fill: Char): ByteArray {
+            val padding = size - prefix.toByteArray(Charsets.UTF_8).size - suffix.toByteArray(Charsets.UTF_8).size
+            assertTrue(padding > 0)
+            return (prefix + fill.toString().repeat(padding) + suffix).toByteArray(Charsets.UTF_8).also {
+                assertEquals(size, it.size)
+            }
+        }
+
+        val targetBefore = paddedSource(
+            "/* small selected module ",
+            "\n*/\nint decomp_engine_main(void) { return 0; }\n",
+            96,
+            'a',
+        )
+        val siblingBefore = paddedSource(
+            "/* unselected sibling module ",
+            "\n*/\nint secondary(void) { return 0; }\n",
+            128,
+            'b',
+        )
+        val candidatePrefix = "/* active aggregate source-byte boundary: "
+        val candidateSuffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+
+        fun candidate(bytes: Int): ByteArray = paddedSource(candidatePrefix, candidateSuffix, bytes, 's')
+
+        val exactCandidate = candidate(candidateSize)
+        val oversizedCandidate = candidate(candidateSize + 1)
+
+        fun seededProject(prefix: String): Path = createProject(
+            createRepairTempDirectory(prefix).resolve("project"),
+            reconstructedSource = targetBefore.decodeToString(),
+        ).also { project -> project.resolve(siblingPath).writeBytes(siblingBefore) }
+
+        val sizingProject = seededProject("repair-active-source-tree-sizing-")
+        data class Sizing(
+            val sources: Map<String, ByteArray>,
+            val selected: Map<String, ByteArray>,
+            val head: String,
+            val nodes: Int,
+            val runs: Int,
+        )
+        val sizing = ModuleRevisionGraph.open(sizingProject, GeneratedCRepairIndexProfile).use { graph ->
+            val context = graph.selectContext("compile", failureText)
+            assertEquals(setOf(targetPath), context.writablePaths.toSet())
+            val selected = graph.preflightStagingContext(context)
+            assertTrue(targetPath in selected)
+            assertTrue(siblingPath !in selected, "the sibling must remain outside staged context")
+            Sizing(
+                graph.candidateSources(),
+                selected,
+                graph.snapshot.headId,
+                graph.snapshot.nodes.size,
+                graph.snapshot.runs.size,
+            )
+        }
+        assertContentEquals(targetBefore, sizing.sources.getValue(targetPath))
+        assertContentEquals(siblingBefore, sizing.sources.getValue(siblingPath))
+        val baselineSourceBytes = sizing.sources.values.fold(0L) { total, bytes ->
+            Math.addExact(total, bytes.size.toLong())
+        }
+        val sourceByteLimit = Math.addExact(
+            baselineSourceBytes - targetBefore.size.toLong(),
+            candidateSize.toLong(),
+        )
+        val exactCandidateBytes = sizing.sources.entries.fold(0L) { total, (path, bytes) ->
+            Math.addExact(total, if (path == targetPath) exactCandidate.size.toLong() else bytes.size.toLong())
+        }
+        assertEquals(sourceByteLimit, exactCandidateBytes)
+        assertTrue(oversizedCandidate.size.toLong() + baselineSourceBytes - targetBefore.size > sourceByteLimit)
+
+        fun runCase(overLimit: Boolean) {
+            data class Baseline(
+                val sources: Map<String, ByteArray>,
+                val selected: Map<String, ByteArray>,
+                val head: String,
+                val nodes: Int,
+                val runs: Int,
+            )
+            val project = seededProject(
+                if (overLimit) "repair-active-source-tree-over-" else "repair-active-source-tree-exact-",
+            )
+            val budget = RepairResourceBudget(
+                maximumSourceFileBytes = 512,
+                maximumSourceBytes = sourceByteLimit,
+                maximumContextBytes = sourceByteLimit,
+                maximumStagingBytes = sourceByteLimit,
+                maximumPatchFiles = 1,
+                maximumPatchBytes = 256,
+            )
+            val before = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                val context = graph.selectContext("compile", failureText)
+                assertEquals(setOf(targetPath), context.writablePaths.toSet())
+                val selected = graph.preflightStagingContext(context)
+                assertEquals(sizing.selected.keys, selected.keys)
+                sizing.selected.forEach { (path, bytes) -> assertContentEquals(bytes, selected.getValue(path), path) }
+                Baseline(
+                    graph.candidateSources(),
+                    selected,
+                    graph.snapshot.headId,
+                    graph.snapshot.nodes.size,
+                    graph.snapshot.runs.size,
+                )
+            }
+            assertEquals(sizing.sources.keys, before.sources.keys)
+            before.sources.forEach { (path, bytes) -> assertContentEquals(bytes, sizing.sources.getValue(path), path) }
+            assertTrue(budget.maximumSourceBytes >= budget.maximumSourceFileBytes)
+            assertTrue(budget.maximumStagingBytes >= before.selected.values.sumOf { it.size.toLong() })
+            assertTrue(budget.maximumPatchBytes > exactCandidate.size.toLong())
+            val expectedCandidateSources = before.sources.toMutableMap().apply {
+                put(targetPath, if (overLimit) oversizedCandidate else exactCandidate)
+            }
+            val expectedCandidateRevision = repairCandidateSourceSha256(expectedCandidateSources)
+
+            val mode = if (overLimit) {
+                "repair-active-declared-role-source-bytes-over"
+            } else {
+                "repair-active-declared-role-source-bytes-exact"
+            }
+            val acp = AcpAgentHarnessTest().harness(mode)
+            var dispatches = 0
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.execute(request, onEvent)
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    assertEquals(before.selected.keys, initialFiles.keys)
+                    assertTrue(siblingPath !in initialFiles, "unselected sibling must not enter the staging snapshot")
+                    before.selected.forEach { (path, bytes) -> assertContentEquals(bytes, initialFiles.getValue(path), path) }
+                    val grants = assertNotNull(request.accessPolicy.mutationAuthority).grants
+                    assertEquals(setOf(targetPath), grants.map { it.path.relativePath }.toSet())
+                    assertEquals(setOf(AgentOperation.WRITE_FILE), grants.single().operations)
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                }
+            }
+            var validations = 0
+            var validatedRevision: String? = null
+            val validatorFailure = IllegalStateException("exact complete source-byte candidate reached validator")
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validations++
+                    if (overLimit) error("over-limit complete candidate must be refused before validation")
+                    assertEquals(before.sources.keys.sorted(), request.candidateSourcePaths)
+                    val sources = request.candidateSources
+                    before.sources.filterKeys { it != targetPath }.forEach { (path, bytes) ->
+                        assertContentEquals(bytes, sources.getValue(path), path)
+                    }
+                    assertContentEquals(exactCandidate, sources.getValue(targetPath))
+                    assertContentEquals(siblingBefore, sources.getValue(siblingPath))
+                    val total = sources.values.fold(0L) { sum, bytes -> Math.addExact(sum, bytes.size.toLong()) }
+                    assertEquals(sourceByteLimit, total)
+                    val revision = repairCandidateSourceSha256(sources)
+                    assertEquals(expectedCandidateRevision, revision)
+                    assertEquals(revision, request.sourceRevisionSha256)
+                    validatedRevision = revision
+                    throw validatorFailure
+                }
+
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("source-byte admission case must stop at the candidate validator")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("source-byte admission case must stop at the candidate validator")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport = error("source-byte admission case must not run behavior validation")
+            }
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = RepairHistory(project.resolve("reports/repair_history.json")),
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = budget,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+            try {
+                if (overLimit) {
+                    val failure = assertFailsWith<RepairBudgetExceededException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", failureText),
+                            emptyList(),
+                        )
+                    }
+                    assertEquals("repair source inputs exceed $sourceByteLimit bytes", failure.message)
+                } else {
+                    val failure = assertFailsWith<IllegalStateException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", failureText),
+                            emptyList(),
+                        )
+                    }
+                    assertSame(validatorFailure, failure)
+                }
+            } finally {
+                loop.close()
+            }
+
+            assertEquals(1, dispatches)
+            assertEquals(if (overLimit) 0 else 1, validations)
+            before.sources.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes(), path) }
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                val snapshot = graph.snapshot
+                assertNull(snapshot.pendingAttemptId)
+                assertEquals(before.head, snapshot.headId)
+                assertEquals(before.nodes + 1, snapshot.nodes.size)
+                assertEquals(before.runs + 1, snapshot.runs.size)
+                assertEquals(
+                    if (overLimit) RepairRunStatus.RESOURCE_EXHAUSTED else RepairRunStatus.VALIDATION_FAILED,
+                    snapshot.runs.last().status,
+                )
+                val rejected = snapshot.nodes.last()
+                assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+                val binding = assertNotNull(rejected.repairMetadata?.agentInvocation)
+                assertEquals("returned-completed", binding.terminalOutcome)
+                assertTrue(binding.receiptReleaseComplete)
+                assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+                val receiptBytes = project.resolve(binding.receiptPath).readBytes()
+                assertEquals(binding.receiptSha256, sha256(receiptBytes))
+                val receipt = Json.parseToJsonElement(receiptBytes.decodeToString()).jsonObject
+                val outcome = receipt.getValue("outcome").jsonObject
+                assertEquals("returned", outcome.getValue("type").jsonPrimitive.content)
+                val result = outcome.getValue("result").jsonObject
+                assertEquals("completed", result.getValue("stopReason").jsonPrimitive.content)
+                val changeSet = result.getValue("changes").jsonObject
+                assertEquals(1, changeSet.getValue("observedCount").jsonPrimitive.int)
+                val change = changeSet.getValue("records").jsonArray.single().jsonObject
+                assertEquals("modified", change.getValue("kind").jsonPrimitive.content)
+                assertEquals(
+                    sha256(targetPath.toByteArray(Charsets.UTF_8)),
+                    change.getValue("relativePath").jsonObject.getValue("sha256").jsonPrimitive.content,
+                )
+                assertEquals(sha256(targetBefore), change.getValue("beforeSha256").jsonPrimitive.content)
+                assertEquals(sha256(if (overLimit) oversizedCandidate else exactCandidate),
+                    change.getValue("afterSha256").jsonPrimitive.content)
+                assertEquals(
+                    (if (overLimit) oversizedCandidate else exactCandidate).size.toLong(),
+                    change.getValue("sizeBytes").jsonPrimitive.content.toLong(),
+                )
+                val process = receipt.getValue("process").jsonObject
+                assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int)
+                assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean)
+                val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
+                val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
+                assertEquals(2, filesystem.getValue("recordCount").jsonPrimitive.int)
+                assertEquals(2, records.size)
+                assertEquals(
+                    listOf("fs/write_text_file", "fs/read_text_file").map {
+                        sha256(it.toByteArray(Charsets.UTF_8))
+                    },
+                    records.map { it.getValue("method").jsonObject.getValue("sha256").jsonPrimitive.content },
+                )
+                assertTrue(records.all {
+                    it.getValue("outcome").jsonPrimitive.content == "allowed" &&
+                        it.getValue("reason").jsonPrimitive.content == "completed"
+                })
+                val assessmentBytes = project.resolve(requireNotNull(binding.assessmentPath)).readBytes()
+                assertEquals(binding.assessmentSha256, sha256(assessmentBytes))
+                val assessment = decompengine.project.AcpChangeAssessment.parse(assessmentBytes)
+                assertEquals(binding.receiptSha256, assessment.receiptSha256)
+                assertEquals(
+                    if (overLimit) decompengine.project.AcpChangeValidationStatus.NOT_RUN
+                    else decompengine.project.AcpChangeValidationStatus.FAILED,
+                    assessment.validationStatus,
+                )
+                assertEquals(
+                    listOf(if (overLimit) "resource-exhausted" else "validation-failed"),
+                    assessment.reasonCodes,
+                )
+                assertEquals(decompengine.project.AcpChangePublicationEligibility.REJECTED, assessment.eligibility)
+                assertEquals(if (overLimit) expectedCandidateRevision else validatedRevision, assessment.afterSha256)
+            }
+        }
+
+        runCase(overLimit = false)
+        runCase(overLimit = true)
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 180, unit = TimeUnit.SECONDS)
     fun `active ACP repair admits the exact candidate blob entry and refuses the next directory entry`() {
         val targetPath = "src/modules/reconstructed.c"
         val sourceText = "int decomp_engine_main(void) { return 0; }\n"

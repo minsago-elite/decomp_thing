@@ -2287,6 +2287,32 @@ recovery under #732, durable provenance under #733, physical storage limits,
 successful publication, or the complete #734/#63 acceptance matrix. Keep #734
 and #63 open.
 
+## Active repair complete candidate source-byte admission — 2026-11-12
+
+The active repair case stages only `src/modules/reconstructed.c`; an unchanged
+`src/modules/secondary.c` remains outside the selected context. The exact case
+admits the 128-byte replacement at the measured complete-candidate
+`maximumSourceBytes` ceiling and reaches the injected validator with the full
+source map, including the sibling. In the one-byte-over case, ACP acknowledges
+and reads back the 129-byte replacement before complete candidate-request
+admission refuses the aggregate tree. This refusal now produces typed
+`RESOURCE_EXHAUSTED` status and a `NOT_RUN` validation assessment with a
+resource-exhaustion reason; the validator is not invoked. Both cases verify
+receipt/assessment binding, candidate commitments, accepted source/head
+preservation, no pending attempt, and process/sandbox cleanup.
+
+The focused scripted-ACP test passed with one test and zero failures, errors,
+or skips. The retained [JUnit report](evidence/issue-734-active-repair-complete-source-bytes-2026-11-12.xml)
+has SHA-256
+`d33ce8036e8271809b33540b5f53b4d59d86734dc591566612fc4b18d4f19f2d`; the
+[provenance record](evidence/issue-734-active-repair-complete-source-bytes-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, hosted exact-head CI,
+publication crash recovery under #732, durable provenance under #733, or the
+complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Active repair cumulative regression-input byte admission — 2026-11-12
 
 The paired cumulative controls use one project and retained corpus across

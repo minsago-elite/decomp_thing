@@ -102,6 +102,8 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-declared-role-stored-blob-over",
     "repair-active-declared-role-stored-blob-shared",
     "repair-active-declared-role-stored-blob-distinct",
+    "repair-active-declared-role-source-bytes-exact",
+    "repair-active-declared-role-source-bytes-over",
     "repair-active-declared-role-invalid-unicode-after-write",
     "repair-active-declared-role-read-limit-after-write",
     "repair-active-declared-role-patch-count-retry",
@@ -316,6 +318,8 @@ expected_fs = {
     "repair-active-declared-role-stored-blob-over": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-stored-blob-shared": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-stored-blob-distinct": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-source-bytes-exact": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-source-bytes-over": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-invalid-unicode-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-read-limit-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-patch-count-retry": {"readTextFile": True, "writeTextFile": True},
@@ -1089,6 +1093,24 @@ if MODE in {
     second_readback = read_workspace_file(second, 217)
     if "error" in second_readback or second_readback.get("result", {}).get("content") != second_candidate:
         raise SystemExit(212)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE in {
+    "repair-active-declared-role-source-bytes-exact",
+    "repair-active-declared-role-source-bytes-over",
+}:
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    expected_bytes = 128 + (1 if MODE == "repair-active-declared-role-source-bytes-over" else 0)
+    prefix = "/* active aggregate source-byte boundary: "
+    suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+    padding_bytes = expected_bytes - len(prefix.encode()) - len(suffix.encode())
+    candidate = prefix + "s" * padding_bytes + suffix
+    if len(candidate.encode()) != expected_bytes:
+        raise SystemExit(218)
+    write_workspace_file(source, candidate, 218)
+    readback = read_workspace_file(source, 219)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(219)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 if MODE == "repair-active-declared-role-invalid-unicode-after-write":

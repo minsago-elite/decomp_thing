@@ -48,14 +48,12 @@ class RepairCandidateValidationRequest(
     }
 
     init {
-        require(sourceContent.isNotEmpty() && sourceContent.size <= budget.maximumSourceFiles)
+        require(sourceContent.isNotEmpty())
         require(sourceContent.keys.all { path ->
             path.isNotEmpty() && !Path.of(path).isAbsolute &&
                 Path.of(path).normalize().toString().replace('\\', '/') == path &&
                 Path.of(path).none { it.toString() == ".." }
         }) { "candidate source paths must be normalized project-relative paths" }
-        require(sourceContent.values.all { it.size.toLong() <= budget.maximumSourceFileBytes })
-        require(sourceContent.values.fold(0L) { sum, bytes -> Math.addExact(sum, bytes.size.toLong()) } <= budget.maximumSourceBytes)
         require(repairCandidateSourceSha256(sourceContent) == sourceRevisionSha256) {
             "candidate source bytes differ from the requested revision"
         }
@@ -74,15 +72,24 @@ class RepairCandidateValidationRequest(
 }
 
 private fun checkedCandidateSources(sources: Map<String, ByteArray>, budget: RepairResourceBudget): Map<String, ByteArray> {
-    require(sources.isNotEmpty() && sources.size <= budget.maximumSourceFiles)
+    require(sources.isNotEmpty())
+    if (sources.size > budget.maximumSourceFiles) {
+        throw RepairCandidateSourceBudgetExceededException("repair source inputs exceed ${budget.maximumSourceFiles} files")
+    }
     var total = 0L
     sources.forEach { (path, bytes) ->
         require(path.isNotEmpty() && !Path.of(path).isAbsolute &&
             Path.of(path).normalize().toString().replace('\\', '/') == path &&
             Path.of(path).none { it.toString() == ".." })
-        require(bytes.size.toLong() <= budget.maximumSourceFileBytes)
+        if (bytes.size.toLong() > budget.maximumSourceFileBytes) {
+            throw RepairCandidateSourceBudgetExceededException(
+                "repair source file $path has ${bytes.size} bytes; limit=${budget.maximumSourceFileBytes}",
+            )
+        }
         total = Math.addExact(total, bytes.size.toLong())
-        require(total <= budget.maximumSourceBytes)
+        if (total > budget.maximumSourceBytes) {
+            throw RepairCandidateSourceBudgetExceededException("repair source inputs exceed ${budget.maximumSourceBytes} bytes")
+        }
     }
     return Collections.unmodifiableMap(sources.mapValuesTo(TreeMap()) { (_, bytes) -> bytes.copyOf() })
 }

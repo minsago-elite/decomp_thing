@@ -1643,7 +1643,7 @@ class TraceGuidedRepairLoop private constructor(
                     AcpChangePolicyVerdict.NOT_EVALUATED
                 } else AcpChangePolicyVerdict.ALLOW,
                 reasonCodes = if (effectiveEligibility == AcpChangePublicationEligibility.REJECTED) {
-                    listOf("validation-failed")
+                    listOf(if (validationStatus == AcpChangeValidationStatus.NOT_RUN) "resource-exhausted" else "validation-failed")
                 } else emptyList(),
                 validationStatus = validationStatus,
                 validationProofSha256 = listOfNotNull(proof?.evidenceSha256),
@@ -1656,10 +1656,13 @@ class TraceGuidedRepairLoop private constructor(
 
         private fun stagedResultStopReason(): AgentStopReason = result.stopReason
 
-        fun reject(evidence: RepairEvidence?): ModuleRevisionNode {
+        fun reject(
+            evidence: RepairEvidence?,
+            validationStatus: AcpChangeValidationStatus = AcpChangeValidationStatus.FAILED,
+        ): ModuleRevisionNode {
             if (turnIntent != null && !assessmentPersisted) {
                 try {
-                    persistAssessment(AcpChangePublicationEligibility.REJECTED, AcpChangeValidationStatus.FAILED, null)
+                    persistAssessment(AcpChangePublicationEligibility.REJECTED, validationStatus, null)
                 } catch (failure: Exception) {
                     assessmentPersistenceFailed = true
                     throw failure as? RepairAgentEvidencePersistenceException
@@ -1683,7 +1686,10 @@ class TraceGuidedRepairLoop private constructor(
             // pending for roll-forward; neither case may be terminalized here.
             if (repairAttemptCanBeRejected(finalized, assessmentPersisted, original, assessmentPersistenceFailed)) {
                 runCatching {
-                    reject(repairFailureEvidence(evidenceKind, original))
+                    val validationStatus = if (original is RepairCandidateSourceBudgetExceededException) {
+                        AcpChangeValidationStatus.NOT_RUN
+                    } else AcpChangeValidationStatus.FAILED
+                    reject(repairFailureEvidence(evidenceKind, original), validationStatus)
                     reconcile()
                 }.onFailure(original::addSuppressed)
             }
