@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T08:55:33.726Z" hostname="whatsername" time="9.545">
+  <properties/>
+  <testcase name="active ACP repair enforces returned token ceilings after a write and permits exact usage()" classname="decompengine.repair.TraceGuidedRepairTest" time="9.535"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -2178,3 +2178,26 @@ This is local scripted-ACP evidence for Generated C Make. It does not qualify
 live providers, production repair validation under #236, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair refusal after acknowledged write — 2026-11-12
+
+The scripted active-repair ACP peer now acknowledges a modification to the
+allowlisted implementation and then returns the `refused` stop reason. The
+active workflow persists the invocation receipt and rejected assessment, maps
+the run to `REJECTED`, records the observed modification's path commitment,
+preimage/postimage hashes, and byte count, and does not call the injected
+validator. The accepted source and graph head remain unchanged, pending state is
+cleared, and receipt evidence records final-snapshot completion and verified
+process/sandbox cleanup.
+
+The focused method passed with one test and zero failures, errors, or skips.
+The retained [JUnit report](evidence/issue-734-active-repair-refusal-after-write-2026-11-12.xml)
+has SHA-256
+`5e6b548a2f17165adaf7f89d581c70dd02d3421570e4dd90937b8ab89e1e82da`; the
+[provenance record](evidence/issue-734-active-repair-refusal-after-write-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence. It does not qualify production validation
+under #236, live providers, publication crash recovery under #732, durable
+provenance under #733, hosted exact-head CI, or the complete #734/#63
+acceptance matrix. Keep #734 and #63 open.

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "a228bb1a220341637453a1fffb6a4339abc08ed3",
+  "sourceParent": "e8b078069f736c7d03bf587a4436297a9b793d91",
+  "sourceTree": "f02e44acc6a93c88616db991590459ca42329bb9",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces returned token ceilings after a write and permits exact usage"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces returned token ceilings after a write and permits exact usage'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 9.535,
+    "suiteSeconds": 9.545,
+    "timestamp": "2026-11-12T08:55:33.726Z",
+    "junitSha256": "5e6b548a2f17165adaf7f89d581c70dd02d3421570e4dd90937b8ab89e1e82da"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "The fixture acknowledges a write to the declared implementation, then returns refusal. The active loop persists the request-bound receipt and rejected assessment, records the observed MODIFIED path, before/after digests and byte count, rejects the attempt without invoking the injected validator, preserves accepted source/head, and leaves no pending attempt. Receipt evidence also records final snapshot completion, zero remaining processes, and verified sandbox cleanup. The same method retains the adjacent token ceiling, exact usage, and malformed usage controls.",
+    "qualificationLimits": [
+      "local scripted ACP only; no live-provider qualification",
+      "uses an injected validator and proves refusal precedes validation, not production validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not establish hosted exact-head CI or complete #734/#63 acceptance"
+    ]
+  }
+}
