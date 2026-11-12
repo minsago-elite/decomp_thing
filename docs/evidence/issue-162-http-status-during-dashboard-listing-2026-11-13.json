@@ -1,0 +1,24 @@
+{
+  "status": "passed",
+  "issue": 162,
+  "sourceCommit": "409327b583a25bd27b5fbe3621c39e81a9e4c086",
+  "sourceParent": "519b16afa06ab64d2b72ad92c46c1baffc24f294",
+  "sourceTree": "2ef54604884383a99c9c1073dffedbc73c9fc13b",
+  "command": "PATH=\"$PWD/build/frontend-node-24.20.0-npm-11.19.0.BpJuvR/node/bin:$PATH\" ./gradlew --no-daemon -x verifyFrontendToolchain test --tests 'decompengine.web.UploadServerTest.HTTP job status remains responsive while a multi-record dashboard listing is stalled'",
+  "suite": "decompengine.web.UploadServerTest",
+  "test": "HTTP job status remains responsive while a multi-record dashboard listing is stalled",
+  "junitXml": "issue-162-http-status-during-dashboard-listing-2026-11-13.xml",
+  "junitXmlSha256": "440645289a3681b71ed307e99c2db62664070d0fbf8caae26d6c486a3bff5f1c",
+  "totals": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "scope": "Local deterministic HTTP regression: one dashboard request is held in a physical job.json metadata read while eight GET /api/jobs/{id} requests each require HTTP 200 in under 2 seconds; after release the dashboard must include all three jobs.",
+  "limitations": [
+    "Does not measure sustained-load throughput or physical-disk contention.",
+    "Does not qualify live deployment behavior or hosted CI.",
+    "Does not complete the broader #162 upload/listing quota matrix or issue acceptance."
+  ]
+}

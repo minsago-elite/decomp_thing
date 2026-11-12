@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.UploadServerTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T19:14:54.468Z" hostname="whatsername" time="1.869">
+  <properties/>
+  <testcase name="HTTP job status remains responsive while a multi-record dashboard listing is stalled()" classname="decompengine.web.UploadServerTest" time="1.633"/>
+  <system-out><![CDATA[web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"HTTP job status remains responsive while a multi-record dashboard listing is stalled()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

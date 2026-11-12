@@ -73,8 +73,9 @@ during blocked transfers, and mutual exclusion between uploads and workflows.
 dashboard request, then sends eight real `GET /api/jobs/{id}` requests before
 releasing the listing. Each status response must return 200 in under two seconds;
 the dashboard must remain blocked until release and then return all three rows.
-The focused local regression passed on its recorded test run. This qualifies HTTP
-routing and serialization during one deliberately stalled listing; it is not a
+The focused local regression passed on its recorded test run ([evidence record](evidence/issue-162-http-status-during-dashboard-listing-2026-11-13.json),
+[JUnit XML](evidence/issue-162-http-status-during-dashboard-listing-2026-11-13.xml)).
+This qualifies HTTP routing and serialization during one deliberately stalled listing; it is not a
 sustained-load benchmark, does not measure physical-disk contention, and does not
 complete the broader #162 upload/listing quota matrix or hosted qualification.
 
