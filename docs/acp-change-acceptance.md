@@ -2493,3 +2493,31 @@ directory-count control does not mutate a candidate or invoke validation. It
 does not qualify production validation under #236, live providers, publication
 crash recovery under #732, durable provenance under #733, hosted exact-head CI,
 or the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
+## Public reconstruction initial-snapshot byte equality — 2026-11-12
+
+The public ACP reconstruction limit matrix now includes exact-equality controls
+for the initial snapshot's per-file-byte and total-byte ceilings. Each control
+seeds one existing implementation immediately before the initial snapshot and
+sets one byte dimension to that file's exact UTF-8 size, leaving the other
+byte dimension unconstrained. Both reach ACP dispatch, return a completed
+`MODIFIED` receipt with the seeded preimage and candidate postimage hashes, pass
+the final workspace snapshot, and verify process/sandbox cleanup. The existing
+one-byte-under controls continue to require `RESOURCE_EXHAUSTED` before
+process launch.
+
+The focused public reconstruction method passed with one test and zero
+failures, errors, or skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-initial-snapshot-byte-equality-2026-11-12.xml)
+has SHA-256
+`d37291eba3d2faceb4163847168a80f5ee1499a966a1cb1456f97c596626fb7b`; the
+[provenance record](evidence/issue-734-public-reconstruction-initial-snapshot-byte-equality-2026-11-12.json)
+binds the tested source commit/tree, selector, command, and result.
+
+The injected existing-target scenario is rejected at the later generation
+committable gate after the ACP call and final snapshot complete. These equality
+controls therefore qualify initial snapshot admission and execution cleanup;
+they do not claim successful publication. This remains local scripted ACP
+coverage for Generated C Make. It does not qualify live providers, production
+repair validation under #236, publication crash recovery under #732, durable
+provenance under #733, hosted exact-head CI, or the complete #734/#63
+acceptance matrix. Keep #734 and #63 open.
