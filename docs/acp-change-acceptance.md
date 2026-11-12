@@ -1980,3 +1980,33 @@ This is local scripted-provider evidence for Generated C Make. It does not
 qualify live providers, other profiles, hosted exact-head CI, production repair
 validation under #236, publication crash recovery under #732, or durable
 provenance under #733. The full #734/#63 acceptance matrix remains open.
+
+## Public reconstruction mutation-grant boundaries for existing targets — 2026-11-12
+
+The public Generated C Make reconstruction matrix now exercises the byte grant
+on an existing implementation as well as on a newly created one. With the
+target seeded in the staged project before dispatch, a multibyte replacement
+of exactly 262,144 UTF-8 bytes is admitted and reported as one `MODIFIED`
+receipt change. The receipt binds the request, seeded preimage, expected
+postimage digest, and final byte count. The workflow reaches the Make build,
+returns no unresolved entities, and publishes the expected bytes in the
+project, `source-tree`, and verified extracted archive; the extracted archive
+rebuilds successfully.
+
+A paired attempt on an existing target sends 262,145 UTF-8 bytes with a 1 MiB
+frame ceiling. The broker must deny that target write with `POLICY_DENIED`,
+after which the scripted peer makes a valid replacement. The final receipt
+must still describe exactly one `MODIFIED` change from the seeded preimage, and
+the resulting project and extracted archive must contain the valid replacement
+with no unauthorized sibling file.
+
+The focused local scripted-ACP run passed one JUnit method with zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-modified-grant-boundaries-2026-11-12.xml)
+has SHA-256 `a503a7f80fb4cd71bc0f4250b8471964f8e6fcabe9f96382aede06bef2674a5c`;
+the [provenance record](evidence/issue-734-public-reconstruction-modified-grant-boundaries-2026-11-12.json)
+binds the source commit/tree, selector, command, and result.
+
+This is local scripted evidence for Generated C Make only. It does not qualify
+live providers, other profiles, hosted exact-head CI, production repair
+validation under #236, publication recovery under #732, durable provenance
+under #733, or the complete #734/#63 matrix.

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "8e8d3391aa94937b9d749d6ee7e565112c36430c",
+  "sourceParent": "ba092d70b24592c48d3be62cd372e260c3f3b791",
+  "sourceTree": "08bdac679c63e2c74023b8e0698e16f2dbd3d650",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x buildAnalysisIoHelper --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 67.489,
+    "suiteSeconds": 67.503,
+    "timestamp": "2026-11-12T07:39:46.859Z",
+    "junitSha256": "a503a7f80fb4cd71bc0f4250b8471964f8e6fcabe9f96382aede06bef2674a5c"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction profile with a 256 KiB file grant and snapshot ceiling",
+    "provider": "Scripted ACP process through ArchivalReconstructionService.reconstructWithWorkspace",
+    "coverage": "The active cases seed an existing declared implementation before ACP dispatch. One scripted replacement is exactly 262144 UTF-8 bytes with multibyte padding and must be admitted as one MODIFIED receipt change with the seeded preimage digest, matching postimage digest, exact size, successful Make build, and no unresolved entities. The paired mutation-grant case attempts 262145 UTF-8 bytes against the existing target and requires -32602/POLICY_DENIED, then performs an admitted replacement. Its completed receipt must remain MODIFIED and bind the seeded preimage to the final source bytes. Both cases verify published source-tree and extracted archive bytes, rebuild the extracted project, and reject extra sibling files. The same method retains the CREATE exact-limit and one-byte-over controls.",
+    "qualificationLimits": [
+      "local scripted ACP evidence for Generated C Make only",
+      "does not qualify live-provider behavior, other profiles, or hosted exact-head CI",
+      "does not qualify production repair validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "complete #734/#63 mutation and resource acceptance remains open"
+    ]
+  }
+}
