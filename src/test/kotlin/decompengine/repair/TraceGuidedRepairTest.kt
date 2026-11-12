@@ -3298,6 +3298,178 @@ class TraceGuidedRepairTest {
 
     @Test
     @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair enforces cumulative retained regression input count across calls`() {
+        val project = createProject(
+            createRepairTempDirectory("repair-active-regression-cumulative-count-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+        )
+        val targetPath = "src/modules/reconstructed.c"
+        val target = project.resolve(targetPath)
+        val acceptedSource = target.readBytes()
+        val candidateSource = "/* validated candidate */\nint decomp_engine_main(void) { return 1; }\n"
+            .toByteArray(Charsets.UTF_8)
+        val exactInputs = listOf(
+            ProcessInput("first", args = listOf("alpha"), stdin = byteArrayOf(1)),
+            ProcessInput("second", args = listOf("beta"), stdin = byteArrayOf(2)),
+        )
+        val budget = RepairResourceBudget(
+            maximumRegressionInputs = exactInputs.size,
+            maximumRegressionInputBytes = 64,
+            maximumRequestBytes = 64 * 1024,
+        )
+        val baseline = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            Triple(graph.snapshot.headId, graph.snapshot.nodes.size, graph.snapshot.runs.size)
+        }
+        val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-candidate")
+        var dispatches = 0
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = acp.execute(request, onEvent)
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                turnIdentity: decompengine.agent.AgentTurnIdentity,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt {
+                dispatches++
+                return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+            }
+        }
+        var validationCalls = 0
+        val validation = object : RepairValidationStrategy {
+            override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+            override fun requireAvailable() = Unit
+            override fun validateCandidate(
+                request: RepairCandidateValidationRequest,
+            ): RepairCandidateValidationOutcome {
+                validationCalls++
+                val expectedInputs = exactInputs.take(validationCalls)
+                assertEquals(expectedInputs.map { it.id }, request.inputs.map { it.id })
+                assertEquals(
+                    decompengine.repair.repairRegressionCorpusSha256(expectedInputs),
+                    request.regressionCorpusSha256,
+                )
+                assertContentEquals(acceptedSource, request.projectDir.resolve(targetPath).readBytes())
+                assertContentEquals(candidateSource, request.candidateSources.getValue(targetPath))
+                assertEquals(
+                    decompengine.repair.repairCandidateSourceSha256(request.candidateSources),
+                    request.sourceRevisionSha256,
+                )
+                val invocation = assertNotNull(request.invocation)
+                assertEquals(request.regressionCorpusSha256, invocation.regressionCorpusSha256)
+                val evidenceBytes = (
+                    "{\"schemaVersion\":1,\"outcome\":\"compile-failed\",\"sourceRevisionSha256\":" +
+                        "\"${request.sourceRevisionSha256}\"}\n"
+                    ).toByteArray(Charsets.UTF_8)
+                request.reportsDir.createDirectories()
+                val evidencePath = request.reportsDir.resolve("${request.label}.validation.json")
+                evidencePath.writeBytes(evidenceBytes)
+                val proof = RepairValidationProof(
+                    sourceRevisionSha256 = request.sourceRevisionSha256,
+                    profileSha256 = request.profileSha256,
+                    indexSha256 = request.indexSha256,
+                    regressionCorpusSha256 = request.regressionCorpusSha256,
+                    originalBinarySha256 = null,
+                    rebuiltBinarySha256 = null,
+                    runtimeSha256 = sha256("cumulative-regression-fixture".toByteArray(Charsets.UTF_8)),
+                    evidenceSha256 = sha256(evidenceBytes),
+                    cleanupVerified = true,
+                    assurance = RepairValidationAssurance.STRICT_CONTAINED,
+                )
+                return RepairCandidateValidationOutcome.CompileFailed(
+                    CompileFailure(listOf("fixture-compiler"), 1, "", "$targetPath: fixture failure"),
+                    proof,
+                )
+            }
+            override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                error("active repair must use immutable candidate validation")
+            override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                error("active repair must use immutable candidate validation")
+            override fun evaluateBehavior(
+                id: String,
+                projectDir: Path,
+                originalBinary: Path,
+                rebuiltBinary: Path,
+                inputs: List<ProcessInput>,
+                reportsDir: Path,
+                budget: RepairResourceBudget,
+            ): BehaviorComparisonReport = error("compile-failed candidates must not reach behavior validation")
+        }
+        val loop = TestRepairRuntimeAccess.openLoop(
+            harness = harness,
+            history = RepairHistory(project.resolve("reports/repair_history.json")),
+            profile = GeneratedCRepairIndexProfile,
+            validationStrategy = validation,
+            stagingAuthority = CapturedRepairStagingAuthority,
+            limits = AgentExecutionLimits(),
+            cancellation = AgentCancellation.NONE,
+            onAgentEvent = {},
+            resourceBudget = budget,
+            allowTestOnlyValidation = false,
+            faultInjector = null,
+        )
+
+        try {
+            exactInputs.forEachIndexed { index, input ->
+                val iteration = loop.repairCompileError(
+                    project,
+                    CompileFailure(listOf("make"), 2, "", "$targetPath: fixture compile error $index"),
+                    listOf(input),
+                )
+                assertFalse(iteration.succeeded)
+                assertEquals(RepairAttemptDisposition.REJECTED, iteration.disposition)
+                assertContentEquals(acceptedSource, target.readBytes())
+            }
+            assertEquals(2, dispatches)
+            assertEquals(2, validationCalls)
+
+            val failure = assertFailsWith<RepairBudgetExceededException> {
+                loop.repairCompileError(
+                    project,
+                    CompileFailure(listOf("make"), 2, "", "$targetPath: over-limit input"),
+                    listOf(ProcessInput("third", args = listOf("gamma"), stdin = byteArrayOf(3))),
+                )
+            }
+            assertEquals("retained regression corpus contains 3 inputs; limit=2", failure.message)
+            assertEquals(2, dispatches, "cumulative overflow must be refused before ACP dispatch")
+            assertEquals(2, validationCalls, "cumulative overflow must be refused before validation")
+            assertContentEquals(acceptedSource, target.readBytes())
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId)
+                assertEquals(baseline.first, graph.snapshot.headId)
+                assertEquals(baseline.second + 2, graph.snapshot.nodes.size)
+                assertEquals(baseline.third + 2, graph.snapshot.runs.size)
+                assertEquals(exactInputs.map { it.id }, graph.retainedRegressionCorpus().inputs.map { it.id })
+                assertEquals(
+                    decompengine.repair.repairRegressionCorpusSha256(exactInputs),
+                    graph.retainedRegressionCorpus().sha256,
+                )
+            }
+        } finally {
+            loop.close()
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
     fun `active repair admits exact retained regression input count and refuses one input over before dispatch`() {
         val exactInputs = listOf(
             ProcessInput("a", args = listOf("x"), stdin = byteArrayOf(1)),
