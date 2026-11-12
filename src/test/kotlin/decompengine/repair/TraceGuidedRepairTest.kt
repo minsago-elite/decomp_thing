@@ -4723,6 +4723,256 @@ class TraceGuidedRepairTest {
 
     @Test
     @org.junit.jupiter.api.Timeout(value = 180, unit = TimeUnit.SECONDS)
+    fun `active ACP repair admits the exact candidate blob entry and refuses the next directory entry`() {
+        val targetPath = "src/modules/reconstructed.c"
+        val sourceText = "int decomp_engine_main(void) { return 0; }\n"
+        val prefix = "/* active repair stored-blob byte boundary: "
+        val suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+        val candidateBytes = 4096
+        val paddingBytes = candidateBytes - prefix.toByteArray(Charsets.UTF_8).size -
+            suffix.toByteArray(Charsets.UTF_8).size
+        val candidate = (prefix + "s".repeat(paddingBytes) + suffix).toByteArray(Charsets.UTF_8)
+        assertEquals(candidateBytes, candidate.size)
+        val candidateDigest = sha256(candidate)
+        val sizingProject = createProject(
+            createRepairTempDirectory("repair-active-state-entry-sizing-").resolve("project"),
+            reconstructedSource = sourceText,
+        )
+        val blobsRelative = "reports/repair-revisions/blobs"
+        val sizingBlobs = sizingProject.resolve(blobsRelative)
+        val baselineBlobNames = ModuleRevisionGraph.open(
+            sizingProject,
+            GeneratedCRepairIndexProfile,
+        ).use {
+            Files.newDirectoryStream(sizingBlobs).use { stream ->
+                stream.map { it.fileName.toString() }.toSet()
+            }
+        }
+        val exactEntryLimit = baselineBlobNames.size + 1
+        assertTrue(baselineBlobNames.isNotEmpty())
+        assertFalse(candidateDigest in baselineBlobNames)
+
+        fun runCase(exact: Boolean) {
+            val stateEntryLimit = if (exact) exactEntryLimit else exactEntryLimit - 1
+            val budget = RepairResourceBudget(
+                maximumStateDirectoryEntries = stateEntryLimit,
+                maximumSourceFileBytes = 64 * 1024,
+                maximumSourceBytes = 256 * 1024,
+                maximumContextBytes = 256 * 1024,
+                maximumStagingBytes = 256 * 1024,
+                maximumPatchBytes = 64 * 1024,
+            )
+            val project = createProject(
+                createRepairTempDirectory(
+                    if (exact) "repair-active-state-entry-exact-" else "repair-active-state-entry-over-",
+                ).resolve("project"),
+                reconstructedSource = sourceText,
+            )
+            val target = project.resolve(targetPath)
+            val acceptedSource = target.readBytes()
+            val acceptedMakefile = project.resolve("Makefile").readBytes()
+            val blobsPath = project.resolve(blobsRelative)
+            val baseline = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                val names = Files.newDirectoryStream(blobsPath).use { stream ->
+                    stream.map { it.fileName.toString() }.toSet()
+                }
+                assertEquals(baselineBlobNames, names)
+                Triple(graph.snapshot.headId, graph.snapshot.nodes.size, graph.snapshot.runs.size)
+            }
+            val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-stored-blob-exact")
+            var dispatches = 0
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.execute(request, onEvent)
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    assertEquals(
+                        targetPath,
+                        request.accessPolicy.mutationAuthority?.grants?.single()?.path?.relativePath,
+                    )
+                    assertEquals(
+                        setOf(AgentOperation.WRITE_FILE),
+                        request.accessPolicy.mutationAuthority?.grants?.single()?.operations,
+                    )
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                }
+            }
+            var validationCalls = 0
+            val validationStop = IllegalStateException("exact state directory entry reached candidate validator")
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    assertContentEquals(candidate, request.candidateSources.getValue(targetPath))
+                    assertEquals(
+                        decompengine.repair.repairCandidateSourceSha256(request.candidateSources),
+                        request.sourceRevisionSha256,
+                    )
+                    throw validationStop
+                }
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("blob entry admission must stop at immutable candidate validation")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("blob entry admission must stop at immutable candidate validation")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport = error("blob entry admission must not run behavior validation")
+            }
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = RepairHistory(project.resolve("reports/repair_history.json")),
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = budget,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+            try {
+                if (exact) {
+                    assertSame(validationStop, assertFailsWith<IllegalStateException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                            emptyList(),
+                        )
+                    })
+                } else {
+                    val refusal = assertFailsWith<RepairBudgetExceededException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertEquals(
+                        "repair blob publication requires $exactEntryLimit directory entries; limit=${exactEntryLimit - 1}",
+                        refusal.message,
+                    )
+                }
+            } finally {
+                loop.close()
+            }
+
+            assertEquals(1, dispatches, "both cases reach ACP before graph blob admission")
+            assertEquals(if (exact) 1 else 0, validationCalls)
+            assertContentEquals(acceptedSource, target.readBytes())
+            assertContentEquals(acceptedMakefile, project.resolve("Makefile").readBytes())
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                assertNull(graph.snapshot.pendingAttemptId)
+                assertEquals(baseline.first, graph.snapshot.headId)
+                assertEquals(baseline.second + 1, graph.snapshot.nodes.size)
+                assertEquals(baseline.third + 1, graph.snapshot.runs.size)
+                assertEquals(
+                    if (exact) RepairRunStatus.VALIDATION_FAILED else RepairRunStatus.RESOURCE_EXHAUSTED,
+                    graph.snapshot.runs.last().status,
+                )
+                val rejected = graph.snapshot.nodes.last()
+                assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+                assertFalse(rejected.recoveredAfterCrash)
+                val binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+                assertEquals("returned-completed", binding.terminalOutcome)
+                assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+                assertTrue(binding.receiptReleaseComplete)
+                val receiptBytes = project.resolve(binding.receiptPath).readBytes()
+                assertEquals(binding.receiptSha256, sha256(receiptBytes))
+                val receipt = Json.parseToJsonElement(receiptBytes.decodeToString()).jsonObject
+                val outcome = receipt.getValue("outcome").jsonObject
+                assertEquals("returned", outcome.getValue("type").jsonPrimitive.content)
+                val result = outcome.getValue("result").jsonObject
+                assertEquals("completed", result.getValue("stopReason").jsonPrimitive.content)
+                val change = result.getValue("changes").jsonObject.getValue("records").jsonArray.single().jsonObject
+                assertEquals("modified", change.getValue("kind").jsonPrimitive.content)
+                assertEquals(sha256(acceptedSource), change.getValue("beforeSha256").jsonPrimitive.content)
+                assertEquals(candidateDigest, change.getValue("afterSha256").jsonPrimitive.content)
+                assertEquals(candidateBytes.toLong(), change.getValue("sizeBytes").jsonPrimitive.content.toLong())
+                val process = receipt.getValue("process").jsonObject
+                assertEquals(0, process.getValue("remainingProcessCount").jsonPrimitive.int)
+                assertTrue(process.getValue("sandboxCleanupVerified").jsonPrimitive.boolean)
+                val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject
+                assertEquals(2, filesystem.getValue("recordCount").jsonPrimitive.int)
+                val records = filesystem.getValue("records").jsonArray.map { it.jsonObject }
+                assertEquals(
+                    listOf("fs/write_text_file", "fs/read_text_file").map {
+                        sha256(it.toByteArray(Charsets.UTF_8))
+                    },
+                    records.map {
+                        it.getValue("method").jsonObject.getValue("sha256").jsonPrimitive.content
+                    },
+                )
+                assertEquals(listOf("allowed", "allowed"), records.map {
+                    it.getValue("outcome").jsonPrimitive.content
+                })
+                assertEquals(listOf("completed", "completed"), records.map {
+                    it.getValue("reason").jsonPrimitive.content
+                })
+                assertTrue(records.all {
+                    it.getValue("policyPath").jsonObject.getValue("relativePath").jsonObject
+                        .getValue("sha256").jsonPrimitive.content ==
+                        sha256(targetPath.toByteArray(Charsets.UTF_8))
+                })
+                val assessmentBytes = project.resolve(requireNotNull(binding.assessmentPath)).readBytes()
+                assertEquals(binding.assessmentSha256, sha256(assessmentBytes))
+                val assessment = decompengine.project.AcpChangeAssessment.parse(assessmentBytes)
+                assertEquals(binding.receiptSha256, assessment.receiptSha256)
+                assertEquals(decompengine.project.AcpChangePublicationEligibility.REJECTED, assessment.eligibility)
+                assertEquals(
+                    if (exact) decompengine.project.AcpChangeValidationStatus.FAILED
+                    else decompengine.project.AcpChangeValidationStatus.NOT_RUN,
+                    assessment.validationStatus,
+                )
+            }
+            val remainingBlobNames = Files.newDirectoryStream(blobsPath).use { stream ->
+                stream.map { it.fileName.toString() }.toSet()
+            }
+            assertEquals(
+                if (exact) baselineBlobNames + candidateDigest else baselineBlobNames,
+                remainingBlobNames,
+                "only the exact-entry candidate may create a new blob",
+            )
+        }
+
+        runCase(exact = true)
+        runCase(exact = false)
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 180, unit = TimeUnit.SECONDS)
     fun `active ACP repair admits the exact revision node count and refuses the next attempt before dispatch`() {
         val project = createProject(
             createRepairTempDirectory("repair-active-revision-node-limit-").resolve("project"),
