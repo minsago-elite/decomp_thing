@@ -140,6 +140,67 @@ class WorkspaceSnapshotLimitsTest {
                 assertEquals(7L, changes.getValue(destinationPath).sizeBytes)
             }
         }
+
+        // Replacing an existing destination is a WRITE, not a CREATE. Keep the
+        // source grant independent so the destination operation cannot mask a
+        // missing DELETE grant on the source.
+        val replacementCases = listOf(
+            MoveAuthorizationCase(
+                sourceOperations = setOf(AgentOperation.DELETE_FILE),
+                destinationOperations = setOf(AgentOperation.CREATE_FILE),
+                refusedPath = "src/z-target",
+            ),
+            MoveAuthorizationCase(
+                sourceOperations = setOf(AgentOperation.WRITE_FILE),
+                destinationOperations = setOf(AgentOperation.WRITE_FILE),
+                refusedPath = "src/a-source",
+            ),
+            MoveAuthorizationCase(
+                sourceOperations = setOf(AgentOperation.DELETE_FILE),
+                destinationOperations = setOf(AgentOperation.WRITE_FILE),
+                refusedPath = null,
+            ),
+        )
+
+        for (case in replacementCases) {
+            val root = workspace()
+            val sourcePath = AgentWorkspacePath("project", "src/a-source")
+            val destinationPath = AgentWorkspacePath("project", "src/z-target")
+            val sourceBytes = "payload".toByteArray()
+            val destinationBytes = "old-target".toByteArray()
+            Files.write(root.resolve(sourcePath.relativePath), sourceBytes)
+            Files.write(root.resolve(destinationPath.relativePath), destinationBytes)
+            val request = roleBoundRequest(root, listOf(
+                mutationGrant(sourcePath, case.sourceOperations),
+                mutationGrant(destinationPath, case.destinationOperations),
+            ))
+            val before = capture(request, WorkspaceSnapshotLimits())
+            Files.move(
+                root.resolve(sourcePath.relativePath), root.resolve(destinationPath.relativePath),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            )
+            val after = capture(request, WorkspaceSnapshotLimits())
+
+            if (case.refusedPath != null) {
+                assertMutationRefused(before, after, request, case.refusedPath)
+            } else {
+                val changes = before.diff(after, request, budget(WorkspaceSnapshotLimits())).associateBy { it.path }
+                assertEquals(setOf(sourcePath, destinationPath), changes.keys)
+                val sourceChange = changes.getValue(sourcePath)
+                assertEquals(AgentFileChangeKind.DELETED, sourceChange.kind)
+                assertEquals(sourcePath, sourceChange.path)
+                assertEquals(sha256(sourceBytes), sourceChange.beforeSha256)
+                assertEquals(null, sourceChange.afterSha256)
+                assertEquals(null, sourceChange.sizeBytes)
+
+                val destinationChange = changes.getValue(destinationPath)
+                assertEquals(AgentFileChangeKind.MODIFIED, destinationChange.kind)
+                assertEquals(destinationPath, destinationChange.path)
+                assertEquals(sha256(destinationBytes), destinationChange.beforeSha256)
+                assertEquals(sha256(sourceBytes), destinationChange.afterSha256)
+                assertEquals(sourceBytes.size.toLong(), destinationChange.sizeBytes)
+            }
+        }
     }
 
     @Test
@@ -221,6 +282,9 @@ class WorkspaceSnapshotLimitsTest {
         path, operations, "test-owner", "a".repeat(64), path.relativePath.substringAfterLast('/'),
         setOf("editable"), contentKind, 70_000,
     )
+
+    private fun sha256(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun roleBoundRequest(root: Path, grants: List<AgentMutationGrant>): AgentExecutionRequest {
         val allowed = setOf(
