@@ -2467,3 +2467,28 @@ boundary. It does not qualify `LinuxGeneratedCRepairValidationBoundary`,
 production validation under #236, live providers, publication crash recovery
 under #732, durable provenance under #733, hosted exact-head CI, or the
 complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair staging-directory admission equality — 2026-11-12
+
+The active repair loop now has an equality control for the staging directory
+count alongside its existing over-limit refusal. A single source at
+`a/b/c/program.c` requires four virtual directories when the root itself is
+counted: the root, `a`, `a/b`, and `a/b/c`. A ceiling of four reaches the
+captured harness with the exact staged path and bytes; a ceiling of three is
+refused with the exact directory-budget diagnostic before harness dispatch.
+Both attempts leave the accepted source and graph head unchanged and clear
+pending state. The graph records `NO_CHANGES` at equality and
+`RESOURCE_EXHAUSTED` for the lower ceiling.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-staging-directory-boundary-2026-11-12.xml)
+has SHA-256
+`9b05f19b5d338fd978bbae748149e35f976e8c5cabd20e9af87cc8d15b2ca35e`; the
+[provenance record](evidence/issue-734-active-repair-staging-directory-boundary-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local captured-harness evidence, not a scripted ACP process. The
+directory-count control does not mutate a candidate or invoke validation. It
+does not qualify production validation under #236, live providers, publication
+crash recovery under #732, durable provenance under #733, hosted exact-head CI,
+or the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
