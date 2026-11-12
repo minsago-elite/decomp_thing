@@ -1776,3 +1776,27 @@ This adds local scripted-ACP evidence for one multibyte over-limit refusal in
 the Generated C Make profile. It does not qualify other profiles, live-provider
 behavior, production validation under #236, hosted exact-head CI, or the full
 #734/#63 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair retained-regression input byte boundary — 2026-11-12
+
+Source commit `43023ffe8beec1d550d9a61f84359bbc958949c7` adds an active-loop
+boundary case for aggregate retained regression inputs. Two inputs use exactly
+8 UTF-8/input bytes across identifiers, arguments, and stdin. At the exact
+`maximumRegressionInputBytes` ceiling, scripted ACP dispatch reaches the
+injected compile-valid validator; the test checks both input values and the
+corpus digest, then verifies provisional evidence while preserving the accepted
+source and head. The one-byte-over control supplies 9 bytes against the same
+8-byte ceiling and requires the specific resource-budget diagnostic before
+agent dispatch, validator invocation, or run creation, with no pending attempt
+and unchanged source/head.
+
+The focused run passed all three methods: the new boundary case plus the
+existing active compile-failed and compile-valid validator controls, with zero
+failures, errors, or skips. The retained [JUnit report](evidence/issue-734-active-repair-regression-input-bytes-2026-11-12.xml)
+has SHA-256 `1950402f1e9457af538ffc5a40aee221febdfff3ee781ede0f160d419fbd073c`;
+the [provenance record](evidence/issue-734-active-repair-regression-input-bytes-2026-11-12.json)
+binds the source commit, tree, focused command, and result.
+
+This is local scripted-provider evidence and uses an injected validation
+strategy; it does not qualify production validation under #236, live providers,
+hosted exact-head CI, or the complete #734/#63 matrix. Keep #734 and #63 open.

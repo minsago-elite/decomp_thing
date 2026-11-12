@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "43023ffe8beec1d550d9a61f84359bbc958949c7",
+  "sourceParent": "2261e0d918c2df7bacb78c63b97b805ff6b7e749",
+  "sourceTree": "469628861f5917f7e95876800ea6d6081d2017fd",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair consumes a receipt-bound compile failure and rejects the candidate",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair records compile-only validation as provisional without accepting the head"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair consumes a receipt-bound compile failure and rejects the candidate' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair records compile-only validation as provisional without accepting the head'",
+  "result": {
+    "tests": 3,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 6.254,
+    "suiteSeconds": 6.267,
+    "timestamp": "2026-11-12T05:29:24.856Z",
+    "junitSha256": "1950402f1e9457af538ffc5a40aee221febdfff3ee781ede0f160d419fbd073c"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "Two retained inputs total exactly 8 UTF-8/input bytes including multibyte identifiers and argv values. At that ceiling the scripted ACP candidate reaches the injected CompileValid validation boundary; assertions bind exact input values and corpus digest, retain a provisional attempt, and preserve accepted source/head. A 9-byte corpus is refused during active graph admission with a specific diagnostic before dispatch, validation, run creation, or source/head change.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "frontend asset verification/build tasks were excluded because generated frontend assets are absent from the exact-source snapshot",
+      "validator is an injected test strategy and does not qualify successful production validation under #236",
+      "does not qualify live-provider behavior",
+      "does not establish hosted exact-head CI",
+      "does not complete every #734 or #63 criterion"
+    ]
+  }
+}
