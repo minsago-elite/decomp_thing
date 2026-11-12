@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T06:36:23.224Z" hostname="whatsername" time="1.278">
+  <properties/>
+  <testcase name="active legacy repair admits exact response byte limit and refuses one byte under before validation()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.267"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

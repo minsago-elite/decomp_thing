@@ -1853,6 +1853,30 @@ validation under #236 or live-provider acceptance. Hosted exact-head CI,
 remaining resource limits, and the complete #734/#63 acceptance matrix remain
 open. Keep #734 and #63 open.
 
+## Active legacy repair response-byte boundary — 2026-11-12
+
+Source commit `1d9e9234163f8b0cbf3978072ce173754f0a54ad` adds an active-loop
+boundary for `maximumResponseBytes` through the legacy OpenAI-compatible repair
+adapter. A local HTTP fixture returns one fixed serialized response body. A
+ceiling equal to its UTF-8 byte length reaches the injected candidate validator;
+the test requires the validator sentinel to propagate and the persisted run to
+be `VALIDATION_FAILED`. A second attempt with a ceiling one byte lower requires
+the transport-limit `RESOURCE_EXHAUSTED` result before validation. Both cases
+preserve accepted source and head and leave no pending attempt.
+
+The focused run passed the single response-byte method with zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-active-repair-response-bytes-2026-11-12.xml)
+has SHA-256 `9868a40b3752a7efbe1cf97b61867011799a348090cda9158edabb070635b50d`;
+the [provenance record](evidence/issue-734-active-repair-response-bytes-2026-11-12.json)
+binds the source commit/tree, selector, command, and result.
+
+This qualifies only the active legacy OpenAI-compatible response-body limit
+with a local HTTP fixture. It uses `allowTestOnlyValidation=true` and an
+injected validator because the legacy adapter does not provide schema-v2 ACP
+provider evidence. It does not qualify ACP transport, a live provider,
+production validation under #236, hosted exact-head CI, or the complete
+#734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Active repair request-byte admission boundary — 2026-11-12
 
 Source commit `d7351e0a31227b8ee2c71c1bb686c020500bcd99` adds the missing
