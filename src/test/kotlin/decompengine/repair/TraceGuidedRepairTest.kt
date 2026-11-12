@@ -239,7 +239,7 @@ class TraceGuidedRepairTest {
         )
         cases.forEach { (expectedTerminal, outcome) ->
             val project = createProject(
-                createTempDirectory("trace-acp-${expectedTerminal.replace('-', '_')}-").resolve("project"),
+                createRepairTempDirectory("trace-acp-${expectedTerminal.replace('-', '_')}-").resolve("project"),
                 reconstructedSource = "int decomp_engine_main(void) {\n",
             )
             val history = RepairHistory(project.resolve("reports/repair_history.json"))
