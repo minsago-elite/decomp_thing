@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "436df5696c4f2b664e61f5276b4e0ea78af9b830",
+  "sourceParent": "a0ea79ec8f129f6b51c12961646f3c845ee7fa3a",
+  "sourceTree": "68dfae27075fe34295a241c66c97306e68369401",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the declared source-file byte grant after an acknowledged candidate"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline -Dorg.gradle.jvmargs='-Xmx8g -XX:MaxMetaspaceSize=2g' -Pkotlin.compiler.execution.strategy=in-process test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the declared source-file byte grant after an acknowledged candidate'",
+  "result": {
+    "tests": 3,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 5.506,
+    "suiteSeconds": 5.506,
+    "timestamp": "2026-11-12T08:01:43Z",
+    "junitSha256": "5b4c406429346afa82073f9930b8633e0b69d1d71c528655db39ca38e3ed457d"
+  },
+  "scope": {
+    "profile": "Generated C repair profile through the real scripted ACP harness",
+    "coverage": "The declared source-file test writes exactly 4096 UTF-8 bytes containing multibyte text, then attempts a 4097-byte replacement whose character count remains below the 4096-byte ceiling. The ACP fixture requires the refusal and immediately reads back the original accepted candidate. The injected strict validator checks the exact bytes and digest; receipt/assessment checks correlate the change and require the accepted source and graph head to remain unchanged after the sentinel rejection. The shared retry fixture also remains covered for patch-byte and filesystem-write ceilings.",
+    "qualificationLimits": [
+      "local scripted-provider and injected-validator evidence only",
+      "does not qualify production repair validation under #236 or live-provider behavior",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not establish hosted exact-head CI or the complete #734/#63 matrix"
+    ]
+  }
+}

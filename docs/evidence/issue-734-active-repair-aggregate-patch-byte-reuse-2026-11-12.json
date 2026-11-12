@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "7c4cf4bb8c97b5ce0f84fd30c0f4a1931607ab50",
+  "sourceParent": "7bc8df35c1a15141224d99fcc0d3f257ae5c3a15",
+  "sourceTree": "2a42a44c5cf93c3b4d82ed8f7297d132939cb7d5",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair reclaims aggregate patch bytes after shrink and baseline restoration"
+  ],
+  "command": "JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair reclaims aggregate patch bytes after shrink and baseline restoration'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.967,
+    "suiteSeconds": 2.978,
+    "timestamp": "2026-11-12T12:49:07.110Z",
+    "junitSha256": "652dee6bdc263ca081b80514c1af7cd08ff3f6c835efa0feb3d03456a6ca96f8"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "With maximumPatchBytes=4,096 and maximumPatchFiles=2, the peer writes two 2,048-byte replacements exactly at the aggregate byte ceiling. A 2,049-byte replacement is denied and readback proves neither accepted candidate changed. Shrinking the first replacement to 1,024 bytes then permits growing the second to 3,072 bytes, again exactly at the aggregate limit. A 3,073-byte retry is denied and readback confirms the 3,072-byte candidate remains. Restoring the first file to baseline releases its patch-byte charge, allowing the second file to grow to 4,096 bytes. Final validation receives only the second file as MODIFIED; its receipt binds the original and final hashes and byte count. The ordered 13 callback outcomes, declared WRITE_FILE grants, injected-validator handoff, cleanup, and unchanged accepted source/head are checked.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator sentinel and does not establish production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

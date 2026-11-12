@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "add817e0ab90be33dbc5b98a9345d7cc20b99ebf",
+  "sourceParent": "61bed424b3cd5ff165289a8dac72311acd4d82f9",
+  "sourceTree": "4ffa00a6dcbf4426d537771e00540550209bd1bf",
+  "test": "decompengine.repair.RepairStagingAuthorityReceiptTest.deletion patch-count refusal retains the first deletion without charging the refused one",
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.RepairStagingAuthorityReceiptTest.deletion patch-count refusal retains the first deletion without charging the refused one'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1"
+  },
+  "report": {
+    "path": "issue-734-repair-staging-deletion-patch-count-2026-11-11.xml",
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 0.04,
+    "timestamp": "2026-11-11T13:11:16.694Z",
+    "sha256": "d481c66b1c609f7e866d2e86044ef2cf8c97064488049e44d7f5cec9c7a0d930"
+  },
+  "scope": {
+    "covered": "BoundedRepairOutput deletion accounting refuses a second distinct deletion when maximumPatchFiles is one and preserves the first deletion as the only candidate change.",
+    "notCovered": [
+      "public ACP deletion: active repair authorizes only READ_FILE and WRITE_FILE, and the captured ACP filesystem exposes no delete callback",
+      "production validation, live providers, hosted exact-head CI, complete #734/#63 acceptance"
+    ]
+  }
+}

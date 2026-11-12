@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-11-12T06:15:03.543Z" hostname="whatsername" time="10.135">
+  <properties/>
+  <testcase name="active repair admits exact diagnostic character limit and records one over as resource exhaustion()" classname="decompengine.repair.TraceGuidedRepairTest" time="3.046"/>
+  <testcase name="active repair admits exact retained regression input count and refuses one input over before dispatch()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.453"/>
+  <testcase name="active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.695"/>
+  <testcase name="active repair admits exact request byte limit and records one byte under as resource exhaustion()" classname="decompengine.repair.TraceGuidedRepairTest" time="2.394"/>
+  <testcase name="active repair admits exact retained regression argument count and refuses one argument over before dispatch()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.529"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

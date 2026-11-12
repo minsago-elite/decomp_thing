@@ -1,0 +1,39 @@
+{
+  "schema": "issue-734-focused-junit-evidence-v1",
+  "sourceCommit": "b34fe29f88c8ad7ea713966e60e64923280dbb2e",
+  "sourceParent": "0ec1b75ea11e1f4cddb699979ec93956b048d969",
+  "command": [
+    "./gradlew",
+    "--no-daemon",
+    "--offline",
+    "test",
+    "--console=plain",
+    "-x",
+    "frontendInstall",
+    "--tests",
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "environment": {
+    "liveAcpContractRequired": true,
+    "java": "21.0.12.1",
+    "node": "24.20.0",
+    "npm": "11.19.0",
+    "frontendAssetBuild": "passed"
+  },
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testStartedAtUtc": "2026-11-11T08:57:32.675Z",
+    "testDurationSeconds": 57.377,
+    "reportPath": "docs/evidence/issue-734-public-reconstruction-frame-count-2026-11-11.xml",
+    "reportSha256": "6613be165f8befeb951b1312100868ae7ce1a65f58505201dcb2b4385399014b"
+  },
+  "scopeLimits": [
+    "local scripted ACP peer only",
+    "Generated C Make profile only",
+    "no independent provider or production validator qualification",
+    "no hosted exact-head result for this commit"
+  ]
+}

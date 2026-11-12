@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "81f96eaa256d88ca4de2acc801dfba33bc59ddc6",
+  "sourceParent": "b15aa062c1494041e53080c3cd8d38a4c10e9e28",
+  "sourceTree": "6ee887a93949f15d1129c70b41026d0d69722c54",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces returned token ceilings after a write and permits exact usage"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces returned token ceilings after a write and permits exact usage'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 11.016,
+    "suiteSeconds": 11.026,
+    "timestamp": "2026-11-12T09:02:41.362Z",
+    "junitSha256": "9afe32085744bf376ad464a544e335b49691474cf1f95f5e9b99774acfb84806"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "The peer acknowledges an allowed implementation modification and returns ACP max_turn_requests with within-limit usage. The active repair loop maps this to LIMIT_EXHAUSTED and persists a RESOURCE_EXHAUSTED run plus a receipt-bound interrupted assessment; validation is not invoked. Assertions bind the MODIFIED path commitment, before/after digests, and byte count, while accepted source/head remain unchanged and no attempt remains pending. Receipt evidence records final snapshot completion, zero remaining processes, and verified sandbox cleanup. The same method also retains token-ceiling, exact-usage, malformed-usage, and refusal-after-write cases.",
+    "qualificationLimits": [
+      "local scripted ACP only; no live-provider qualification",
+      "does not establish production validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not establish hosted exact-head CI or complete #734/#63 acceptance"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.RepairStagingAuthorityReceiptTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-11T13:23:43.372Z" hostname="whatsername" time="0.114">
+  <properties/>
+  <testcase name="deletion patch-count refusal retains the first deletion without charging the refused one()" classname="decompengine.repair.RepairStagingAuthorityReceiptTest" time="0.083"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

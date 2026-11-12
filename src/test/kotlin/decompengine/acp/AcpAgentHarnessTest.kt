@@ -12,6 +12,9 @@ import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
+import decompengine.agent.AgentMutationContentKind
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentTaskProgress
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFileChangeEvent
@@ -33,17 +36,28 @@ import decompengine.agent.executeReceipt
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
 import decompengine.project.ArchivalBundleVerifier
+import decompengine.project.ArchivalReconstructionResult
 import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
+import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
+import decompengine.project.ReconstructionProfile
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionOutputWorkspace
+import decompengine.project.PublicationEntryRecord
+import decompengine.project.PublicationTreeBudget
+import decompengine.project.ReconstructionOutputTree
 import decompengine.project.budgetedAnalyzer
+import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.UserDefinedFileAttributeView
+import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
@@ -1125,6 +1139,1610 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    @Timeout(value = 180, unit = TimeUnit.SECONDS)
+    fun `transactional ACP source generation accepts a bounded modification of an existing owned implementation`() {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val buildRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        val fixture = createTempDirectory(buildRoot, "acp-public-reconstruction-modify-")
+        val input = fixture.resolve("input.elf").also { Files.write(it, byteArrayOf(4, 2, 1)) }
+        val output = fixture.resolve("output")
+        val implementationPath = profile.layout.declaration("module-implementation")
+            .materialize(mapOf("module" to "decomp"))
+        val priorSource = (
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+            ).toByteArray(Charsets.UTF_8)
+        val expectedSource = priorSource.decodeToString().replace("return 0;", "return 1;")
+            .toByteArray(Charsets.UTF_8)
+        val harness = harness("reconstruction-modify-existing-source", sentinel = implementationPath)
+        val factoryProvenance = AcpHarnessProvenance(
+            harness = "acp",
+            implementationId = "scripted-acp-v1",
+            agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+            acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "0".repeat(64),
+            deprecated = false,
+        )
+        var taskCount = 0
+        var taskRequestSha256: String? = null
+        var implementationExistedAtDispatch: Boolean? = null
+        val receipts = mutableListOf<AgentExecutionReceipt>()
+        val progress = object : AgentWorkflowProgress {
+            override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
+                taskCount++
+                taskRequestSha256 = AgentExecutionRequestBinding.capture(request).requestSha256
+                val rule = request.accessPolicy.pathRules.single()
+                val root = request.workspaceRoots.single { it.id == rule.path.rootId }
+                implementationExistedAtDispatch = Files.isRegularFile(root.path.resolve(rule.path.relativePath))
+                return object : AgentTaskProgress {
+                    override fun event(event: AgentExecutionEvent) = Unit
+                    override fun complete(receipt: AgentExecutionReceipt) {
+                        receipts += receipt
+                    }
+                }
+            }
+
+            override fun phase(
+                phase: decompengine.agent.AgentWorkflowPhase,
+                taskId: String?,
+                acceptedRevisionSha256: String?,
+            ) = Unit
+        }
+        var generation: decompengine.project.ReconstructionGenerationResult? = null
+        var buildReturnCode: Int? = null
+        var publication = decompengine.project.PublicationResult.REJECTED
+
+        ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+            val model = RecoveredProgramModel(
+                inputSha256 = workspace.inputSha256,
+                functions = listOf(
+                    RecoveredFunction(
+                        "fn_0000000000001000",
+                        "decomp_engine_main",
+                        0x1000UL,
+                        "int decomp_engine_main(void)",
+                        "int decomp_engine_main(void) { return 1; }",
+                    ),
+                ),
+            )
+            publication = workspace.publish(
+                setOf("source-tree", "source-tree.zip", ".decomp-agent-sessions"),
+                buildStage = { stage ->
+                    val project = stage.resolve("source-tree")
+                    val implementation = project.resolve(implementationPath)
+                    implementation.parent.createDirectories()
+                    Files.write(implementation, priorSource)
+                    generation = decompengine.project.SourceTreeGenerator.generateWithCompilerFeedback(
+                        model = model,
+                        projectDir = project,
+                        hostSafetyLimits = decompengine.project.ReconstructionHostSafetyLimits.DEFAULT,
+                        reconstructor = BoundedLlmModuleReconstructor(
+                            harness,
+                            harnessProvenanceDescriptor = factoryProvenance.stableDescriptor,
+                            progress = progress,
+                        ),
+                        profile = profile,
+                        progress = progress,
+                        publicationLock = workspace.publicationLock,
+                        workflowRunId = "public-reconstruction-existing-source-modification",
+                    )
+                    buildReturnCode = ReconstructionAdapters.resolve(profile).build(project, profile).returnCode
+                    decompengine.project.ArchivalPackager.create(
+                        project,
+                        stage.resolve("source-tree.zip"),
+                        profile = profile,
+                    )
+                },
+            )
+        }
+
+        assertEquals(decompengine.project.PublicationResult.PUBLISHED, publication)
+        assertEquals(1, taskCount)
+        assertEquals(true, implementationExistedAtDispatch)
+        assertEquals(0, buildReturnCode)
+        val generated = assertNotNull(generation)
+        assertTrue(generated.disposition.committable)
+        assertTrue(generated.manifest.unresolvedImplementationIds.isEmpty())
+        val invocationReceipt = receipts.single()
+        assertEquals(taskRequestSha256, invocationReceipt.requestBinding.requestSha256)
+        val receipt = invocationReceipt.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, receipt.stopReason)
+        val change = receipt.changes.single()
+        assertEquals(implementationPath, change.path.relativePath)
+        assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+        assertEquals(sha256(priorSource), change.beforeSha256)
+        assertEquals(sha256(expectedSource), change.afterSha256)
+        assertEquals(expectedSource.size.toLong(), change.sizeBytes)
+        val target = output.resolve("source-tree").resolve(implementationPath)
+        assertContentEquals(expectedSource, Files.readAllBytes(target))
+        val audit = harness.latestFilesystemAudit()
+        assertEquals(7, audit.size, audit.toString())
+        val write = audit.last()
+        assertEquals(implementationPath, assertNotNull(write.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, write.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, write.reason)
+        val extracted = fixture.resolve("verified-modified-source")
+        ArchivalBundleVerifier.extractAndVerify(output.resolve("source-tree.zip"), extracted, profile = profile)
+        assertContentEquals(expectedSource, Files.readAllBytes(extracted.resolve(implementationPath)))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(extracted, profile).returnCode)
+        assertNoReconstructionPublicationResidue(output)
+    }
+
+    @Test
+    @Timeout(value = 180, unit = TimeUnit.SECONDS)
+    fun `public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val maximumSourceBytes = 256L * 1024
+        val profile = ReconstructionProfile(
+            base.schemaVersion,
+            base.id,
+            base.layout,
+            base.budgets.copy(archiveMaximumFileBytes = maximumSourceBytes),
+            base.adapterConfiguration,
+        )
+        val buildRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        val fixture = createTempDirectory(buildRoot, "acp-public-reconstruction-mutation-")
+        val binary = fixture.resolve("input.elf")
+        val binaryBytes = byteArrayOf(9, 8, 7, 6)
+        Files.write(binary, binaryBytes)
+        val output = fixture.resolve("output")
+        val implementationPath = profile.layout.declaration("module-implementation")
+            .materialize(mapOf("module" to "decomp"))
+        val expectedCreatedSource = (
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+            ).toByteArray(Charsets.UTF_8)
+
+        fun assertDeclaredReconstructionAuthority(taskId: String, accessPolicy: AgentAccessPolicy) {
+            val allowedMutationOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)
+            val rule = accessPolicy.pathRules.single()
+            assertEquals(AgentWorkspacePath("project", implementationPath), rule.path)
+            assertEquals(allowedMutationOperations, rule.operations)
+            assertFalse(rule.recursive)
+            assertEquals(allowedMutationOperations, accessPolicy.allowedOperations)
+
+            val authority = assertNotNull(accessPolicy.mutationAuthority)
+            assertEquals("declared-role-reconstruction-v1", authority.policyId)
+            assertEquals("module-reconstruction:${profile.id}:$taskId", authority.ownerId)
+            assertEquals(profile.sha256, authority.profileSha256)
+            val grant = authority.grants.single()
+            assertEquals(AgentWorkspacePath("project", implementationPath), grant.path)
+            assertEquals(allowedMutationOperations, grant.operations)
+            assertEquals(authority.ownerId, grant.ownerId)
+            assertEquals(profile.sha256, grant.profileSha256)
+            val declaration = profile.layout.declarationForPath(implementationPath)
+            assertEquals(declaration.id, grant.declarationId)
+            assertEquals(declaration.roles.map { it.wireName }.toSet(), grant.roles)
+            assertEquals(AgentMutationContentKind.UTF8_TEXT, grant.contentKind)
+            assertEquals(maximumSourceBytes, grant.maximumBytes)
+            assertFalse(AgentOperation.DELETE_FILE in grant.operations)
+        }
+
+        data class Attempt(
+            val result: ArchivalReconstructionResult?,
+            val failure: Exception?,
+            val harness: AcpAgentHarness,
+            val taskCount: Int,
+            val receipts: List<AgentExecutionReceipt>,
+            val requestSha256s: List<String>,
+            val implementationExistedAtDispatch: Boolean?,
+            val cancellationReadyObserved: Boolean,
+            val workerInterruptFlagAtExit: Boolean?,
+            val phases: List<decompengine.agent.AgentWorkflowPhase>,
+        )
+
+        fun runAttempt(
+            mode: String,
+            index: Int,
+            maximumFrameBytes: Int = 64 * 1024,
+            maximumProtocolFrames: Int = DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES,
+            requestTimeoutMillis: Long? = null,
+            executionLimits: AgentExecutionLimits? = null,
+            snapshotLimits: WorkspaceSnapshotLimits? = null,
+            seedExistingTarget: ByteArray? = null,
+            seedSourceBeforeDispatch: ByteArray? = null,
+            decompiledBody: String = "int decomp_engine_main(void) { return 0; }",
+            appendScenarioMarker: Boolean = true,
+            outputPath: Path = output,
+            gatePromptCompletion: Boolean = false,
+            cancelAfterAcknowledgedMessage: String? = null,
+            afterPromptCompletion: ((Path) -> Unit)? = null,
+        ): Attempt {
+            val receipts = mutableListOf<AgentExecutionReceipt>()
+            val requestSha256s = mutableListOf<String>()
+            val phases = mutableListOf<decompengine.agent.AgentWorkflowPhase>()
+            val cancellationReady = cancelAfterAcknowledgedMessage?.let { CountDownLatch(1) }
+            var taskCount = 0
+            var implementationExistedAtDispatch: Boolean? = null
+            var implementationPathAtDispatch: Path? = null
+            val progress = object : AgentWorkflowProgress {
+                override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
+                    taskCount++
+                    requestSha256s += AgentExecutionRequestBinding.capture(request).requestSha256
+                    assertDeclaredReconstructionAuthority(taskId, request.accessPolicy)
+                    val rule = request.accessPolicy.pathRules.single()
+                    val workspaceRoot = request.workspaceRoots.single { it.id == rule.path.rootId }.path
+                    implementationPathAtDispatch = workspaceRoot.resolve(rule.path.relativePath)
+                    return object : AgentTaskProgress {
+                        override fun event(event: AgentExecutionEvent) {
+                            if (event is AgentMessageEvent && event.textDelta == cancelAfterAcknowledgedMessage) {
+                                cancellationReady?.countDown()
+                            }
+                        }
+                        override fun complete(receipt: AgentExecutionReceipt) {
+                            receipts += receipt
+                        }
+                    }
+                }
+
+                override fun phase(
+                    phase: decompengine.agent.AgentWorkflowPhase,
+                    taskId: String?,
+                    acceptedRevisionSha256: String?,
+                ) { phases += phase }
+            }
+            val acp = harness(
+                mode = mode,
+                sentinel = implementationPath,
+                maximumFrameBytes = maximumFrameBytes,
+                maximumProtocolFrames = maximumProtocolFrames,
+                timeouts = requestTimeoutMillis?.let { timeout ->
+                    timeouts(startup = 2_500, request = timeout, shutdown = 1_500)
+                } ?: timeouts(),
+                workspaceSnapshotLimits = snapshotLimits,
+            ).also { configured ->
+                configured.withInitialWorkspaceSnapshotHookForTesting {
+                    val target = requireNotNull(implementationPathAtDispatch)
+                    seedExistingTarget?.let { bytes ->
+                        Files.write(
+                            target,
+                            bytes,
+                            StandardOpenOption.CREATE_NEW,
+                            StandardOpenOption.WRITE,
+                            LinkOption.NOFOLLOW_LINKS,
+                        )
+                    }
+                    implementationExistedAtDispatch = target.let(Files::isRegularFile)
+                }
+                if (gatePromptCompletion || afterPromptCompletion != null) {
+                    configured.withPromptLoopGateForTesting { promptJob ->
+                        kotlinx.coroutines.withTimeout(5_000) { promptJob.join() }
+                        afterPromptCompletion?.invoke(requireNotNull(implementationPathAtDispatch))
+                    }
+                }
+            }
+            val function = RecoveredFunction(
+                "fn_0000000000001000",
+                "decomp_engine_main",
+                0x1000UL,
+                "int decomp_engine_main(void)",
+                decompiledBody + if (appendScenarioMarker) " /* scenario-$index */" else "",
+            )
+            val model = RecoveredProgramModel(inputSha256 = sha256(binaryBytes), functions = listOf(function))
+            val provenance = AcpHarnessProvenance(
+                harness = "acp",
+                implementationId = "scripted-acp-v1",
+                agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+                acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+                acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+                configurationSha256 = "0".repeat(64),
+                deprecated = false,
+            )
+            val boundedReconstructor = BoundedLlmModuleReconstructor(
+                acp,
+                harnessProvenanceDescriptor = provenance.stableDescriptor,
+                progress = progress,
+            ).also { reconstructor -> executionLimits?.let(reconstructor::withExecutionLimitsForTesting) }
+            val reconstructor = if (seedSourceBeforeDispatch == null) {
+                boundedReconstructor
+            } else {
+                object : decompengine.project.ModuleReconstructor by boundedReconstructor {
+                    override fun reconstruct(
+                        request: decompengine.project.ModuleReconstructionRequest,
+                    ): decompengine.project.ReconstructedModule {
+                        val target = request.workspaceRoot.resolve(request.module.sourcePath).normalize()
+                        require(target.startsWith(request.workspaceRoot.toAbsolutePath().normalize()))
+                        target.parent.createDirectories()
+                        Files.write(
+                            target,
+                            seedSourceBeforeDispatch,
+                            StandardOpenOption.CREATE_NEW,
+                            StandardOpenOption.WRITE,
+                            LinkOption.NOFOLLOW_LINKS,
+                        )
+                        return boundedReconstructor.reconstruct(request)
+                    }
+                }
+            }
+            val service = ArchivalReconstructionService(
+                analyzer = budgetedAnalyzer { supplied, _ ->
+                    assertEquals(binary, supplied)
+                    model
+                },
+                reconstructor = reconstructor,
+                profile = profile,
+                progress = progress,
+            )
+            var result: ArchivalReconstructionResult? = null
+            var failure: Exception? = null
+            var workerInterruptFlagAtExit: Boolean? = null
+            fun reconstructOnCurrentThread() {
+                ReconstructionOutputWorkspace.open(outputPath, binary).use { workspace ->
+                    try {
+                        result = service.reconstructWithWorkspace(
+                            binary,
+                            outputPath,
+                            workspace,
+                            workflowRunId = "public-reconstruction-mutation-$index",
+                        )
+                    } catch (caught: Exception) {
+                        failure = caught
+                    }
+                }
+            }
+            if (cancelAfterAcknowledgedMessage == null) {
+                reconstructOnCurrentThread()
+            } else {
+                val worker = Thread({
+                    try {
+                        reconstructOnCurrentThread()
+                    } finally {
+                        workerInterruptFlagAtExit = Thread.currentThread().isInterrupted
+                    }
+                }, "public-reconstruction-cancel-$index")
+                worker.start()
+                val acknowledged = requireNotNull(cancellationReady).await(10, TimeUnit.SECONDS)
+                if (acknowledged) worker.interrupt()
+                worker.join(30_000)
+                assertFalse(worker.isAlive, "public reconstruction worker did not stop after its single interrupt")
+                assertTrue(acknowledged, "the candidate-write acknowledgement event did not arrive before the guard timeout")
+            }
+            return Attempt(
+                result,
+                failure,
+                acp,
+                taskCount,
+                receipts.toList(),
+                requestSha256s.toList(),
+                implementationExistedAtDispatch,
+                cancellationReady?.count == 0L,
+                workerInterruptFlagAtExit,
+                phases.toList(),
+            )
+        }
+
+        var sourceBytesAfterOversizedRefusal: ByteArray? = null
+        val successful = runAttempt(
+            "reconstruction-mutation-grant",
+            index = 1,
+            maximumFrameBytes = 1024 * 1024,
+            afterPromptCompletion = { sourceBytesAfterOversizedRefusal = Files.readAllBytes(it) },
+        )
+        assertNull(successful.failure)
+        val result = assertNotNull(successful.result)
+        assertEquals(1, successful.taskCount)
+        assertEquals(1, successful.receipts.size)
+        assertEquals(0, result.build.returnCode)
+        assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
+        val execution = successful.receipts.single().requireResult()
+        assertEquals(AgentStopReason.COMPLETED, execution.stopReason)
+        val change = execution.changes.single()
+        assertEquals(implementationPath, change.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, change.kind)
+        assertNull(change.beforeSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), change.sizeBytes)
+        assertEquals(sha256(expectedCreatedSource), change.afterSha256)
+        assertContentEquals(expectedCreatedSource, assertNotNull(sourceBytesAfterOversizedRefusal))
+        assertContentEquals(
+            expectedCreatedSource,
+            Files.readAllBytes(result.projectDir.resolve(implementationPath)),
+        )
+
+        val audit = successful.harness.latestFilesystemAudit()
+        assertEquals(9, audit.size, audit.toString())
+        assertTrue(audit.take(5).all {
+            it.method == "fs/read_text_file" && it.outcome == AcpFilesystemAuditOutcome.DENIED &&
+                it.reason == AcpFilesystemAuditReason.CAPABILITY_DISABLED
+        }, audit.toString())
+        assertEquals("Makefile", assertNotNull(audit[5].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[5].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[5].reason)
+        assertEquals("src/modules/decomp_extra.c", assertNotNull(audit[6].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[6].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[6].reason)
+        assertEquals(implementationPath, assertNotNull(audit[7].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, audit[7].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, audit[7].reason)
+        assertEquals(implementationPath, assertNotNull(audit[8].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit[8].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit[8].reason)
+        assertFalse(result.projectDir.resolve("src/modules/decomp_extra.c").exists())
+        val extracted = fixture.resolve("verified-success")
+        ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
+        assertFalse(extracted.resolve("src/modules/decomp_extra.c").exists())
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(extracted.resolve(implementationPath)))
+        assertEquals(sha256(expectedCreatedSource), sha256(Files.readAllBytes(extracted.resolve(implementationPath))))
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(output.resolve("source-tree").resolve(implementationPath)))
+        var acceptedMetadata = capturePublishedMetadata(output)
+        assertEquals(false, successful.implementationExistedAtDispatch)
+
+        val invalidUnicode = runAttempt(
+            "reconstruction-invalid-unicode-after-write",
+            index = 32,
+            outputPath = fixture.resolve("invalid-unicode-output"),
+        )
+        assertNull(invalidUnicode.failure, "invalid Unicode must be refused without discarding the valid candidate")
+        assertEquals(1, invalidUnicode.taskCount)
+        assertEquals(1, invalidUnicode.receipts.size)
+        val invalidUnicodeResult = assertNotNull(invalidUnicode.result)
+        assertEquals(0, invalidUnicodeResult.build.returnCode)
+        assertTrue(requireNotNull(invalidUnicodeResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        val invalidUnicodeReceipt = invalidUnicode.receipts.single()
+        assertEquals(
+            invalidUnicode.requestSha256s.single(),
+            invalidUnicodeReceipt.requestBinding.requestSha256,
+        )
+        val invalidUnicodeExecution = invalidUnicodeReceipt.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, invalidUnicodeExecution.stopReason)
+        assertEquals(1, invalidUnicodeExecution.changes.size)
+        val invalidUnicodeChange = invalidUnicodeExecution.changes.single()
+        assertEquals(implementationPath, invalidUnicodeChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, invalidUnicodeChange.kind)
+        assertNull(invalidUnicodeChange.beforeSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), invalidUnicodeChange.sizeBytes)
+        assertEquals(sha256(expectedCreatedSource), invalidUnicodeChange.afterSha256)
+        assertContentEquals(
+            expectedCreatedSource,
+            Files.readAllBytes(invalidUnicodeResult.projectDir.resolve(implementationPath)),
+        )
+        val invalidUnicodeAudit = invalidUnicode.harness.latestFilesystemAudit()
+        assertEquals(8, invalidUnicodeAudit.size, invalidUnicodeAudit.toString())
+        assertTrue(invalidUnicodeAudit.take(5).all {
+            it.method == "fs/read_text_file" && it.outcome == AcpFilesystemAuditOutcome.DENIED &&
+                it.reason == AcpFilesystemAuditReason.CAPABILITY_DISABLED
+        }, invalidUnicodeAudit.toString())
+        assertEquals("Makefile", assertNotNull(invalidUnicodeAudit[5].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, invalidUnicodeAudit[5].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, invalidUnicodeAudit[5].reason)
+        assertEquals(implementationPath, assertNotNull(invalidUnicodeAudit[6].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, invalidUnicodeAudit[6].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, invalidUnicodeAudit[6].reason)
+        assertEquals(implementationPath, assertNotNull(invalidUnicodeAudit[7].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, invalidUnicodeAudit[7].outcome)
+        assertEquals(AcpFilesystemAuditReason.INVALID_TEXT, invalidUnicodeAudit[7].reason)
+        val invalidUnicodeExtracted = fixture.resolve("verified-invalid-unicode")
+        ArchivalBundleVerifier.extractAndVerify(
+            invalidUnicodeResult.bundle.archivePath,
+            invalidUnicodeExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(invalidUnicodeExtracted.resolve(implementationPath)))
+        assertContentEquals(
+            expectedCreatedSource,
+            Files.readAllBytes(fixture.resolve("invalid-unicode-output/source-tree").resolve(implementationPath)),
+        )
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(invalidUnicodeExtracted, profile).returnCode)
+        assertNoReconstructionPublicationResidue(fixture.resolve("invalid-unicode-output"))
+
+        val exactSourceBoundary = runAttempt(
+            "reconstruction-exact-source-byte-boundary",
+            index = 18,
+            maximumFrameBytes = 1024 * 1024,
+            snapshotLimits = WorkspaceSnapshotLimits(
+                entries = 3,
+                files = 1,
+                fileBytes = 256L * 1024,
+                totalBytes = 256L * 1024,
+            ),
+        )
+        assertNull(exactSourceBoundary.failure, "a source file exactly at its declared grant limit must be accepted")
+        assertEquals(1, exactSourceBoundary.taskCount)
+        assertEquals(1, exactSourceBoundary.receipts.size)
+        assertEquals(false, exactSourceBoundary.implementationExistedAtDispatch)
+        val exactBoundaryResult = assertNotNull(exactSourceBoundary.result)
+        assertEquals(0, exactBoundaryResult.build.returnCode)
+        val exactBoundaryReceipt = exactSourceBoundary.receipts.single().requireResult()
+        assertEquals(AgentStopReason.COMPLETED, exactBoundaryReceipt.stopReason)
+        assertEquals(1, exactBoundaryReceipt.changes.size)
+        val exactBoundaryChange = exactBoundaryReceipt.changes.single()
+        assertEquals(implementationPath, exactBoundaryChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, exactBoundaryChange.kind)
+        assertNull(exactBoundaryChange.beforeSha256)
+        assertEquals(256L * 1024, exactBoundaryChange.sizeBytes)
+        val expectedSourcePrefix =
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+        val expectedPaddingBytes =
+            256 * 1024 - expectedSourcePrefix.toByteArray(Charsets.UTF_8).size - 2 - "*/\n".length
+        assertTrue(expectedPaddingBytes >= 0)
+        val expectedPadding = "é".repeat(expectedPaddingBytes / 2) +
+            if (expectedPaddingBytes % 2 == 1) "x" else ""
+        val expectedSource = (expectedSourcePrefix + "/*" + expectedPadding + "*/\n")
+            .toByteArray(Charsets.UTF_8)
+        assertEquals(256 * 1024, expectedSource.size)
+        assertEquals(sha256(expectedSource), exactBoundaryChange.afterSha256)
+        assertContentEquals(expectedSource, Files.readAllBytes(exactBoundaryResult.projectDir.resolve(implementationPath)))
+        val exactBoundaryAudit = exactSourceBoundary.harness.latestFilesystemAudit().last()
+        assertEquals(implementationPath, assertNotNull(exactBoundaryAudit.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, exactBoundaryAudit.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, exactBoundaryAudit.reason)
+        val exactBoundaryExtracted = fixture.resolve("verified-exact-source-byte-boundary")
+        ArchivalBundleVerifier.extractAndVerify(
+            exactBoundaryResult.bundle.archivePath,
+            exactBoundaryExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedSource, Files.readAllBytes(exactBoundaryExtracted.resolve(implementationPath)))
+        assertContentEquals(expectedSource, Files.readAllBytes(output.resolve("source-tree").resolve(implementationPath)))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactBoundaryExtracted, profile).returnCode)
+        acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
+
+        val priorModifiedSource = (
+            "#include \"modules/decomp.h\"\n" +
+                "/* fn_0000000000001000 */\n" +
+                "int decomp_engine_main(void) { return 0; }\n"
+            ).toByteArray(Charsets.UTF_8)
+        val expectedModifiedSource = priorModifiedSource.decodeToString()
+            .replace("return 0;", "return 1;")
+            .toByteArray(Charsets.UTF_8)
+        val modifiedExisting = runAttempt(
+            "reconstruction-modify-existing-source",
+            index = 19,
+            seedSourceBeforeDispatch = priorModifiedSource,
+            decompiledBody = "int decomp_engine_main(void) { return 1; }",
+            appendScenarioMarker = false,
+            outputPath = fixture.resolve("modified-output"),
+        )
+        assertNull(modifiedExisting.failure, "the public workflow must admit a bounded modification of an existing target")
+        assertEquals(1, modifiedExisting.taskCount)
+        assertEquals(1, modifiedExisting.receipts.size)
+        assertEquals(true, modifiedExisting.implementationExistedAtDispatch)
+        val modifiedResult = assertNotNull(modifiedExisting.result)
+        assertEquals(0, modifiedResult.build.returnCode)
+        assertTrue(requireNotNull(modifiedResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        val modifiedInvocationReceipt = modifiedExisting.receipts.single()
+        assertEquals(modifiedExisting.requestSha256s.single(), modifiedInvocationReceipt.requestBinding.requestSha256)
+        val modifiedExecution = modifiedInvocationReceipt.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, modifiedExecution.stopReason)
+        assertEquals(1, modifiedExecution.changes.size)
+        val modifiedChange = modifiedExecution.changes.single()
+        assertEquals(implementationPath, modifiedChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.MODIFIED, modifiedChange.kind)
+        assertEquals(sha256(priorModifiedSource), modifiedChange.beforeSha256)
+        assertEquals(sha256(expectedModifiedSource), modifiedChange.afterSha256)
+        assertEquals(expectedModifiedSource.size.toLong(), modifiedChange.sizeBytes)
+        assertContentEquals(
+            expectedModifiedSource,
+            Files.readAllBytes(modifiedResult.projectDir.resolve(implementationPath)),
+        )
+        assertFalse(modifiedResult.projectDir.resolve("src/modules/decomp_extra.c").exists())
+        val modifiedAudit = modifiedExisting.harness.latestFilesystemAudit()
+        assertEquals(7, modifiedAudit.size, modifiedAudit.toString())
+        val modifiedWrite = modifiedAudit.last()
+        assertEquals(implementationPath, assertNotNull(modifiedWrite.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, modifiedWrite.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, modifiedWrite.reason)
+        val modifiedExtracted = fixture.resolve("verified-modified-existing-source")
+        ArchivalBundleVerifier.extractAndVerify(
+            modifiedResult.bundle.archivePath,
+            modifiedExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedModifiedSource, Files.readAllBytes(modifiedExtracted.resolve(implementationPath)))
+        assertContentEquals(
+            expectedModifiedSource,
+            Files.readAllBytes(fixture.resolve("modified-output/source-tree").resolve(implementationPath)),
+        )
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(modifiedExtracted, profile).returnCode)
+        assertNoReconstructionPublicationResidue(fixture.resolve("modified-output"))
+
+        val exactModifiedBoundary = runAttempt(
+            "reconstruction-exact-source-byte-boundary",
+            index = 30,
+            maximumFrameBytes = 1024 * 1024,
+            snapshotLimits = WorkspaceSnapshotLimits(
+                entries = 3,
+                files = 1,
+                fileBytes = 256L * 1024,
+                totalBytes = 256L * 1024,
+            ),
+            seedSourceBeforeDispatch = priorModifiedSource,
+        )
+        assertNull(exactModifiedBoundary.failure, "an existing target must accept an exact-limit replacement")
+        assertEquals(1, exactModifiedBoundary.taskCount)
+        assertEquals(1, exactModifiedBoundary.receipts.size)
+        assertEquals(true, exactModifiedBoundary.implementationExistedAtDispatch)
+        val exactModifiedResult = assertNotNull(exactModifiedBoundary.result)
+        assertEquals(0, exactModifiedResult.build.returnCode)
+        assertTrue(requireNotNull(exactModifiedResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        val exactModifiedInvocation = exactModifiedBoundary.receipts.single()
+        assertEquals(exactModifiedBoundary.requestSha256s.single(), exactModifiedInvocation.requestBinding.requestSha256)
+        val exactModifiedExecution = exactModifiedInvocation.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, exactModifiedExecution.stopReason)
+        assertEquals(1, exactModifiedExecution.changes.size)
+        val exactModifiedChange = exactModifiedExecution.changes.single()
+        assertEquals(implementationPath, exactModifiedChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.MODIFIED, exactModifiedChange.kind)
+        assertEquals(sha256(priorModifiedSource), exactModifiedChange.beforeSha256)
+        assertEquals(sha256(expectedSource), exactModifiedChange.afterSha256)
+        assertEquals(expectedSource.size.toLong(), exactModifiedChange.sizeBytes)
+        assertContentEquals(expectedSource, Files.readAllBytes(exactModifiedResult.projectDir.resolve(implementationPath)))
+        val exactModifiedAudit = exactModifiedBoundary.harness.latestFilesystemAudit()
+        assertEquals(7, exactModifiedAudit.size, exactModifiedAudit.toString())
+        val exactModifiedWrite = exactModifiedAudit.last()
+        assertEquals(implementationPath, assertNotNull(exactModifiedWrite.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, exactModifiedWrite.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, exactModifiedWrite.reason)
+        val exactModifiedExtracted = fixture.resolve("verified-exact-modified-source-boundary")
+        ArchivalBundleVerifier.extractAndVerify(
+            exactModifiedResult.bundle.archivePath,
+            exactModifiedExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedSource, Files.readAllBytes(exactModifiedExtracted.resolve(implementationPath)))
+        assertContentEquals(expectedSource, Files.readAllBytes(output.resolve("source-tree").resolve(implementationPath)))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactModifiedExtracted, profile).returnCode)
+        acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
+
+        val modifiedOverlimitSeed = priorModifiedSource.decodeToString()
+            .replace("return 0;", "return 1;")
+            .toByteArray(Charsets.UTF_8)
+        var modifiedSourceBytesAfterOversizedRefusal: ByteArray? = null
+        val overlimitModified = runAttempt(
+            "reconstruction-mutation-grant",
+            index = 31,
+            maximumFrameBytes = 1024 * 1024,
+            seedSourceBeforeDispatch = modifiedOverlimitSeed,
+            afterPromptCompletion = { modifiedSourceBytesAfterOversizedRefusal = Files.readAllBytes(it) },
+        )
+        assertNull(overlimitModified.failure, "a denied oversized replacement must leave the existing target writable")
+        assertEquals(1, overlimitModified.taskCount)
+        assertEquals(1, overlimitModified.receipts.size)
+        assertEquals(true, overlimitModified.implementationExistedAtDispatch)
+        val overlimitModifiedResult = assertNotNull(overlimitModified.result)
+        assertEquals(0, overlimitModifiedResult.build.returnCode)
+        assertTrue(requireNotNull(overlimitModifiedResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        val overlimitModifiedInvocation = overlimitModified.receipts.single()
+        assertEquals(overlimitModified.requestSha256s.single(), overlimitModifiedInvocation.requestBinding.requestSha256)
+        val overlimitModifiedExecution = overlimitModifiedInvocation.requireResult()
+        assertEquals(AgentStopReason.COMPLETED, overlimitModifiedExecution.stopReason)
+        assertEquals(1, overlimitModifiedExecution.changes.size)
+        val overlimitModifiedChange = overlimitModifiedExecution.changes.single()
+        assertEquals(implementationPath, overlimitModifiedChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.MODIFIED, overlimitModifiedChange.kind)
+        assertEquals(sha256(modifiedOverlimitSeed), overlimitModifiedChange.beforeSha256)
+        assertEquals(sha256(expectedCreatedSource), overlimitModifiedChange.afterSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), overlimitModifiedChange.sizeBytes)
+        assertContentEquals(
+            expectedCreatedSource,
+            Files.readAllBytes(overlimitModifiedResult.projectDir.resolve(implementationPath)),
+        )
+        assertContentEquals(expectedCreatedSource, assertNotNull(modifiedSourceBytesAfterOversizedRefusal))
+        val overlimitModifiedAudit = overlimitModified.harness.latestFilesystemAudit()
+        assertEquals(9, overlimitModifiedAudit.size, overlimitModifiedAudit.toString())
+        assertEquals(implementationPath, assertNotNull(overlimitModifiedAudit[7].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, overlimitModifiedAudit[7].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, overlimitModifiedAudit[7].reason)
+        assertEquals(implementationPath, assertNotNull(overlimitModifiedAudit[8].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, overlimitModifiedAudit[8].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, overlimitModifiedAudit[8].reason)
+        assertFalse(overlimitModifiedResult.projectDir.resolve("src/modules/decomp_extra.c").exists())
+        val overlimitModifiedExtracted = fixture.resolve("verified-overlimit-modified-source")
+        ArchivalBundleVerifier.extractAndVerify(
+            overlimitModifiedResult.bundle.archivePath,
+            overlimitModifiedExtracted,
+            profile = profile,
+        )
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(overlimitModifiedExtracted.resolve(implementationPath)))
+        assertFalse(overlimitModifiedExtracted.resolve("src/modules/decomp_extra.c").exists())
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(output.resolve("source-tree").resolve(implementationPath)))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(overlimitModifiedExtracted, profile).returnCode)
+        acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
+
+        // The public reconstruction grant is one non-recursive target path. Its rule and two
+        // parents make initial entry-count refusal reachable. The workflow normally starts with
+        // an absent target, so the one-shot snapshot hook seeds a target only for initial byte
+        // ceiling cases; final byte ceilings separately cover candidate creation.
+        val seededImplementation = (
+            expectedCreatedSource.toString(Charsets.UTF_8) + "/* seeded initial snapshot headroom */\n"
+        ).toByteArray(Charsets.UTF_8)
+        for ((offset, dimension) in listOf("file-bytes", "total-bytes").withIndex()) {
+            val limits = when (dimension) {
+                "file-bytes" -> WorkspaceSnapshotLimits(fileBytes = seededImplementation.size.toLong())
+                "total-bytes" -> WorkspaceSnapshotLimits(totalBytes = seededImplementation.size.toLong())
+                else -> error("unexpected initial snapshot dimension: $dimension")
+            }
+            assertEquals(seededImplementation.size.toLong(), when (dimension) {
+                "file-bytes" -> limits.fileBytes
+                "total-bytes" -> limits.totalBytes
+                else -> error("unexpected initial snapshot dimension: $dimension")
+            })
+            val exactOutput = fixture.resolve("exact-initial-snapshot-$dimension-output")
+            val exactInitialSnapshot = runAttempt(
+                "reconstruction-mutation-grant",
+                index = 40 + offset,
+                maximumFrameBytes = 1024 * 1024,
+                snapshotLimits = limits,
+                seedExistingTarget = seededImplementation,
+                outputPath = exactOutput,
+            )
+            assertTrue(
+                exactInitialSnapshot.failure?.message.orEmpty()
+                    .contains("agent generation contains a rejected module"),
+                "$dimension equality must pass initial snapshot admission and reach downstream generation handling",
+            )
+            assertEquals(1, exactInitialSnapshot.taskCount)
+            assertEquals(1, exactInitialSnapshot.receipts.size)
+            assertEquals(true, exactInitialSnapshot.implementationExistedAtDispatch)
+            assertNull(exactInitialSnapshot.result, "the injected pre-existing target is refused by generation admission")
+            val exactInvocation = exactInitialSnapshot.receipts.single()
+            val exactEvidence = assertIs<AcpInvocationEvidenceSnapshot>(exactInvocation.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, exactEvidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, exactEvidence.cleanupDisposition)
+            assertNotNull(exactEvidence.completeExecutionEvidence)
+            val exactExecution = exactInitialSnapshot.receipts.single().requireResult()
+            assertEquals(AgentStopReason.COMPLETED, exactExecution.stopReason)
+            val exactChange = exactExecution.changes.single()
+            assertEquals(implementationPath, exactChange.path.relativePath)
+            assertEquals(AgentFileChangeKind.MODIFIED, exactChange.kind)
+            assertEquals(sha256(seededImplementation), exactChange.beforeSha256)
+            assertEquals(expectedCreatedSource.size.toLong(), exactChange.sizeBytes)
+            assertEquals(sha256(expectedCreatedSource), exactChange.afterSha256)
+            val exactWriteAudit = exactInitialSnapshot.harness.latestFilesystemAudit().single {
+                it.policyPath?.relativePath == implementationPath && it.outcome == AcpFilesystemAuditOutcome.ALLOWED
+            }
+            assertEquals(implementationPath, assertNotNull(exactWriteAudit.policyPath).relativePath)
+            assertEquals(AcpFilesystemAuditOutcome.ALLOWED, exactWriteAudit.outcome)
+            assertEquals(AcpFilesystemAuditReason.COMPLETED, exactWriteAudit.reason)
+            assertFalse(exactOutput.resolve("source-tree").exists())
+            assertNoReconstructionPublicationResidue(exactOutput)
+        }
+
+        data class SnapshotLimitCase(
+            val dimension: String,
+            val limits: WorkspaceSnapshotLimits,
+            val phase: String,
+            val lifecyclePhase: AcpExecutionLifecyclePhase,
+            val mode: String,
+            val seedExistingTarget: ByteArray? = null,
+        )
+        val snapshotLimitCases = listOf(
+            SnapshotLimitCase(
+                "entry-count",
+                WorkspaceSnapshotLimits(entries = 2),
+                "initial-workspace-snapshot",
+                AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT,
+                "reconstruction-mutation-grant",
+            ),
+            SnapshotLimitCase(
+                "file-bytes",
+                WorkspaceSnapshotLimits(fileBytes = seededImplementation.size.toLong() - 1),
+                "initial-workspace-snapshot",
+                AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT,
+                "reconstruction-mutation-grant",
+                seedExistingTarget = seededImplementation,
+            ),
+            SnapshotLimitCase(
+                "total-bytes",
+                WorkspaceSnapshotLimits(totalBytes = seededImplementation.size.toLong() - 1),
+                "initial-workspace-snapshot",
+                AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT,
+                "reconstruction-mutation-grant",
+                seedExistingTarget = seededImplementation,
+            ),
+            SnapshotLimitCase(
+                "file-bytes",
+                WorkspaceSnapshotLimits(fileBytes = 1),
+                "final-workspace-snapshot",
+                AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT,
+                "reconstruction-role-policy",
+            ),
+            SnapshotLimitCase(
+                "total-bytes",
+                WorkspaceSnapshotLimits(totalBytes = 1),
+                "final-workspace-snapshot",
+                AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT,
+                "reconstruction-role-policy",
+            ),
+        )
+        for ((offset, scenario) in snapshotLimitCases.withIndex()) {
+            val (dimension, limits, phase, lifecyclePhase, mode, seedExistingTarget) = scenario
+            val limitedSnapshot = runAttempt(
+                mode,
+                index = 10 + offset,
+                snapshotLimits = limits,
+                seedExistingTarget = seedExistingTarget,
+            )
+            assertNotNull(limitedSnapshot.failure, "$dimension snapshot limit must refuse publication")
+            assertEquals(1, limitedSnapshot.taskCount)
+            assertEquals(seedExistingTarget != null, limitedSnapshot.implementationExistedAtDispatch)
+            val snapshotReceipt = limitedSnapshot.receipts.single()
+            val snapshotFailure = assertIs<AgentExecutionOutcome.Failed>(snapshotReceipt.outcome).failure
+            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, snapshotFailure.kind,
+                "${snapshotFailure.message}; details=${snapshotFailure.details}")
+            assertEquals(dimension, snapshotFailure.details["limit"],
+                "${snapshotFailure.message}; details=${snapshotFailure.details}")
+            assertEquals(phase, snapshotFailure.details["phase"])
+            val snapshotEvidence = assertIs<AcpInvocationEvidenceSnapshot>(snapshotReceipt.providerEvidence)
+            assertEquals(lifecyclePhase, snapshotEvidence.phaseReached)
+            if (phase == "initial-workspace-snapshot") {
+                assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, snapshotEvidence.cleanupDisposition)
+                assertNull(snapshotEvidence.diagnostics)
+                assertNull(snapshotEvidence.sandboxEvidence)
+                assertTrue(limitedSnapshot.harness.latestFilesystemAudit().isEmpty())
+                assertNull(limitedSnapshot.harness.latestDiagnostics())
+            } else {
+                assertEquals(AcpExecutionCleanupDisposition.VERIFIED, snapshotEvidence.cleanupDisposition)
+                assertNotNull(snapshotEvidence.diagnostics)
+                assertNotNull(snapshotEvidence.sandboxEvidence)
+                assertTrue(limitedSnapshot.harness.latestFilesystemAudit().any {
+                    it.policyPath?.relativePath == implementationPath && it.outcome == AcpFilesystemAuditOutcome.ALLOWED
+                })
+                assertTrue(requireNotNull(snapshotEvidence.diagnostics).remainingProcessIds.isEmpty())
+                assertTrue(snapshotEvidence.diagnostics.sandboxCleanupVerified)
+            }
+            assertNull(snapshotEvidence.completeExecutionEvidence)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), dimension)
+            assertNoReconstructionPublicationResidue(output)
+        }
+
+        data class FinalSnapshotViolation(
+            val label: String,
+            val index: Int,
+            val expectedReason: String?,
+            val inject: (Path, Path) -> Unit,
+            val expectedFailure: AgentFailureKind,
+            val mode: String = "reconstruction-role-policy",
+            val seedSourceBeforeDispatch: ByteArray? = null,
+            val expectedMessageFragment: String? = null,
+        )
+        val oversizedValidSource = ("/*" + "x".repeat(256 * 1024 - 4) + "*/\n").toByteArray(Charsets.UTF_8)
+        assertEquals(256 * 1024 + 1, oversizedValidSource.size)
+        val finalSnapshotViolations = listOf(
+            FinalSnapshotViolation(
+                label = "invalid-utf8",
+                index = 22,
+                expectedReason = null,
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, _ ->
+                    Files.write(target, Files.readAllBytes(target) + byteArrayOf(0xff.toByte()))
+                },
+            ),
+            FinalSnapshotViolation(
+                label = "grant-size",
+                index = 23,
+                expectedReason = null,
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, _ -> Files.write(target, oversizedValidSource) },
+            ),
+            FinalSnapshotViolation(
+                label = "symbolic-link",
+                index = 24,
+                expectedReason = "symbolic-link",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, outside ->
+                    Files.write(outside, Files.readAllBytes(target))
+                    Files.delete(target)
+                    Files.createSymbolicLink(target, outside.toAbsolutePath())
+                },
+            ),
+            FinalSnapshotViolation(
+                label = "hard-link",
+                index = 25,
+                expectedReason = "unsupported-link-count",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, outside -> Files.createLink(outside, target) },
+            ),
+            FinalSnapshotViolation(
+                label = "fifo",
+                index = 26,
+                expectedReason = "special-file",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, _ ->
+                    Files.delete(target)
+                    val mkfifo = ProcessBuilder("/usr/bin/mkfifo", target.toString())
+                        .redirectErrorStream(true)
+                        .start()
+                    try {
+                        assertTrue(mkfifo.waitFor(5, TimeUnit.SECONDS), "mkfifo fixture timed out")
+                        assertEquals(0, mkfifo.exitValue(), "mkfifo fixture failed")
+                    } finally {
+                        if (mkfifo.isAlive) mkfifo.destroyForcibly()
+                    }
+                },
+            ),
+            FinalSnapshotViolation(
+                label = "extended-attribute",
+                index = 27,
+                expectedReason = "unsupported-extended-attributes",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                inject = { target, _ ->
+                    val attributes = assertNotNull(
+                        Files.getFileAttributeView(target, UserDefinedFileAttributeView::class.java),
+                        "test filesystem must support user-defined attributes",
+                    )
+                    attributes.write("decomp-test", ByteBuffer.wrap(byteArrayOf(1, 2, 3)))
+                },
+            ),
+            FinalSnapshotViolation(
+                label = "delete-existing-target",
+                index = 32,
+                expectedReason = null,
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                mode = "reconstruction-modify-existing-source",
+                seedSourceBeforeDispatch = priorModifiedSource,
+                expectedMessageFragment = "without DELETE_FILE authority",
+                inject = { target, _ -> Files.delete(target) },
+            ),
+            FinalSnapshotViolation(
+                label = "metadata-change-existing-target",
+                index = 33,
+                expectedReason = "file-metadata-changed",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                mode = "reconstruction-modify-existing-source",
+                seedSourceBeforeDispatch = priorModifiedSource,
+                inject = { target, _ ->
+                    val permissions = Files.getPosixFilePermissions(target).toMutableSet()
+                    if (!permissions.remove(PosixFilePermission.OWNER_EXECUTE)) {
+                        permissions.add(PosixFilePermission.OWNER_EXECUTE)
+                    }
+                    assertTrue(PosixFilePermission.OWNER_READ in permissions)
+                    Files.setPosixFilePermissions(target, permissions)
+                },
+            ),
+        )
+        for (scenario in finalSnapshotViolations) {
+            val outside = fixture.resolve("final-snapshot-${scenario.label}-outside.c")
+            Files.deleteIfExists(outside)
+            var injected = 0
+            var expectedOutsideBytes: ByteArray? = null
+            val finalSnapshotRefusal = runAttempt(
+                scenario.mode,
+                index = scenario.index,
+                seedSourceBeforeDispatch = scenario.seedSourceBeforeDispatch,
+                afterPromptCompletion = { target ->
+                    if (scenario.label == "symbolic-link" || scenario.label == "hard-link") {
+                        expectedOutsideBytes = Files.readAllBytes(target)
+                    }
+                    scenario.inject(target, outside)
+                    injected++
+                },
+            )
+            assertEquals(1, injected, scenario.label)
+            assertNotNull(finalSnapshotRefusal.failure, "${scenario.label} final snapshot must refuse publication")
+            assertEquals(1, finalSnapshotRefusal.taskCount, scenario.label)
+            assertEquals(scenario.seedSourceBeforeDispatch != null, finalSnapshotRefusal.implementationExistedAtDispatch,
+                scenario.label)
+            assertEquals(1, finalSnapshotRefusal.receipts.size, scenario.label)
+            val violationReceipt = finalSnapshotRefusal.receipts.single()
+            assertEquals(
+                finalSnapshotRefusal.requestSha256s.single(),
+                violationReceipt.requestBinding.requestSha256,
+                scenario.label,
+            )
+            val turnIdentity = assertNotNull(violationReceipt.turnIdentity, scenario.label)
+            assertEquals(violationReceipt.requestBinding.requestSha256, turnIdentity.requestSha256, scenario.label)
+            val violationFailure = assertIs<AgentExecutionOutcome.Failed>(violationReceipt.outcome).failure
+            assertEquals(scenario.expectedFailure, violationFailure.kind, scenario.label)
+            assertEquals("final-workspace-snapshot", violationFailure.details["phase"], scenario.label)
+            if (scenario.expectedReason == null) {
+                assertEquals("project", violationFailure.details["rootId"], scenario.label)
+                assertEquals(implementationPath, violationFailure.details["relativePath"], scenario.label)
+            } else {
+                assertEquals(scenario.expectedReason, violationFailure.details["reason"], scenario.label)
+            }
+            scenario.expectedMessageFragment?.let { fragment ->
+                assertTrue(violationFailure.message.contains(fragment), violationFailure.message)
+            }
+            val violationEvidence = assertIs<AcpInvocationEvidenceSnapshot>(violationReceipt.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, violationEvidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, violationEvidence.cleanupDisposition)
+            assertNull(violationEvidence.completeExecutionEvidence)
+            val diagnostics = assertNotNull(violationEvidence.diagnostics, scenario.label)
+            assertTrue(diagnostics.remainingProcessIds.isEmpty(), scenario.label)
+            assertTrue(diagnostics.sandboxCleanupVerified, scenario.label)
+            assertProcessStopped(diagnostics.pid)
+            assertTrue(finalSnapshotRefusal.harness.latestFilesystemAudit().any {
+                it.policyPath?.relativePath == implementationPath &&
+                    it.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                    it.reason == AcpFilesystemAuditReason.COMPLETED
+            }, scenario.label)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), scenario.label)
+            assertNoReconstructionPublicationResidue(output)
+            if (scenario.label == "symbolic-link" || scenario.label == "hard-link") {
+                assertTrue(Files.isRegularFile(outside), scenario.label)
+                assertContentEquals(
+                    requireNotNull(expectedOutsideBytes),
+                    Files.readAllBytes(outside),
+                    scenario.label,
+                )
+            }
+            Files.deleteIfExists(outside)
+        }
+
+        val limited = runAttempt("reconstruction-limit-after-write", index = 2)
+        val interruption = assertNotNull(limited.failure, "LIMIT_EXHAUSTED must refuse candidate publication")
+        assertEquals(1, limited.taskCount)
+        val interruptionInChain = generateSequence<Throwable>(interruption) { it.cause }
+            .filterIsInstance<decompengine.project.ModuleReconstructionInterruptedException>()
+            .single()
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, interruptionInChain.stopReason)
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, limited.receipts.single().requireResult().stopReason)
+        assertEquals(AgentFileChangeKind.CREATED, limited.receipts.single().requireResult().changes.single().kind)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val maxTurnRequests = runAttempt(
+            "reconstruction-max-turn-requests-after-write",
+            index = 34,
+        )
+        val maxTurnFailure = assertNotNull(
+            maxTurnRequests.failure,
+            "max_turn_requests after an authorized write must refuse publication",
+        )
+        assertNull(maxTurnRequests.result)
+        assertEquals(1, maxTurnRequests.taskCount)
+        assertEquals(1, maxTurnRequests.receipts.size)
+        val maxTurnInterruption = generateSequence<Throwable>(maxTurnFailure) { it.cause }
+            .filterIsInstance<decompengine.project.ModuleReconstructionInterruptedException>()
+            .single()
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, maxTurnInterruption.stopReason)
+        val maxTurnReceipt = maxTurnRequests.receipts.single()
+        assertEquals(maxTurnRequests.requestSha256s.single(), maxTurnReceipt.requestBinding.requestSha256)
+        assertEquals(maxTurnReceipt.requestBinding.requestSha256, maxTurnReceipt.turnIdentity?.requestSha256)
+        val maxTurnExecution = maxTurnReceipt.requireResult()
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, maxTurnExecution.stopReason)
+        assertEquals(1, maxTurnExecution.changes.size)
+        val maxTurnChange = maxTurnExecution.changes.single()
+        assertEquals(implementationPath, maxTurnChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, maxTurnChange.kind)
+        assertNull(maxTurnChange.beforeSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), maxTurnChange.sizeBytes)
+        assertEquals(sha256(expectedCreatedSource), maxTurnChange.afterSha256)
+        val maxTurnEvidence = assertIs<AcpInvocationEvidenceSnapshot>(maxTurnReceipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, maxTurnEvidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, maxTurnEvidence.cleanupDisposition)
+        val maxTurnDiagnostics = assertNotNull(maxTurnRequests.harness.latestDiagnostics())
+        assertTrue(maxTurnDiagnostics.remainingProcessIds.isEmpty(), maxTurnDiagnostics.toString())
+        assertTrue(maxTurnDiagnostics.sandboxCleanupVerified, maxTurnDiagnostics.toString())
+        assertProcessStopped(maxTurnDiagnostics.pid)
+        assertTrue(maxTurnRequests.harness.latestFilesystemAudit().any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        })
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val refused = runAttempt("reconstruction-refusal-after-write", index = 33)
+        val refusalFailure = assertNotNull(refused.failure, "a model refusal must prevent candidate publication")
+        assertNull(refused.result)
+        assertEquals(1, refused.taskCount)
+        assertEquals(1, refused.receipts.size)
+        assertTrue(
+            refusalFailure.message.orEmpty().contains("validated source publication was refused"),
+            refusalFailure.message.orEmpty(),
+        )
+        val refusalReceipt = refused.receipts.single()
+        assertEquals(refused.requestSha256s.single(), refusalReceipt.requestBinding.requestSha256)
+        assertEquals(refusalReceipt.requestBinding.requestSha256, refusalReceipt.turnIdentity?.requestSha256)
+        val refusalExecution = refusalReceipt.requireResult()
+        assertEquals(AgentStopReason.REFUSED, refusalExecution.stopReason)
+        assertEquals(1, refusalExecution.changes.size)
+        val refusedChange = refusalExecution.changes.single()
+        assertEquals(implementationPath, refusedChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, refusedChange.kind)
+        assertNull(refusedChange.beforeSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), refusedChange.sizeBytes)
+        assertEquals(sha256(expectedCreatedSource), refusedChange.afterSha256)
+        val refusalEvidence = assertIs<AcpInvocationEvidenceSnapshot>(refusalReceipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, refusalEvidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, refusalEvidence.cleanupDisposition)
+        assertNotNull(refusalEvidence.completeExecutionEvidence)
+        val refusalDiagnostics = assertNotNull(refused.harness.latestDiagnostics())
+        assertTrue(refusalDiagnostics.remainingProcessIds.isEmpty(), refusalDiagnostics.toString())
+        assertTrue(refusalDiagnostics.sandboxCleanupVerified, refusalDiagnostics.toString())
+        assertProcessStopped(refusalDiagnostics.pid)
+        val refusalAudit = refused.harness.latestFilesystemAudit()
+        assertEquals(7, refusalAudit.size, refusalAudit.toString())
+        val refusalWrite = refusalAudit.last()
+        assertEquals(implementationPath, assertNotNull(refusalWrite.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, refusalWrite.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, refusalWrite.reason)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val wallLimited = runAttempt(
+            "reconstruction-request-timeout-after-write",
+            index = 8,
+            requestTimeoutMillis = 25_000,
+            executionLimits = AgentExecutionLimits(
+                wallClockTimeout = Duration.ofSeconds(12),
+                idleTimeout = Duration.ofSeconds(20),
+            ),
+        )
+        val wallFailure = assertNotNull(wallLimited.failure, "request wall-clock exhaustion must refuse publication")
+        assertEquals(1, wallLimited.taskCount)
+        val wallReceipt = wallLimited.receipts.single()
+        assertEquals(wallLimited.requestSha256s.single(), wallReceipt.requestBinding.requestSha256)
+        assertEquals(wallReceipt.requestBinding.requestSha256, wallReceipt.turnIdentity?.requestSha256)
+        val wallOutcome = assertIs<AgentExecutionOutcome.Failed>(wallReceipt.outcome)
+        assertEquals(AgentFailureKind.TIMEOUT, wallOutcome.failure.kind)
+        assertTrue(wallOutcome.failure.message.contains("wall-clock", ignoreCase = true), wallOutcome.failure.message)
+        assertNull(assertIs<AcpInvocationEvidenceSnapshot>(wallReceipt.providerEvidence).completeExecutionEvidence)
+        assertTrue(wallLimited.harness.latestFilesystemAudit().any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        })
+        assertTrue(generateSequence<Throwable>(wallFailure) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        val wallDiagnostics = assertNotNull(wallLimited.harness.latestDiagnostics())
+        assertTrue(wallDiagnostics.remainingProcessIds.isEmpty(), wallDiagnostics.toString())
+        assertTrue(wallDiagnostics.sandboxCleanupVerified, wallDiagnostics.toString())
+        assertProcessStopped(wallDiagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val idleLimited = runAttempt(
+            "reconstruction-request-timeout-after-write",
+            index = 9,
+            requestTimeoutMillis = 25_000,
+            executionLimits = AgentExecutionLimits(
+                wallClockTimeout = Duration.ofSeconds(20),
+                idleTimeout = Duration.ofSeconds(12),
+            ),
+        )
+        val idleFailure = assertNotNull(idleLimited.failure, "request idle exhaustion must refuse publication")
+        assertEquals(1, idleLimited.taskCount)
+        val idleReceipt = idleLimited.receipts.single()
+        assertEquals(idleLimited.requestSha256s.single(), idleReceipt.requestBinding.requestSha256)
+        assertEquals(idleReceipt.requestBinding.requestSha256, idleReceipt.turnIdentity?.requestSha256)
+        val idleOutcome = assertIs<AgentExecutionOutcome.Failed>(idleReceipt.outcome)
+        assertEquals(AgentFailureKind.TIMEOUT, idleOutcome.failure.kind)
+        assertTrue(idleOutcome.failure.message.contains("idle", ignoreCase = true), idleOutcome.failure.message)
+        assertNull(assertIs<AcpInvocationEvidenceSnapshot>(idleReceipt.providerEvidence).completeExecutionEvidence)
+        assertTrue(idleLimited.harness.latestFilesystemAudit().any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        })
+        assertTrue(generateSequence<Throwable>(idleFailure) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        val idleDiagnostics = assertNotNull(idleLimited.harness.latestDiagnostics())
+        assertTrue(idleDiagnostics.remainingProcessIds.isEmpty(), idleDiagnostics.toString())
+        assertTrue(idleDiagnostics.sandboxCleanupVerified, idleDiagnostics.toString())
+        assertProcessStopped(idleDiagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val frameLimited = runAttempt("reconstruction-frame-limit-after-write", index = 3)
+        val refusal = assertNotNull(frameLimited.failure, "oversized protocol frame must refuse candidate publication")
+        assertTrue(generateSequence<Throwable>(refusal) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        assertEquals(1, frameLimited.taskCount)
+        val failedReceipt = frameLimited.receipts.single()
+        val failedOutcome = assertIs<AgentExecutionOutcome.Failed>(failedReceipt.outcome)
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failedOutcome.failure.kind)
+        assertTrue(failedOutcome.failure.message.contains("frame limit"), failedOutcome.failure.message)
+        assertNull(assertIs<AcpInvocationEvidenceSnapshot>(failedReceipt.providerEvidence).completeExecutionEvidence)
+        val diagnostics = assertNotNull(frameLimited.harness.latestDiagnostics())
+        assertTrue(diagnostics.remainingProcessIds.isEmpty(), diagnostics.toString())
+        assertTrue(diagnostics.sandboxCleanupVerified, diagnostics.toString())
+        assertProcessStopped(diagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val frameCountLimited = runAttempt(
+            "reconstruction-frame-count-limit-after-write",
+            index = 19,
+            maximumProtocolFrames = 16,
+        )
+        val frameCountFailure = assertNotNull(
+            frameCountLimited.failure,
+            "protocol frame-count exhaustion must refuse a candidate after its acknowledged source write",
+        )
+        assertEquals(1, frameCountLimited.taskCount)
+        val frameCountReceipt = frameCountLimited.receipts.single()
+        assertEquals(frameCountLimited.requestSha256s.single(), frameCountReceipt.requestBinding.requestSha256)
+        val frameCountOutcome = assertIs<AgentExecutionOutcome.Failed>(frameCountReceipt.outcome)
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, frameCountOutcome.failure.kind)
+        assertTrue(
+            frameCountOutcome.failure.message.contains("16-frame protocol limit"),
+            frameCountOutcome.failure.message,
+        )
+        assertNull(
+            assertIs<AcpInvocationEvidenceSnapshot>(frameCountReceipt.providerEvidence).completeExecutionEvidence,
+            "a frame-count-exhausted invocation cannot claim complete terminal execution evidence",
+        )
+        assertTrue(generateSequence<Throwable>(frameCountFailure) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        val frameCountAudit = frameCountLimited.harness.latestFilesystemAudit()
+        assertTrue(frameCountAudit.any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        }, "the frame-count failure must occur after the authorized source write")
+        val frameCountDiagnostics = assertNotNull(frameCountLimited.harness.latestDiagnostics())
+        assertTrue(frameCountDiagnostics.remainingProcessIds.isEmpty(), frameCountDiagnostics.toString())
+        assertTrue(frameCountDiagnostics.sandboxCleanupVerified, frameCountDiagnostics.toString())
+        assertProcessStopped(frameCountDiagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        for ((index, scenario) in listOf(
+            "reconstruction-stderr-limit-after-write" to "execution limit",
+            "reconstruction-stdout-limit-after-write" to "execution limit",
+            "reconstruction-mixed-output-limit-after-write" to "execution limit",
+        ).withIndex()) {
+            val (mode, expectedMessage) = scenario
+            val resourceLimited = runAttempt(mode, index = 4 + index)
+            val resourceFailure = assertNotNull(
+                resourceLimited.failure,
+                "$mode must refuse candidate publication after the agent writes source",
+            )
+            assertEquals(1, resourceLimited.taskCount, mode)
+            val resourceReceipt = resourceLimited.receipts.single()
+            val resourceOutcome = assertIs<AgentExecutionOutcome.Failed>(resourceReceipt.outcome)
+            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, resourceOutcome.failure.kind, mode)
+            assertTrue(
+                resourceOutcome.failure.message.contains(expectedMessage, ignoreCase = true),
+                resourceOutcome.failure.message,
+            )
+            assertNull(
+                assertIs<AcpInvocationEvidenceSnapshot>(resourceReceipt.providerEvidence).completeExecutionEvidence,
+                "$mode cannot claim a complete terminal execution",
+            )
+            assertTrue(generateSequence<Throwable>(resourceFailure) { it.cause }.any {
+                it.message.orEmpty().contains("validated source publication was refused")
+            }, mode)
+            val resourceDiagnostics = assertNotNull(resourceLimited.harness.latestDiagnostics(), mode)
+            assertTrue(resourceDiagnostics.remainingProcessIds.isEmpty(), resourceDiagnostics.toString())
+            assertTrue(resourceDiagnostics.sandboxCleanupVerified, resourceDiagnostics.toString())
+            assertProcessStopped(resourceDiagnostics.pid)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), mode)
+            assertNoReconstructionPublicationResidue(output)
+        }
+
+        val requestTimedOut = runAttempt(
+            "reconstruction-request-timeout-after-write",
+            index = 7,
+            requestTimeoutMillis = 3_000,
+        )
+        val timeoutFailure = assertNotNull(
+            requestTimedOut.failure,
+            "the configured ACP prompt deadline must refuse a candidate already written to the stage",
+        )
+        assertEquals(1, requestTimedOut.taskCount)
+        val timeoutReceipt = requestTimedOut.receipts.single()
+        val timeoutOutcome = assertIs<AgentExecutionOutcome.Failed>(timeoutReceipt.outcome)
+        assertEquals(AgentFailureKind.TIMEOUT, timeoutOutcome.failure.kind)
+        assertTrue(timeoutOutcome.failure.message.contains("session/prompt"), timeoutOutcome.failure.message)
+        assertNull(assertIs<AcpInvocationEvidenceSnapshot>(timeoutReceipt.providerEvidence).completeExecutionEvidence)
+        assertTrue(
+            requestTimedOut.harness.latestFilesystemAudit().any { record ->
+                record.policyPath?.relativePath == implementationPath &&
+                    record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                    record.reason == AcpFilesystemAuditReason.COMPLETED
+            },
+            "the timeout fixture must cross the authorized candidate-write boundary",
+        )
+        assertTrue(generateSequence<Throwable>(timeoutFailure) { it.cause }.any {
+            it.message.orEmpty().contains("validated source publication was refused")
+        })
+        val timeoutDiagnostics = assertNotNull(requestTimedOut.harness.latestDiagnostics())
+        assertTrue(timeoutDiagnostics.remainingProcessIds.isEmpty(), timeoutDiagnostics.toString())
+        assertTrue(timeoutDiagnostics.sandboxCleanupVerified, timeoutDiagnostics.toString())
+        assertProcessStopped(timeoutDiagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        val toolLimited = runAttempt(
+            "reconstruction-tool-limit-after-write",
+            index = 13,
+            executionLimits = AgentExecutionLimits(
+                maxToolCalls = 2,
+                maxInputTokens = 11,
+                maxOutputTokens = 7,
+            ),
+            gatePromptCompletion = true,
+        )
+        val toolFailure = assertNotNull(toolLimited.failure, "tool-call exhaustion must refuse publication")
+        assertEquals(1, toolLimited.taskCount)
+        val toolResult = toolLimited.receipts.single().requireResult()
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, toolResult.stopReason)
+        val toolUsage = assertNotNull(toolResult.usage)
+        assertEquals(3, assertNotNull(toolUsage.toolCalls))
+        assertEquals(11L, assertNotNull(toolUsage.inputTokens))
+        assertEquals(7L, assertNotNull(toolUsage.outputTokens))
+        val toolReceipt = toolLimited.receipts.single()
+        assertEquals(toolLimited.requestSha256s.single(), toolReceipt.requestBinding.requestSha256)
+        val toolEvidence = assertIs<AcpInvocationEvidenceSnapshot>(toolReceipt.providerEvidence)
+        assertNotNull(toolEvidence.completeExecutionEvidence)
+        val toolDiagnostics = assertNotNull(toolLimited.harness.latestDiagnostics())
+        assertTrue(toolDiagnostics.remainingProcessIds.isEmpty(), toolDiagnostics.toString())
+        assertTrue(toolDiagnostics.sandboxCleanupVerified, toolDiagnostics.toString())
+        assertProcessStopped(toolDiagnostics.pid)
+        assertEquals(1, toolLimited.harness.latestFilesystemAudit().count {
+            it.policyPath?.relativePath == implementationPath &&
+                it.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                it.reason == AcpFilesystemAuditReason.COMPLETED
+        })
+        assertTrue(generateSequence<Throwable>(toolFailure) { it.cause }.any {
+            it is decompengine.project.ModuleReconstructionInterruptedException &&
+                it.stopReason == AgentStopReason.LIMIT_EXHAUSTED
+        })
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
+        for ((index, limit) in listOf(
+            "input" to AgentExecutionLimits(maxInputTokens = 10),
+            "output" to AgentExecutionLimits(maxOutputTokens = 6),
+        ).withIndex()) {
+            val (dimension, limits) = limit
+            val limitedTokens = runAttempt(
+                "reconstruction-role-policy",
+                index = 14 + index,
+                executionLimits = limits,
+            )
+            val tokenFailure = assertNotNull(limitedTokens.failure, "$dimension token limit must refuse publication")
+            assertEquals(1, limitedTokens.taskCount)
+            val tokenResult = limitedTokens.receipts.single().requireResult()
+            assertEquals(AgentStopReason.LIMIT_EXHAUSTED, tokenResult.stopReason)
+            val tokenUsage = assertNotNull(tokenResult.usage)
+            assertEquals(11L, assertNotNull(tokenUsage.inputTokens))
+            assertEquals(7L, assertNotNull(tokenUsage.outputTokens))
+            assertEquals(1, limitedTokens.harness.latestFilesystemAudit().count {
+                it.policyPath?.relativePath == implementationPath &&
+                    it.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                    it.reason == AcpFilesystemAuditReason.COMPLETED
+            })
+            assertTrue(generateSequence<Throwable>(tokenFailure) { it.cause }.any {
+                it is decompengine.project.ModuleReconstructionInterruptedException &&
+                    it.stopReason == AgentStopReason.LIMIT_EXHAUSTED
+            })
+            val tokenDiagnostics = assertNotNull(limitedTokens.harness.latestDiagnostics())
+            assertTrue(tokenDiagnostics.remainingProcessIds.isEmpty(), tokenDiagnostics.toString())
+            assertTrue(tokenDiagnostics.sandboxCleanupVerified, tokenDiagnostics.toString())
+            assertProcessStopped(tokenDiagnostics.pid)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), dimension)
+            assertNoReconstructionPublicationResidue(output)
+        }
+
+        data class InvalidUsageCase(
+            val name: String,
+            val mode: String,
+            val limits: AgentExecutionLimits,
+            val expectedMessage: String,
+        )
+        for ((index, invalidUsage) in listOf(
+            InvalidUsageCase(
+                "missing-required-usage",
+                "reconstruction-missing-usage-after-write",
+                AgentExecutionLimits(maxInputTokens = 10, maxOutputTokens = 6),
+                "inputTokens,outputTokens",
+            ),
+            InvalidUsageCase(
+                "negative-reported-usage",
+                "reconstruction-negative-usage-after-write",
+                AgentExecutionLimits(maxInputTokens = 10),
+                "invalid prompt usage",
+            ),
+        ).withIndex()) {
+            val invalid = runAttempt(
+                invalidUsage.mode,
+                index = 17 + index,
+                executionLimits = invalidUsage.limits,
+            )
+            val invalidFailure = assertNotNull(
+                invalid.failure,
+                "${invalidUsage.name} must refuse reconstruction after the candidate write",
+            )
+            assertEquals(1, invalid.taskCount)
+            val receipt = invalid.receipts.single()
+            assertEquals(invalid.requestSha256s.single(), receipt.requestBinding.requestSha256)
+            val outcome = assertIs<AgentExecutionOutcome.Failed>(receipt.outcome)
+            assertEquals(AgentFailureKind.PROTOCOL, outcome.failure.kind)
+            assertTrue(outcome.failure.message.contains(invalidUsage.expectedMessage), outcome.failure.message)
+            val invocationEvidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+            assertNull(invocationEvidence.completeExecutionEvidence)
+            assertTrue(invalid.harness.latestFilesystemAudit().any { record ->
+                record.policyPath?.relativePath == implementationPath &&
+                    record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                    record.reason == AcpFilesystemAuditReason.COMPLETED
+            }, invalidUsage.name)
+            assertTrue(generateSequence<Throwable>(invalidFailure) { it.cause }.any {
+                it.message.orEmpty().contains("validated source publication was refused")
+            }, invalidUsage.name)
+            val invalidDiagnostics = assertNotNull(invalid.harness.latestDiagnostics(), invalidUsage.name)
+            assertTrue(invalidDiagnostics.remainingProcessIds.isEmpty(), invalidDiagnostics.toString())
+            assertTrue(invalidDiagnostics.sandboxCleanupVerified, invalidDiagnostics.toString())
+            assertProcessStopped(invalidDiagnostics.pid)
+            assertEquals(acceptedMetadata, capturePublishedMetadata(output), invalidUsage.name)
+            assertNoReconstructionPublicationResidue(output)
+        }
+
+        val exactResourceBoundary = runAttempt(
+            "reconstruction-tool-limit-after-write",
+            index = 16,
+            executionLimits = AgentExecutionLimits(
+                maxToolCalls = 3,
+                maxInputTokens = 11,
+                maxOutputTokens = 7,
+            ),
+            gatePromptCompletion = true,
+        )
+        assertNull(exactResourceBoundary.failure)
+        assertEquals(1, exactResourceBoundary.taskCount)
+        assertEquals(false, exactResourceBoundary.implementationExistedAtDispatch)
+        val exactResult = assertNotNull(exactResourceBoundary.result)
+        assertEquals(0, exactResult.build.returnCode)
+        assertEquals(AgentStopReason.COMPLETED,
+            exactResourceBoundary.receipts.single().requireResult().stopReason)
+        val exactUsage = assertNotNull(exactResourceBoundary.receipts.single().requireResult().usage)
+        assertEquals(3, assertNotNull(exactUsage.toolCalls))
+        assertEquals(11L, assertNotNull(exactUsage.inputTokens))
+        assertEquals(7L, assertNotNull(exactUsage.outputTokens))
+        val exactExtracted = fixture.resolve("verified-exact-resource-boundary")
+        ArchivalBundleVerifier.extractAndVerify(exactResult.bundle.archivePath, exactExtracted, profile = profile)
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(exactExtracted, profile).returnCode)
+        assertNoReconstructionPublicationResidue(output)
+
+        val previouslyPublishedMakefile = Files.readAllBytes(output.resolve("source-tree/Makefile"))
+        val previouslyPublishedHeader = Files.readAllBytes(output.resolve("source-tree/include/modules/decomp.h"))
+        val terminalMutation = runAttempt("reconstruction-terminal-mutation-refusal-disabled", index = 20)
+        assertNull(
+            terminalMutation.failure,
+            "terminal delete/move attempts must be refused without failing reconstruction: " +
+                "outcome=${terminalMutation.receipts.singleOrNull()?.outcome}; " +
+                "terminalAudit=${terminalMutation.harness.latestTerminalAudit()}; " +
+                "diagnostics=${terminalMutation.harness.latestDiagnostics()}",
+        )
+        assertEquals(1, terminalMutation.taskCount)
+        assertEquals(1, terminalMutation.receipts.size)
+        assertEquals(
+            terminalMutation.requestSha256s.single(),
+            terminalMutation.receipts.single().requestBinding.requestSha256,
+        )
+        val terminalResult = assertNotNull(terminalMutation.result)
+        assertEquals(0, terminalResult.build.returnCode)
+        assertTrue(requireNotNull(terminalResult.bundle.audit).unresolvedEntityIds.isEmpty())
+        assertEquals(AgentStopReason.COMPLETED, terminalMutation.receipts.single().requireResult().stopReason)
+        val terminalChange = terminalMutation.receipts.single().requireResult().changes.single()
+        assertEquals(implementationPath, terminalChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, terminalChange.kind)
+        assertEquals(expectedCreatedSource.size.toLong(), terminalChange.sizeBytes)
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(terminalResult.projectDir.resolve(implementationPath)))
+
+        val terminalInvocation = assertIs<AcpInvocationEvidenceSnapshot>(terminalMutation.receipts.single().providerEvidence)
+        assertTrue(terminalInvocation.completeness.terminalAuditComplete)
+        assertNotNull(terminalInvocation.completeExecutionEvidence)
+        assertEquals(2, terminalInvocation.terminalAudit.size)
+        assertEquals(List(2) { "terminal/create" }, terminalInvocation.terminalAudit.map { it.method })
+        assertEquals(List(2) { AcpTerminalAuditOutcome.DENIED }, terminalInvocation.terminalAudit.map { it.outcome })
+        assertEquals(
+            List(2) { AcpTerminalAuditReason.CAPABILITY_DISABLED },
+            terminalInvocation.terminalAudit.map { it.reason },
+        )
+        assertEquals(2, terminalInvocation.terminalAudit.map { it.requestSha256 }.toSet().size)
+        assertEquals(
+            listOf(AcpSandboxLaunchPurpose.OUTER_AGENT),
+            assertNotNull(terminalInvocation.sandboxEvidence).launches.map { it.purpose },
+            "neither attempted shell command may launch",
+        )
+
+        val terminalFilesystemAudit = terminalMutation.harness.latestFilesystemAudit()
+        assertEquals(7, terminalFilesystemAudit.size, terminalFilesystemAudit.toString())
+        assertTrue(terminalFilesystemAudit.take(5).all {
+            it.method == "fs/read_text_file" &&
+                it.outcome == AcpFilesystemAuditOutcome.DENIED &&
+                it.reason == AcpFilesystemAuditReason.CAPABILITY_DISABLED
+        }, terminalFilesystemAudit.toString())
+        assertEquals("Makefile", assertNotNull(terminalFilesystemAudit[5].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, terminalFilesystemAudit[5].outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, terminalFilesystemAudit[5].reason)
+        assertEquals(implementationPath, assertNotNull(terminalFilesystemAudit[6].policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, terminalFilesystemAudit[6].outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, terminalFilesystemAudit[6].reason)
+
+        assertTrue(Files.isRegularFile(terminalResult.projectDir.resolve("Makefile")))
+        assertTrue(Files.isRegularFile(terminalResult.projectDir.resolve("include/modules/decomp.h")))
+        assertContentEquals(previouslyPublishedMakefile, Files.readAllBytes(terminalResult.projectDir.resolve("Makefile")))
+        assertContentEquals(
+            previouslyPublishedHeader,
+            Files.readAllBytes(terminalResult.projectDir.resolve("include/modules/decomp.h")),
+        )
+        assertFalse(Files.exists(terminalResult.projectDir.resolve("src/modules/decomp_extra.c")))
+        val terminalExtracted = fixture.resolve("verified-terminal-mutation-20")
+        ArchivalBundleVerifier.extractAndVerify(terminalResult.bundle.archivePath, terminalExtracted, profile = profile)
+        assertContentEquals(expectedCreatedSource, Files.readAllBytes(terminalExtracted.resolve(implementationPath)))
+        assertTrue(Files.isRegularFile(terminalExtracted.resolve("Makefile")))
+        assertTrue(Files.isRegularFile(terminalExtracted.resolve("include/modules/decomp.h")))
+        assertContentEquals(previouslyPublishedMakefile, Files.readAllBytes(terminalExtracted.resolve("Makefile")))
+        assertContentEquals(
+            previouslyPublishedHeader,
+            Files.readAllBytes(terminalExtracted.resolve("include/modules/decomp.h")),
+        )
+        assertFalse(Files.exists(terminalExtracted.resolve("src/modules/decomp_extra.c")))
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(terminalExtracted, profile).returnCode)
+        acceptedMetadata = capturePublishedMetadata(output)
+        assertNoReconstructionPublicationResidue(output)
+
+        val interrupted = runAttempt(
+            "reconstruction-cancel-after-write",
+            index = 21,
+            requestTimeoutMillis = 25_000,
+            cancelAfterAcknowledgedMessage = "reconstruction-cancel-after-ack-ready",
+        )
+        assertTrue(interrupted.cancellationReadyObserved, "the fixture must acknowledge its candidate write first")
+        assertNull(interrupted.result)
+        val interruptionFailure = assertNotNull(interrupted.failure)
+        assertEquals(1, interrupted.taskCount)
+        assertEquals(1, interrupted.receipts.size)
+        val interruptedReceipt = interrupted.receipts.single()
+        assertEquals(interrupted.requestSha256s.single(), interruptedReceipt.requestBinding.requestSha256)
+        assertEquals(interrupted.requestSha256s.single(), interruptedReceipt.turnIdentity?.requestSha256)
+        val interruptedOutcome = assertIs<AgentExecutionOutcome.Returned>(interruptedReceipt.outcome)
+        assertEquals(AgentStopReason.CANCELLED, interruptedOutcome.result.stopReason)
+        val interruptedEvidence = assertIs<AcpInvocationEvidenceSnapshot>(interruptedReceipt.providerEvidence)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, interruptedEvidence.cleanupDisposition)
+        assertTrue(interrupted.harness.latestFilesystemAudit().any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        }, "the acknowledged candidate write must precede caller interruption")
+        val interruptedTurn = generateSequence<Throwable>(interruptionFailure) { it.cause }
+            .filterIsInstance<decompengine.project.ModuleReconstructionInterruptedException>()
+            .single()
+        assertEquals(AgentStopReason.CANCELLED, interruptedTurn.stopReason)
+        assertFalse(interrupted.workerInterruptFlagAtExit ?: true,
+            "runBlocking consumes the interrupt while the harness converts it to a typed cancellation")
+        assertTrue(interrupted.phases.none {
+            it in setOf(
+                decompengine.agent.AgentWorkflowPhase.ACCEPTED,
+                decompengine.agent.AgentWorkflowPhase.COMPLETED,
+                decompengine.agent.AgentWorkflowPhase.UNRESOLVED,
+            )
+        }, interrupted.phases.toString())
+        val interruptDiagnostics = assertNotNull(interrupted.harness.latestDiagnostics())
+        assertTrue(interruptDiagnostics.remainingProcessIds.isEmpty(), interruptDiagnostics.toString())
+        assertTrue(interruptDiagnostics.sandboxCleanupVerified, interruptDiagnostics.toString())
+        assertProcessStopped(interruptDiagnostics.pid)
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output), "caller interruption must preserve accepted output")
+        assertNoReconstructionPublicationResidue(output)
+    }
+
+    private fun capturePublishedMetadata(output: Path): Map<String, PublicationEntryRecord> {
+        val budget = PublicationTreeBudget()
+        return LinuxFilesystemSyscalls.openRoot(output).use { root ->
+            listOf("source-tree", "source-tree.zip", "reconstruction.json", ".decomp-agent-sessions")
+                .associateWith { relative -> ReconstructionOutputTree.recordAt(root, Path.of(relative), budget) }
+        }
+    }
+
+    private fun assertNoReconstructionPublicationResidue(output: Path) {
+        assertFalse(Files.exists(output.resolve(ReconstructionOutputWorkspace.PUBLICATION)))
+        Files.list(output).use { entries ->
+            assertTrue(entries.noneMatch { path ->
+                val name = path.fileName.toString()
+                name.startsWith(".reconstruction-stage-") || name.startsWith(".reconstruction-previous-") ||
+                    name.startsWith(".publication-")
+            })
+        }
+    }
+
+    @Test
     fun `public harness fails closed before launch when the outer sandbox is absent`() {
         val fixture = fixture()
         val harness = AcpAgentHarness(
@@ -1198,7 +2816,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(103, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(105, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -3377,7 +4995,7 @@ class AcpAgentHarnessTest {
         }
     }
 
-    private fun harness(
+    internal fun harness(
         mode: String,
         sentinel: String = "literal-argv",
         ready: Path? = null,
@@ -3387,12 +5005,14 @@ class AcpAgentHarnessTest {
         maximumProtocolFrames: Int = DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES,
         terminalPolicy: AcpTerminalExecutionPolicy? = null,
         sessionPreferences: AcpSessionPreferences = AcpSessionPreferences(),
+        workspaceSnapshotLimits: WorkspaceSnapshotLimits? = null,
+        filesystemLimits: AcpFilesystemLimits = AcpFilesystemLimits(),
     ): AcpAgentHarness {
         requireLiveSandboxHost()
         val script = Path.of(requireNotNull(javaClass.getResource("/acp/fake_acp_v1_agent.py")).toURI())
         val arguments = mutableListOf("-S", AGENT_SCRIPT_DESTINATION.toString(), mode, sentinel)
         ready?.let { arguments += it.toString() }
-        return AcpAgentHarness(
+        val acp = AcpAgentHarness(
             AcpProcessConfiguration(
                 executable = PYTHON,
                 arguments = arguments,
@@ -3401,6 +5021,7 @@ class AcpAgentHarnessTest {
                 maximumFrameBytes = maximumFrameBytes,
                 maximumProtocolFrames = maximumProtocolFrames,
                 maximumStderrBytes = 64 * 1024,
+                filesystemLimits = filesystemLimits,
                 implementationId = "scripted-acp-v1",
                 sandboxBoundary = liveSandboxConfiguration(
                     listOf(
@@ -3414,7 +5035,9 @@ class AcpAgentHarnessTest {
                 terminalPolicy = terminalPolicy,
                 sessionPreferences = sessionPreferences,
             ),
-        ).bindFactoryProvenance(
+        )
+        workspaceSnapshotLimits?.let(acp::withWorkspaceSnapshotLimitsForTesting)
+        return acp.bindFactoryProvenance(
             AcpHarnessProvenance(
                 harness = "acp",
                 implementationId = "scripted-acp-v1",

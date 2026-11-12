@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "1bc6ecac4b9af1b164960e2a0686f62828687676",
+  "sourceParent": "3fca2dcd708a02585190dceb8249a3a15c8dca7c",
+  "sourceTree": "6ac36c7bbb04dfc02cebb5d914b6a157e1484ead",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces staging bytes across rewrites and baseline restoration"
+  ],
+  "command": "./gradlew test --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces staging bytes across rewrites and baseline restoration' --no-daemon -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.96,
+    "suiteSeconds": 2.97,
+    "timestamp": "2026-11-12T13:44:21.392Z",
+    "junitSha256": "fac84817959152658a04992c8ddee789bb6186adeaa4947f0c201a5b1484a761"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "The test derives U from the exact dispatched selected-context inventory after excluding the two writable implementation files. Their baseline sizes are 1,025 and 2,048 bytes; maximumStagingBytes is U+4,096, with patch, source-file, context, filesystem, and transport budgets above each attempted candidate. The agent writes 2,048-byte candidates to both files, then its 2,049-byte retry is refused and immediate readback proves both accepted candidates remain. It shrinks the first file to 1,024 and grows the second to 3,072, filling staging capacity again; a 3,073-byte retry is refused with both candidates preserved. Restoring the first file to its 1,025-byte baseline would release patch bytes but exceed staging by one byte, so that write is refused and read back unchanged. After the second file shrinks to 3,071, restoring the first succeeds at the exact staging ceiling. The completed receipt contains one MODIFIED record for the second file with its baseline and final hashes and size. All 17 ordered ACP filesystem callbacks, declared write grants, one validator handoff, verified process/sandbox cleanup, unchanged accepted files/head, rejected assessment linkage, and cleared pending state are asserted.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator that throws; does not qualify production validation under #236 or successful compilation and behavior validation",
+      "qualifies logical staging admission over captured selected-context bytes, not physical memory or disk consumption",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

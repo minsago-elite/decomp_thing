@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "f09bfd4c0f82e9c7bd0248bbd7e4223db67f877a",
+  "sourceParent": "4b7688d6fbbf80fdda0b6faa04bf45d727701146",
+  "sourceTree": "db3ad921db0f3be9e129c7b6de97b981bd58d0d6",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair enforces cumulative UTF-8 regression argument bytes across calls"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair enforces cumulative UTF-8 regression argument bytes across calls'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 4.778,
+    "suiteSeconds": 4.788,
+    "timestamp": "2026-11-12T10:45:12.110Z",
+    "junitSha256": "00572efd487342cfae1c32d15c927c62dac96dc8f389c1c4fa6b5569e0fa9734"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through successive active repair calls",
+    "coverage": "Two successive calls each dispatch through ACP and reach the injected validator while retaining two distinct UTF-8 arguments at a total maximumRegressionInputBytes value of seven (two identifier bytes plus five UTF-8 argument bytes). A third distinct input with one argument is refused at nine aggregate bytes before another ACP dispatch, validation call, or repair run. Assertions preserve the accepted source and graph head, confirm no pending attempt, and bind the retained corpus and digest to the accepted inputs.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy and does not qualify production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

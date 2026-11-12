@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "3978681e8bf15279f489701956f9dbbbfa2dc432",
+  "sourceParent": "8c841d38fc588afc97fbdda432065a9e05292442",
+  "sourceTree": "c5ce4b575cb8d5692975a6308b7c78bb5d2d9db2",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair charges discovery directories inside excluded repair trees"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair charges discovery directories inside excluded repair trees' --no-daemon",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.503,
+    "suiteSeconds": 3.518,
+    "timestamp": "2026-11-12T16:29:25.262Z",
+    "junitSha256": "66b748a1a176f87b249879a277bf1f1ecde41d41dc0995c123be664acf90adc5"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "discoveryDirectories": {
+      "sourceDirectories": [
+        "src",
+        "src/modules"
+      ],
+      "excludedDirectoriesTraversed": [
+        "src/modules/stale.repair",
+        "src/modules/stale.repair/nested"
+      ],
+      "exactLimit": 4,
+      "oneUnderLimit": 3,
+      "entryLimit": 64,
+      "depthLimit": 16,
+      "sourcePaths": [
+        "Makefile",
+        "src/modules/reconstructed.c"
+      ],
+      "excludedRegularFile": "src/modules/stale.repair/nested/ignored.c"
+    },
+    "coverage": "At maximumDiscoveryDirectories=4, active repair admits the complete discovery tree, dispatches scripted ACP to replace and read back the declared implementation, and reaches an injected validator that checks the complete source set and profile/index/revision bindings before throwing an identity-checked sentinel. The receipt records final-snapshot completion, two successful filesystem callbacks, and verified process/sandbox cleanup. The accepted source/head remain unchanged after rejection, and the excluded file remains unchanged. At limit 3, discovery enters stale.repair and refuses at the nested directory before dispatch or validation; no run, pending attempt, or repair-history record is retained, and reopening at 4 succeeds.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator; does not qualify production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

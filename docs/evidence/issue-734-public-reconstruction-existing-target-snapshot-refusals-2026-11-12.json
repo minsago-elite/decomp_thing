@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "d5ebc4823b4a42ecd5d08bf9e76e37337be375f4",
+  "sourceParent": "de4c39e4ddb8f94a0198061c9ebd519559f1a4bb",
+  "sourceTree": "20924ba7f6ef21b892fb0d2fff7c52e430bc23f5",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline -Dorg.gradle.jvmargs='-Xmx8g -XX:MaxMetaspaceSize=2g' -Pkotlin.compiler.execution.strategy=in-process test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 73.61,
+    "suiteSeconds": 73.639,
+    "timestamp": "2026-11-12T08:06:43.190Z",
+    "junitSha256": "c3b19e8ceb370fb5225fd9827f3bff872fb1278456628aac5526a2967b3d9155"
+  },
+  "scope": {
+    "profile": "Generated C Make public reconstruction profile with a 256 KiB mutation and snapshot ceiling",
+    "provider": "Scripted ACP process through ArchivalReconstructionService.reconstructWithWorkspace",
+    "coverage": "At every beginTask dispatch in the focused method, the exact non-recursive declared-role authority is checked for owner, profile digest, target path, declaration ID/roles, UTF8_TEXT, byte ceiling, and create/write-only operation set. Two existing-target cases seed an implementation before dispatch, have the scripted agent write it, then use a host-side after-prompt hook to delete the target or change its POSIX mode before final snapshot capture. The receipt requires WORKSPACE_VIOLATION at final-workspace-snapshot, verified cleanup, and no complete execution evidence; publication metadata and transaction-residue assertions verify refusal preserves the accepted publication.",
+    "qualificationLimits": [
+      "local scripted ACP and host-injected final-state evidence for Generated C Make only",
+      "delete and chmod are not advertised agent operations; the injections test final snapshot observation and authorization",
+      "does not qualify live providers or other profiles",
+      "does not qualify production repair validation under #236, publication recovery under #732, or durable provenance under #733",
+      "does not establish hosted exact-head CI or the complete #734/#63 matrix"
+    ]
+  }
+}

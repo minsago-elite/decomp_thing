@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "a12ea50898a8b464fff187c738bcd6b03e36aaa2",
+  "sourceParent": "bc9fa1bddeb6c4cc3ba8a5ec2aa970ef487a0973",
+  "sourceTree": "2f7d3221af4012af6861b2265b2d2e328b5af6a5",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression input count and refuses one input over before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression argument count and refuses one argument over before dispatch"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression argument count and refuses one argument over before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression input count and refuses one input over before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch'",
+  "result": {
+    "tests": 3,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 8.435,
+    "suiteSeconds": 8.445,
+    "timestamp": "2026-11-12T05:57:27.427Z",
+    "junitSha256": "4cbcb5f8c0c002ef88bea8b55e7b2c2afc851444495db0e11380adce017c573e"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "Exact admission pairs cover two retained inputs, three aggregate UTF-8 arguments, and aggregate input bytes. The exact argument control uses two inputs with three total arguments; its one-over control keeps the input count at two and submits four arguments while remaining below the 64-byte retained-input ceiling and 64 KiB request ceiling. Exact-limit controls dispatch scripted ACP and reach the injected receipt-bound compile-valid validator. Over-limit controls require the dimension-specific diagnostic before dispatch, validation, run creation, or candidate mutation, with graph/source/head unchanged.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy rather than production validation under #236",
+      "no live-provider or hosted exact-head CI qualification",
+      "over-limit cases start from separate empty-corpus projects and do not test cumulative overflow across calls",
+      "other resource limits and complete #734/#63 acceptance remain open"
+    ]
+  }
+}

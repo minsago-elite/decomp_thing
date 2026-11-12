@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "f52ed2067546f222edae86511c706c4775859a81",
+  "sourceParent": "b312e099b26b6eaa90cbf41acb4b4fd4c343b0f3",
+  "sourceTree": "ff4af1ce5320bf01752cfa10c41fbc6c2e3bc484",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair staging directory limit admits equality and refuses one fewer before dispatch"
+  ],
+  "command": "JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair staging directory limit admits equality and refuses one fewer before dispatch'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 1.388,
+    "suiteSeconds": 1.402,
+    "timestamp": "2026-11-12T11:46:31.386Z",
+    "junitSha256": "b8defa6e9b99221733f8b596707fa5be9d922403e0b7b515ee10e0df2e5f0b22"
+  },
+  "scope": {
+    "profile": "Declarative repair index profile with one source at a/b/c/program.c",
+    "provider": "captured repair harness through TraceGuidedRepairLoop.forTesting",
+    "coverage": "The exact case sets maximumStagingDirectories=4, matching the virtual root plus a, a/b, and a/b/c. It dispatches once and the harness confirms the exact staged path and bytes. The paired limit=3 case requires the exact 'repair staging requires 4 directories; limit=3' refusal before harness dispatch. Both preserve source bytes, graph head, and no-pending state; the graph records NO_CHANGES for equality and RESOURCE_EXHAUSTED for refusal.",
+    "qualificationLimits": [
+      "local captured-harness evidence, not a scripted ACP process",
+      "no candidate mutation or validator invocation is exercised in this directory-count control",
+      "does not establish production validation under #236 or live-provider behavior",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not qualify hosted exact-head CI or the complete #734/#63 acceptance matrix"
+    ]
+  }
+}

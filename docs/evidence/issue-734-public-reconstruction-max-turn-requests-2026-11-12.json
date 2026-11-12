@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "26673b1ce563159ccd1d37c901ccde92d69ccc91",
+  "sourceParent": "6ba77ac9dba27a968c5b9c68bc4e7e9b0ff7791c",
+  "sourceTree": "cc6b5a875d3dfb55ff318a3a98bc33994858a563",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 76.606,
+    "suiteSeconds": 76.621,
+    "timestamp": "2026-11-12T08:45:21.714Z",
+    "junitSha256": "e0d97cf72619e7b9332acea67ea70b4b2487dd6781cbeaea7762c7c523844356"
+  },
+  "scope": {
+    "profile": "Generated C Make public reconstruction through a scripted ACP peer",
+    "coverage": "After an authorized source write is acknowledged, the scripted peer returns max_turn_requests. The public reconstruction workflow records LIMIT_EXHAUSTED, refuses publication, retains the request-bound CREATED change with exact size and digest, and records final-snapshot completion with verified cleanup. The previously accepted publication metadata is unchanged and no publication residue remains. The suite also retains the neighboring max_tokens, refusal, and mutation/limit controls.",
+    "qualificationLimits": [
+      "local scripted ACP only; no live provider qualification",
+      "does not qualify production repair validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not establish hosted exact-head CI or complete #734/#63 acceptance"
+    ]
+  }
+}

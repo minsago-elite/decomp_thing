@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "f42e29e54ae0c15a7920823790904172180978f9",
+  "sourceParent": "a6694ac18f486b0aeb5c48ea2118a86bf46c67e2",
+  "sourceTree": "8b154e8487cc8fe1bb48ebd5ce86abc99e227970",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem read limit after an acknowledged candidate write"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem read limit after an acknowledged candidate write'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 3,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 5.744,
+    "suiteSeconds": 5.744,
+    "timestamp": "2026-11-11T12:39:14.984Z",
+    "junitSha256": "3ac962bb9a81843af5f31b38511f296a76ba6ba51665a459b2d3f63c99c3440f"
+  },
+  "scope": {
+    "profile": "Generated C repair index",
+    "provider": "scripted ACP process through AcpCapturedRepairFilesystem",
+    "scenario": "The new case writes an exact 4,097-byte candidate, then attempts to read it with AcpFilesystemLimits.maximumReadBytes=4,096. The write ceiling is 8 MiB and patch, source-file, staging, context, patch-count, frame, and protocol limits have headroom. The test verifies initial captured files fit within the read cap, isolating the callback read refusal after the acknowledged write.",
+    "candidate": "The receipt records the allowed write and resource-limit read refusal. The exact candidate reaches the injected STRICT_CONTAINED validator, which throws its expected sentinel. Receipt and rejected assessment bindings are checked; accepted source/head are unchanged; pending state is cleared; process and sandbox cleanup are verified.",
+    "qualificationLimits": [
+      "scripted ACP fixture and Generated C repair profile only",
+      "injected STRICT_CONTAINED validator rejects after candidate inspection; successful production validation is not established",
+      "no live-provider behavior",
+      "no production validator qualification under #236",
+      "no hosted exact-head CI qualification"
+    ]
+  }
+}

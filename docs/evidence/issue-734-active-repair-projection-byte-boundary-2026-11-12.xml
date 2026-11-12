@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T12:32:53.136Z" hostname="whatsername" time="5.429">
+  <properties/>
+  <testcase name="activeAcpRepairAdmitsExactProjectionBytesAndRefusesOneByteUnderAfterAcknowledgedWrite()" classname="decompengine.repair.TraceGuidedRepairTest" time="5.419"/>
+  <system-out><![CDATA[measured maximumProjectionBytes admission edge=13514
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "feb60d7adc0a5068820fc08dc6094ae6fddbcd3d",
+  "sourceParent": "46746fbd5553f5e5555ceda8172ec4e152c3bf43",
+  "sourceTree": "fd19da26db642b6bc45695fee3e9eb93d2c62d67",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact generated C indexed entity count and refuses one below before dispatch"
+  ],
+  "command": "./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact generated C indexed entity count and refuses one below before dispatch'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 1.51,
+    "suiteSeconds": 1.516,
+    "timestamp": "2026-11-12T14:56:27.736Z",
+    "junitSha256": "0a2f315e8ec3789cbcadaf80273979527cc403eb9dea0856f4076fdf8e86193a"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "Generated module-plan and program-model evidence contains one function, one global, and one type (three indexed entities). With maximumIndexedEntities=3, the active ACP repair admits a replacement, records completed final-snapshot and verified cleanup evidence, and reaches an injected validator that verifies candidate bytes and profile/index/source-revision bindings before throwing its expected sentinel. With maximumIndexedEntities=2, active admission returns the exact typed resource-limit diagnostic before ACP dispatch and candidate validation; original source and plan/model evidence remain unchanged, no run or pending attempt is retained, and a subsequent graph open succeeds with no run or pending attempt.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator; does not qualify production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

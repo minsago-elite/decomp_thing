@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T15:55:44.081Z" hostname="whatsername" time="2.385">
+  <properties/>
+  <testcase name="active repair admits exact generated C indexed module count including fallback modules()" classname="decompengine.repair.TraceGuidedRepairTest" time="2.367"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

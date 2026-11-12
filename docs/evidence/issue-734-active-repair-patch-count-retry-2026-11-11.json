@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "f83280073182d91e14e577b2fe875bd027520dd1",
+  "sourceParent": "383b26f25c594715783e88725e661d0e31b30825",
+  "sourceTree": "5cd8c2170d54496149f60449989802bdd663ab85",
+  "test": "decompengine.repair.TraceGuidedRepairTest.active ACP repair keeps the first patch when the second file exceeds patch count",
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair keeps the first patch when the second file exceeds patch count'",
+  "environment": {
+    "java": "openjdk version 21.0.12.1",
+    "node": "v26.12.1",
+    "npm": "11.20.0",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.407,
+    "suiteSeconds": 3.417,
+    "timestamp": "2026-11-11T10:16:55.735Z",
+    "junitSha256": "bde651544d6ad3b8d6ef1781384b54a739a8c63dcdbfaf410a8e51f9c5239b5b"
+  },
+  "scope": {
+    "patchFileBudget": 1,
+    "declaredWritableTargets": [
+      "src/modules/reconstructed.c",
+      "src/modules/secondary.c"
+    ],
+    "firstReplacementBytes": 73,
+    "secondRefusedReplacementBytes": 34,
+    "otherQuotaBudgetsHaveHeadroom": true,
+    "receipt": "one MODIFIED result with before/after hashes and size; allowed first write, resource-limit refusal on second file, then readbacks of first candidate and unchanged second file",
+    "validator": "injected STRICT_CONTAINED strategy verified the full candidate and then threw a sentinel; this demonstrates handoff and rejection handling, not successful validation",
+    "provider": "scripted ACP peer",
+    "stagingAuthority": "CapturedRepairStagingAuthority",
+    "productionRepairValidatorQualified": false,
+    "hostedExactHeadCiQualified": false
+  }
+}

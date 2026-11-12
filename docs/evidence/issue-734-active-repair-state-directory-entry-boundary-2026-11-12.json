@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "5e986ea128529b30aa3701dd43cd345da981a260",
+  "sourceParent": "9da453ae75f47c23f21ea34c9b9c97c73b97d7ff",
+  "sourceTree": "d47d842929e1d4fb003b08887092ef2e2f9d79c6",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair admits the exact candidate blob entry and refuses the next directory entry"
+  ],
+  "command": "./gradlew test --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair admits the exact candidate blob entry and refuses the next directory entry' --no-daemon -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.719,
+    "suiteSeconds": 3.731,
+    "timestamp": "2026-11-12T13:28:29.701Z",
+    "junitSha256": "025b44433497cea01c4a45da96d298911bac792317aae1a0c3493621053f1923"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "Two fresh projects have identical baseline source and blob-name sets S. The test derives B from the distinct existing blob names and verifies the candidate digest is absent. With maximumStateDirectoryEntries=B+1, the scripted peer acknowledges a 4,096-byte replacement and exact readback; the completed receipt records one MODIFIED path with the accepted preimage and candidate postimage hashes, two allowed filesystem callbacks, and verified process/sandbox cleanup. The candidate reaches the injected validator, which confirms its bytes and candidate-set revision digest before throwing its expected sentinel. With maximumStateDirectoryEntries=B, the same ACP write/readback completes, then active graph admission fails with the exact projected-entry diagnostic before the candidate blob is retained. That case has zero validator calls. Both projects preserve accepted source/Makefile/head, reject the attempt, retain a receipt-linked rejected assessment, record the expected terminal run status, clear pending state, and report recoveredAfterCrash=false. Final blob inventory is S plus the candidate at equality and exactly S on refusal.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator that throws, not production validation under #236",
+      "does not establish compilation, behavior validation, or successful publication",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

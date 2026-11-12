@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-11-12T05:57:27.427Z" hostname="whatsername" time="8.445">
+  <properties/>
+  <testcase name="active repair admits exact retained regression input count and refuses one input over before dispatch()" classname="decompengine.repair.TraceGuidedRepairTest" time="6.258"/>
+  <testcase name="active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.02"/>
+  <testcase name="active repair admits exact retained regression argument count and refuses one argument over before dispatch()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.157"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

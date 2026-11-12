@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "56c61ea70706d1b6442ae5e10766d080f58986a3",
+  "sourceParent": "21b6c0a58b01d161a35dda8fcf4b25c4f58016b8",
+  "sourceTree": "c668c2e899b1124d864942ac2ab873b15cf7b4f4",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact generated C include closure traversal and refuses one below before dispatch"
+  ],
+  "command": "./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact generated C include closure traversal and refuses one below before dispatch'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.564,
+    "suiteSeconds": 2.579,
+    "timestamp": "2026-11-12T15:09:55.921Z",
+    "junitSha256": "06e3adcac29850ed978bc5557c4caf87655f61b8f751391a9776b821a3c12ec6"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "The minimal project has exactly Makefile, include/decomp_types.h, and src/modules/reconstructed.c; its implementation includes the shared header, and no module-plan or program-model evidence exists. The resulting fallback index has one implementation module and an include closure visiting two paths. maximumDependencyEdges=2 admits the active ACP replacement and readback, then reaches an injected validator that verifies candidate source, profile/index, and source-revision bindings before throwing its expected sentinel. The receipt binds one MODIFIED change and records completed final-snapshot evidence, two allowed callbacks, and verified cleanup. maximumDependencyEdges=1 fails graph opening with the exact include-closure traversal diagnostic before ACP dispatch or validation. Both scenarios preserve the source tree and leave no pending attempt; the refusal retains no run or repair history, and a later graph open succeeds.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator; does not qualify production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-11T13:23:43.490Z" hostname="whatsername" time="0.693">
+  <properties/>
+  <testcase name="active repair request-byte budget refuses before dispatch and preserves the accepted head()" classname="decompengine.repair.TraceGuidedRepairTest" time="0.692"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

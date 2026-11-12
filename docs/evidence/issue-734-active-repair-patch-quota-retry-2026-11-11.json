@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "1481daf2743390277b5d60d415f40a1db89d6095",
+  "sourceParent": "4752c86771dc799622a9de45b136621ee4fe5606",
+  "sourceTree": "5fff3a24e4a871fce6acc249b6be068ea9200970",
+  "test": "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry",
+  "command": "PATH=/home/june/.t3/worktrees/decomp_thing/t3-cc0c2dbb/build/frontend-node-24.20.0-npm-11.19.0.2rSV99/node/bin:$PATH DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --no-daemon --offline test --console=plain -x frontendInstall --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry'",
+  "environment": {
+    "java": "openjdk version 21.0.12.1",
+    "node": "v24.20.0",
+    "npm": "11.19.0",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.724,
+    "suiteSeconds": 2.755,
+    "timestamp": "2026-11-11T09:48:16.431Z",
+    "junitSha256": "586df4a9087d223690c46b5e51dcdd04acff120576dd1d00615ad4b1a7dd7bd5"
+  },
+  "scope": {
+    "patchBudgetBytes": 4096,
+    "acceptedCandidateBytes": 4096,
+    "refusedRetryBytes": 4097,
+    "otherResourceBudgetsHaveHeadroom": true,
+    "validator": "injected STRICT_CONTAINED strategy verified exact candidate and then threw a sentinel; this demonstrates handoff and rejection handling, not successful validation",
+    "provider": "scripted ACP peer",
+    "stagingAuthority": "CapturedRepairStagingAuthority",
+    "productionRepairValidatorQualified": false,
+    "hostedExactHeadCiQualified": false
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "38c465772222853dabb2b98b96ab2b791dc80b9a",
+  "sourceParent": "3a9632f3086ae74114899914833b4875f291932c",
+  "sourceTree": "33738db34132af551063a22ea21c741e05c4b1be",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact required context module file and byte limits",
+    "decompengine.repair.TraceGuidedRepairTest.active repair required context module file and byte budgets refuse before dispatch"
+  ],
+  "command": "JAVA_OPTS=-Xmx8g ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact required context module file and byte limits' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair required context module file and byte budgets refuse before dispatch'",
+  "result": {
+    "tests": 2,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 1.818,
+    "suiteSeconds": 1.818,
+    "timestamp": "2026-11-12T11:10:46.420Z",
+    "junitSha256": "8534e22b0c86406cdd637fb9cc9d91bf27486091a83de4ee8843988f5563c6fd"
+  },
+  "scope": {
+    "profile": "declarative repair profile with two seeded modules and two owned source files",
+    "provider": "strict captured test harness invoked by the active repair loop",
+    "coverage": "The equality case sets maximumContextModules=2, maximumContextFiles=2, and maximumContextBytes=77 for two required modules/files totaling exactly 77 UTF-8 source bytes. It verifies the active loop reaches the harness once with both exact file bodies, then records NO_CHANGES with accepted source/head preserved and no pending attempt. The paired refusal case retains the existing one-under/over controls for the individual dimensions.",
+    "qualificationLimits": [
+      "local strict captured-harness evidence; this equality case does not launch an ACP process",
+      "does not qualify production validation under #236",
+      "does not qualify live-provider behavior",
+      "does not establish hosted exact-head CI",
+      "does not qualify publication crash recovery under #732 or durable provenance under #733",
+      "does not complete the remaining #734/#63 acceptance matrix"
+    ]
+  }
+}

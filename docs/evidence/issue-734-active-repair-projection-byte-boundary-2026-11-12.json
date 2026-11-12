@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "825f7e2bc36c33a890309fef017dcbc5a767152f",
+  "sourceParent": "8675937bf33d03ceb4d4bb5fb20591f6bf368fbe",
+  "sourceTree": "0ac7cb7f1426e758b424ddc065a0931df40ab22e",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.activeAcpRepairAdmitsExactProjectionBytesAndRefusesOneByteUnderAfterAcknowledgedWrite"
+  ],
+  "command": "JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.activeAcpRepairAdmitsExactProjectionBytesAndRefusesOneByteUnderAfterAcknowledgedWrite'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 5.419,
+    "suiteSeconds": 5.429,
+    "timestamp": "2026-11-12T12:32:53.136Z",
+    "junitSha256": "6b629c6f94200350fe191d6fdb0ca0d6dd6e7ce48d7d393b89b6e4ad924ae967"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "The test calibrates the exact history-projection admission edge (13,514 bytes) by binary-searching the production renderRepairHistoryProjection over the recovered state of a 4,096-byte ACP-written candidate. At that exact maximumProjectionBytes value, the active loop admits the completed write and reaches the injected validator. One byte below, the same ACP write and readback complete, then candidate admission is refused with the exact history-projection limit diagnostic before validation. Receipt change hashes/size, filesystem callback outcomes, process and sandbox cleanup, accepted source/head, rejected assessment, pending state, and candidate blob cleanup are checked. The test-only Error used by calibration/exact cases retains the candidate for measurement; reopening is part of measurement and does not claim crash-recovery qualification.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy rather than production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

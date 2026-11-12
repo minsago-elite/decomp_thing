@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "af75ec4f50471bf20da3244996c837d1a1375e9c",
+  "sourceParent": "cbe7493f8fc2971cb34e5f800a3ec5eb34df3ff2",
+  "sourceTree": "a3cbe80bae071ef56865b0fad1e2f5eda51f5286",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair admits exact stored blob bytes and removes one byte over candidate blob"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair admits exact stored blob bytes and removes one byte over candidate blob'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 5.817,
+    "suiteSeconds": 5.829,
+    "timestamp": "2026-11-12T09:47:50.624Z",
+    "junitSha256": "2a0989b5fabb35fa9164164b8f8077b7c23ffad9cf4dd1fd47d7bac4ae517535"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "Paired fresh projects start with 485 uniquely referenced source-blob bytes. The 4,096-byte candidate is accepted at the exact 4,581-byte stored-blob ceiling and reaches the injected validator. The 4,097-byte candidate is acknowledged by the ACP write and read callbacks, then graph admission refuses at 4,582 bytes against the 4,581-byte ceiling before validation. Both cases bind the receipt to the observed modified path, before/after hashes and byte size; preserve accepted source/head; clear pending state; and verify process and sandbox cleanup. Reopening the graph confirms exact stored-byte accounting, and the over-limit case confirms the unreferenced candidate blob is removed while all baseline blobs remain.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy rather than production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

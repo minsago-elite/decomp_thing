@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "c6921dbd30dd7f1b8b7c2b25d212677b76a56cf0",
+  "sourceParent": "880a2a14f7e88e1e1b6ef9dddd306a9592e12dc0",
+  "sourceTree": "2aef32840485b6ffc923dfd526a24e59568a287e",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair admits an exact initial captured source read and refuses one byte over before launch"
+  ],
+  "command": "./gradlew test --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair admits an exact initial captured source read and refuses one byte over before launch' --no-daemon -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.106,
+    "suiteSeconds": 3.127,
+    "timestamp": "2026-11-12T13:13:21.394Z",
+    "junitSha256": "14e6a17c9e10528acd67dd82530d6c14e9d027858ef28f46783e317f6e276446"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "Two fresh projects seed the declared implementation with exactly 4,096 UTF-8 bytes, including multibyte padding. At maximumReadBytes=4,096, the captured request passes preflight, the ACP process completes, and the candidate reaches the injected validator; the receipt records a completed final snapshot and verified process/sandbox cleanup. At maximumReadBytes=4,095, the same request is dispatched to the captured harness but initial-file preflight refuses before ACP process creation. The test requires RESOURCE_EXHAUSTED with the target-specific diagnostic, REQUEST_BOUND lifecycle, NOT_REQUIRED cleanup, absent process/sandbox evidence, and no filesystem audit records. Both outcomes preserve the accepted source/head, reject the provisional node, increment one run, and clear pending graph state.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy rather than production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open",
+      "the scripted peer does not invoke readTextFile, so this tests initial-input admission rather than callback read behavior"
+    ]
+  }
+}

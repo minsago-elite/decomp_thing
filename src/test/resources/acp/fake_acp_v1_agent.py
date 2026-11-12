@@ -60,7 +60,63 @@ GENERIC_CONTRACT_MODES = {
     "session-preferences-pipelined-update",
     "session-preferences-pipelined-work",
 }
-RECONSTRUCTION_MODES = {"reconstruction-role-policy"}
+RECONSTRUCTION_MODES = {
+    "reconstruction-role-policy",
+    "reconstruction-mutation-grant",
+    "reconstruction-modify-existing-source",
+    "reconstruction-exact-source-byte-boundary",
+    "reconstruction-invalid-unicode-after-write",
+    "reconstruction-refusal-after-write",
+    "reconstruction-frame-count-limit-after-write",
+    "reconstruction-tool-limit-after-write",
+    "reconstruction-limit-after-write",
+    "reconstruction-max-turn-requests-after-write",
+    "reconstruction-missing-usage-after-write",
+    "reconstruction-negative-usage-after-write",
+    "reconstruction-frame-limit-after-write",
+    "reconstruction-stderr-limit-after-write",
+    "reconstruction-stdout-limit-after-write",
+    "reconstruction-mixed-output-limit-after-write",
+    "reconstruction-request-timeout-after-write",
+    "reconstruction-terminal-mutation-refusal-disabled",
+    "reconstruction-cancel-after-write",
+}
+ACTIVE_REPAIR_MODES = {
+    "repair-active-oversized-only",
+    "repair-active-output-limit",
+    "repair-active-declared-role-token-limit-after-write",
+    "repair-active-declared-role-max-turn-requests-after-write",
+    "repair-active-declared-role-refusal-after-write",
+    "repair-active-declared-role-missing-usage-after-write",
+    "repair-active-declared-role-negative-usage-after-write",
+    "repair-active-declared-role-tool-limit-after-write",
+    "repair-active-declared-role-tool-limit-delayed-response-after-write",
+    "repair-active-declared-role-tool-limit-no-final-response-after-write",
+    "repair-active-declared-role-cancel-after-write",
+    "repair-active-declared-role-frame-limit-after-write",
+    "repair-active-declared-role-frame-size-after-write",
+    "repair-active-declared-role-no-change",
+    "repair-active-declared-role-candidate",
+    "repair-active-declared-role-quota-retry",
+    "repair-active-declared-role-stored-blob-exact",
+    "repair-active-declared-role-stored-blob-over",
+    "repair-active-declared-role-stored-blob-shared",
+    "repair-active-declared-role-stored-blob-distinct",
+    "repair-active-declared-role-source-bytes-exact",
+    "repair-active-declared-role-source-bytes-over",
+    "repair-active-declared-role-indexed-entities",
+    "repair-active-declared-role-indexed-modules",
+    "repair-active-declared-role-include-closure",
+    "repair-active-declared-role-invalid-unicode-after-write",
+    "repair-active-declared-role-read-limit-after-write",
+    "repair-active-declared-role-patch-count-retry",
+    "repair-active-declared-role-patch-byte-reuse",
+    "repair-active-declared-role-staging-byte-reuse",
+    "repair-active-declared-role-timeout-after-write",
+}
+RECONSTRUCTION_MAXIMUM_SOURCE_BYTES = 256 * 1024
+RECONSTRUCTION_OVERSIZED_SOURCE_BYTES = RECONSTRUCTION_MAXIMUM_SOURCE_BYTES + 1
+REPAIR_QUOTA_BOUNDARY_BYTES = 4096
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
 int main(void) {
     char badge[8];
@@ -228,6 +284,54 @@ expected_fs = {
     "fs-cap-write-only": {"readTextFile": False, "writeTextFile": True},
     "fs-cap-none": None,
     "reconstruction-role-policy": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-mutation-grant": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-modify-existing-source": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-exact-source-byte-boundary": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-invalid-unicode-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-refusal-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-frame-count-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-tool-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-max-turn-requests-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-missing-usage-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-negative-usage-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-frame-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-stderr-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-stdout-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-mixed-output-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-request-timeout-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-cancel-after-write": {"readTextFile": False, "writeTextFile": True},
+    "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-token-limit-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-max-turn-requests-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-refusal-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-missing-usage-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-negative-usage-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-tool-limit-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-tool-limit-delayed-response-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-tool-limit-no-final-response-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-cancel-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-frame-limit-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-frame-size-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-no-change": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-candidate": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-quota-retry": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-stored-blob-exact": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-stored-blob-over": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-stored-blob-shared": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-stored-blob-distinct": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-source-bytes-exact": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-source-bytes-over": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-indexed-entities": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-indexed-modules": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-include-closure": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-invalid-unicode-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-read-limit-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-patch-count-retry": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-patch-byte-reuse": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-staging-byte-reuse": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-timeout-after-write": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -254,6 +358,11 @@ if MODE in (
     if actual_terminal is not True:
         respond(initialize, error={"code": -32602, "message": "terminal capability was not enabled"})
         raise SystemExit(104)
+if MODE == "reconstruction-terminal-mutation-refusal-disabled":
+    actual_terminal = initialize.get("params", {}).get("clientCapabilities", {}).get("terminal")
+    if bool(actual_terminal):
+        respond(initialize, error={"code": -32602, "message": "reconstruction must not advertise terminal capability"})
+        raise SystemExit(105)
 
 if MODE == "malformed-initialize":
     sys.stdout.write("{not-json\n")
@@ -540,7 +649,9 @@ prompt = read_message()
 if prompt is None or prompt.get("method") != "session/prompt":
     raise SystemExit(94)
 prompt_text = prompt.get("params", {}).get("prompt", [{}])[0].get("text", "")
-if MODE in RECONSTRUCTION_MODES:
+if MODE in ACTIVE_REPAIR_MODES:
+    prompt_valid = "Compile command:" in prompt_text and "Exit code:" in prompt_text
+elif MODE in RECONSTRUCTION_MODES:
     prompt_valid = SENTINEL in prompt_text and "decomp_engine_main" in prompt_text
 elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     prompt_valid = (
@@ -664,6 +775,566 @@ if MODE == "repair-quota-retry":
     if denied_response.get("error", {}).get("code") != -32602:
         raise SystemExit(141)
     write_workspace_file(source, "fit\n", 141)
+if MODE == "repair-active-oversized-only":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    send({
+        "jsonrpc": "2.0",
+        "id": 142,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": source,
+            "content": "oversized replacement\n",
+        },
+    })
+    denied_response = read_message()
+    if denied_response is None or denied_response.get("id") != 142:
+        raise SystemExit(142)
+    if denied_response.get("error", {}).get("code") != -32602:
+        raise SystemExit(143)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-output-limit":
+    # Cross the request's aggregate output allowance using valid, individually bounded ACP
+    # notifications. If the host does not enforce the limit, the fixture fails closed below.
+    try:
+        for index in range(20):
+            update({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "o" * 30000},
+                "messageId": f"repair-output-limit-{index}",
+            })
+    except (BrokenPipeError, OSError):
+        pass
+    time.sleep(30)
+    raise SystemExit(144)
+if MODE == "repair-active-declared-role-tool-limit-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* tool-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        148,
+    )
+    # Let the host enter its prompt wait loop, then deliver the over-limit updates and final
+    # response in one pipe write. This keeps prompt completion adjacent to the recorded limit.
+    time.sleep(0.05)
+    completion_burst = [
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "fixture-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": f"tool-after-write-{ordinal}",
+                    "title": f"Tool call {ordinal} after target write",
+                    "kind": "other",
+                    "status": "completed",
+                },
+            },
+        }
+        for ordinal in range(2)
+    ]
+    completion_burst.append({
+        "jsonrpc": "2.0",
+        "id": prompt["id"],
+        "result": {
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 11,
+                "outputTokens": 7,
+                "totalTokens": 18,
+                "cachedReadTokens": 3,
+            },
+        },
+    })
+    sys.stdout.write("".join(json.dumps(message, separators=(",", ":")) + "\n"
+                            for message in completion_burst))
+    sys.stdout.flush()
+    raise SystemExit(0)
+if MODE in (
+    "repair-active-declared-role-tool-limit-delayed-response-after-write",
+    "repair-active-declared-role-tool-limit-no-final-response-after-write",
+):
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* delayed tool-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        148,
+    )
+    # Exceed the host tool-call ceiling. The delayed-response mode waits for the host's
+    # cancellation notification before sending final usage, so only a live response drain
+    # can retain these counters.
+    for ordinal in range(2):
+        update({
+            "sessionUpdate": "tool_call",
+            "toolCallId": f"delayed-tool-after-write-{ordinal}",
+            "title": f"Delayed tool call {ordinal} after target write",
+            "kind": "other",
+            "status": "completed",
+        })
+    if MODE == "repair-active-declared-role-tool-limit-delayed-response-after-write":
+        while True:
+            message = read_message()
+            if message is None:
+                raise SystemExit(0)
+            if message.get("method") == "session/cancel":
+                respond(prompt, {
+                    "stopReason": "end_turn",
+                    "usage": {
+                        "inputTokens": 11,
+                        "outputTokens": 7,
+                        "totalTokens": 18,
+                        "cachedReadTokens": 3,
+                    },
+                })
+                raise SystemExit(0)
+    while True:
+        message = read_message()
+        if message is None:
+            raise SystemExit(0)
+        if message.get("method") == "session/cancel":
+            raise SystemExit(0)
+if MODE == "repair-active-declared-role-cancel-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* cancellation candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        151,
+    )
+    update({
+        "sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": "repair-cancel-after-ack-ready"},
+        "messageId": "repair-cancel-after-ack-ready",
+    })
+    while True:
+        message = read_message()
+        if message is None:
+            raise SystemExit(0)
+        if message.get("method") == "session/cancel":
+            respond(prompt, {"stopReason": "cancelled"})
+            raise SystemExit(0)
+if MODE in (
+    "repair-active-declared-role-max-turn-requests-after-write",
+    "repair-active-declared-role-refusal-after-write",
+    "repair-active-declared-role-token-limit-after-write",
+    "repair-active-declared-role-missing-usage-after-write",
+    "repair-active-declared-role-negative-usage-after-write",
+):
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* active refusal candidate */\nint decomp_engine_main(void) { return 1; }\n"
+        if MODE == "repair-active-declared-role-refusal-after-write"
+        else "/* active max-turn candidate */\nint decomp_engine_main(void) { return 1; }\n"
+        if MODE == "repair-active-declared-role-max-turn-requests-after-write"
+        else "/* token-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        149,
+    )
+    time.sleep(0.05)
+    if MODE == "repair-active-declared-role-refusal-after-write":
+        respond(prompt, {"stopReason": "refusal"})
+        raise SystemExit(0)
+    prompt_result = {"stopReason": "end_turn"}
+    if MODE == "repair-active-declared-role-max-turn-requests-after-write":
+        prompt_result["stopReason"] = "max_turn_requests"
+    if MODE != "repair-active-declared-role-missing-usage-after-write":
+        prompt_result["usage"] = {
+            "inputTokens": -1 if MODE == "repair-active-declared-role-negative-usage-after-write" else 11,
+            "outputTokens": 7,
+            "totalTokens": 18,
+            "cachedReadTokens": 3,
+        }
+    respond(prompt, prompt_result)
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-frame-limit-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* frame-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        149,
+    )
+    # The target write is acknowledged before these individually bounded frames exceed the
+    # configured protocol-frame count. If the host does not stop the stream, fail closed.
+    for ordinal in range(64):
+        send({
+            "jsonrpc": "2.0",
+            "method": "contract/unknown_notification",
+            "params": {"ordinal": ordinal},
+        })
+    time.sleep(30)
+    raise SystemExit(150)
+if MODE == "repair-active-declared-role-frame-size-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* frame-size candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        151,
+    )
+    # One otherwise valid notification exceeds the configured frame-byte ceiling after the
+    # broker has acknowledged the candidate write. The frame stays below aggregate output.
+    send({
+        "jsonrpc": "2.0",
+        "method": "contract/oversized_notification",
+        "params": {"padding": "x" * 20000},
+    })
+    time.sleep(30)
+    raise SystemExit(152)
+if MODE == "repair-active-declared-role-no-change":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    sibling = join_path(cwd, "src/modules/reconstructed_extra.c")
+    makefile = join_path(cwd, "Makefile")
+    module_header = join_path(cwd, "include/modules/reconstructed.h")
+    main_source = join_path(cwd, "src/main.c")
+    repair_graph = join_path(cwd, "reports/repair-revisions/graph.json")
+    for request_id, path, content in (
+        (147, sibling, "int extra(void) { return 0; }\n"),
+        (148, makefile, "all: unauthorized\n"),
+        (149, module_header, "int decomp_engine_main(void);\n"),
+        (152, main_source, "int main(void) { return 1; }\n"),
+        (153, repair_graph, "{}\n"),
+    ):
+        denied = try_write_workspace_file(path, content, request_id)
+        if denied.get("error", {}).get("code") != -32602:
+            raise SystemExit(154)
+    oversized = try_write_workspace_file(
+        source,
+        "/*" + ("o" * 4092) + "*/\n",
+        157,
+    )
+    if oversized.get("error", {}).get("code") != -32602:
+        raise SystemExit(158)
+    write_workspace_file(source, "/*" + ("e" * 4091) + "*/\n", 159)
+    write_workspace_file(
+        source,
+        "/* café */\nint decomp_engine_main(void) { return 1; }\n",
+        155,
+    )
+    write_workspace_file(source, "int decomp_engine_main(void) { return 0; }\n", 156)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-candidate":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* validated candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        152,
+    )
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-indexed-entities":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    candidate = "/* indexed entity boundary candidate */\nint reconstructed_main(void) { return 1; }\n"
+    write_workspace_file(source, candidate, 153)
+    readback = read_workspace_file(source, 154)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(155)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-indexed-modules":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    candidate = "int reconstructed_value(void) { return 42; }\n"
+    write_workspace_file(source, candidate, 153)
+    readback = read_workspace_file(source, 154)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(155)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-include-closure":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    candidate = '#include "decomp_types.h"\nint reconstructed_value(void) { return BOUNDARY_VALUE + 1; }\n'
+    write_workspace_file(source, candidate, 153)
+    readback = read_workspace_file(source, 154)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(155)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-quota-retry":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    prefix = "/* exact repair quota-byte boundary: "
+    suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+    padding_bytes = REPAIR_QUOTA_BOUNDARY_BYTES - len(prefix.encode()) - len(suffix.encode())
+    padding = "é" * (padding_bytes // 2) + ("x" if padding_bytes % 2 else "")
+    candidate = prefix + padding + suffix
+    if len(candidate.encode()) != REPAIR_QUOTA_BOUNDARY_BYTES:
+        raise SystemExit(155)
+    if len(candidate) >= REPAIR_QUOTA_BOUNDARY_BYTES or "é" not in candidate:
+        raise SystemExit(162)
+    write_workspace_file(source, candidate, 154)
+
+    oversized_candidate = candidate + " "
+    if len(oversized_candidate.encode()) != REPAIR_QUOTA_BOUNDARY_BYTES + 1:
+        raise SystemExit(163)
+    if len(oversized_candidate) >= REPAIR_QUOTA_BOUNDARY_BYTES:
+        raise SystemExit(164)
+    oversized = try_write_workspace_file(source, oversized_candidate, 155)
+    if oversized.get("error", {}).get("code") != -32602:
+        raise SystemExit(156)
+
+    readback = read_workspace_file(source, 156)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(157)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE in {
+    "repair-active-declared-role-stored-blob-exact",
+    "repair-active-declared-role-stored-blob-over",
+}:
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    expected_bytes = REPAIR_QUOTA_BOUNDARY_BYTES + (
+        1 if MODE == "repair-active-declared-role-stored-blob-over" else 0
+    )
+    prefix = "/* active repair stored-blob byte boundary: "
+    suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+    padding_bytes = expected_bytes - len(prefix.encode()) - len(suffix.encode())
+    candidate = prefix + "s" * padding_bytes + suffix
+    if len(candidate.encode()) != expected_bytes:
+        raise SystemExit(168)
+    if candidate == "int decomp_engine_main(void) { return 0; }\n":
+        raise SystemExit(169)
+    write_workspace_file(source, candidate, 168)
+    readback = read_workspace_file(source, 169)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(170)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE in {
+    "repair-active-declared-role-stored-blob-shared",
+    "repair-active-declared-role-stored-blob-distinct",
+}:
+    first = join_path(cwd, "src/modules/reconstructed.c")
+    second = join_path(cwd, "src/modules/secondary.c")
+    prefix = "/* shared content-addressed candidate: "
+    suffix = " */\nstatic int shared_candidate(void) { return 1; }\n"
+    candidate_bytes = 4096
+    padding_bytes = candidate_bytes - len(prefix.encode()) - len(suffix.encode())
+    shared_candidate = prefix + "s" * padding_bytes + suffix
+    distinct_candidate = shared_candidate[:len(prefix)] + "t" + shared_candidate[len(prefix) + 1:]
+    if len(shared_candidate.encode()) != candidate_bytes:
+        raise SystemExit(208)
+    if len(distinct_candidate.encode()) != candidate_bytes:
+        raise SystemExit(209)
+    if sum(left != right for left, right in zip(shared_candidate, distinct_candidate)) != 1:
+        raise SystemExit(210)
+    second_candidate = shared_candidate if MODE == "repair-active-declared-role-stored-blob-shared" \
+        else distinct_candidate
+    write_workspace_file(first, shared_candidate, 214)
+    write_workspace_file(second, second_candidate, 215)
+    first_readback = read_workspace_file(first, 216)
+    if "error" in first_readback or first_readback.get("result", {}).get("content") != shared_candidate:
+        raise SystemExit(211)
+    second_readback = read_workspace_file(second, 217)
+    if "error" in second_readback or second_readback.get("result", {}).get("content") != second_candidate:
+        raise SystemExit(212)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE in {
+    "repair-active-declared-role-source-bytes-exact",
+    "repair-active-declared-role-source-bytes-over",
+}:
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    expected_bytes = 128 + (1 if MODE == "repair-active-declared-role-source-bytes-over" else 0)
+    prefix = "/* active aggregate source-byte boundary: "
+    suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+    padding_bytes = expected_bytes - len(prefix.encode()) - len(suffix.encode())
+    candidate = prefix + "s" * padding_bytes + suffix
+    if len(candidate.encode()) != expected_bytes:
+        raise SystemExit(218)
+    write_workspace_file(source, candidate, 218)
+    readback = read_workspace_file(source, 219)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(219)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-invalid-unicode-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    prefix = "/* exact repair quota-byte boundary: "
+    suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+    padding_bytes = REPAIR_QUOTA_BOUNDARY_BYTES - len(prefix.encode()) - len(suffix.encode())
+    padding = "é" * (padding_bytes // 2) + ("x" if padding_bytes % 2 else "")
+    candidate = prefix + padding + suffix
+    if len(candidate.encode()) != REPAIR_QUOTA_BOUNDARY_BYTES:
+        raise SystemExit(165)
+    write_workspace_file(source, candidate, 164)
+    malformed = try_write_workspace_file(source, "/*\ud800*/\n", 165)
+    if malformed.get("error", {}).get("code") != -32602:
+        raise SystemExit(166)
+    readback = read_workspace_file(source, 166)
+    if "error" in readback or readback.get("result", {}).get("content") != candidate:
+        raise SystemExit(167)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-read-limit-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    prefix = "/* exact repair quota-byte boundary: "
+    suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
+    candidate_size = REPAIR_QUOTA_BOUNDARY_BYTES + 1
+    candidate = prefix + ("q" * (candidate_size - len(prefix.encode()) - len(suffix.encode()))) + suffix
+    if len(candidate.encode()) != candidate_size:
+        raise SystemExit(158)
+    write_workspace_file(source, candidate, 159)
+
+    refused = read_workspace_file(source, 160)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(161)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-patch-count-retry":
+    first = join_path(cwd, "src/modules/reconstructed.c")
+    second = join_path(cwd, "src/modules/secondary.c")
+    first_candidate = "/* retained one-file patch */\nint decomp_engine_main(void) { return 1; }\n"
+    second_candidate = "int secondary(void) { return 1; }\n"
+    first_original = "int decomp_engine_main(void) { return 0; }\n"
+    second_original = "int secondary(void) { return 0; }\n"
+    write_workspace_file(first, first_candidate, 170)
+
+    refused = try_write_workspace_file(second, second_candidate, 171)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(172)
+
+    first_readback = read_workspace_file(first, 173)
+    if "error" in first_readback or first_readback.get("result", {}).get("content") != first_candidate:
+        raise SystemExit(173)
+    second_readback = read_workspace_file(second, 174)
+    if "error" in second_readback or second_readback.get("result", {}).get("content") != \
+            second_original:
+        raise SystemExit(174)
+
+    # Returning the first file to its initial bytes removes it from the distinct
+    # patch set and must release the single patch slot for the second file.
+    write_workspace_file(first, first_original, 175)
+    write_workspace_file(second, second_candidate, 176)
+    restored_first = read_workspace_file(first, 177)
+    if "error" in restored_first or restored_first.get("result", {}).get("content") != first_original:
+        raise SystemExit(177)
+    accepted_second = read_workspace_file(second, 178)
+    if "error" in accepted_second or accepted_second.get("result", {}).get("content") != second_candidate:
+        raise SystemExit(178)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-patch-byte-reuse":
+    first = join_path(cwd, "src/modules/reconstructed.c")
+    second = join_path(cwd, "src/modules/secondary.c")
+
+    def padded_candidate(prefix, suffix, size):
+        padding_bytes = size - len((prefix + suffix).encode())
+        if padding_bytes < 0:
+            raise SystemExit(179)
+        candidate = prefix + ("x" * padding_bytes) + suffix
+        if len(candidate.encode()) != size:
+            raise SystemExit(180)
+        return candidate
+
+    first_original = "int decomp_engine_main(void) { return 0; }\n"
+    second_original = "int secondary(void) { return 0; }\n"
+    first_large = padded_candidate("/* first-large ", " */\nint decomp_engine_main(void) { return 1; }\n", 2048)
+    first_small = padded_candidate("/* first-small ", " */\nint decomp_engine_main(void) { return 1; }\n", 1024)
+    second_small = padded_candidate("/* second-small ", " */\nint secondary(void) { return 1; }\n", 2048)
+    second_over = padded_candidate("/* second-over ", " */\nint secondary(void) { return 1; }\n", 2049)
+    second_large = padded_candidate("/* second-large ", " */\nint secondary(void) { return 1; }\n", 3072)
+    second_large_over = padded_candidate("/* second-large-over ", " */\nint secondary(void) { return 1; }\n", 3073)
+    second_exact = padded_candidate("/* second-exact ", " */\nint secondary(void) { return 1; }\n", 4096)
+
+    write_workspace_file(first, first_large, 181)
+    write_workspace_file(second, second_small, 182)
+    refused = try_write_workspace_file(second, second_over, 183)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(181)
+    if read_workspace_file(first, 184).get("result", {}).get("content") != first_large:
+        raise SystemExit(182)
+    if read_workspace_file(second, 185).get("result", {}).get("content") != second_small:
+        raise SystemExit(183)
+
+    write_workspace_file(first, first_small, 186)
+    write_workspace_file(second, second_large, 187)
+    refused = try_write_workspace_file(second, second_large_over, 188)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(184)
+    if read_workspace_file(second, 189).get("result", {}).get("content") != second_large:
+        raise SystemExit(185)
+
+    write_workspace_file(first, first_original, 190)
+    write_workspace_file(second, second_exact, 191)
+    if read_workspace_file(first, 192).get("result", {}).get("content") != first_original:
+        raise SystemExit(186)
+    if read_workspace_file(second, 193).get("result", {}).get("content") != second_exact:
+        raise SystemExit(187)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-staging-byte-reuse":
+    first = join_path(cwd, "src/modules/reconstructed.c")
+    second = join_path(cwd, "src/modules/secondary.c")
+
+    def padded_candidate(prefix, suffix, size):
+        padding_bytes = size - len((prefix + suffix).encode())
+        if padding_bytes < 0:
+            raise SystemExit(194)
+        candidate = prefix + ("x" * padding_bytes) + suffix
+        if len(candidate.encode()) != size:
+            raise SystemExit(195)
+        return candidate
+
+    first_original = "/* first-original " + ("o" * (1025 - len(("/* first-original " + " */\nint decomp_engine_main(void) { return 0; }\n").encode()))) + " */\nint decomp_engine_main(void) { return 0; }\n"
+    second_original = padded_candidate("/* second-original ", " */\nint secondary(void) { return 0; }\n", 2048)
+    first_large = padded_candidate("/* first-large ", " */\nint decomp_engine_main(void) { return 1; }\n", 2048)
+    first_small = padded_candidate("/* first-small ", " */\nint decomp_engine_main(void) { return 1; }\n", 1024)
+    second_small = padded_candidate("/* second-small ", " */\nint secondary(void) { return 1; }\n", 2048)
+    second_over = padded_candidate("/* second-over ", " */\nint secondary(void) { return 1; }\n", 2049)
+    second_large = padded_candidate("/* second-large ", " */\nint secondary(void) { return 1; }\n", 3072)
+    second_large_over = padded_candidate("/* second-large-over ", " */\nint secondary(void) { return 1; }\n", 3073)
+    second_shrunk = padded_candidate("/* second-shrunk ", " */\nint secondary(void) { return 1; }\n", 3071)
+    if len(first_original.encode()) != 1025:
+        raise SystemExit(196)
+
+    write_workspace_file(first, first_large, 197)
+    write_workspace_file(second, second_small, 198)
+    refused = try_write_workspace_file(second, second_over, 199)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(197)
+    if read_workspace_file(first, 200).get("result", {}).get("content") != first_large:
+        raise SystemExit(198)
+    if read_workspace_file(second, 201).get("result", {}).get("content") != second_small:
+        raise SystemExit(199)
+
+    write_workspace_file(first, first_small, 202)
+    write_workspace_file(second, second_large, 203)
+    refused = try_write_workspace_file(second, second_large_over, 204)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(200)
+    if read_workspace_file(first, 205).get("result", {}).get("content") != first_small:
+        raise SystemExit(201)
+    if read_workspace_file(second, 206).get("result", {}).get("content") != second_large:
+        raise SystemExit(202)
+
+    # Baseline restoration would release patch bytes but add one staging byte.
+    refused = try_write_workspace_file(first, first_original, 207)
+    if refused.get("error", {}).get("code") != -32602:
+        raise SystemExit(203)
+    if read_workspace_file(first, 208).get("result", {}).get("content") != first_small:
+        raise SystemExit(204)
+    if read_workspace_file(second, 209).get("result", {}).get("content") != second_large:
+        raise SystemExit(205)
+
+    # Free one staging byte by shrinking B, then restore A exactly at the ceiling.
+    write_workspace_file(second, second_shrunk, 210)
+    write_workspace_file(first, first_original, 211)
+    if read_workspace_file(first, 212).get("result", {}).get("content") != first_original:
+        raise SystemExit(206)
+    if read_workspace_file(second, 213).get("result", {}).get("content") != second_shrunk:
+        raise SystemExit(207)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "repair-active-declared-role-timeout-after-write":
+    source = join_path(cwd, "src/modules/reconstructed.c")
+    write_workspace_file(
+        source,
+        "/* timeout candidate */\nint decomp_engine_main(void) { return 1; }\n",
+        153,
+    )
+    # Wait until the host has acknowledged the real filesystem callback, then leave the prompt
+    # unanswered so the configured wall-clock or idle deadline owns termination.
+    time.sleep(30)
+    raise SystemExit(154)
 if MODE == "pipelined-callbacks":
     source = join_path(cwd, "contract/artifact.txt")
     for request_id in (130, 131):
@@ -1165,13 +1836,185 @@ if MODE in RECONSTRUCTION_MODES:
     if denied_write.get("error", {}).get("code") != -32602:
         raise SystemExit(125)
 
+    if MODE == "reconstruction-terminal-mutation-refusal-disabled":
+        terminal_requests = (
+            (830, "/usr/bin/rm", ["-f", join_path(cwd, "Makefile")]),
+            (
+                831,
+                "/usr/bin/mv",
+                [
+                    "-f",
+                    join_path(cwd, f"include/modules/{module_id}.h"),
+                    join_path(cwd, f"src/modules/{module_id}_extra.c"),
+                ],
+            ),
+        )
+        for request_id, command, arguments in terminal_requests:
+            send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "terminal/create",
+                "params": {
+                    "sessionId": "fixture-session",
+                    "command": command,
+                    "args": arguments,
+                    "cwd": cwd,
+                    "env": [],
+                    "outputByteLimit": 4096,
+                },
+            })
+            terminal_response = read_message()
+            if (
+                terminal_response is None
+                or terminal_response.get("id") != request_id
+                or terminal_response.get("error", {}).get("code") != -32602
+                or "result" in terminal_response
+            ):
+                raise SystemExit(160 + request_id - 830)
+
     source = join_path(cwd, SENTINEL)
     content = (
         f'#include "modules/{module_id}.h"\n'
         "/* fn_0000000000001000 */\n"
         "int decomp_engine_main(void) { return 0; }\n"
     )
-    write_workspace_file(source, content, 816)
+    if MODE == "reconstruction-exact-source-byte-boundary":
+        opening = "/*"
+        suffix = "*/\n"
+        padding_bytes = (
+            RECONSTRUCTION_MAXIMUM_SOURCE_BYTES
+            - len(content.encode("utf-8"))
+            - len(opening.encode("utf-8"))
+            - len(suffix.encode("utf-8"))
+        )
+        if padding_bytes < 0:
+            raise SystemExit(135)
+        # Use multi-byte text, plus one ASCII byte when needed, so the test proves
+        # that grant/snapshot limits measure UTF-8 bytes instead of character count.
+        padding = "é" * (padding_bytes // 2) + ("x" if padding_bytes % 2 else "")
+        content += opening + padding + suffix
+        if len(content.encode("utf-8")) != RECONSTRUCTION_MAXIMUM_SOURCE_BYTES:
+            raise SystemExit(136)
+    if MODE == "reconstruction-modify-existing-source":
+        content = content.replace("return 0;", "return 1;")
+    candidate_written_before_retry = False
+    if MODE == "reconstruction-mutation-grant":
+        outside_path = join_path(cwd, f"src/modules/{module_id}_extra.c")
+        outside = try_write_workspace_file(outside_path, "unauthorized sibling\n", 817)
+        if outside.get("error", {}).get("code") != -32602:
+            raise SystemExit(126)
+        # Establish a valid candidate before exercising the denied over-limit
+        # retry, so the host can verify refusal preserves existing bytes.
+        write_workspace_file(source, content, 816)
+        candidate_written_before_retry = True
+        # Keep the UTF-8 payload at exactly grant + 1 while using non-ASCII
+        # source bytes. The host raises the frame ceiling for this scenario so
+        # JSON escaping cannot mask the filesystem byte-limit refusal.
+        opening = "/*"
+        suffix = "*/\n"
+        padding_bytes = (
+            RECONSTRUCTION_OVERSIZED_SOURCE_BYTES
+            - len(opening.encode("utf-8"))
+            - len(suffix.encode("utf-8"))
+        )
+        padding = "é" * (padding_bytes // 2) + ("x" if padding_bytes % 2 else "")
+        oversized_content = opening + padding + suffix
+        if len(oversized_content.encode("utf-8")) != RECONSTRUCTION_OVERSIZED_SOURCE_BYTES:
+            raise SystemExit(137)
+        oversized = try_write_workspace_file(
+            source,
+            oversized_content,
+            818,
+        )
+        if oversized.get("error", {}).get("code") != -32602:
+            raise SystemExit(127)
+    if not candidate_written_before_retry:
+        write_workspace_file(source, content, 816)
+    if MODE == "reconstruction-refusal-after-write":
+        respond(prompt, {"stopReason": "refusal"})
+        raise SystemExit(0)
+    if MODE == "reconstruction-invalid-unicode-after-write":
+        malformed = try_write_workspace_file(source, "/*\ud800*/\n", 819)
+        if malformed.get("error", {}).get("code") != -32602:
+            raise SystemExit(138)
+        respond(prompt, {"stopReason": "end_turn"})
+        raise SystemExit(0)
+    if MODE == "reconstruction-cancel-after-write":
+        # This update follows the successful filesystem callback acknowledgement.
+        update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "reconstruction-cancel-after-ack-ready"},
+            "messageId": "reconstruction-cancel-after-ack-ready",
+        })
+        while True:
+            message = read_message()
+            if message is None:
+                raise SystemExit(0)
+            if message.get("method") == "session/cancel":
+                respond(prompt, {"stopReason": "cancelled"})
+                raise SystemExit(0)
+    if MODE == "reconstruction-frame-count-limit-after-write":
+        # The authorized write is acknowledged first. These individually bounded notifications
+        # then exceed the reconstruction request's frame-count ceiling without exhausting its
+        # frame-byte or aggregate-output budgets.
+        for ordinal in range(64):
+            send({
+                "jsonrpc": "2.0",
+                "method": "contract/unknown_notification",
+                "params": {"ordinal": ordinal},
+            })
+        time.sleep(30)
+        raise SystemExit(150)
+    if MODE == "reconstruction-tool-limit-after-write":
+        for ordinal in range(2):
+            update({
+                "sessionUpdate": "tool_call",
+                "toolCallId": f"reconstruction-tool-after-write-{ordinal}",
+                "title": f"Tool call {ordinal} after reconstruction write",
+                "kind": "other",
+                "status": "completed",
+            })
+    if MODE == "reconstruction-request-timeout-after-write":
+        time.sleep(30)
+        raise SystemExit(0)
+    if MODE == "reconstruction-frame-limit-after-write":
+        sys.stdout.write("{" + ("x" * 70000))
+        sys.stdout.flush()
+        time.sleep(30)
+        raise SystemExit(0)
+    if MODE == "reconstruction-stderr-limit-after-write":
+        sys.stderr.write("x" * (9 * 1024 * 1024))
+        sys.stderr.flush()
+        sys.stdin.read()
+        raise SystemExit(0)
+    if MODE == "reconstruction-stdout-limit-after-write":
+        try:
+            chunk = "x" * 30000
+            for index in range(300):
+                update({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": chunk},
+                    "messageId": f"output-limit-{index}",
+                })
+        except (BrokenPipeError, OSError):
+            pass
+        raise SystemExit(0)
+    if MODE == "reconstruction-mixed-output-limit-after-write":
+        # Neither stream exceeds the request's 8 MiB budget by itself. The shared accountant
+        # must include both the 5 MiB stderr body and these 4.2 MiB of stdout text.
+        sys.stderr.write("s" * (5 * 1024 * 1024))
+        sys.stderr.flush()
+        try:
+            chunk = "m" * 30000
+            for index in range(140):
+                update({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": chunk},
+                    "messageId": f"mixed-output-limit-{index}",
+                })
+        except (BrokenPipeError, OSError):
+            pass
+        raise SystemExit(0)
 elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     reconstructing = "Convert the Ghidra decompiler output" in prompt_text
     source = join_path(cwd, "decompiled.c" if reconstructing else "patched.c")
@@ -1198,9 +2041,13 @@ update({
     "status": "completed",
 })
 prompt_result = {"stopReason": "end_turn"}
-if MODE != "missing-usage":
+if MODE == "reconstruction-limit-after-write":
+    prompt_result["stopReason"] = "max_tokens"
+if MODE == "reconstruction-max-turn-requests-after-write":
+    prompt_result["stopReason"] = "max_turn_requests"
+if MODE not in ("missing-usage", "reconstruction-missing-usage-after-write"):
     prompt_result["usage"] = {
-        "inputTokens": -1 if MODE == "negative-usage" else 11,
+        "inputTokens": -1 if MODE in ("negative-usage", "reconstruction-negative-usage-after-write") else 11,
         "outputTokens": 7,
         "totalTokens": 18,
         "cachedReadTokens": 3,

@@ -3,10 +3,13 @@ package decompengine.repair
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.ACP_CAPTURED_REPAIR_WORKSPACE
 import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentFailure
+import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentAccessPolicy
@@ -117,7 +120,20 @@ interface CapturedRepairAgentHarness : AgentHarness {
         output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit,
     ): AgentExecutionReceipt = captureAgentExecutionReceipt(request) {
-        executeCaptured(request, initialFiles, output, onEvent)
+        try {
+            executeCaptured(request, initialFiles, output, onEvent)
+        } catch (failure: RepairBudgetExceededException) {
+            // A bounded sink refusing candidate growth is a resource outcome, not an invalid
+            // provider request. Preserve that classification in the immutable invocation receipt.
+            throw AgentExecutionException(
+                AgentFailure(
+                    AgentFailureKind.RESOURCE_EXHAUSTED,
+                    "captured repair output exceeded an admitted resource budget",
+                    details = mapOf("exception" to failure.javaClass.name),
+                ),
+                failure,
+            )
+        }
     }
 
     fun executeCapturedReceipt(
@@ -166,12 +182,18 @@ class BoundedRepairOutput internal constructor(
     fun replace(relativePath: String, bytes: ByteArray) {
         check(!closed) { "captured repair output is closed" }
         require(relativePath in writablePaths) { "captured repair output is unauthorized: $relativePath" }
-        // Replacement bytes can be caller-owned. Accept and retain one detached snapshot so a
-        // concurrent caller mutation cannot change the bytes after validation.
-        val acceptedBytes = bytes.copyOf()
         if (relativePath !in currentFiles) {
             throw IllegalArgumentException("captured repair output cannot recreate a deleted source file")
         }
+        if (bytes.size.toLong() > resourceBudget.maximumSourceFileBytes) {
+            throw RepairBudgetExceededException(
+                "captured repair output $relativePath exceeds the source-file byte budget",
+            )
+        }
+        // Replacement bytes can be caller-owned. Accept and retain one detached snapshot so a
+        // concurrent caller mutation cannot change the bytes after validation. Enforce the
+        // admitted per-file ceiling first so an oversized candidate is rejected before copying.
+        val acceptedBytes = bytes.copyOf()
         if (accessPolicy != null && !accessPolicy.allowsMutation(
                 AgentWorkspacePath(workspaceRootId, relativePath),
                 AgentOperation.WRITE_FILE,
@@ -179,11 +201,6 @@ class BoundedRepairOutput internal constructor(
                 acceptedBytes.isStrictUtf8ForMutation(),
             )) {
             throw IllegalArgumentException("captured repair output violates declared mutation authority")
-        }
-        if (acceptedBytes.size.toLong() > resourceBudget.maximumSourceFileBytes) {
-            throw RepairBudgetExceededException(
-                "captured repair output $relativePath exceeds the source-file byte budget",
-            )
         }
         val wasChanged = relativePath in replacements
         val previousReplacementBytes = replacements[relativePath]?.size?.toLong() ?: 0L
@@ -288,7 +305,9 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
             )
         require(initialFiles.keys == initialFiles.keys.map(::normalizedCapturedPath).distinct().toSet())
         require(writablePaths.all { it in initialFiles }) { "repair writable paths must be staged source inputs" }
-        require(initialFiles.size <= budget.maximumContextFiles) { "repair staging exceeds the file-entry budget" }
+        if (initialFiles.size > budget.maximumContextFiles) {
+            throw RepairBudgetExceededException("repair staging exceeds the file-entry budget")
+        }
         val directories = buildSet {
             add("") // The virtual root itself is an inode/entry in a filesystem-backed authority.
             initialFiles.keys.forEach { relative ->
@@ -296,8 +315,10 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
                 components.indices.forEach { index -> add(components.take(index + 1).joinToString("/")) }
             }
         }
-        require(directories.size <= budget.maximumStagingDirectories) {
-            "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}"
+        if (directories.size > budget.maximumStagingDirectories) {
+            throw RepairBudgetExceededException(
+                "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}",
+            )
         }
         val initialBytes = initialFiles.values.fold(0L) { total, bytes -> Math.addExact(total, bytes.size.toLong()) }
         if (initialBytes > budget.maximumStagingBytes) {
@@ -340,7 +361,9 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
             )
         require(initialFiles.keys == initialFiles.keys.map(::normalizedCapturedPath).distinct().toSet())
         require(writablePaths.all { it in initialFiles }) { "repair writable paths must be staged source inputs" }
-        require(initialFiles.size <= budget.maximumContextFiles) { "repair staging exceeds the file-entry budget" }
+        if (initialFiles.size > budget.maximumContextFiles) {
+            throw RepairBudgetExceededException("repair staging exceeds the file-entry budget")
+        }
         val directories = buildSet {
             add("")
             initialFiles.keys.forEach { relative ->
@@ -348,8 +371,10 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
                 components.indices.forEach { index -> add(components.take(index + 1).joinToString("/")) }
             }
         }
-        require(directories.size <= budget.maximumStagingDirectories) {
-            "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}"
+        if (directories.size > budget.maximumStagingDirectories) {
+            throw RepairBudgetExceededException(
+                "repair staging requires ${directories.size} directories; limit=${budget.maximumStagingDirectories}",
+            )
         }
         val initialBytes = initialFiles.values.fold(0L) { total, bytes -> Math.addExact(total, bytes.size.toLong()) }
         if (initialBytes > budget.maximumStagingBytes) {

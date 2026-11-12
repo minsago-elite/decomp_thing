@@ -132,6 +132,11 @@ import kotlinx.serialization.json.JsonPrimitive
 class AcpAgentHarness(
     private val configuration: AcpProcessConfiguration,
 ) : CapturedRepairAgentHarness, AcpExecutionEvidenceSource {
+    private val workspaceSnapshotLimitsLock = Any()
+    private var configuredWorkspaceSnapshotLimits = WorkspaceSnapshotLimits()
+    private var workspaceSnapshotLimitsFrozen = false
+    private val initialWorkspaceSnapshotHookForTesting = AtomicReference<(() -> Unit)?>(null)
+    private val promptLoopGateForTesting = AtomicReference<(suspend (Job) -> Unit)?>(null)
     private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
     private val latestDiagnosticsReference = AtomicReference<AcpProcessDiagnostics?>()
@@ -140,6 +145,31 @@ class AcpAgentHarness(
     private val latestPermissionAuditReference = AtomicReference<List<AcpPermissionAuditRecord>>(emptyList())
     private val latestSandboxEvidenceReference = AtomicReference<AcpSandboxEvidence?>()
     private val latestExecutionEvidenceReference = AtomicReference<AcpExecutionEvidenceSnapshot?>()
+
+    /** Internal-only bound override for active workspace-snapshot limit tests. */
+    internal fun withWorkspaceSnapshotLimitsForTesting(limits: WorkspaceSnapshotLimits): AcpAgentHarness = apply {
+        synchronized(workspaceSnapshotLimitsLock) {
+            check(!workspaceSnapshotLimitsFrozen) { "workspace snapshot limits are already in use" }
+            configuredWorkspaceSnapshotLimits = limits
+        }
+    }
+
+    /** Internal-only setup hook for deterministic initial-snapshot admission tests. */
+    internal fun withInitialWorkspaceSnapshotHookForTesting(hook: () -> Unit): AcpAgentHarness = apply {
+        check(initialWorkspaceSnapshotHookForTesting.compareAndSet(null, hook)) {
+            "initial workspace snapshot test hook is already configured"
+        }
+    }
+
+    /** Internal-only barrier for deterministic prompt-completion ordering tests. */
+    internal fun withPromptLoopGateForTesting(gate: suspend (Job) -> Unit): AcpAgentHarness = apply {
+        check(promptLoopGateForTesting.compareAndSet(null, gate)) { "prompt loop test gate is already configured" }
+    }
+
+    private fun freezeWorkspaceSnapshotLimits(): WorkspaceSnapshotLimits = synchronized(workspaceSnapshotLimitsLock) {
+        workspaceSnapshotLimitsFrozen = true
+        configuredWorkspaceSnapshotLimits
+    }
 
     override fun implementationIdentifier(): String = configuration.implementationId
 
@@ -282,6 +312,7 @@ class AcpAgentHarness(
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AgentExecutionReceipt {
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
+        val workspaceSnapshotLimits = freezeWorkspaceSnapshotLimits()
         val prefixObservation = createOptionalPrelaunchObservation {
             RuntimeCopyStatistics.Prefix.create(wallDeadline::observationSample)
         }
@@ -330,6 +361,7 @@ class AcpAgentHarness(
                     sessionJournal,
                     authenticationInventory,
                     prefixObservation,
+                    workspaceSnapshotLimits,
                 ),
             )
         } catch (_: WorkspaceSnapshotCancelled) {
@@ -405,6 +437,7 @@ class AcpAgentHarness(
         sessionJournal: AgentSessionJournal?,
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
         prefixObservation: RuntimeCopyStatistics.Prefix?,
+        workspaceSnapshotLimits: WorkspaceSnapshotLimits,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -422,9 +455,15 @@ class AcpAgentHarness(
         val before = if (capturedFilesystem == null && preflightWorkflow == null) {
             evidenceState.reach(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT)
             try {
+                initialWorkspaceSnapshotHookForTesting.getAndSet(null)?.invoke()
                 WorkspaceSnapshot.capture(
                     request,
-                    WorkspaceSnapshotBudget(request.cancellation, wallDeadline, honorCancellation = true),
+                    WorkspaceSnapshotBudget(
+                        request.cancellation,
+                        wallDeadline,
+                        honorCancellation = true,
+                        limits = workspaceSnapshotLimits,
+                    ),
                 )
             } catch (_: WorkspaceSnapshotCancelled) {
                 return AgentExecutionResult(
@@ -552,6 +591,11 @@ class AcpAgentHarness(
                         authenticationInventory = authenticationInventory,
                     )
                 }
+            } catch (failure: InterruptedException) {
+                // runBlocking clears the worker's interrupt flag when it throws. Preserve the
+                // caller-cancellation meaning through ACP result handling so reconstruction can
+                // persist an interrupted attempt and roll back instead of reporting unresolved.
+                recordPrimaryFailure(RequestedAcpCancellation("caller interruption"))
             } catch (failure: Throwable) {
                 recordPrimaryFailure(failure)
             }
@@ -780,6 +824,7 @@ class AcpAgentHarness(
                     wallDeadline,
                     // A cancellation already accepted by the prompt still needs an accurate final change set.
                     honorCancellation = finished.stopReason != AgentStopReason.CANCELLED,
+                    limits = workspaceSnapshotLimits,
                 )
                 val finalSnapshot = WorkspaceSnapshot.capture(request, finalBudget)
                 requireNotNull(before).diff(finalSnapshot, request, finalBudget, translator.sessionReference())
@@ -830,8 +875,14 @@ class AcpAgentHarness(
                 )
             }
         } ?: AgentUsage(toolCalls = translator.toolCallCount(), wallClock = elapsed)
-        requireConfiguredTokenUsage(request, usage, translator.sessionReference())
-        val limited = tokenLimitExceeded(request, usage)
+        val toolExhaustionWithoutFinalResponse =
+            finished.stopReason == AgentStopReason.LIMIT_EXHAUSTED &&
+                finished.response == null &&
+                translator.limitFailure.get() != null
+        if (!toolExhaustionWithoutFinalResponse) {
+            requireConfiguredTokenUsage(request, usage, translator.sessionReference())
+        }
+        val limited = toolExhaustionWithoutFinalResponse || tokenLimitExceeded(request, usage)
 
         val result = AgentExecutionResult(
             stopReason = if (limited) AgentStopReason.LIMIT_EXHAUSTED else stopReason,
@@ -1470,6 +1521,15 @@ class AcpAgentHarness(
             promptResponse.get() ?: throw AcpProtocolFailure("ACP session/prompt ended without a stop reason")
         }
 
+        fun exhaustedOutcome(): PromptOutcome? = translator.limitFailure.get()?.let { limitSummary ->
+            // Preserve a prompt response that completed alongside an exhausted tool update.
+            // Its reported usage is still required to classify configured token ceilings;
+            // discarding it would turn bounded exhaustion into a protocol failure.
+            PromptOutcome(AgentStopReason.LIMIT_EXHAUSTED, promptResponse.get(), limitSummary)
+        }
+
+        promptLoopGateForTesting.getAndSet(null)?.invoke(promptJob)
+
         while (true) {
             try {
                 terminal.throwIfFailed()
@@ -1479,21 +1539,25 @@ class AcpAgentHarness(
                 cancelPrompt(session, promptJob, operationScope)
                 throw failure
             }
+            translator.callbackFailure.get()?.let { callbackFailure ->
+                cancelPrompt(session, promptJob, operationScope)
+                throw callbackFailure
+            }
+            exhaustedOutcome()?.let { exhausted ->
+                cancelPrompt(session, promptJob, operationScope)
+                // A peer may deliver its final response while acknowledging cancellation.
+                // Re-read after the bounded drain so available usage is retained, while a
+                // host-enforced tool limit remains authoritative if no response arrives.
+                return exhausted.copy(response = promptResponse.get() ?: exhausted.response)
+            }
             if (promptJob.isCompleted) {
                 val response = promptJob.await()
+                exhaustedOutcome()?.let { return it }
                 terminal.throwIfFailed()
                 filesystemAudit.failure()?.let { throw it }
                 permissionAudit.failure()?.let { throw it }
                 evidenceState.reach(AcpExecutionLifecyclePhase.PROMPT_COMPLETED)
                 return PromptOutcome(response.stopReason.toContractStopReason(), response)
-            }
-            translator.callbackFailure.get()?.let { callbackFailure ->
-                cancelPrompt(session, promptJob, operationScope)
-                throw callbackFailure
-            }
-            translator.limitFailure.get()?.let { limitSummary ->
-                cancelPrompt(session, promptJob, operationScope)
-                return PromptOutcome(AgentStopReason.LIMIT_EXHAUSTED, null, limitSummary)
             }
             if (request.cancellation.isCancellationRequested()) {
                 cancelPrompt(session, promptJob, operationScope)
@@ -1510,6 +1574,7 @@ class AcpAgentHarness(
                 }
                 if (drained != null) {
                     val response = drained.value
+                    exhaustedOutcome()?.let { return it }
                     terminal.throwIfFailed()
                     filesystemAudit.failure()?.let { throw it }
                     permissionAudit.failure()?.let { throw it }
@@ -1548,8 +1613,15 @@ class AcpAgentHarness(
             }
         }
         cancelJob.cancel()
-        promptJob.cancel()
-        awaitWithin(promptJob, deadline)
+        // Keep collecting until the cancellation grace expires. Some peers send their final
+        // prompt response (including usage) only after they receive session/cancel. Cancelling
+        // the collector first loses that response and can misclassify tool exhaustion as a
+        // missing-token-usage protocol failure.
+        if (promptJob.isActive) awaitWithin(promptJob, deadline)
+        if (promptJob.isActive) {
+            promptJob.cancel()
+            awaitWithin(promptJob, deadline)
+        }
     }
 
     private suspend fun awaitWithin(job: Job, deadline: MonotonicDeadline) {
@@ -3524,8 +3596,8 @@ private fun renderPrompt(request: AgentExecutionRequest): String =
     decompengine.agent.renderAgentPrompt(request.objective, request.contextInputs)
 
 private fun tokenLimitExceeded(request: AgentExecutionRequest, usage: AgentUsage): Boolean =
-    request.limits.maxInputTokens?.let { requireNotNull(usage.inputTokens) > it } == true ||
-        request.limits.maxOutputTokens?.let { requireNotNull(usage.outputTokens) > it } == true
+    request.limits.maxInputTokens?.let { usage.inputTokens?.let { used -> used > it } } == true ||
+        request.limits.maxOutputTokens?.let { usage.outputTokens?.let { used -> used > it } } == true
 
 private fun requireConfiguredTokenUsage(
     request: AgentExecutionRequest,

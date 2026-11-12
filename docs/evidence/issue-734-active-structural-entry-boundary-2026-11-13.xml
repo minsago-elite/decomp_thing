@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T16:11:11.407Z" hostname="whatsername" time="3.093">
+  <properties/>
+  <testcase name="active repair admits exact generated C structural entries and refuses one below before dispatch()" classname="decompengine.repair.TraceGuidedRepairTest" time="3.082"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

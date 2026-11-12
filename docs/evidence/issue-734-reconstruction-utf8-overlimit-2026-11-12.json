@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "2b4ae45f24f124582a87bf4d1a82f4ae87525d23",
+  "sourceParent": "f903335383c91d80e15c1c64e494c81521f4fbbd",
+  "sourceTree": "0bb8c4d214bc2e3fa8bda6238d6fbb9d4ef0d8df",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 64.97,
+    "suiteSeconds": 64.97,
+    "timestamp": "2026-11-12T04:53:33.393Z",
+    "junitSha256": "783d27d9ecac232a69c9e07fce327b420121716faa4e5fb240c1ca2408419d12"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction",
+    "provider": "scripted ACP process through public reconstruction workflow",
+    "coverage": "The existing public mutation-grant test now sends a UTF-8 payload exactly one byte above the 262144-byte per-file grant, with a 1 MiB protocol frame ceiling. Its fixture asserts the exact UTF-8 byte length; the host receipt audit asserts POLICY_DENIED for the authorized implementation path.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "frontend asset verification/build tasks were excluded because generated frontend assets are absent from the exact-source snapshot",
+      "does not qualify live providers or other reconstruction profiles",
+      "does not qualify production validation under #236",
+      "does not establish hosted exact-head CI",
+      "does not complete every #734 or #63 criterion"
+    ]
+  }
+}

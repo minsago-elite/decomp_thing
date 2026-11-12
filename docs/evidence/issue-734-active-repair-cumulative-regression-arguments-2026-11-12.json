@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "5fcbf6a13a26d6a124b02c3f6a51ff1f5c763f53",
+  "sourceParent": "d64628dd53b603281e224db02347179a054805cb",
+  "sourceTree": "ea58fff7ba45f13f0e84bf6c6d18c346ec00b7e8",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair enforces cumulative retained regression input count across calls",
+    "decompengine.repair.TraceGuidedRepairTest.active repair enforces cumulative retained regression byte limit across calls",
+    "decompengine.repair.TraceGuidedRepairTest.active repair enforces cumulative retained regression argument limit across calls"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS=-Xmx8g ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair enforces cumulative retained regression input count across calls' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair enforces cumulative retained regression byte limit across calls' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair enforces cumulative retained regression argument limit across calls'",
+  "result": {
+    "tests": 3,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 11.134,
+    "suiteSeconds": 11.134,
+    "timestamp": "2026-11-12T09:27:38.461Z",
+    "junitSha256": "e12289f415eb721a96c94ac5fddc1a24a6484f18448f51aedd1b041ad735a92d"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "The cumulative helper makes separate ACP-backed repair calls with distinct retained inputs and verifies every accepted cumulative corpus at the injected validator. Exact/one-over controls cover retained-input count, aggregate input bytes, and total arguments. The argument case accepts one argument in the first call and reaches three arguments after the second; a fourth argument is refused before another dispatch, validation, or run creation. Each control verifies that the previously retained corpus and digest remain unchanged, accepted source/head are preserved, and no attempt is pending.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy rather than production validation under #236",
+      "does not qualify live-provider behavior",
+      "does not establish hosted exact-head CI",
+      "does not qualify publication crash recovery under #732 or durable provenance under #733",
+      "does not complete the remaining #734/#63 acceptance matrix"
+    ]
+  }
+}

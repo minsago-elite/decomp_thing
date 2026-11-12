@@ -171,7 +171,10 @@ data class RepairResourceBudget(
     }
 }
 
-class RepairBudgetExceededException(message: String) : IllegalArgumentException(message)
+open class RepairBudgetExceededException(message: String) : IllegalArgumentException(message)
+
+/** Candidate-source admission failed before the validator received a request. */
+internal class RepairCandidateSourceBudgetExceededException(message: String) : RepairBudgetExceededException(message)
 
 /** A contained stable read found no admissible regular file (missing, linked, special or escaping). */
 internal class StableFileUnavailableException(message: String) : IllegalArgumentException(message)

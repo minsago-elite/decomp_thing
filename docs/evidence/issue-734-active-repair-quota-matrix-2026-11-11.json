@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "19251d1e15072b8d3a0329605c4b3ea2321d375a",
+  "sourceParent": "84a1f11871443e4b62064827c45ce1a06e51d9eb",
+  "sourceTree": "4dfb4d1eaa2f49562ff9ccdb8e0afa8d23dd3f19",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair keeps the first patch when the second file exceeds patch count",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact staging candidate after refusing an oversized retry",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem read limit after an acknowledged candidate write",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the declared source-file byte grant after an acknowledged candidate"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem read limit after an acknowledged candidate write' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the declared source-file byte grant after an acknowledged candidate' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact staging candidate after refusing an oversized retry' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair keeps the first patch when the second file exceeds patch count'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 6,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 9.875,
+    "suiteSeconds": 9.875,
+    "timestamp": "2026-11-11T12:52:30.516Z",
+    "junitSha256": "90ebb5eec8b6e4884700d64cc646ded9e3e54d1f021b315720b8e075b7fbc73b"
+  },
+  "scope": {
+    "profile": "Generated C repair index",
+    "provider": "scripted ACP process through AcpCapturedRepairFilesystem",
+    "coverage": "Active patch-byte, staging-byte, and patch-file-count retry boundaries; ACP filesystem callback read-byte and write-byte limits; and the declared per-file source mutation grant. The shared exact-candidate controls check receipt/assessment linkage, active validator handoff, unchanged accepted source/head after sentinel rejection, no pending attempt, and verified process/sandbox cleanup.",
+    "qualificationLimits": [
+      "scripted ACP fixture and Generated C repair profile only",
+      "injected STRICT_CONTAINED validator rejects after candidate inspection; successful production validation is not established",
+      "no live-provider behavior",
+      "no production validator qualification under #236",
+      "no hosted exact-head CI qualification",
+      "does not complete every #734 or #63 criterion"
+    ]
+  }
+}

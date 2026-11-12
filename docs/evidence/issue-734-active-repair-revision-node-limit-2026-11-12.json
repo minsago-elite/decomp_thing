@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "6752c2896fb6c3076f7471e494a8419da19a258e",
+  "sourceParent": "08f4ce8aa35a16980b79f23df06ad7f6953827b1",
+  "sourceTree": "27ff476576c86fd2ecc068fade9f060717047eeb",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair admits the exact revision node count and refuses the next attempt before dispatch"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair admits the exact revision node count and refuses the next attempt before dispatch'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.152,
+    "suiteSeconds": 3.165,
+    "timestamp": "2026-11-12T09:59:03.666Z",
+    "junitSha256": "3e33c77a43fd357443f29c17ed9d6089318443d73bcb5f62c2b2ec1dda0c78ce"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "The fresh graph starts with one root and maximumRevisionNodes=2. The first scripted ACP modification reaches the injected validator and leaves the graph with exactly two nodes and one run. A second repair call can begin its second run but is refused by beginAttempt with the exact revision-node-budget diagnostic before another ACP dispatch or validation; the terminal RESOURCE_EXHAUSTED run is retained. Assertions verify the node count remains at the ceiling, accepted source/head remain unchanged, no attempt is pending, and the first invocation receipt, assessment, process exit, and sandbox cleanup are bound and verified.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy rather than production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

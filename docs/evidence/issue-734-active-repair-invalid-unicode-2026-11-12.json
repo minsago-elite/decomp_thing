@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "a695dd608bb8ebd2e86951b97b5e7d4501e29ac0",
+  "sourceParent": "ce85e8a7649df618124d259c5a6a0e478ef6d8dc",
+  "sourceTree": "7365bd875a5386144cc5fe6ee8c5d8be39a11132",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem read limit after an acknowledged candidate write",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the declared source-file byte grant after an acknowledged candidate",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair rejects malformed Unicode after retaining the valid candidate"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact patch candidate after refusing an oversized retry' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem write limit after retaining an exact candidate' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the filesystem read limit after an acknowledged candidate write' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair enforces the declared source-file byte grant after an acknowledged candidate' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair rejects malformed Unicode after retaining the valid candidate'",
+  "result": {
+    "tests": 5,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 8.968,
+    "suiteSeconds": 8.968,
+    "timestamp": "2026-11-12T08:32:22.706Z",
+    "junitSha256": "373184a410650d849fc6e20afb84e91b641ab1be43ce4510633c01b3dabb7525"
+  },
+  "scope": {
+    "profile": "Generated C repair profile through scripted ACP and active repair validation",
+    "coverage": "The scripted peer writes a multibyte candidate of exactly 4,096 UTF-8 bytes, submits a write containing a lone UTF-16 surrogate, requires a protocol refusal, and reads the target back to confirm the candidate is unchanged. The active loop requires a receipt-bound injected validator to observe the exact candidate bytes/digest. The retained receipt and assessment hashes are linked; the candidate is rejected by the sentinel validator, while accepted source/head remain unchanged and pending state clears. The same run also covers existing exact-candidate patch-byte, filesystem read/write, and source-file grant retry cases.",
+    "qualificationLimits": [
+      "local scripted ACP only; the validator is injected and does not qualify production validation under #236",
+      "does not qualify live providers",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not establish hosted exact-head CI or complete #734/#63 acceptance"
+    ]
+  }
+}

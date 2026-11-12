@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "8774d4ed557106813ad540bd690b9e831d46d1d1",
+  "sourceParent": "4b5ee464441fb112782d1bf9f0a6a32fc8a82d1e",
+  "sourceTree": "0adcd290d32717ab72e002431e77f9146efcecba",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x buildAnalysisIoHelper --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 66.275,
+    "suiteSeconds": 66.295,
+    "timestamp": "2026-11-12T06:58:42.367Z",
+    "junitSha256": "75be7ba7bec3657824f487f52fca277cfc40dbcd532b6d6ee918b1cc4f42f745"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction profile",
+    "provider": "Scripted ACP process through the public ArchivalReconstructionService workflow",
+    "coverage": "The active exact-boundary case sends a multibyte UTF-8 source whose encoded size is exactly 262144 bytes with a 1 MiB protocol-frame ceiling. Its sole host-observed CREATED change must name the declared implementation path, have no before digest, carry the exact byte size and an afterSha256 matching the independently constructed expected source, and match bytes in the reconstructed project, published source-tree, and verified extracted archive. The extracted project rebuilds successfully. The paired fixture constructs a 262145-byte UTF-8 write, requires the broker callback to reject it with -32602/POLICY_DENIED on the declared target, then writes the normal admitted candidate; no extra file appears and the final admitted source remains byte-exact.",
+    "qualificationLimits": [
+      "local scripted ACP evidence for Generated C Make only",
+      "does not qualify live providers, other profiles, or hosted exact-head CI",
+      "does not qualify production repair validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "complete #734/#63 mutation and resource acceptance remains open"
+    ]
+  }
+}

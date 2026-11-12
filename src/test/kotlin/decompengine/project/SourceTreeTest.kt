@@ -1193,6 +1193,125 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `reconstruction rejects agent change claims that disagree with observed target bytes`() {
+        val testRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        val implementationPath = AgentWorkspacePath("project", "src/modules/parse.c")
+        val scenarios = listOf(
+            "wrong-path",
+            "multiple-paths",
+            "false-deletion",
+            "wrong-kind",
+            "wrong-before-hash",
+            "wrong-after-hash",
+            "wrong-size",
+        )
+
+        scenarios.forEach { scenario ->
+            val project = createTempDirectory(testRoot, "source-tree-agent-claim-$scenario-")
+            val candidateBytes = "untrusted candidate for $scenario\n".toByteArray()
+            val seedBytes = "accepted source before $scenario\n".toByteArray()
+            if (scenario in setOf("wrong-kind", "wrong-before-hash")) {
+                project.resolve(implementationPath.relativePath).apply {
+                    parent.createDirectories()
+                    Files.write(this, seedBytes)
+                }
+            }
+            var dispatches = 0
+            val harness = AgentHarness { request, _ ->
+                dispatches++
+                val targetRule = request.accessPolicy.pathRules.single { rule ->
+                    AgentOperation.WRITE_FILE in rule.operations
+                }
+                assertEquals(implementationPath, targetRule.path)
+                val target = targetRule.path.resolve(request.workspaceRoots)
+                val before = target.takeIf(Files::exists)?.readBytes()
+                target.parent.createDirectories()
+                Files.write(target, candidateBytes)
+                val afterSha256 = sha256(candidateBytes)
+                val change = AgentFileChange(
+                    implementationPath,
+                    if (before == null) AgentFileChangeKind.CREATED else AgentFileChangeKind.MODIFIED,
+                    before?.let(::sha256),
+                    afterSha256,
+                    candidateBytes.size.toLong(),
+                )
+                val claimedChanges = when (scenario) {
+                    "wrong-path" -> listOf(change.copy(path = AgentWorkspacePath("project", "src/modules/other.c")))
+                    "multiple-paths" -> listOf(
+                        change,
+                        AgentFileChange(
+                            AgentWorkspacePath("project", "src/modules/extra.c"),
+                            AgentFileChangeKind.CREATED,
+                            null,
+                            sha256("unwritten extra".toByteArray()),
+                            "unwritten extra".toByteArray().size.toLong(),
+                        ),
+                    )
+                    "false-deletion" -> listOf(
+                        AgentFileChange(
+                            implementationPath,
+                            AgentFileChangeKind.DELETED,
+                            before?.let(::sha256) ?: "1".repeat(64),
+                            null,
+                            before?.size?.toLong() ?: 0,
+                        ),
+                    )
+                    "wrong-kind" -> listOf(
+                        AgentFileChange(
+                            implementationPath,
+                            AgentFileChangeKind.CREATED,
+                            null,
+                            afterSha256,
+                            candidateBytes.size.toLong(),
+                        ),
+                    )
+                    "wrong-before-hash" -> listOf(
+                        AgentFileChange(
+                            implementationPath,
+                            AgentFileChangeKind.MODIFIED,
+                            "1".repeat(64),
+                            afterSha256,
+                            candidateBytes.size.toLong(),
+                        ),
+                    )
+                    "wrong-after-hash" -> listOf(change.copy(afterSha256 = "2".repeat(64)))
+                    "wrong-size" -> listOf(change.copy(sizeBytes = candidateBytes.size.toLong() + 1))
+                    else -> error("unknown scenario: $scenario")
+                }
+                AgentExecutionResult(
+                    AgentStopReason.COMPLETED,
+                    "scripted candidate with contradictory change evidence",
+                    claimedChanges,
+                )
+            }
+
+            val manifest = SourceTreeGenerator.generate(
+                oneModuleModel(),
+                project,
+                reconstructor = fixtureOnlyAgent(BoundedLlmModuleReconstructor(harness)),
+            )
+
+            assertEquals(1, dispatches, scenario)
+            assertEquals(
+                oneModuleModel().functions.map { it.id }.toSet(),
+                manifest.unresolvedImplementationIds.toSet(),
+                scenario,
+            )
+            val sourceEvidence = manifest.files.single { it.path == implementationPath.relativePath }
+            assertEquals(false, sourceEvidence.acceptedImplementation, scenario)
+            assertFalse(project.resolve(implementationPath.relativePath).readBytes().contentEquals(candidateBytes), scenario)
+            val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+            assertEquals(JsonPrimitive(false), checkpoint.getValue("accepted"), scenario)
+            assertTrue(
+                checkpoint.getValue("issues").jsonArray.any { issue ->
+                    issue.jsonObject.getValue("code").jsonPrimitive.content == "reconstruction-failed"
+                },
+                scenario,
+            )
+        }
+    }
+
+    @Test
     fun `LLM reconstruction rejects a context role hidden by an alternate profile`() {
         val base = GeneratedCNinjaReconstructionProfile.descriptor
         val layout = ProjectLayoutProfile(

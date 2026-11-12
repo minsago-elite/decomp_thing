@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-11T10:16:55.735Z" hostname="whatsername" time="3.417">
+  <properties/>
+  <testcase name="active ACP repair keeps the first patch when the second file exceeds patch count()" classname="decompengine.repair.TraceGuidedRepairTest" time="3.407"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

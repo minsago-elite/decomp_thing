@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "1c4b00f94a302d0001dc48de38b98445e6ab9d1d",
+  "sourceParent": "27f52d7b9d831b0509d19c1f5c6ba676aac401d5",
+  "sourceTree": "97b206b16cee3bdab3d2726140252ef3b7a61cce",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 63.843,
+    "suiteSeconds": 63.856,
+    "timestamp": "2026-11-12T05:11:58.071Z",
+    "junitSha256": "631c212053c81ea57e0699e16ef43d1e8b3a1313ae2a5545b3646cda45667853"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction",
+    "provider": "scripted ACP process through public reconstruction workflow",
+    "coverage": "The existing public reconstruction test now seeds one valid existing implementation immediately before the initial workspace snapshot and separately sets fileBytes and totalBytes to one byte below its exact size. Both refusals are RESOURCE_EXHAUSTED at initial-workspace-snapshot, before ACP process launch; assertions require WORKSPACE_SNAPSHOT evidence, NOT_REQUIRED cleanup, no filesystem audit or process diagnostics, unchanged accepted publication metadata, and no publication residue. Existing initial entry-count and final snapshot byte-limit cases remain in the same scenario.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "frontend asset verification/build tasks were excluded because generated frontend assets are absent from the exact-source snapshot",
+      "does not qualify live providers or other reconstruction profiles",
+      "does not qualify production validation under #236",
+      "does not establish hosted exact-head CI",
+      "does not complete every #734 or #63 criterion"
+    ]
+  }
+}

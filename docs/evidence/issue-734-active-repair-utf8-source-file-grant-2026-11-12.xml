@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-11-12T08:00:41.326Z" hostname="whatsername" time="5.506">
+  <properties/>
+  <testcase name="active ACP repair preserves an exact patch candidate after refusing an oversized retry()" classname="decompengine.repair.TraceGuidedRepairTest" time="2.651"/>
+  <testcase name="active ACP repair enforces the filesystem write limit after retaining an exact candidate()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.454"/>
+  <testcase name="active ACP repair enforces the declared source-file byte grant after an acknowledged candidate()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.386"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

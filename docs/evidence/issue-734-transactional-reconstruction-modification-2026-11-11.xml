@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpAgentHarnessTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-11-11T09:22:21.157Z" hostname="whatsername" time="46.657">
+  <properties/>
+  <testcase name="public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes()" classname="decompengine.acp.AcpAgentHarnessTest" time="45.364"/>
+  <testcase name="transactional ACP source generation accepts a bounded modification of an existing owned implementation()" classname="decompengine.acp.AcpAgentHarnessTest" time="0.874"/>
+  <testcase name="production bytecode exposes no launcher boundary or test mode bypass()" classname="decompengine.acp.AcpAgentHarnessTest" time="0.394"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

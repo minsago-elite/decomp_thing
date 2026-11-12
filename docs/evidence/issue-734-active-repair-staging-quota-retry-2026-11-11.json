@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "ede3bf193c7606815211a6fdfc0b1b29ca8a0afe",
+  "sourceParent": "2254162c507231bc2c1223f8e91de4bdf598c4cf",
+  "sourceTree": "228e03ee7a8717b64d4fe7342f3cb3678d03570f",
+  "test": "decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact staging candidate after refusing an oversized retry",
+  "command": "PATH=/home/june/.t3/worktrees/decomp_thing/t3-cc0c2dbb/build/frontend-node-24.20.0-npm-11.19.0.2rSV99/node/bin:$PATH DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --no-daemon --offline test --console=plain -x frontendInstall --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair preserves an exact staging candidate after refusing an oversized retry'",
+  "environment": {
+    "java": "openjdk version 21.0.12.1",
+    "node": "v24.20.0",
+    "npm": "11.19.0",
+    "gradleWrapper": "9.6.1",
+    "frontendAssets": {
+      "buildId": "f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4",
+      "verified": true,
+      "files": 26,
+      "totalBytes": 459096
+    }
+  },
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.373,
+    "suiteSeconds": 2.527,
+    "timestamp": "2026-11-11T10:03:08.093Z",
+    "junitSha256": "4fe17089e7493174f64157c84446dc8d624820d86221bf6228d2ff152a6a053c"
+  },
+  "scope": {
+    "initialSelectedContext": "measured before graph creation using the same GeneratedCRepairIndexProfile and compile diagnostic; exact context bytes and paths are asserted again at active dispatch",
+    "stagingBudgetBytes": "non-target selected context bytes plus 4096",
+    "acceptedCandidateBytes": 4096,
+    "refusedRetryBytes": 4097,
+    "patchBytesBudgetBytes": 2097152,
+    "sourceFileBudgetBytes": 134217728,
+    "patchFileBudgetCount": 32,
+    "otherResourceBudgetsHaveHeadroom": true,
+    "validator": "injected STRICT_CONTAINED strategy verified the complete candidate and unchanged context, then threw a sentinel; this demonstrates handoff and rejection handling, not successful validation",
+    "provider": "scripted ACP peer",
+    "stagingAuthority": "CapturedRepairStagingAuthority",
+    "productionRepairValidatorQualified": false,
+    "hostedExactHeadCiQualified": false
+  }
+}

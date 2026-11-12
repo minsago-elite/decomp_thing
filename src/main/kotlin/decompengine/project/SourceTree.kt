@@ -8,6 +8,7 @@ import decompengine.repair.readStableRegularFile
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionLimits
 import decompengine.agent.AgentSessionContinuation
 import decompengine.agent.AgentSessionJournal
 import decompengine.agent.AgentSessionRecoveryException
@@ -207,6 +208,7 @@ class BoundedLlmModuleReconstructor(
     private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
     private val sessionResumePolicy: AgentSessionResumePolicy = AgentSessionResumePolicy.LOAD_OR_NEW_WHEN_UNSUPPORTED,
 ) : ModuleReconstructor {
+    private var testExecutionLimitsOverride: AgentExecutionLimits? = null
     private val harnessProvenanceSha256 = harnessProvenanceDescriptor?.let { descriptor ->
         require(descriptor.isNotBlank()) { "harness provenance descriptor must not be blank" }
         val encoded = descriptor.toByteArray(StandardCharsets.UTF_8)
@@ -226,6 +228,16 @@ class BoundedLlmModuleReconstructor(
     private fun cacheIdentity(contextCharacters: Int): String =
         "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
             "factory-${harnessProvenanceSha256 ?: "unbound"}:v5"
+
+    /**
+     * Internal-only per-turn limits seam for active reconstruction boundary tests. The test
+     * override is execution evidence, not a distinct reconstructor implementation/profile
+     * identity. Callers must use an isolated output or a distinct input/model fingerprint.
+     */
+    internal fun withExecutionLimitsForTesting(limits: AgentExecutionLimits): BoundedLlmModuleReconstructor = apply {
+        check(testExecutionLimitsOverride == null) { "test execution limits are already configured" }
+        testExecutionLimitsOverride = limits
+    }
 
     private fun contextBudget(profile: ReconstructionProfile): Int =
         minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
@@ -343,6 +355,7 @@ class BoundedLlmModuleReconstructor(
                         policyId = "declared-role-reconstruction-v1",
                     ),
                 ),
+                limits = testExecutionLimitsOverride ?: AgentExecutionLimits(),
                 sessionContinuation = sessionContinuation(request),
             )
             val eventRecorder = BoundedAgentExecutionEventRecorder()

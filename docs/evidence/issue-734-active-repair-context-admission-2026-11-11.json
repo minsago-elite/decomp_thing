@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "ee8413bda2e2a99c2fb34475898b25c14e215586",
+  "sourceParent": "f9d079a9e800d1fbdcdc1b51d9c6b65182c0a5c6",
+  "sourceTree": "5c93421d1bf8383df42b6ccc8e363ef890177e89",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair required context file and byte budgets refuse before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active ACP repair reuses a patch slot after restoring the first file"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild --tests 'decompengine.repair.TraceGuidedRepairTest.active repair required context file and byte budgets refuse before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active ACP repair reuses a patch slot after restoring the first file'",
+  "environment": {
+    "java": "OpenJDK Temurin 21.0.12.1",
+    "gradleWrapper": "9.6.1"
+  },
+  "result": {
+    "report": "issue-734-active-repair-context-admission-2026-11-11.xml",
+    "tests": 2,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 2.613,
+    "timestamp": "2026-11-11T13:48:20.115Z",
+    "sha256": "a2685dda894010abe47968030cee996609d1454d431ecded181058075ab90adb"
+  },
+  "scope": {
+    "claim": "The active repair loop refuses a two-file required context under independently isolated maximumContextFiles=1 and maximumContextBytes=one byte below the exact combined bytes. Both refusals occur before harness dispatch and preserve accepted source/head, leave no pending attempt, and record RESOURCE_EXHAUSTED. The same run rechecks active ACP patch-slot reuse after exact restoration of the first file.",
+    "limitations": [
+      "Context admission cases use a strict captured test harness and intentionally do not launch ACP after pre-dispatch refusal.",
+      "Local evidence only; no live provider, successful production validation under #236, other profiles, hosted exact-head CI, or complete #734/#63 acceptance."
+    ]
+  }
+}

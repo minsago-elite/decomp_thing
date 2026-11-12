@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "1b91c68bc5ef09a55299acf227262a7534285c65",
+  "sourceParent": "faa23d37fe09a3293099e4df827e18d6f889f485",
+  "sourceTree": "602369c487d27177249095774b5f0b343a0ad083",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate generated C index evidence bytes and refuses one below before dispatch"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate generated C index evidence bytes and refuses one below before dispatch' --no-daemon",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.359,
+    "suiteSeconds": 3.376,
+    "timestamp": "2026-11-12T15:41:17.963Z",
+    "junitSha256": "8a6c18db6d749f15d028a3244331414cdad13ec42f2b800f72b0d8db995fc03f"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "indexEvidence": {
+      "modulePlanBytes": 394,
+      "programModelBytes": 33639,
+      "aggregateExactLimitBytes": 34033,
+      "oneByteUnderLimitBytes": 34032,
+      "oneUnderRemainingProgramModelBytes": 33638,
+      "programModelIncludesTrailingJsonWhitespaceBytes": 32768
+    },
+    "coverage": "SourceTreeGenerator produces valid plan/model evidence with one function, one global, and one type. At maximumIndexEvidenceBytes=34033, the full aggregate evidence is admitted; scripted ACP acknowledges a replacement and readback, and an injected validator verifies candidate bytes plus profile, index, and source-revision bindings before throwing its expected sentinel. The receipt reaches the final workspace snapshot and records verified process/sandbox cleanup. At maximumIndexEvidenceBytes=34032, the plan fits but the program model exceeds the remaining aggregate allowance by one byte; active graph admission returns the exact typed stable-file diagnostic before ACP dispatch or candidate validation. Sources and evidence remain unchanged, no graph/run/history attempt is retained, and a subsequent graph open at the exact limit succeeds.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator; does not qualify production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

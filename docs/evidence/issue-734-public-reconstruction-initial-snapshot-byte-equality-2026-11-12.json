@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "996b01df63b8c10a180f118f5b26d6ad8277969a",
+  "sourceParent": "9e09c9d0ff3c62e7a9ec380196f97ecf7951850d",
+  "sourceTree": "0c18577956451f0be73a6d944509fc1e0384052b",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 81.924,
+    "suiteSeconds": 81.937,
+    "timestamp": "2026-11-12T12:03:03.192Z",
+    "junitSha256": "d37291eba3d2faceb4163847168a80f5ee1499a966a1cb1456f97c596626fb7b"
+  },
+  "scope": {
+    "profile": "Generated C Make reconstruction profile with 256 KiB source grant",
+    "provider": "scripted ACP process through ArchivalReconstructionService.reconstructWithWorkspace",
+    "coverage": "Separate initial-snapshot controls set fileBytes and totalBytes independently to the exact byte size of a one-shot seeded existing target. Each dispatch confirms the target exists, the completed receipt binds its MODIFIED preimage/postimage and exact size, the final workspace snapshot completes, and process/sandbox cleanup is verified. Existing one-byte-under cases continue to require initial-snapshot RESOURCE_EXHAUSTED before dispatch.",
+    "qualificationLimits": [
+      "the seeded-existing-target fixture is rejected by later generation admission, so these equality cases prove snapshot admission and completed ACP/final-snapshot handling, not publication success",
+      "local scripted ACP evidence for Generated C Make only",
+      "does not establish live-provider behavior or other profiles",
+      "does not establish production repair validation under #236, publication crash recovery under #732, or durable provenance under #733",
+      "does not qualify hosted exact-head CI or the complete #734/#63 acceptance matrix"
+    ]
+  }
+}
