@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebBoundedReadsHttpTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T23:49:09.583Z" hostname="whatsername" time="21.833">
+  <properties/>
+  <testcase name="upload request quota does not block unrelated HTTP status reads()" classname="decompengine.web.WebBoundedReadsHttpTest" time="21.822"/>
+  <system-out><![CDATA[issue-162-upload-quota-status-v1 held_upload_workers=2 third_upload=503/UPLOAD_CAPACITY request_body_bytes_sent=0 status_responses=4 status_max_ms=52 status_latencies_ms=22,26,46,52
+issue-162-upload-quota-status-v1 cleanup=verified subsequent_upload=201 admission=empty
+]]></system-out>
+  <system-err><![CDATA[web-http-failure request_id=197bf579-ceaf-444a-b69e-d23006e63ebb status=503 code=UPLOAD_CAPACITY
+web-http-failure request_id=e20ffb2d-251f-4d37-baf5-9160cf480d9d status=422 code=INVALID_ELF
+web-http-failure request_id=b3d44d3c-390c-4c65-9110-d9419d1049e1 status=422 code=INVALID_ELF
+]]></system-err>
+</testsuite>

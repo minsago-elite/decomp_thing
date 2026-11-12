@@ -69,6 +69,15 @@ Verification adds reservation overlap/release, exact free-space boundaries,
 accounting-error recovery, retained-report refusal before body reads, status reads
 during blocked transfers, and mutual exclusion between uploads and workflows.
 
+The real-listener test `WebBoundedReadsHttpTest.upload request quota does not block
+unrelated HTTP status reads` complements that service-level evidence: two streamed
+uploads remain admitted in staging, a third header-only request receives
+`503 UPLOAD_CAPACITY` before sending a body, and four concurrent status reads finish
+within 52 ms in the recorded local run. Both held invalid fixtures are cleaned up,
+and a subsequent valid upload succeeds. The run is retained at
+[issue-162-upload-quota-status-2026-11-13](evidence/issue-162-upload-quota-status-2026-11-13.json).
+It does not inject a disk-full HTTP condition or measure physical-disk contention.
+
 The packaged upload browser qualification passed against `51ff358`, using the
 pinned Chrome driver with test-only `--no-sandbox`. It covered session restoration,
 lost-response reload/retry, invalid and oversized request rejection, and a real
