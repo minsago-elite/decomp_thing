@@ -69,13 +69,17 @@ Verification adds reservation overlap/release, exact free-space boundaries,
 accounting-error recovery, retained-report refusal before body reads, status reads
 during blocked transfers, and mutual exclusion between uploads and workflows.
 
-`UploadServerTest` also exercises the actual legacy dashboard and status HTTP routes
-while the dashboard is paused at the read observer immediately before the physical
-metadata read for four distinct jobs. Each independent status response must return
-HTTP 200 within two seconds before that record is released; the completed dashboard
-must contain every uploaded job ID. This is a deterministic local responsiveness
-regression, not a blocked-kernel-I/O test, throughput benchmark or hosted qualification
-of sustained production load.
+`UploadServerTest` exercises the authenticated SPA collection and status HTTP routes
+while four distinct physical metadata reads are paused by the listing observer. Two
+other HTTP multipart uploads hold active staging reservations throughout those pauses;
+a third upload must receive `UPLOAD_CAPACITY`, and a competing collection request must
+receive `LISTING_BUSY`. Each independent status response must return HTTP 200 within
+two seconds before the paused read is released. The completed collection must include
+every prior job as a successful row with its expected filename and status, and the two
+held uploads must then publish successfully and remove their staging directories.
+This is a deterministic local responsiveness regression using an injected read pause,
+not a blocked-kernel-I/O test, throughput benchmark or hosted qualification of sustained
+production load.
 
 The packaged upload browser qualification passed against `51ff358`, using the
 pinned Chrome driver with test-only `--no-sandbox`. It covered session restoration,

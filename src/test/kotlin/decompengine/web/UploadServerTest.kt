@@ -48,6 +48,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.put
 import java.net.URI
 import java.nio.ByteBuffer
@@ -611,8 +612,26 @@ class UploadServerTest {
     }
 
     @Test
-    fun `dashboard HTTP listing remains responsive to status HTTP reads across slow records`() = withServer { server, _ ->
-        val jobIds = (1..5).map { uploadedJobId(server) }
+    fun `dashboard HTTP listing remains responsive under upload and listing admission pressure`() = withServer(uiMode = WebUiMode.SPA) { server, root ->
+        fun uploadViaApi(filename: String): Response {
+            val boundary = "dashboard-admission-boundary"
+            val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"$filename\"\r\n".toByteArray() +
+                "Content-Type: application/x-elf\r\n\r\n".toByteArray() + elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+            return request(server, "POST", "/api/v1/jobs", body, mapOf(
+                "Content-Type" to "multipart/form-data; boundary=$boundary",
+                "Accept" to "application/json",
+                "Idempotency-Key" to "dashboard-${filename.substringBefore('.')}",
+            ))
+        }
+        val existingJobs = (1..5).associate { index ->
+            val filename = "slow-listing-$index.elf"
+            val response = uploadViaApi(filename)
+            assertEquals(201, response.status)
+            val id = Json.parseToJsonElement(response.body.decodeToString()).jsonObject.getValue("data").jsonObject
+                .getValue("jobId").toString().trim('"')
+            id to filename
+        }
+        val jobIds = existingJobs.keys.toList()
         val statusJobId = jobIds.last()
         val slowedJobIds = jobIds.dropLast(1).toSet()
         val service = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }
@@ -630,40 +649,115 @@ class UploadServerTest {
             }
         }
 
-        val callers = java.util.concurrent.Executors.newFixedThreadPool(2)
+        data class HeldUpload(val socket: java.net.Socket, val suffix: ByteArray)
+        val heldUploads = mutableListOf<HeldUpload>()
+        val callers = java.util.concurrent.Executors.newFixedThreadPool(4)
         try {
             // Prime the shared legacy session before concurrent requests touch the fixture map.
-            val baseline = request(server, "GET", "/api/jobs/$statusJobId")
+            val baseline = request(server, "GET", "/api/v1/jobs/$statusJobId", headers = mapOf("Accept" to "application/json"))
             assertEquals(200, baseline.status)
 
-            val dashboard = callers.submit<Response> { request(server, "GET", "/") }
+            val uploadHeaders = sessions.getOrPut(server) { legacySessionHeaders(server) }
+            fun holdMultipartUpload(index: Int): HeldUpload {
+                val boundary = "held-upload-$index"
+                val prefix = "--$boundary\r\n".toByteArray() +
+                    "Content-Disposition: form-data; name=\"binary\"; filename=\"held-$index.elf\"\r\n".toByteArray() +
+                    "Content-Type: application/x-elf\r\n\r\n".toByteArray()
+                val content = elfFixture()
+                val suffix = "\r\n--$boundary--\r\n".toByteArray()
+                val socket = java.net.Socket("127.0.0.1", server.serverPort).apply { soTimeout = 10_000 }
+                val origin = "http://127.0.0.1:${server.serverPort}"
+                val requestHeaders = buildString {
+                    append("POST /api/v1/jobs HTTP/1.1\r\nHost: 127.0.0.1:${server.serverPort}\r\n")
+                    append("Origin: $origin\r\nAccept: application/json\r\n")
+                    append("Content-Type: multipart/form-data; boundary=$boundary\r\n")
+                    append("Idempotency-Key: held-dashboard-upload-$index\r\n")
+                    append("Content-Length: ${prefix.size + content.size + suffix.size}\r\nConnection: close\r\n")
+                    uploadHeaders.forEach { (name, value) -> append("$name: $value\r\n") }
+                    append("\r\n")
+                }.toByteArray()
+                socket.getOutputStream().apply {
+                    write(requestHeaders)
+                    write(prefix)
+                    write(content)
+                    flush()
+                }
+                return HeldUpload(socket, suffix)
+            }
+            fun awaitStageCount(expected: Int) {
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+                var observed = 0
+                while (System.nanoTime() < deadline) {
+                    observed = Files.newDirectoryStream(root, ".upload-stream-v1-*").use { it.count() }
+                    if (observed == expected) return
+                    Thread.sleep(10)
+                }
+                assertEquals(expected, observed, "expected $expected HTTP uploads to hold active staging reservations")
+            }
+            fun finishHeldUpload(upload: HeldUpload) {
+                upload.socket.getOutputStream().apply { write(upload.suffix); flush() }
+                val response = upload.socket.getInputStream().readBytes().decodeToString()
+                upload.socket.close()
+                assertTrue(response.startsWith("HTTP/1.1 201"), "held upload should complete after dashboard collection")
+            }
+
+            // Keep both HTTP upload reservations active while dashboard and status requests run.
+            for (index in 1..2) {
+                heldUploads += holdMultipartUpload(index)
+                awaitStageCount(index)
+            }
+            val excessUpload = uploadViaApi("over-capacity.elf")
+            assertEquals(503, excessUpload.status)
+            assertTrue(excessUpload.body.decodeToString().contains("UPLOAD_CAPACITY"))
+
+            val dashboard = callers.submit<Response> {
+                request(server, "GET", "/api/v1/jobs", headers = mapOf("Accept" to "application/json"))
+            }
             val observedSlowRecords = mutableSetOf<String>()
             repeat(slowedJobIds.size) {
                 val listedJob = enteredReads.poll(5, java.util.concurrent.TimeUnit.SECONDS)
                 assertNotNull(listedJob, "The dashboard did not reach each controlled legacy record read")
                 observedSlowRecords += listedJob
+                awaitStageCount(2)
 
                 val startedAt = System.nanoTime()
-                val status = callers.submit<Response> { request(server, "GET", "/api/jobs/$statusJobId") }
+                val status = callers.submit<Response> {
+                    request(server, "GET", "/api/v1/jobs/$statusJobId", headers = mapOf("Accept" to "application/json"))
+                }
                     .get(2, java.util.concurrent.TimeUnit.SECONDS)
                 val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
                 assertEquals(200, status.status, "status request during dashboard read for $listedJob")
-                assertTrue(status.body.decodeToString().contains(statusJobId), "status response must identify its requested job")
+                val statusData = Json.parseToJsonElement(status.body.decodeToString()).jsonObject.getValue("data").jsonObject
+                assertEquals(statusJobId, statusData.getValue("jobId").toString().trim('"'))
                 assertTrue(elapsedMs <= 2_000, "status HTTP request took ${elapsedMs}ms during a stalled listing record")
                 assertTrue(!dashboard.isDone, "the dashboard must still be collecting records while status remains responsive")
+
+                val competingListing = request(server, "GET", "/api/v1/jobs", headers = mapOf("Accept" to "application/json"))
+                assertEquals(503, competingListing.status)
+                assertTrue(competingListing.body.decodeToString().contains("LISTING_BUSY"))
                 readPermits.release()
             }
 
             assertEquals(slowedJobIds, observedSlowRecords, "the dashboard should remain active across distinct records")
             val completedDashboard = dashboard.get(5, java.util.concurrent.TimeUnit.SECONDS)
             assertEquals(200, completedDashboard.status)
-            val dashboardBody = completedDashboard.body.decodeToString()
-            for (jobId in jobIds) assertTrue(dashboardBody.contains(jobId), "completed listing should include $jobId")
-            assertTrue(dashboardBody.contains("boundary.elf"))
+            val dashboardData = Json.parseToJsonElement(completedDashboard.body.decodeToString()).jsonObject
+                .getValue("data").jsonObject
+            val listedRows = dashboardData.getValue("items").jsonArray.map { it.jsonObject }
+                .associateBy { it.getValue("jobId").toString().trim('"') }
+            assertEquals(existingJobs.keys, listedRows.keys, "completed listing should contain every retained job")
+            for ((jobId, filename) in existingJobs) {
+                val row = assertNotNull(listedRows[jobId], "listing should contain a successful row for $jobId")
+                assertEquals(filename, row.getValue("displayFilename").toString().trim('"'))
+                assertEquals("uploaded", row.getValue("status").toString().trim('"'))
+            }
+            heldUploads.forEach(::finishHeldUpload)
+            awaitStageCount(0)
         } finally {
             // Unpark any physical read even when an assertion fails, then let the server drain.
             readPermits.release(slowedJobIds.size + 1)
             service.listingReadObserver = {}
+            heldUploads.forEach { it.socket.close() }
             callers.shutdownNow()
             assertTrue(callers.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
         }
@@ -2750,12 +2844,14 @@ class UploadServerTest {
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
         reconstructor: JobReconstructor = JobReconstructor { _, _ -> },
         profiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
+        uiMode: WebUiMode = WebUiMode.LEGACY,
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
         val parent = Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories()
         val dataDir = createTempDirectory(parent, "case-")
         val directExecutor = Executor { command -> command.run() }
-        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, sourceProfiles = profiles)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor,
+            uiMode = uiMode, sourceProfiles = profiles)
         server.start()
         try {
             block(server, dataDir)
