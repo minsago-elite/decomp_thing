@@ -134,18 +134,24 @@ is not evidence/activity readiness: those routes intentionally require explicit 
 each layout/contrast/focus pass, the audit activates the activity/exploration/history/receipt
 controls and requires populated content and successful reads. The source-search form and
 populated results each have independent route coverage, and visible input values and placeholders
-are included in contrast measurements. Each explicit action's
-elapsed time and expected reads are recorded separately in `interactions`, not folded into
-route timing or claimed as a qualified interaction p95. The navigation gate asserts p95 ≤1.5 s
+are included in contrast measurements. Each explicit action's page, action, context, elapsed time
+and ordered fixture reads are validated against the trusted fixture contract. The finite,
+nonnegative raw interaction samples are tied to those records and their samples/median/p95 summary
+is recomputed into `report.json`. They remain separate from route timing and have no interaction
+budget, so the summary is not a qualified interaction p95 threshold. The navigation gate asserts p95 ≤1.5 s
 cold, ≤100 ms feedback and ≤500 ms first route data, the loopback budgets above, and keeps the
 raw navigation samples and median/p95 in `report.json`.
 
 The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
 chunks and worker are real packaged responses. That isolates browser-side navigation and
-rendering work. It is not the constrained 4× CPU / 10 Mbit profile, a fresh browser process per
-cold load, a server-latency measurement or a cross-engine result. A local run on a development
-host measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI
-retains its own numbers.
+rendering work. The default `--profile reference` preserves browser defaults and applies the
+documented navigation budgets. An opt-in `--profile constrained` applies 4× CPU throttling and
+symmetric 10 Mbit/s throughput to each audit page target. It records and validates the same timing
+evidence but does not apply the reference timing thresholds; it creates no new interaction budget
+or CI gate. The profile does not create a fresh browser process per cold load, measure server
+latency or establish a cross-engine result. A local reference-profile run on a development host
+measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI retains its
+own numbers.
 
 Heavy browser work is bounded rather than deferred: source previews read at most one
 64 KiB chunk and mount at most 200 rows, and syntax highlighting is an explicit action that runs

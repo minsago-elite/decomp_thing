@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+	<testcase name="only the exact Playwright WebKit screenshot style violation is classified as driver-owned" time="0.001311" classname="test" file="/home/june/.t3/worktrees/decomp_thing/t3-cc0c2dbb/build/orchestration/issue623-interaction-integrity-2b112/scripts/test-packaged-browser-engine-adapter.mjs"/>
+	<testcase name="every layout and fresh focus navigation populates reads and distinct visible content" time="0.327377" classname="test" file="/home/june/.t3/worktrees/decomp_thing/t3-cc0c2dbb/build/orchestration/issue623-interaction-integrity-2b112/scripts/test-packaged-browser-engine-adapter.mjs"/>
+	<testcase name="attempt shells and missing/hidden highlighted tokens cannot satisfy populated predicates" time="0.006743" classname="test" file="/home/june/.t3/worktrees/decomp_thing/t3-cc0c2dbb/build/orchestration/issue623-interaction-integrity-2b112/scripts/test-packaged-browser-engine-adapter.mjs"/>
+	<testcase name="adapter rejects each missing content selector, unused/stale read and failed HTTP read" time="0.037979" classname="test" file="/home/june/.t3/worktrees/decomp_thing/t3-cc0c2dbb/build/orchestration/issue623-interaction-integrity-2b112/scripts/test-packaged-browser-engine-adapter.mjs"/>
+	<testcase name="metadata timing deliberately does not claim explicit interactions" time="0.001614" classname="test" file="/home/june/.t3/worktrees/decomp_thing/t3-cc0c2dbb/build/orchestration/issue623-interaction-integrity-2b112/scripts/test-packaged-browser-engine-adapter.mjs"/>
+	<testcase name="HTTP fixture boundary serves native attachment bytes without reaching authenticated upstream API" time="0.041705" classname="test" file="/home/june/.t3/worktrees/decomp_thing/t3-cc0c2dbb/build/orchestration/issue623-interaction-integrity-2b112/scripts/test-packaged-browser-engine-adapter.mjs"/>
+	<!-- tests 6 -->
+	<!-- suites 0 -->
+	<!-- pass 6 -->
+	<!-- fail 0 -->
+	<!-- cancelled 0 -->
+	<!-- skipped 0 -->
+	<!-- todo 0 -->
+	<!-- duration_ms 602.525646 -->
+</testsuites>
