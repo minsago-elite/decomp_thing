@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "2e8927bf78e51b6175fd9900b4561e5f5f782719",
+  "sourceParent": "ab6986112b5c8abc71f05f2827a2081d285f30a7",
+  "sourceTree": "29e9f58cea09d926192545fdcd18b02c32c0e1dd",
+  "tests": [
+    "decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes"
+  ],
+  "command": "DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 JAVA_OPTS='-Xmx8g' ./gradlew --offline test --console=plain -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.acp.AcpAgentHarnessTest.public ACP reconstruction enforces mutation grants and preserves publication on limit outcomes'",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 75.401,
+    "suiteSeconds": 75.416,
+    "timestamp": "2026-11-12T08:39:32.843Z",
+    "junitSha256": "70f5ccac992f8ee2644f84cb794e3b2e4ae59c52d7f5d99329ac925edf1ba52c"
+  },
+  "scope": {
+    "profile": "Generated C Make public reconstruction through a scripted ACP peer",
+    "coverage": "The peer acknowledges the authorized source write and returns the refusal stop reason. The workflow refuses publication while the retained request-bound receipt records REFUSED and the observed CREATED target change with the expected size and digest. Invocation evidence confirms final-snapshot completion and verified cleanup; accepted publication metadata remains unchanged and publication residue is absent.",
+    "qualificationLimits": [
+      "local scripted ACP only; no live provider qualification",
+      "does not qualify production repair validation under #236",
+      "does not establish publication crash recovery under #732 or durable provenance under #733",
+      "does not establish hosted exact-head CI or complete #734/#63 acceptance"
+    ]
+  }
+}

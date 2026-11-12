@@ -1660,6 +1660,29 @@ providers, other profiles, hosted exact-head CI, production validation under
 #236, publication crash recovery under #732, durable provenance under #733, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Public reconstruction model refusal after acknowledged write — 2026-11-12
+
+The Generated C Make public reconstruction fixture now returns the ACP
+`refusal` stop reason after an authorized source write has been acknowledged.
+The workflow refuses publication while retaining the request-bound returned
+receipt: it records `REFUSED`, the observed `CREATED` change and its exact
+source digest and byte count. Invocation evidence records final snapshot
+completion and verified process/sandbox cleanup. The previously accepted
+publication metadata remains unchanged, and no publication transaction
+residue remains.
+
+The focused local scripted-ACP method passed with one test and zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-public-reconstruction-refusal-after-write-2026-11-12.xml)
+has SHA-256
+`70f5ccac992f8ee2644f84cb794e3b2e4ae59c52d7f5d99329ac925edf1ba52c`;
+the [provenance record](evidence/issue-734-public-reconstruction-refusal-after-write-2026-11-12.json)
+binds the source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence for Generated C Make. It does not qualify
+live providers, production repair validation under #236, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Captured repair deletion patch-count boundary — 2026-11-11
 
 Source commit `add817e0ab90be33dbc5b98a9345d7cc20b99ebf` adds a focused
