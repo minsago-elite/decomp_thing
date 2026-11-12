@@ -1075,24 +1075,39 @@ class UploadServerTest {
         assertEquals(200, request(server, "GET", "/api/jobs/${jobIds.last()}").status)
 
         val firstRead = java.util.concurrent.CountDownLatch(1)
-        val releaseRead = java.util.concurrent.CountDownLatch(1)
+        val releaseFirstRead = java.util.concurrent.CountDownLatch(1)
         val listingReads = java.util.concurrent.atomic.AtomicInteger()
+        val distinctRecordsRead = java.util.concurrent.atomic.AtomicInteger()
+        val seenJobRecords = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val firstReadHeld = java.util.concurrent.atomic.AtomicBoolean()
+        val checkpointRecords = listOf(3, 6)
+        val checkpointReached = checkpointRecords.associateWith { java.util.concurrent.CountDownLatch(1) }
+        val releaseCheckpoint = checkpointRecords.associateWith { java.util.concurrent.CountDownLatch(1) }
+        val checkpointStatusResponses = checkpointRecords.associateWith { java.util.concurrent.CountDownLatch(4) }
+        val heldCheckpoints = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
         val statusWarmup = java.util.concurrent.CountDownLatch(4)
         val statusWarmupResponses = java.util.concurrent.atomic.AtomicInteger()
         val keepStatusReadersRunning = java.util.concurrent.atomic.AtomicBoolean(true)
         data class StatusSample(
             val elapsedMs: Long,
-            val listingReadsAtStart: Int,
+            val distinctRecordsAtStart: Int,
+            val distinctRecordsAtResponse: Int,
             val dashboardStillRunningAtResponse: Boolean,
         )
         val statusSamples = java.util.concurrent.ConcurrentLinkedQueue<StatusSample>()
         val maximumStatusMillis = 2_000L
         server.listingReadObserver = { relative ->
             if (relative.endsWith("/job.json")) {
-                val readNumber = listingReads.incrementAndGet()
-                if (readNumber == 1) {
+                listingReads.incrementAndGet()
+                val recordNumber = if (seenJobRecords.add(relative)) distinctRecordsRead.incrementAndGet()
+                    else distinctRecordsRead.get()
+                if (recordNumber == 1 && firstReadHeld.compareAndSet(false, true)) {
                     firstRead.countDown()
-                    check(releaseRead.await(15, java.util.concurrent.TimeUnit.SECONDS))
+                    check(releaseFirstRead.await(15, java.util.concurrent.TimeUnit.SECONDS))
+                }
+                if (recordNumber in checkpointRecords && heldCheckpoints.add(recordNumber)) {
+                    checkpointReached.getValue(recordNumber).countDown()
+                    check(releaseCheckpoint.getValue(recordNumber).await(10, java.util.concurrent.TimeUnit.SECONDS))
                 }
                 // Simulate a sustained slow metadata scan after the first controlled stall.
                 Thread.sleep(250)
@@ -1113,53 +1128,71 @@ class UploadServerTest {
             val statusReaders = (1..2).map {
                 statusExecutor.submit {
                     while (keepStatusReadersRunning.get()) {
-                        val readsAtStart = listingReads.get()
+                        val recordsAtStart = distinctRecordsRead.get()
                         val startedAt = System.nanoTime()
                         val status = request(server, "GET", "/api/jobs/${jobIds.last()}")
                         val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
                         assertEquals(200, status.status, status.body.decodeToString())
                         assertTrue(status.body.decodeToString().contains(jobIds.last()))
-                        statusSamples.add(StatusSample(elapsedMs, readsAtStart, !dashboard.isDone))
-                        if (statusWarmupResponses.incrementAndGet() <= 4) statusWarmup.countDown()
+                        val recordsAtResponse = distinctRecordsRead.get()
+                        val dashboardStillRunning = !dashboard.isDone
+                        statusSamples.add(StatusSample(elapsedMs, recordsAtStart, recordsAtResponse, dashboardStillRunning))
+                        if (recordsAtStart == 1 && statusWarmupResponses.incrementAndGet() <= 4) statusWarmup.countDown()
+                        if (recordsAtStart == recordsAtResponse && dashboardStillRunning) {
+                            checkpointStatusResponses[recordsAtStart]?.countDown()
+                        }
                         Thread.sleep(10)
                     }
                 }
             }
             assertTrue(statusWarmup.await(5, java.util.concurrent.TimeUnit.SECONDS),
                 "Concurrent HTTP status reads did not complete while the dashboard metadata read was held")
-            assertEquals(1, listingReads.get(), "Warmup must run during the first held physical metadata read")
+            assertEquals(1, distinctRecordsRead.get(), "Warmup must run during the first held record read")
 
-            releaseRead.countDown()
+            releaseFirstRead.countDown()
+            checkpointRecords.forEach { checkpoint ->
+                assertTrue(checkpointReached.getValue(checkpoint).await(10, java.util.concurrent.TimeUnit.SECONDS),
+                    "Dashboard did not reach listing record $checkpoint")
+                assertFalse(dashboard.isDone, "Dashboard should remain active at listing record $checkpoint")
+                assertTrue(checkpointStatusResponses.getValue(checkpoint).await(2, java.util.concurrent.TimeUnit.SECONDS),
+                    "No HTTP status progress completed while listing record $checkpoint was held")
+                releaseCheckpoint.getValue(checkpoint).countDown()
+            }
             val completedDashboard = dashboard.get(10, java.util.concurrent.TimeUnit.SECONDS)
             keepStatusReadersRunning.set(false)
             statusReaders.forEach { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
             val body = completedDashboard.body.decodeToString()
             assertEquals(200, completedDashboard.status)
             jobIds.forEach { assertTrue(body.contains(it), "Completed dashboard omitted $it") }
-            assertTrue(listingReads.get() >= jobIds.size,
-                "Expected physical reads across every listed record; observed ${listingReads.get()}")
+            assertTrue(distinctRecordsRead.get() >= jobIds.size,
+                "Expected physical reads across every listed record; observed ${distinctRecordsRead.get()}")
 
             val samples = statusSamples.toList()
             assertTrue(samples.size >= 16, "Expected sustained status traffic during listing; observed ${samples.size} responses")
             samples.forEach { sample ->
                 assertTrue(sample.elapsedMs < maximumStatusMillis,
-                    "HTTP status request took ${sample.elapsedMs}ms at listing read ${sample.listingReadsAtStart}")
+                    "HTTP status request took ${sample.elapsedMs}ms after ${sample.distinctRecordsAtStart} distinct records")
             }
             val sortedLatencies = samples.map(StatusSample::elapsedMs).sorted()
             val p95Index = ((sortedLatencies.size * 95 + 99) / 100 - 1).coerceAtLeast(0)
             assertTrue(sortedLatencies[p95Index] < maximumStatusMillis,
                 "HTTP status p95 was ${sortedLatencies[p95Index]}ms across ${samples.size} responses")
             val overlapping = samples.filter { it.dashboardStillRunningAtResponse }
-            assertTrue(samples.any {
-                it.listingReadsAtStart in 2 until jobIds.size && it.dashboardStillRunningAtResponse
-            }, "No status response completed during the middle of the dashboard inventory")
+            checkpointRecords.forEach { checkpoint ->
+                assertTrue(samples.count {
+                    it.distinctRecordsAtStart == checkpoint && it.distinctRecordsAtResponse == checkpoint &&
+                        it.dashboardStillRunningAtResponse
+                } >= 4, "Expected four completed status responses while listing record $checkpoint was held")
+            }
             println("issue-162-status-responsiveness-v1 responses=${samples.size} " +
                 "overlapping=${overlapping.size} p95_ms=${sortedLatencies[p95Index]} " +
-                "max_ms=${sortedLatencies.last()} listing_reads=${listingReads.get()} " +
-                "samples=${samples.joinToString(",") { "${it.elapsedMs}:${it.listingReadsAtStart}:${it.dashboardStillRunningAtResponse}" }}")
+                "max_ms=${sortedLatencies.last()} distinct_records=${distinctRecordsRead.get()} " +
+                "physical_reads=${listingReads.get()} " +
+                "samples=${samples.joinToString(",") { "${it.elapsedMs}:${it.distinctRecordsAtStart}:${it.distinctRecordsAtResponse}:${it.dashboardStillRunningAtResponse}" }}")
         } finally {
             keepStatusReadersRunning.set(false)
-            releaseRead.countDown()
+            releaseFirstRead.countDown()
+            checkpointRecords.forEach { releaseCheckpoint.getValue(it).countDown() }
             server.listingReadObserver = {}
             dashboardExecutor.shutdownNow()
             statusExecutor.shutdownNow()
