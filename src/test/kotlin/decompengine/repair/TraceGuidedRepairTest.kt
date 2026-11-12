@@ -3763,6 +3763,173 @@ class TraceGuidedRepairTest {
         }
     }
 
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active legacy repair admits exact response byte limit and refuses one byte under before validation`() {
+        val targetPath = "src/modules/reconstructed.c"
+        val candidate = "/* bounded provider response */\nint decomp_engine_main(void) { return 1; }\n"
+        val messageContent =
+            "{\"summary\":\"bounded\",\"patches\":[{\"relativePath\":${JsonPrimitive(targetPath)}," +
+                "\"replacement\":${JsonPrimitive(candidate)}}]}"
+        val responseBody =
+            "{\"choices\":[{\"message\":{\"content\":${JsonPrimitive(messageContent)}}}]}"
+        val responseBytes = responseBody.toByteArray(Charsets.UTF_8)
+        val requests = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/v1/chat/completions") { exchange ->
+            exchange.requestBody.use { it.readBytes() }
+            requests.incrementAndGet()
+            exchange.sendResponseHeaders(200, responseBytes.size.toLong())
+            exchange.responseBody.use { it.write(responseBytes) }
+        }
+        server.start()
+        val endpoint = URI.create("http://127.0.0.1:${server.address.port}/v1")
+        val limits = AgentExecutionLimits(maxOutputBytes = 1024 * 1024)
+        assertTrue(responseBytes.size.toLong() < limits.maxOutputBytes)
+
+        fun strategy(validate: (RepairCandidateValidationRequest) -> RepairCandidateValidationOutcome) =
+            object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome = validate(request)
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("legacy response boundary must use the injected candidate validator")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("legacy response boundary must use the injected candidate validator")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport =
+                    error("legacy response boundary must use the injected candidate validator")
+            }
+
+        fun openLoop(project: Path, budget: RepairResourceBudget, validation: RepairValidationStrategy) =
+            TestRepairRuntimeAccess.openLoop(
+                harness = RepairClientAgentHarness(
+                    HttpOpenAiCompatibleRepairClient(
+                        apiKey = "test-key",
+                        model = "test-model",
+                        baseUrl = endpoint,
+                        defaultBudget = budget,
+                        defaultLimits = limits,
+                    ),
+                ),
+                history = RepairHistory(project.resolve("reports/repair_history.json")),
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = limits,
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = budget,
+                allowTestOnlyValidation = true,
+                faultInjector = null,
+            )
+
+        try {
+            val exactBudget = RepairResourceBudget(
+                maximumRegressionInputBytes = 64,
+                maximumResponseBytes = responseBytes.size.toLong(),
+            )
+            val exactProject = createProject(
+                createRepairTempDirectory("repair-active-response-exact-").resolve("project"),
+                reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+            )
+            val exactSource = exactProject.resolve(targetPath).readBytes()
+            val exactBaseline = ModuleRevisionGraph.open(
+                exactProject, GeneratedCRepairIndexProfile, exactBudget,
+            ).use { graph ->
+                Triple(graph.snapshot.headId, graph.snapshot.nodes.size, graph.snapshot.runs.size)
+            }
+            val exactSentinel = IllegalStateException("exact response reached candidate validator")
+            var exactValidationCalls = 0
+            val exactLoop = openLoop(exactProject, exactBudget, strategy { request ->
+                exactValidationCalls++
+                assertContentEquals(candidate.toByteArray(Charsets.UTF_8), request.candidateSources.getValue(targetPath))
+                throw exactSentinel
+            })
+            try {
+                val failure = assertFailsWith<IllegalStateException> {
+                    exactLoop.repairCompileError(
+                        exactProject,
+                        CompileFailure(listOf("make"), 2, "", "$targetPath: original compile error"),
+                        emptyList(),
+                    )
+                }
+                assertTrue(failure === exactSentinel)
+                assertEquals(1, requests.get(), "exact response must be served once")
+                assertEquals(1, exactValidationCalls)
+                assertContentEquals(exactSource, exactProject.resolve(targetPath).readBytes())
+                ModuleRevisionGraph.open(exactProject, GeneratedCRepairIndexProfile, exactBudget).use { graph ->
+                    assertNull(graph.snapshot.pendingAttemptId)
+                    assertEquals(exactBaseline.first, graph.snapshot.headId)
+                    assertEquals(exactBaseline.second + 1, graph.snapshot.nodes.size)
+                    assertEquals(exactBaseline.third + 1, graph.snapshot.runs.size)
+                    assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                    assertEquals(RepairRunStatus.VALIDATION_FAILED, graph.snapshot.runs.last().status)
+                }
+            } finally {
+                exactLoop.close()
+            }
+
+            val overBudget = RepairResourceBudget(
+                maximumRegressionInputBytes = 64,
+                maximumResponseBytes = responseBytes.size.toLong() - 1,
+            )
+            val overProject = createProject(
+                createRepairTempDirectory("repair-active-response-under-limit-").resolve("project"),
+                reconstructedSource = "int decomp_engine_main(void) { return 0; }\n",
+            )
+            val overSource = overProject.resolve(targetPath).readBytes()
+            val overBaseline = ModuleRevisionGraph.open(
+                overProject, GeneratedCRepairIndexProfile, overBudget,
+            ).use { graph ->
+                Triple(graph.snapshot.headId, graph.snapshot.nodes.size, graph.snapshot.runs.size)
+            }
+            var overValidationCalls = 0
+            val overLoop = openLoop(overProject, overBudget, strategy {
+                overValidationCalls++
+                error("undersized response budget must refuse before validation")
+            })
+            try {
+                val failure = assertFailsWith<AgentExecutionException> {
+                    overLoop.repairCompileError(
+                        overProject,
+                        CompileFailure(listOf("make"), 2, "", "$targetPath: original compile error"),
+                        emptyList(),
+                    )
+                }
+                assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.failure.kind)
+                assertEquals(
+                    "OpenAI-compatible response exceeds its ${responseBytes.size - 1}-byte transport limit",
+                    failure.failure.message,
+                )
+                assertEquals(2, requests.get())
+                assertEquals(0, overValidationCalls)
+                assertContentEquals(overSource, overProject.resolve(targetPath).readBytes())
+                ModuleRevisionGraph.open(overProject, GeneratedCRepairIndexProfile, overBudget).use { graph ->
+                    assertNull(graph.snapshot.pendingAttemptId)
+                    assertEquals(overBaseline.first, graph.snapshot.headId)
+                    assertEquals(overBaseline.second + 1, graph.snapshot.nodes.size)
+                    assertEquals(overBaseline.third + 1, graph.snapshot.runs.size)
+                    assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                    assertEquals(RepairRunStatus.RESOURCE_EXHAUSTED, graph.snapshot.runs.last().status)
+                }
+            } finally {
+                overLoop.close()
+            }
+        } finally {
+            server.stop(0)
+        }
+    }
+
     private fun activeAcpRepairConsumesReceiptBoundValidationResult(
         compileValid: Boolean,
         regressionInputs: List<ProcessInput> = emptyList(),
