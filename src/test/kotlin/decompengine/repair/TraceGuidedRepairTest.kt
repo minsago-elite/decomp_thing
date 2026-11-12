@@ -6397,6 +6397,106 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair admits exact required context module file and byte limits`() {
+        val targetPath = "src/modules/reconstructed.c"
+        val contextPath = "src/modules/secondary.c"
+        val targetBytes = "int decomp_engine_main(void) { return 0; }\n".toByteArray(Charsets.UTF_8)
+        val contextBytes = "int secondary(void) { return 0; }\n".toByteArray(Charsets.UTF_8)
+        val requiredBytes = targetBytes.size.toLong() + contextBytes.size
+        assertEquals(requiredBytes, 77L, "the explicit source fixtures define the exact aggregate boundary")
+
+        val project = createProject(
+            createRepairTempDirectory("repair-active-context-exact-limit-").resolve("project"),
+            reconstructedSource = targetBytes.toString(Charsets.UTF_8),
+        )
+        project.resolve(contextPath).writeBytes(contextBytes)
+        val profile = DeclarativeRepairIndexProfile(
+            "active-context-exact-limit-v1",
+            RepairIndexLayout(
+                sourcePaths = listOf(targetPath, contextPath).sorted(),
+                editablePaths = listOf(targetPath),
+                modules = listOf(
+                    RepairModuleEvidence("main", listOf(targetPath)),
+                    RepairModuleEvidence("secondary", listOf(contextPath)),
+                ),
+            ),
+        )
+        val budget = RepairResourceBudget(
+            maximumContextModules = 2,
+            maximumContextFiles = 2,
+            maximumContextBytes = requiredBytes,
+            maximumPatchFiles = 2,
+            maximumPatchBytes = requiredBytes,
+        )
+        val baselineHead = ModuleRevisionGraph.open(project, profile, budget).use { it.snapshot.headId }
+        var dispatches = 0
+        var observedFiles: Map<String, ByteArray>? = null
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("strict captured repair must not expose a host workspace")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                dispatches++
+                observedFiles = initialFiles.mapValues { (_, bytes) -> bytes.copyOf() }
+                return AgentExecutionResult(AgentStopReason.NO_CHANGES)
+            }
+        }
+        val loop = TestRepairRuntimeAccess.openLoop(
+            harness = harness,
+            history = RepairHistory(project.resolve("reports/repair_history.json")),
+            profile = profile,
+            validationStrategy = GeneratedCRepairValidationStrategy(TestOnlyGeneratedCRepairValidationBoundary),
+            stagingAuthority = CapturedRepairStagingAuthority,
+            limits = AgentExecutionLimits(),
+            cancellation = AgentCancellation.NONE,
+            onAgentEvent = {},
+            resourceBudget = budget,
+            allowTestOnlyValidation = true,
+            faultInjector = null,
+        )
+
+        try {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                loop.repairCompileError(
+                    project,
+                    CompileFailure(
+                        listOf("cc"),
+                        2,
+                        "",
+                        "$targetPath: compiler error\n$contextPath: compiler error",
+                    ),
+                    emptyList(),
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("repair agent stopped with no_changes"))
+        } finally {
+            loop.close()
+        }
+
+        assertEquals(1, dispatches, "equality at all three required-context ceilings must reach the harness")
+        val dispatched = assertNotNull(observedFiles)
+        assertEquals(setOf(targetPath, contextPath), dispatched.keys)
+        assertContentEquals(targetBytes, dispatched.getValue(targetPath))
+        assertContentEquals(contextBytes, dispatched.getValue(contextPath))
+        assertContentEquals(targetBytes, project.resolve(targetPath).readBytes())
+        assertContentEquals(contextBytes, project.resolve(contextPath).readBytes())
+        ModuleRevisionGraph.open(project, profile, budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertEquals(baselineHead, graph.snapshot.headId)
+            assertEquals(RepairRunStatus.NO_CHANGES, graph.snapshot.runs.last().status)
+            assertEquals(2, graph.snapshot.nodes.size)
+        }
+    }
+
+    @Test
     fun `strict captured staging closes the mutation sink against background writers`() {
         lateinit var retainedOutput: BoundedRepairOutput
         val harness = object : CapturedRepairAgentHarness {
