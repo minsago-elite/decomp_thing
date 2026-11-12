@@ -12,6 +12,7 @@ import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
+import decompengine.agent.AgentMutationContentKind
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentTaskProgress
 import decompengine.agent.AgentFailureKind
@@ -56,6 +57,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.UserDefinedFileAttributeView
+import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
@@ -1294,6 +1296,31 @@ class AcpAgentHarnessTest {
                 "int decomp_engine_main(void) { return 0; }\n"
             ).toByteArray(Charsets.UTF_8)
 
+        fun assertDeclaredReconstructionAuthority(taskId: String, accessPolicy: AgentAccessPolicy) {
+            val allowedMutationOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)
+            val rule = accessPolicy.pathRules.single()
+            assertEquals(AgentWorkspacePath("project", implementationPath), rule.path)
+            assertEquals(allowedMutationOperations, rule.operations)
+            assertFalse(rule.recursive)
+            assertEquals(allowedMutationOperations, accessPolicy.allowedOperations)
+
+            val authority = assertNotNull(accessPolicy.mutationAuthority)
+            assertEquals("declared-role-reconstruction-v1", authority.policyId)
+            assertEquals("module-reconstruction:${profile.id}:$taskId", authority.ownerId)
+            assertEquals(profile.sha256, authority.profileSha256)
+            val grant = authority.grants.single()
+            assertEquals(AgentWorkspacePath("project", implementationPath), grant.path)
+            assertEquals(allowedMutationOperations, grant.operations)
+            assertEquals(authority.ownerId, grant.ownerId)
+            assertEquals(profile.sha256, grant.profileSha256)
+            val declaration = profile.layout.declarationForPath(implementationPath)
+            assertEquals(declaration.id, grant.declarationId)
+            assertEquals(declaration.roles.map { it.wireName }.toSet(), grant.roles)
+            assertEquals(AgentMutationContentKind.UTF8_TEXT, grant.contentKind)
+            assertEquals(maximumSourceBytes, grant.maximumBytes)
+            assertFalse(AgentOperation.DELETE_FILE in grant.operations)
+        }
+
         data class Attempt(
             val result: ArchivalReconstructionResult?,
             val failure: Exception?,
@@ -1335,6 +1362,7 @@ class AcpAgentHarnessTest {
                 override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
                     taskCount++
                     requestSha256s += AgentExecutionRequestBinding.capture(request).requestSha256
+                    assertDeclaredReconstructionAuthority(taskId, request.accessPolicy)
                     val rule = request.accessPolicy.pathRules.single()
                     val workspaceRoot = request.workspaceRoots.single { it.id == rule.path.rootId }.path
                     implementationPathAtDispatch = workspaceRoot.resolve(rule.path.relativePath)
@@ -1849,6 +1877,9 @@ class AcpAgentHarnessTest {
             val expectedReason: String?,
             val inject: (Path, Path) -> Unit,
             val expectedFailure: AgentFailureKind,
+            val mode: String = "reconstruction-role-policy",
+            val seedSourceBeforeDispatch: ByteArray? = null,
+            val expectedMessageFragment: String? = null,
         )
         val oversizedValidSource = ("/*" + "x".repeat(256 * 1024 - 4) + "*/\n").toByteArray(Charsets.UTF_8)
         assertEquals(256 * 1024 + 1, oversizedValidSource.size)
@@ -1918,6 +1949,32 @@ class AcpAgentHarnessTest {
                     attributes.write("decomp-test", ByteBuffer.wrap(byteArrayOf(1, 2, 3)))
                 },
             ),
+            FinalSnapshotViolation(
+                label = "delete-existing-target",
+                index = 32,
+                expectedReason = null,
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                mode = "reconstruction-modify-existing-source",
+                seedSourceBeforeDispatch = priorModifiedSource,
+                expectedMessageFragment = "without DELETE_FILE authority",
+                inject = { target, _ -> Files.delete(target) },
+            ),
+            FinalSnapshotViolation(
+                label = "metadata-change-existing-target",
+                index = 33,
+                expectedReason = "file-metadata-changed",
+                expectedFailure = AgentFailureKind.WORKSPACE_VIOLATION,
+                mode = "reconstruction-modify-existing-source",
+                seedSourceBeforeDispatch = priorModifiedSource,
+                inject = { target, _ ->
+                    val permissions = Files.getPosixFilePermissions(target).toMutableSet()
+                    if (!permissions.remove(PosixFilePermission.OWNER_EXECUTE)) {
+                        permissions.add(PosixFilePermission.OWNER_EXECUTE)
+                    }
+                    assertTrue(PosixFilePermission.OWNER_READ in permissions)
+                    Files.setPosixFilePermissions(target, permissions)
+                },
+            ),
         )
         for (scenario in finalSnapshotViolations) {
             val outside = fixture.resolve("final-snapshot-${scenario.label}-outside.c")
@@ -1925,8 +1982,9 @@ class AcpAgentHarnessTest {
             var injected = 0
             var expectedOutsideBytes: ByteArray? = null
             val finalSnapshotRefusal = runAttempt(
-                "reconstruction-role-policy",
+                scenario.mode,
                 index = scenario.index,
+                seedSourceBeforeDispatch = scenario.seedSourceBeforeDispatch,
                 afterPromptCompletion = { target ->
                     if (scenario.label == "symbolic-link" || scenario.label == "hard-link") {
                         expectedOutsideBytes = Files.readAllBytes(target)
@@ -1938,6 +1996,8 @@ class AcpAgentHarnessTest {
             assertEquals(1, injected, scenario.label)
             assertNotNull(finalSnapshotRefusal.failure, "${scenario.label} final snapshot must refuse publication")
             assertEquals(1, finalSnapshotRefusal.taskCount, scenario.label)
+            assertEquals(scenario.seedSourceBeforeDispatch != null, finalSnapshotRefusal.implementationExistedAtDispatch,
+                scenario.label)
             assertEquals(1, finalSnapshotRefusal.receipts.size, scenario.label)
             val violationReceipt = finalSnapshotRefusal.receipts.single()
             assertEquals(
@@ -1955,6 +2015,9 @@ class AcpAgentHarnessTest {
                 assertEquals(implementationPath, violationFailure.details["relativePath"], scenario.label)
             } else {
                 assertEquals(scenario.expectedReason, violationFailure.details["reason"], scenario.label)
+            }
+            scenario.expectedMessageFragment?.let { fragment ->
+                assertTrue(violationFailure.message.contains(fragment), violationFailure.message)
             }
             val violationEvidence = assertIs<AcpInvocationEvidenceSnapshot>(violationReceipt.providerEvidence)
             assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, violationEvidence.phaseReached)
