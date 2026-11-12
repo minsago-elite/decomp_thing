@@ -69,6 +69,7 @@ enum class AcpTerminalAuditReason {
 data class AcpTerminalAuditRecord(
     val sequence: Long,
     val sessionId: String,
+    val sessionIdSha256: String,
     val method: String,
     val requestSha256: String,
     val terminalIdSha256: String?,
@@ -107,17 +108,18 @@ internal class AcpTerminalAuditRecorder(
         producedOutputBytes: Long? = null,
         outputTruncated: Boolean? = null,
         launchFailure: AcpTerminalLaunchFailureContext? = null,
-    ) = synchronized(records) {
-        if (overflowFailure != null) return@synchronized
+    ): AcpTerminalAuditRecord? = synchronized(records) {
+        if (overflowFailure != null) return@synchronized null
         if (records.size >= maximumRecords) {
             overflowFailure = AcpProtocolFailure(
                 "ACP terminal audit exceeded the $maximumRecords-record evidence limit",
             )
-            return@synchronized
+            return@synchronized null
         }
         val entry = AcpTerminalAuditRecord(
             sequence = sequence++,
             sessionId = sessionId,
+            sessionIdSha256 = terminalSha256(sessionId),
             method = method,
             requestSha256 = terminalSha256(request),
             terminalIdSha256 = terminalId?.let(::terminalSha256),
@@ -140,7 +142,7 @@ internal class AcpTerminalAuditRecorder(
                 }
             } catch (_: Throwable) { launchFailureDiagnosticsUnavailable = true }
         }
-        Unit
+        entry
     }
 
     fun launchFailureContext(): String = try {
@@ -554,9 +556,17 @@ internal sealed class AcpTerminalBroker protected constructor(
     ): AcpContainedProcess
 
     suspend fun output(callbackSessionId: String, terminalId: String): TerminalOutputResponse {
+        return output(callbackSessionId, terminalId) { }
+    }
+
+    suspend fun output(
+        callbackSessionId: String,
+        terminalId: String,
+        onObserved: (AgentTerminalOutputEventData) -> Unit,
+    ): TerminalOutputResponse {
         val terminal = requireTerminal(callbackSessionId, terminalId, OUTPUT_METHOD)
         val snapshot = terminal.output.snapshot()
-        audit.record(
+        val admitted = audit.record(
             callbackSessionId,
             OUTPUT_METHOD,
             terminalId,
@@ -568,6 +578,14 @@ internal sealed class AcpTerminalBroker protected constructor(
             snapshot.producedBytes,
             snapshot.truncated,
         )
+        if (admitted != null) onObserved(AgentTerminalOutputEventData(
+            sessionIdSha256 = admitted.sessionIdSha256,
+            terminalIdSha256 = checkNotNull(admitted.terminalIdSha256),
+            toolCallIdSha256 = admitted.toolCallIdSha256,
+            retainedByteCount = checkNotNull(admitted.retainedOutputBytes),
+            producedByteCount = checkNotNull(admitted.producedOutputBytes),
+            truncated = checkNotNull(admitted.outputTruncated),
+        ))
         throwIfFailed()
         return TerminalOutputResponse(
             output = snapshot.text,
@@ -961,6 +979,15 @@ internal sealed class AcpTerminalBroker protected constructor(
     }
 
 }
+
+internal data class AgentTerminalOutputEventData(
+    val sessionIdSha256: String,
+    val terminalIdSha256: String,
+    val toolCallIdSha256: String?,
+    val retainedByteCount: Int,
+    val producedByteCount: Long,
+    val truncated: Boolean,
+)
 
 private enum class TerminalTermination { KILLED, RELEASED, TIMEOUT, OUTPUT_LIMIT, CANCELLED, TEARDOWN }
 

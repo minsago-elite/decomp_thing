@@ -68,9 +68,9 @@ internal fun publicProgressRecord(record: JsonObject, allowMissingKind: Boolean 
     val metadata = setOf("runId", "workflow", "kind", "sequence", "time", "agentSequence")
     val privateLabels = setOf("taskId", "workflowRunId", "revisionId", "path", "text")
     val digests = setOf("taskIdSha256", "workflowRunIdSha256", "revisionIdSha256", "requestSha256", "sessionIdSha256",
-        "toolCallIdSha256", "permissionIdSha256", "messageIdSha256", "acceptedRevisionSha256", "contentSha256", "afterSha256")
-    val counts = setOf("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "contextUsedTokens", "contextWindowTokens", "chunkCharacters", "entryCount")
-    val booleans = setOf("completed", "validationPending", "sourceSequenceGap", "textOmitted", "messageTrackingExhausted", "entriesTruncated")
+        "toolCallIdSha256", "permissionIdSha256", "messageIdSha256", "acceptedRevisionSha256", "contentSha256", "afterSha256", "terminalIdSha256")
+    val counts = setOf("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "contextUsedTokens", "contextWindowTokens", "chunkCharacters", "entryCount", "retainedOutputBytes", "producedOutputBytes")
+    val booleans = setOf("completed", "validationPending", "sourceSequenceGap", "textOmitted", "messageTrackingExhausted", "entriesTruncated", "outputTruncated")
     var omitted = 0
     fun omit() { omitted = Math.addExact(omitted, 1) }
     var withheldText = false
@@ -131,7 +131,19 @@ internal fun publicProgressRecord(record: JsonObject, allowMissingKind: Boolean 
     }
     val kindValue = if (allowMissingKind && "kind" !in record) "unknown" else text(record.getValue("kind"), 64)
     val kind = kindValue.takeIf { it in setOf("run_started", "task_started", "context_usage", "message", "plan", "tool", "permission",
-        "file_change", "agent_finished", "workflow_phase", "workflow_run_state") } ?: "unknown"
+        "file_change", "terminal_output", "agent_finished", "workflow_phase", "workflow_run_state") } ?: "unknown"
+    if (kind == "terminal_output") {
+        require("sessionIdSha256" in fields && "terminalIdSha256" in fields &&
+            "retainedOutputBytes" in fields && "producedOutputBytes" in fields && "outputTruncated" in fields) {
+            "terminal output observation is incomplete"
+        }
+        val retained = fields.getValue("retainedOutputBytes").jsonPrimitive.content.toULong()
+        val produced = fields.getValue("producedOutputBytes").jsonPrimitive.content.toULong()
+        val truncated = fields.getValue("outputTruncated").jsonPrimitive.boolean
+        require(produced >= retained && truncated == (produced > retained)) {
+            "terminal output observation counts are inconsistent"
+        }
+    }
     val occurredAt = record["time"]?.let { value ->
         Instant.parse(text(value, 40)).toString().also {
             require(it.matches(Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z"))) { "observation date is outside the web range" }
@@ -164,7 +176,7 @@ internal fun replayProgressRecord(record: JsonObject): JsonObject {
         throw IllegalArgumentException("historical progress record contains invalid time metadata")
     }
     val numericFields = setOf("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls",
-        "contextUsedTokens", "contextWindowTokens", "chunkCharacters", "entryCount")
+        "contextUsedTokens", "contextWindowTokens", "chunkCharacters", "entryCount", "retainedOutputBytes", "producedOutputBytes")
     return buildJsonObject {
         put("sequence", record.getValue("sequence"))
         classified.writerId?.let { put("runId", it) }

@@ -48,6 +48,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentMessageEvent
+import decompengine.agent.AgentTerminalOutputEvent
 import decompengine.agent.AgentMessageRole
 import decompengine.agent.AgentPermissionDecision
 import decompengine.agent.AgentPermissionEvent
@@ -305,6 +306,22 @@ class AgentExecutionEvidenceTest {
         assertEquals(2, snapshot.observedEventCount)
         assertEquals(1, snapshot.events.size)
         assertEquals("event-count-limit", snapshot.truncationReason)
+    }
+
+    @Test
+    fun `terminal output archive retains only identity commitments and byte metadata`() {
+        val recorder = BoundedAgentExecutionEventRecorder()
+        recorder.record(AgentTerminalOutputEvent(0, "a".repeat(64), "b".repeat(64), "c".repeat(64), 4, 9, true))
+        val snapshot = recorder.receiptSnapshot()
+        assertTrue(snapshot.complete)
+        val encoded = StringBuilder().also(snapshot.events.single()::appendReceiptJson).toString()
+        assertTrue(encoded.contains("\"type\":\"terminal_output\""))
+        assertTrue(encoded.contains("\"retainedBytes\":4"))
+        assertTrue(encoded.contains("\"producedBytes\":9"))
+        assertTrue(encoded.contains("\"truncated\":true"))
+        assertFalse(encoded.contains("text"))
+        assertFalse(encoded.contains("command"))
+        assertFalse(encoded.contains("outputSha256"))
     }
 
     @Test
@@ -973,6 +990,7 @@ class AgentExecutionEvidenceTest {
             val terminal = AcpTerminalAuditRecord(
                 sequence = 0,
                 sessionId = sessionId,
+                sessionIdSha256 = digest(sessionId),
                 method = "terminal/create",
                 requestSha256 = digest("terminal request"),
                 terminalIdSha256 = digest("terminal-1"),

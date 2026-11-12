@@ -24,6 +24,7 @@ import decompengine.agent.AgentPermissionEvent
 import decompengine.agent.AgentPlanEvent
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentToolEvent
+import decompengine.agent.AgentTerminalOutputEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
@@ -1902,6 +1903,14 @@ class AcpAgentHarnessTest {
             events.filterIsInstance<AgentToolEvent>().count { it.toolCallId == "terminal-tool" },
             "permission callback terminal binding must validate and count its tool call exactly once",
         )
+        val outputEvent = events.filterIsInstance<AgentTerminalOutputEvent>().single()
+        assertEquals(14, outputEvent.retainedByteCount)
+        assertEquals(14L, outputEvent.producedByteCount)
+        assertFalse(outputEvent.truncated)
+        val outputAudit = harness.latestTerminalAudit().single { it.reason == AcpTerminalAuditReason.OUTPUT_OBSERVED }
+        assertEquals(outputAudit.terminalIdSha256, outputEvent.terminalIdSha256)
+        assertEquals(outputAudit.toolCallIdSha256, outputEvent.toolCallIdSha256)
+        assertFalse(outputEvent.toString().contains("wire-terminal"))
         assertEquals(AgentPermissionDecision.DENY, events.filterIsInstance<AgentPermissionEvent>().single().decision)
         assertEquals(AcpPermissionAuditReason.DEFAULT_DENY, harness.latestPermissionAudit().single().reason)
         val evidence = assertNotNull(harness.latestSandboxEvidence())

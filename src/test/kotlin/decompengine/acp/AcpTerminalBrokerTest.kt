@@ -201,9 +201,19 @@ class AcpTerminalBrokerTest {
 
         val exit = broker.waitForExit(SESSION, terminalId)
         assertEquals(0u, exit.exitCode)
-        val output = broker.output(SESSION, terminalId)
+        var outputObservation: AgentTerminalOutputEventData? = null
+        val output = broker.output(SESSION, terminalId) { outputObservation = it }
         assertEquals("89abcdef", output.output)
         assertTrue(output.truncated)
+        val observed = assertNotNull(outputObservation)
+        fun sha(value: String) = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        assertEquals(sha(SESSION), observed.sessionIdSha256)
+        assertEquals(sha(terminalId), observed.terminalIdSha256)
+        assertEquals(sha("tool-1"), observed.toolCallIdSha256)
+        assertEquals(8, observed.retainedByteCount)
+        assertEquals(16L, observed.producedByteCount)
+        assertTrue(observed.truncated)
         broker.release(SESSION, terminalId)
         assertFailsWith<AcpExpectedError> { broker.release(SESSION, terminalId) }
         broker.close()
@@ -626,9 +636,11 @@ class AcpTerminalBrokerTest {
             null,
         ).terminalId
         boundedAuditBroker.observeToolCall(SESSION, terminalUpdate("tool-audit-cap", boundedTerminal))
+        var overflowObservationDelivered = false
         assertFailsWith<AcpProtocolFailure> {
-            boundedAuditBroker.output(SESSION, boundedTerminal)
+            boundedAuditBroker.output(SESSION, boundedTerminal) { overflowObservationDelivered = true }
         }
+        assertFalse(overflowObservationDelivered, "output must not be observed when audit admission fails")
         assertEquals(3, boundedAudit.snapshot().size, "terminal audit evidence must remain finitely bounded")
         boundedAuditBroker.close()
         boundedAuditFixture.boundary.close()
