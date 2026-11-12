@@ -167,6 +167,11 @@ normal HttpOnly session cookie after the bootstrap fragment is scrubbed. The JVM
 browser are fresh for each sample, so server-side structure caches cannot warm later
 samples. The protocol does not clear the operating-system page cache; results are cold
 application-process/browser-profile measurements, not cold-storage measurements.
+The aggregate also retains each child's bounded server-phase timing summary and
+sanitized inventory-failure classifications, with hashed request identities and route
+templates only; it does not retain request URLs or response bodies. A missing or
+unreadable child report is reported separately from a report whose declared
+pull-request head or base does not match.
 The lifecycle control also launches real Linux process groups: it waits for an
 ordinary descendant to exit, escalates to a group kill when a surviving child
 ignores cleanup, and refuses to treat forced cleanup as a passing sample. On a

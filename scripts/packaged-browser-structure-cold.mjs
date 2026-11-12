@@ -45,6 +45,36 @@ export function structureProfile(name = 'loopback') {
   return profile;
 }
 
+function safeStructureServerTiming(report) {
+  const timing = report?.structureServerTiming;
+  if (!timing || !Array.isArray(timing.timings)) return null;
+  const rows = timing.timings.slice(0, 512).flatMap(row => {
+    if (!/^[a-z0-9-]{1,64}$/.test(row?.phase ?? '') || !Number.isSafeInteger(row?.elapsedNanos) || row.elapsedNanos < 0) return [];
+    return [{ phase: row.phase, elapsedNanos: row.elapsedNanos }];
+  });
+  const limit = Number.isSafeInteger(timing.limit) && timing.limit >= 0 ? Math.min(timing.limit, 512) : 512;
+  const overflow = Number.isSafeInteger(timing.overflow) && timing.overflow >= 0 ? timing.overflow : null;
+  return { timings: rows, limit, overflow, invalidOrDropped: Math.max(0, timing.timings.length - rows.length) };
+}
+
+function safeFailedInventoryRows(evidence) {
+  if (!Array.isArray(evidence?.failedInventoryRequests)) return null;
+  return evidence.failedInventoryRequests.slice(0, 16).map(row => ({
+    sequence: Number.isSafeInteger(row?.sequence) && row.sequence > 0 ? row.sequence : null,
+    requestIdHash: /^[a-f0-9]{64}$/.test(row?.requestIdHash ?? '') ? row.requestIdHash : null,
+    urlHash: /^[a-f0-9]{64}$/.test(row?.urlHash ?? '') ? row.urlHash : null,
+    pathTemplate: row?.pathTemplate === '/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions' ? row.pathTemplate : 'other',
+    method: row?.method === 'GET' || row?.method === 'HEAD' ? row.method : 'other',
+    status: Number.isSafeInteger(row?.status) && row.status >= 100 && row.status <= 599 ? row.status : null,
+    failure: { error: row?.failure?.error === 'net::ERR_ABORTED' ? 'net::ERR_ABORTED' : row?.failure?.error ? 'other' : null,
+      canceled: typeof row?.failure?.canceled === 'boolean' ? row.failure.canceled : null },
+    lateFailedAfterFinished: typeof row?.lateFailedAfterFinished === 'boolean' ? row.lateFailedAfterFinished : null,
+    contentLength: Number.isSafeInteger(row?.contentLength) && row.contentLength >= 0 ? row.contentLength : null,
+    dataLength: Number.isSafeInteger(row?.dataLength) && row.dataLength >= 0 ? row.dataLength : null,
+    classification: row?.classification === 'canceled-after-consumption' ? row.classification : 'unproven',
+  }));
+}
+
 export async function verifyStructureQualificationSource(repoRoot, commit, {
   sourceFiles = STRUCTURE_QUALIFICATION_SOURCE_FILES,
   readFile = fs.readFile,
@@ -300,13 +330,16 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         child.once('close', () => clearTimeout(timer));
       });
       exitCode = outcome.code ?? null;
-      const childReport = await reportReader(stdout);
+      let childReport = null;
+      try { childReport = await reportReader(stdout); }
+      catch { /* Report read failures are classified below without exposing filesystem paths. */ }
       const report = childReport?.report ?? null;
+      const childReportPresent = report !== null && typeof report === 'object' && !Array.isArray(report);
       const evidence = report?.structureCold;
       const rawFailedRequests = Number.isSafeInteger(evidence?.failedInventoryRequestCount) && evidence.failedInventoryRequestCount >= 0
         ? evidence.failedInventoryRequestCount : null;
       const firstPageMs = Number.isFinite(evidence?.firstPageMs) && evidence.firstPageMs >= 0 ? evidence.firstPageMs : null;
-      const sourceHeadMatches = !expectedHeadCommit || report?.driverPullRequestHeadCommit === expectedHeadCommit;
+      const sourceHeadMatches = childReportPresent && (!expectedHeadCommit || report.driverPullRequestHeadCommit === expectedHeadCommit);
       const sourceBaseMatches = !expectedBaseCommit || report?.driverPullRequestBaseCommit === expectedBaseCommit;
       const revisionBinding = report?.sourceIdentity?.revisionBinding;
       const revisionBindingMatches = revisionBinding?.verified === true && revisionBinding.sourceCommit === report?.driverCommit
@@ -329,12 +362,13 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       }
       const shutdownConfirmed = processTreeConfirmed;
       const diagnostic = stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null;
-      const passed = sourceHeadMatches && sourceBaseMatches && revisionBindingMatches && browserIdentityVerified
+      const passed = childReportPresent && sourceHeadMatches && sourceBaseMatches && revisionBindingMatches && browserIdentityVerified
         && !interrupted && !timedOut && !processTreeForced
         && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true
         && evidence?.profileApplied === profile.name && rawFailedRequests === 0 && firstPageMs !== null && shutdownConfirmed
         && report?.sourceIdentity?.verified === true && report.sourceIdentity.commit === report.driverCommit;
       samples.push({ index: index + 1, status: passed ? 'passed' : 'failed', profile: profile.name, exitCode, firstPageMs, rawFailedRequests,
+        childReportPresent,
         browserHeapBytes: evidence?.browserHeapMemory?.sampledPeakBytes ?? null,
         jvmRssIncrementBytes: evidence?.jvmMemory?.incrementalPeakBytes ?? null,
         profileApplied: evidence?.profileApplied ?? null,
@@ -343,11 +377,19 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         driverPullRequestBaseCommit: report?.driverPullRequestBaseCommit ?? null,
         sourceIdentity: report?.sourceIdentity ?? null,
         browserIdentity: browserIdentity ?? null,
+        structureServerTiming: safeStructureServerTiming(report),
+        failedInventoryRequestEvidenceComplete: evidence?.failedInventoryRequestEvidenceComplete === true,
+        provenCanceledAfterConsumptionCount: Number.isSafeInteger(evidence?.provenCanceledAfterConsumptionCount)
+          && evidence.provenCanceledAfterConsumptionCount >= 0 ? evidence.provenCanceledAfterConsumptionCount : null,
+        unprovenFailedInventoryRequestCount: Number.isSafeInteger(evidence?.unprovenFailedInventoryRequestCount)
+          && evidence.unprovenFailedInventoryRequestCount >= 0 ? evidence.unprovenFailedInventoryRequestCount : null,
+        failedInventoryRequests: safeFailedInventoryRows(evidence),
         archiveSha256: report?.archiveSha256 ?? null, applicationJarSha256: report?.applicationJarSha256 ?? null,
         testDirectory: report?.testDirectory ?? null, browserProfileDirectory: report?.browserProfileDirectory ?? null,
         runtimeProcesses: report?.runtimeProcesses ?? null,
         shutdownConfirmed, processTreeForced, timedOut, error: outcome.timeout ? 'Cold sample timed out'
           : outcome.error ? String(outcome.error.message).slice(0, 512)
+          : !childReportPresent ? 'Child report was not produced or could not be read'
           : !sourceHeadMatches ? 'Child report did not match the declared pull-request head SHA'
           : !sourceBaseMatches ? 'Child report did not match the declared pull-request base SHA'
           : !revisionBindingMatches ? 'Child report did not bind the source commit to the declared pull-request revisions'

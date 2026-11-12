@@ -209,7 +209,14 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
           archiveSha256:'b'.repeat(64), applicationJarSha256:'c'.repeat(64), shutdownConfirmed:true,
           testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/browser profile`,runtimeProcesses:{applicationPid:1000+sample,applicationStartTimeTicks:3000+sample,browserPid:2000+sample,browserStartTimeTicks:4000+sample},
           structureCold:{ passed:true, firstPageMs:sample === 20 ? 900 : sample, failedInventoryRequestCount:0, profileApplied:'loopback',
-            browserHeapMemory:{sampledPeakBytes:1024}, jvmMemory:{incrementalPeakBytes:2048} } } };
+            failedInventoryRequests:[{sequence:2,requestIdHash:'1'.repeat(64),urlHash:'2'.repeat(64),
+              pathTemplate:'/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions',method:'GET',status:200,
+              failure:{error:'net::ERR_ABORTED',canceled:true},lateFailedAfterFinished:false,contentLength:12,dataLength:12,
+              classification:'canceled-after-consumption',rawUrl:'https://private.example/secret?token=secret',body:'private body'}],
+            failedInventoryRequestEvidenceComplete:true,provenCanceledAfterConsumptionCount:1,unprovenFailedInventoryRequestCount:0,
+            browserHeapMemory:{sampledPeakBytes:1024}, jvmMemory:{incrementalPeakBytes:2048} },
+          structureServerTiming:{timings:[{phase:'first-page',elapsedNanos:123456},{phase:'other',elapsedNanos:-1},
+            {phase:'private phase',elapsedNanos:999}],limit:512,overflow:0} } };
     } });
   assert.equal(launches,20); assert.equal(maximumActive,1); assert.equal(result.sampleCount,20);
   assert.equal(result.successfulSamples,20); assert.equal(result.nearestRankP95FirstPageMs,19);
@@ -218,7 +225,17 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
   assert.equal(result.expectedHeadCommit,'d'.repeat(40));
   assert.equal(result.expectedBaseCommit,'f'.repeat(40));
   assert.equal(result.samples[0].driverPullRequestHeadCommit,'d'.repeat(40));
+  assert.deepEqual(result.samples[0].structureServerTiming,{timings:[{phase:'first-page',elapsedNanos:123456}],limit:512,overflow:0,invalidOrDropped:2});
+  assert.deepEqual(result.samples[0].failedInventoryRequests,[{sequence:2,requestIdHash:'1'.repeat(64),urlHash:'2'.repeat(64),
+    pathTemplate:'/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions',method:'GET',status:200,
+    failure:{error:'net::ERR_ABORTED',canceled:true},lateFailedAfterFinished:false,contentLength:12,dataLength:12,
+    classification:'canceled-after-consumption'}]);
+  assert.equal(result.samples[0].failedInventoryRequestEvidenceComplete,true);
+  assert.equal(result.samples[0].provenCanceledAfterConsumptionCount,1);
+  assert.equal(result.samples[0].unprovenFailedInventoryRequestCount,0);
   assert.ok(!JSON.stringify(result).includes('private diagnostic'));
+  assert.ok(!JSON.stringify(result).includes('private.example'));
+  assert.ok(!JSON.stringify(result).includes('private body'));
   assert.equal(result.samples[0].diagnostic.byteLength, 'private diagnostic'.length);
 });
 
@@ -281,6 +298,24 @@ test('runner refuses a child report attributed to a different pull-request head 
       structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}})});
   assert.equal(baseMismatch.successfulSamples,0);
   assert.match(baseMismatch.samples[0].error,/declared pull-request base SHA/);
+});
+
+test('runner classifies an absent child report separately from a pull-request identity mismatch', async () => {
+  const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'loopback',
+    expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40), spawnImpl:()=>fakeChild(),
+    reportReader:async()=>null });
+  assert.equal(result.successfulSamples,0);
+  assert.equal(result.identityConsistent,false);
+  assert.equal(result.samples.length,20);
+  assert.ok(result.samples.every(sample => sample.error === 'Child report was not produced or could not be read'));
+  assert.ok(result.samples.every(sample => sample.childReportPresent === false));
+  assert.ok(result.samples.every(sample => sample.driverPullRequestHeadCommit === null));
+
+  const unreadable = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'loopback',
+    expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40), spawnImpl:()=>fakeChild(),
+    reportReader:async()=>{ throw Object.assign(new Error('/secret/private/report.json'),{code:'ENOENT'}); } });
+  assert.ok(unreadable.samples.every(sample => sample.error === 'Child report was not produced or could not be read'));
+  assert.ok(!JSON.stringify(unreadable).includes('/secret/private'));
 });
 
 test('runner records the timeout state even when the child exits during termination grace', { skip: process.platform !== 'linux' }, async () => {
