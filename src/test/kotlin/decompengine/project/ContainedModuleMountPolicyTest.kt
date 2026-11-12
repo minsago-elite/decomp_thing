@@ -19,6 +19,17 @@ class ContainedModuleMountPolicyTest {
     }
 
     @Test
+    fun `mount parser preserves valid UTF-8 paths`() {
+        val path = "/home/사용자/project/snapshot"
+        val mounts = ContainedModuleMountPolicy.parse(
+            (record(1, 99, "/", "rw") + record(9, 1, path, "ro"))
+                .toByteArray(StandardCharsets.UTF_8),
+        )
+        assertEquals(Path.of(path), mounts.last().mountPoint)
+        ContainedModuleMountPolicy.requireReadOnlyTarget(Path.of("$path/src/main.c"), 9, directory = true, mounts = mounts)
+    }
+
+    @Test
     fun `mount parser permits kernel mount roots containing parent traversal`() {
         val mounts = ContainedModuleMountPolicy.parse(
             record(1, 99, "/", "ro", root = "/../../../../host-root").toByteArray(StandardCharsets.US_ASCII),
@@ -62,6 +73,11 @@ class ContainedModuleMountPolicyTest {
         assertFailsWith<IllegalArgumentException> {
             ContainedModuleMountPolicy.parse((record(1, 99, "/", "ro") + record(1, 1, "/other", "ro"))
                 .toByteArray(StandardCharsets.US_ASCII))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            val prefix = "1 99 0:42 / /home/".toByteArray(StandardCharsets.US_ASCII)
+            val suffix = " ro shared:1 - ext4 /dev/test rw\n".toByteArray(StandardCharsets.US_ASCII)
+            ContainedModuleMountPolicy.parse(prefix + byteArrayOf(0xc3.toByte(), 0x28) + suffix)
         }
         assertFailsWith<IllegalArgumentException> {
             ContainedModuleMountPolicy.parse(ByteArray(4 * 1024 * 1024 + 1) { 'x'.code.toByte() })

@@ -1,6 +1,8 @@
 package decompengine.project
 
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -30,18 +32,35 @@ internal object ContainedModuleMountPolicy {
 
     fun parse(bytes: ByteArray): List<Mount> {
         require(bytes.isNotEmpty() && bytes.size <= MAXIMUM_BYTES) { "compiler mount table is empty or oversized" }
-        require(bytes.all { it == '\n'.code.toByte() || it.toInt() in 0x20..0x7e }) {
-            "compiler mount table is not bounded ASCII"
+        var lineBytes = 0
+        for (byte in bytes) {
+            val value = byte.toInt() and 0xff
+            if (value == '\n'.code) {
+                lineBytes = 0
+            } else {
+                require(value >= 0x20 && value != 0x7f) {
+                    "compiler mount table contains an invalid framing byte"
+                }
+                lineBytes++
+                require(lineBytes <= MAXIMUM_LINE_BYTES) { "compiler mount table record exceeds its byte bound" }
+            }
         }
-        val text = bytes.toString(StandardCharsets.US_ASCII)
-        require(text.all { it == '\n' || it in ' '..'~' }) { "compiler mount table is not bounded ASCII" }
+        val text = try {
+            StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+                .toString()
+        } catch (failure: java.nio.charset.CharacterCodingException) {
+            throw IllegalArgumentException("compiler mount table is not valid UTF-8", failure)
+        }
         require(text.endsWith('\n')) { "compiler mount table has an unterminated record" }
         val lines = text.dropLast(1).split('\n')
         require(lines.size in 1..MAXIMUM_MOUNTS) { "compiler mount table record count exceeds its bound" }
         val mounts = ArrayList<Mount>(lines.size)
         val ids = HashSet<Long>(lines.size)
         for (line in lines) {
-            require(line.isNotEmpty() && line.length <= MAXIMUM_LINE_BYTES) {
+            require(line.isNotEmpty()) {
                 "compiler mount table record is empty or oversized"
             }
             val separator = line.indexOf(" - ")
