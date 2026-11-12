@@ -2115,6 +2115,48 @@ class AcpAgentHarnessTest {
         assertEquals(acceptedMetadata, capturePublishedMetadata(output))
         assertNoReconstructionPublicationResidue(output)
 
+        val maxTurnRequests = runAttempt(
+            "reconstruction-max-turn-requests-after-write",
+            index = 34,
+        )
+        val maxTurnFailure = assertNotNull(
+            maxTurnRequests.failure,
+            "max_turn_requests after an authorized write must refuse publication",
+        )
+        assertNull(maxTurnRequests.result)
+        assertEquals(1, maxTurnRequests.taskCount)
+        assertEquals(1, maxTurnRequests.receipts.size)
+        val maxTurnInterruption = generateSequence<Throwable>(maxTurnFailure) { it.cause }
+            .filterIsInstance<decompengine.project.ModuleReconstructionInterruptedException>()
+            .single()
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, maxTurnInterruption.stopReason)
+        val maxTurnReceipt = maxTurnRequests.receipts.single()
+        assertEquals(maxTurnRequests.requestSha256s.single(), maxTurnReceipt.requestBinding.requestSha256)
+        assertEquals(maxTurnReceipt.requestBinding.requestSha256, maxTurnReceipt.turnIdentity?.requestSha256)
+        val maxTurnExecution = maxTurnReceipt.requireResult()
+        assertEquals(AgentStopReason.LIMIT_EXHAUSTED, maxTurnExecution.stopReason)
+        assertEquals(1, maxTurnExecution.changes.size)
+        val maxTurnChange = maxTurnExecution.changes.single()
+        assertEquals(implementationPath, maxTurnChange.path.relativePath)
+        assertEquals(AgentFileChangeKind.CREATED, maxTurnChange.kind)
+        assertNull(maxTurnChange.beforeSha256)
+        assertEquals(expectedCreatedSource.size.toLong(), maxTurnChange.sizeBytes)
+        assertEquals(sha256(expectedCreatedSource), maxTurnChange.afterSha256)
+        val maxTurnEvidence = assertIs<AcpInvocationEvidenceSnapshot>(maxTurnReceipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, maxTurnEvidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, maxTurnEvidence.cleanupDisposition)
+        val maxTurnDiagnostics = assertNotNull(maxTurnRequests.harness.latestDiagnostics())
+        assertTrue(maxTurnDiagnostics.remainingProcessIds.isEmpty(), maxTurnDiagnostics.toString())
+        assertTrue(maxTurnDiagnostics.sandboxCleanupVerified, maxTurnDiagnostics.toString())
+        assertProcessStopped(maxTurnDiagnostics.pid)
+        assertTrue(maxTurnRequests.harness.latestFilesystemAudit().any { record ->
+            record.policyPath?.relativePath == implementationPath &&
+                record.outcome == AcpFilesystemAuditOutcome.ALLOWED &&
+                record.reason == AcpFilesystemAuditReason.COMPLETED
+        })
+        assertEquals(acceptedMetadata, capturePublishedMetadata(output))
+        assertNoReconstructionPublicationResidue(output)
+
         val refused = runAttempt("reconstruction-refusal-after-write", index = 33)
         val refusalFailure = assertNotNull(refused.failure, "a model refusal must prevent candidate publication")
         assertNull(refused.result)

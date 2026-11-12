@@ -70,6 +70,7 @@ RECONSTRUCTION_MODES = {
     "reconstruction-frame-count-limit-after-write",
     "reconstruction-tool-limit-after-write",
     "reconstruction-limit-after-write",
+    "reconstruction-max-turn-requests-after-write",
     "reconstruction-missing-usage-after-write",
     "reconstruction-negative-usage-after-write",
     "reconstruction-frame-limit-after-write",
@@ -278,6 +279,7 @@ expected_fs = {
     "reconstruction-frame-count-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-tool-limit-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-limit-after-write": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-max-turn-requests-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-missing-usage-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-negative-usage-after-write": {"readTextFile": False, "writeTextFile": True},
     "reconstruction-frame-limit-after-write": {"readTextFile": False, "writeTextFile": True},
@@ -1789,6 +1791,8 @@ update({
 prompt_result = {"stopReason": "end_turn"}
 if MODE == "reconstruction-limit-after-write":
     prompt_result["stopReason"] = "max_tokens"
+if MODE == "reconstruction-max-turn-requests-after-write":
+    prompt_result["stopReason"] = "max_turn_requests"
 if MODE not in ("missing-usage", "reconstruction-missing-usage-after-write"):
     prompt_result["usage"] = {
         "inputTokens": -1 if MODE in ("negative-usage", "reconstruction-negative-usage-after-write") else 11,
