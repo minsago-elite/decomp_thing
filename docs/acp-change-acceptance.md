@@ -2181,7 +2181,9 @@ binds the exact source commit/tree, selectors, command, and result.
 This is local scripted-ACP evidence using an injected validator. It does not
 qualify production validation under #236, live providers, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
-the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+the complete #734/#63 acceptance matrix. The injected validator deliberately
+throws after inspecting the candidate, so this does not establish compilation,
+behavioral validation, or successful publication. Keep #734 and #63 open.
 
 ## Active repair revision-graph byte admission — 2026-11-12
 
@@ -2548,6 +2550,38 @@ qualify crash recovery. This does not qualify production validation under #236,
 live providers, publication crash recovery under #732, durable provenance under
 #733, hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep
 #734 and #63 open.
+
+## Active repair initial captured-source read-byte boundary — 2026-11-12
+
+The active repair loop now has an exact initial-file read-ceiling control for
+the ACP captured filesystem. Two fresh projects seed the declared
+implementation with the same 4,096-byte UTF-8 source, including multibyte
+padding. The captured request contains exactly `Makefile` and that
+implementation; the Makefile is smaller than the lower test ceiling. At
+`maximumReadBytes=4,096`, captured-source preflight admits the input, the
+scripted ACP process completes, and the candidate reaches the injected
+validator. The fixture does not call `readTextFile`, so this qualifies initial
+input admission rather than callback-read behavior. The receipt records
+final-snapshot completion and verified
+process/sandbox cleanup. At `maximumReadBytes=4,095`, the repair loop dispatches
+to the captured harness, but initial-file preflight refuses before an ACP
+process is created. The receipt records `RESOURCE_EXHAUSTED`, the target-specific
+read-limit diagnostic, `REQUEST_BOUND`, `NOT_REQUIRED` cleanup, no process or
+sandbox evidence, and no filesystem audit records. Both attempts preserve the
+accepted source and graph head, reject the provisional node, and clear pending
+state.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-initial-read-byte-boundary-2026-11-12.xml)
+has SHA-256
+`14e6a17c9e10528acd67dd82530d6c14e9d027858ef28f46783e317f6e276446`; the
+[provenance record](evidence/issue-734-active-repair-initial-read-byte-boundary-2026-11-12.json)
+binds the tested source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
 ## Active repair aggregate patch-byte reuse — 2026-11-12
 
