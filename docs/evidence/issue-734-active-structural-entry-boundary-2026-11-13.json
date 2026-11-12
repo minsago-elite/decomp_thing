@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "b08885caf61ebdfed255af0e1239349893698e9d",
+  "sourceParent": "69f12813a4c86f6b04f887f987e4b1a1e4754bc1",
+  "sourceTree": "127523d0d330f2904f29bf2a0784267d3c784828",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact generated C structural entries and refuses one below before dispatch"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact generated C structural entries and refuses one below before dispatch' --no-daemon",
+  "result": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 3.082,
+    "suiteSeconds": 3.093,
+    "timestamp": "2026-11-12T16:11:11.407Z",
+    "junitSha256": "fd84b9bee95e83320ffc22ebb99b4588c42b2095f796956613fae74e76a7a142"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "structuralEntries": {
+      "moduleOwnershipEntries": 1,
+      "boundaryEvidenceEntries": 64,
+      "exactLimit": 65,
+      "oneUnderLimit": 64,
+      "modelGlobals": 0,
+      "modelTypes": 0,
+      "modelCallGlobalReferenceAndStringEntries": 0
+    },
+    "coverage": "SourceTreeGenerator creates a valid one-module, one-function Generated C project. The test replaces its plan boundaryEvidence with 64 distinct short strings, leaving all other charged structural arrays empty for exactly 65 cumulative entries. It separately asserts source inventory, include-closure traversal, and declared dependency references remain below 64. At maximumDependencyEdges=65, the active scripted ACP repair acknowledges a replacement/readback, reaches an injected validator that checks every candidate source byte and profile/index/revision bindings, and stops at the expected identity-checked sentinel. The receipt records final-snapshot completion, two successful filesystem callbacks, and verified process/sandbox cleanup. At 64, graph admission returns the exact generated-C module-boundary structural-entry diagnostic before any harness dispatch or validator call; source and evidence bytes remain unchanged, no run or pending attempt is retained, and opening again at 65 succeeds.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validator; does not qualify production validation under #236",
+      "does not establish live-provider behavior or hosted exact-head CI",
+      "does not establish publication recovery under #732 or durable provenance under #733",
+      "other resource limits and the complete #734/#63 acceptance matrix remain open"
+    ]
+  }
+}

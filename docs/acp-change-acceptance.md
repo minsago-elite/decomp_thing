@@ -2852,3 +2852,37 @@ injected validator. It does not qualify production validation under #236, live
 providers, publication recovery under #732, durable provenance under #733,
 hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
 #63 open.
+
+## Active repair generated-C structural-entry boundary — 2026-11-13
+
+The active repair path now qualifies the Generated C profile's cumulative
+structural-entry accounting, including module ownership and `boundaryEvidence`.
+The generated fixture has one planned module with one owned function, no
+globals, types, calls, global references, strings, or dependency cycles, and 64
+distinct short boundary-evidence entries: exactly 65 structural entries total.
+The test also verifies include-closure traversal, declared dependency
+references, and source inventory each remain below 64, isolating the structural
+counter despite sharing `maximumDependencyEdges` with those other bounds.
+
+At `maximumDependencyEdges=65`, scripted ACP acknowledges an implementation
+replacement and readback. The candidate reaches an injected validator that
+checks every candidate source byte and the profile, index, and source-revision
+bindings before throwing its expected sentinel. The receipt records completed
+final-snapshot capture, both successful filesystem callbacks, and verified
+process/sandbox cleanup. At 64, active graph admission refuses with the exact
+`generated C module boundary evidence structural entries exceed 64 entries`
+diagnostic before ACP dispatch or validation. Source and plan/model evidence
+remain unchanged; no run, pending attempt, or repair-history record is retained,
+and reopening at 65 succeeds.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-structural-entry-boundary-2026-11-13.xml)
+has SHA-256 `fd84b9bee95e83320ffc22ebb99b4588c42b2095f796956613fae74e76a7a142`; the
+[provenance record](evidence/issue-734-active-structural-entry-boundary-2026-11-13.json)
+binds the tested source commit/tree, selector, command, and result.
+
+This is local scripted-ACP admission and validator-handoff evidence using an
+injected validator. It does not qualify production validation under #236, live
+providers, publication recovery under #732, durable provenance under #733,
+hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep #734 and
+#63 open.
