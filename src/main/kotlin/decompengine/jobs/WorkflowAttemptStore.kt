@@ -431,6 +431,7 @@ class WorkflowAttemptStore private constructor(
         cancellation: () -> Boolean = { false },
         budget: WorkflowStartupRecoveryBudget = WorkflowStartupRecoveryBudget(limits, cancellation),
         beforeChanges: (() -> Unit) -> Unit = {},
+        observe: ((String, WorkflowJobInspection.Available, ByteArray, Boolean) -> Unit)? = null,
     ) = lifetime.write {
         ensureOpen()
         try {
@@ -439,6 +440,7 @@ class WorkflowAttemptStore private constructor(
                     prepare = { jobId ->
                         val directory = root.resolve(jobId)
                         if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("INVALID_STORAGE_ENTRY", "A startup job directory is invalid.")
+                        var legacyBytes: ByteArray? = null
                         val inspected = inspectRecord(jobId, directory) { path, maximum ->
                             budget.checkpoint()
                             val perFile = if (path.fileName.toString() == "job.json") minOf(maximum, 256 * 1024) else maximum
@@ -451,6 +453,7 @@ class WorkflowAttemptStore private constructor(
                                 throw workflowStartupReadFailure(failure)
                             }
                             budget.chargeRead(bytes.size.toLong())
+                            if (path.fileName.toString() == "job.json") legacyBytes = bytes
                             bytes
                         }
                         val pending = directory.resolve(PENDING_FILE)
@@ -460,6 +463,8 @@ class WorkflowAttemptStore private constructor(
                         }
                         budget.checkpoint()
                         val replacement = recoveredWorkflowSnapshot(inspected.snapshot, clock::instant, newId)?.let(::encodeSnapshot)
+                        try { observe?.invoke(jobId, inspected, checkNotNull(legacyBytes), replacement != null || hasPending) }
+                        catch (_: Exception) { /* Optional read-only cache observation never changes recovery. */ }
                         if (replacement == null && !hasPending) null else WorkflowStartupRecoveryMutation(
                             replacement?.size?.toLong() ?: 0L,
                         ) {
@@ -690,6 +695,8 @@ class WorkflowAttemptStore private constructor(
     companion object {
         private const val STATE_FILE = "workflow-state.json"
         private const val PENDING_FILE = "workflow-state.pending.json"
+        internal const val LISTING_STATE_FILE = STATE_FILE
+        internal const val LISTING_PENDING_FILE = PENDING_FILE
         private const val STATE_BYTES = 8 * 1024 * 1024
         private const val LEGACY_BYTES = 1024 * 1024
         private const val MAX_ATTEMPTS = 1024

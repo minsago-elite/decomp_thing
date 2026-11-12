@@ -145,13 +145,21 @@ internal class JobOrganizationStore(
     /** A missing file is the default organization; an invalid one is surfaced, never silently reset. */
     fun read(jobId: String, read: (String, Int) -> ByteArray = { relative, maximum ->
         decompengine.repair.readStableRegularFile(root, relative, maximum.toLong()).bytes
-    }): JobOrganization {
+    }): JobOrganization = readObserved(jobId, read).organization
+
+    internal data class ObservedRead(val organization: JobOrganization, val present: Boolean)
+
+    /** Reports presence from the same check that controls the bounded read, for cache inventories. */
+    internal fun readObserved(jobId: String, read: (String, Int) -> ByteArray = { relative, maximum ->
+        decompengine.repair.readStableRegularFile(root, relative, maximum.toLong()).bytes
+    }): ObservedRead {
         requireJobIdentity(jobId)
-        if (!exists(jobId)) return JobOrganization.DEFAULT
+        if (!exists(jobId)) return ObservedRead(JobOrganization.DEFAULT, present = false)
         val bytes = read("$jobId/${JobOrganization.FILE_NAME}", JobOrganization.MAX_BYTES)
-        return try { JobOrganization.decode(bytes) } catch (failure: Exception) {
+        val organization = try { JobOrganization.decode(bytes) } catch (failure: Exception) {
             throw WorkflowStoreException("JOB_RECORD_UNAVAILABLE", "The job organization record is invalid; preserve it before editing.", cause = failure)
         }
+        return ObservedRead(organization, present = true)
     }
 
     sealed interface Result {

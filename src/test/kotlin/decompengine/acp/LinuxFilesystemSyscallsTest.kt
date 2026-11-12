@@ -461,6 +461,44 @@ class LinuxFilesystemSyscallsTest {
     }
 
     @Test
+    fun `path metadata probe matches no-follow unix metadata and distinguishes missing entries`() {
+        val root = createTempDirectory(Files.createDirectories(Path.of("build")).toAbsolutePath(),
+            "statx-path-metadata-").normalize()
+        try {
+            LinuxFilesystemSyscalls.requireSupported(root)
+            val file = root.resolve("record")
+            Files.writeString(file, "bounded metadata probe")
+            val link = root.resolve("record-link")
+            Files.createSymbolicLink(link, file.fileName)
+            LinuxFilesystemSyscalls.pathMetadataProbe().use { probe ->
+                fun assertMatches(path: Path) {
+                    val actual = requireNotNull(probe.stat(path))
+                    val attrs = Files.readAttributes(path,
+                        "unix:dev,ino,mode,nlink,size,lastModifiedTime,ctime", java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                    assertTrue(actual.complete)
+                    assertEquals((attrs["dev"] as Number).toLong(), actual.device)
+                    assertEquals((attrs["ino"] as Number).toLong(), actual.inode)
+                    assertEquals((attrs["mode"] as Number).toInt(), actual.mode)
+                    assertEquals((attrs["nlink"] as Number).toInt(), actual.linkCount)
+                    assertEquals((attrs["size"] as Number).toLong(), actual.size)
+                    val modified = (attrs["lastModifiedTime"] as java.nio.file.attribute.FileTime).toInstant()
+                    val changed = (attrs["ctime"] as java.nio.file.attribute.FileTime).toInstant()
+                    assertEquals(modified.epochSecond, actual.modifiedSeconds)
+                    assertEquals(modified.nano, actual.modifiedNanoseconds)
+                    assertEquals(changed.epochSecond, actual.changedSeconds)
+                    assertEquals(changed.nano, actual.changedNanoseconds)
+                }
+                assertMatches(file)
+                assertMatches(link) // AT_SYMLINK_NOFOLLOW preserves the entry, not target, identity.
+                assertTrue(probe.stat(link)!!.mode and 0xf000 == 0xa000)
+                assertNull(probe.stat(root.resolve("missing")))
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `owned statx bulk decoding matches native field decoding with one reusable snapshot per scope`() {
         LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
             val memory = BulkStatxMemory(scratch)
