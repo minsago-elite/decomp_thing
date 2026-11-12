@@ -31,7 +31,9 @@ import decompengine.acp.AcpAgentHarnessTest
 import decompengine.acp.AcpFilesystemLimits
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredGlobal
 import decompengine.project.RecoveredProgramModel
+import decompengine.project.RecoveredType
 import decompengine.project.SourceTreeGenerator
 import decompengine.project.sha256
 import decompengine.validation.BehaviorCaseResult
@@ -5060,6 +5062,220 @@ class TraceGuidedRepairTest {
 
         runCase(shared = true)
         runCase(shared = false)
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair admits exact generated C indexed entity count and refuses one below before dispatch`() {
+        val model = RecoveredProgramModel(
+            inputSha256 = "d".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    id = "fn_reconstructed",
+                    name = "reconstructed_main",
+                    address = 0x1000UL,
+                    prototype = "int reconstructed_main(void)",
+                    decompiledC = "int reconstructed_main(void) { return global_counter; }",
+                    referencedGlobals = setOf("global_counter"),
+                ),
+            ),
+            globals = listOf(RecoveredGlobal("global_counter", "global_counter", 0x2000UL, "int", "0")),
+            types = listOf(
+                RecoveredType(
+                    id = "type_counter",
+                    declaration = "typedef struct Counter { int value; } Counter;",
+                    sourceAddress = 0x3000UL,
+                ),
+            ),
+        )
+        val candidate = "/* indexed entity boundary candidate */\nint reconstructed_main(void) { return 1; }\n"
+            .toByteArray(Charsets.UTF_8)
+        val targetPath = "src/modules/reconstructed.c"
+
+        fun budget(entityLimit: Int) = RepairResourceBudget(maximumIndexedEntities = entityLimit)
+
+        fun project(prefix: String): Path {
+            val project = createRepairTempDirectory(prefix).resolve("project")
+            SourceTreeGenerator.generate(model, project)
+            val wire = Json.parseToJsonElement(project.resolve("reports/program_model.json").readText()).jsonObject
+            assertEquals(1, wire.getValue("functions").jsonArray.size)
+            assertEquals(1, wire.getValue("globals").jsonArray.size)
+            assertEquals(1, wire.getValue("types").jsonArray.size)
+            val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+            assertEquals(targetPath, plan.getValue("modules").jsonArray.single().jsonObject
+                .getValue("sourcePath").jsonPrimitive.content)
+            return project
+        }
+
+        fun runScenario(entityLimit: Int, exact: Boolean) {
+            val project = project(
+                if (exact) "repair-active-indexed-entities-exact-" else "repair-active-indexed-entities-over-",
+            )
+            val admittedLayout = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget())
+            assertEquals(3, admittedLayout.entities.size)
+            assertTrue(targetPath in admittedLayout.editablePaths)
+            val acceptedSources = admittedLayout.sourcePaths.associateWith { project.resolve(it).readBytes() }
+            val planBefore = project.resolve("reports/module_plan.json").readBytes()
+            val modelBefore = project.resolve("reports/program_model.json").readBytes()
+            val repairBudget = budget(entityLimit)
+            val baseline = if (exact) {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, repairBudget).use { it.snapshot }
+            } else null
+
+            val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-indexed-entities")
+            var dispatches = 0
+            var capturedReceipt: AgentExecutionReceipt? = null
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.execute(request, onEvent)
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    val mutationAuthority = assertNotNull(request.accessPolicy.mutationAuthority)
+                    val implementationGrant = mutationAuthority.grants.single { it.path.relativePath == targetPath }
+                    assertEquals(setOf(AgentOperation.WRITE_FILE), implementationGrant.operations)
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                        .also { capturedReceipt = it }
+                }
+            }
+
+            var validationCalls = 0
+            val validationStop = IllegalStateException("indexed entity equality reached candidate validator")
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    assertEquals(acceptedSources.keys, request.candidateSources.keys)
+                    assertContentEquals(candidate, request.candidateSources.getValue(targetPath))
+                    assertEquals(baseline!!.indexSha256, request.indexSha256)
+                    assertEquals(
+                        GeneratedCRepairIndexProfile.configurationSha256(repairBudget),
+                        request.profileSha256,
+                    )
+                    assertEquals(
+                        repairCandidateSourceSha256(request.candidateSources),
+                        request.sourceRevisionSha256,
+                    )
+                    throw validationStop
+                }
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("indexed entity admission test must use immutable candidate validation")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("indexed entity admission test must use immutable candidate validation")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport =
+                    error("indexed entity admission test must use immutable candidate validation")
+            }
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = RepairHistory(project.resolve("reports/repair_history.json")),
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = repairBudget,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+
+            if (exact) {
+                val failure = assertFailsWith<IllegalStateException> {
+                    loop.repairCompileError(
+                        project,
+                        CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                        emptyList(),
+                    )
+                }
+                assertSame(validationStop, failure)
+                assertEquals(1, dispatches)
+                assertEquals(1, validationCalls)
+                val receipt = assertNotNull(capturedReceipt)
+                val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+                assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, evidence.phaseReached)
+                assertEquals(AcpExecutionCleanupDisposition.VERIFIED, evidence.cleanupDisposition)
+                assertNotNull(evidence.completeExecutionEvidence)
+                val result = assertIs<AgentExecutionOutcome.Returned>(receipt.outcome).result
+                assertEquals(AgentStopReason.COMPLETED, result.stopReason)
+                val change = result.changes.single()
+                assertEquals(targetPath, change.path.relativePath)
+                assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+                assertEquals(sha256(acceptedSources.getValue(targetPath)), change.beforeSha256)
+                assertEquals(sha256(candidate), change.afterSha256)
+                assertEquals(candidate.size.toLong(), change.sizeBytes)
+                acceptedSources.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes()) }
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, repairBudget).use { graph ->
+                    assertNull(graph.snapshot.pendingAttemptId)
+                    assertEquals(baseline!!.headId, graph.snapshot.headId)
+                    assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                    assertEquals(1, graph.snapshot.runs.size)
+                }
+            } else {
+                val failure = assertFailsWith<RepairBudgetExceededException> {
+                    loop.repairCompileError(
+                        project,
+                        CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                        emptyList(),
+                    )
+                }
+                assertEquals("generated C model has 3 indexed entities; limit=2", failure.message)
+                assertEquals(0, dispatches)
+                assertEquals(0, validationCalls)
+                acceptedSources.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes()) }
+                assertContentEquals(planBefore, project.resolve("reports/module_plan.json").readBytes())
+                assertContentEquals(modelBefore, project.resolve("reports/program_model.json").readBytes())
+                val graphPath = project.resolve("reports/repair-revisions/graph.json")
+                if (graphPath.exists()) {
+                    val state = Json.parseToJsonElement(graphPath.readText()).jsonObject
+                    assertEquals(JsonNull, state.getValue("pending"))
+                    assertTrue(state.getValue("nodes").jsonArray.isEmpty())
+                    assertTrue(state.getValue("runs").jsonArray.isEmpty())
+                }
+                assertFalse(project.resolve("reports/repair_history.json").exists())
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget(3)).use { graph ->
+                    assertNull(graph.snapshot.pendingAttemptId)
+                    assertEquals(1, graph.snapshot.nodes.size)
+                    assertEquals(ModuleRevisionStatus.ROOT, graph.snapshot.nodes.single().status)
+                    assertTrue(graph.snapshot.runs.isEmpty())
+                }
+            }
+        }
+
+        runScenario(entityLimit = 3, exact = true)
+        runScenario(entityLimit = 2, exact = false)
     }
 
     @Test
