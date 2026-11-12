@@ -2548,3 +2548,30 @@ qualify crash recovery. This does not qualify production validation under #236,
 live providers, publication crash recovery under #732, durable provenance under
 #733, hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep
 #734 and #63 open.
+
+## Active repair aggregate patch-byte reuse — 2026-11-12
+
+The scripted ACP repair case now tests replacement accounting across a sequence
+of writes to two declared files. With `maximumPatchBytes=4,096`, two
+2,048-byte candidates fill the aggregate budget exactly. A 2,049-byte retry is
+denied; immediate reads confirm that neither accepted candidate changed.
+Shrinking the first candidate to 1,024 bytes then permits growing the second to
+3,072 bytes, again exactly at the aggregate limit. A 3,073-byte retry is denied
+and readback confirms the 3,072-byte candidate remains. Restoring the first
+file to baseline releases its patch-byte charge, allowing the second file to
+grow to 4,096 bytes. Final validation receives only the second file as
+`MODIFIED`; its receipt binds the original and final hashes and byte count.
+The ordered callback audit, injected-validator handoff, cleanup, and unchanged
+accepted source/head are checked.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-aggregate-patch-byte-reuse-2026-11-12.xml)
+has SHA-256
+`86bd96be290300593bb790944808f501b69e0dd93a19a2f206f2bbabb1b37d31`; the
+[provenance record](evidence/issue-734-active-repair-aggregate-patch-byte-reuse-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence for the Generated C repair profile. It does
+not qualify production validation under #236, live providers, publication
+crash recovery under #732, durable provenance under #733, hosted exact-head CI,
+or the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
