@@ -2018,3 +2018,25 @@ The rerun passed one method with zero failures, errors, or skips. Its retained
 has SHA-256 `6ba74c900fa4818db3c2246ba8c54b34ae8c540a829ca9e9f0fc1681d480744f`;
 the [provenance record](evidence/issue-734-public-reconstruction-modified-grant-audit-rerun-2026-11-12.json)
 binds the exact test source and result.
+
+## Active repair UTF-8 source-file grant boundary — 2026-11-12
+
+The active scripted-ACP repair source-file grant retry now distinguishes UTF-8
+byte length from character count. It writes a multibyte candidate of exactly
+4,096 encoded bytes, then attempts a 4,097-byte replacement whose character
+count is still below the 4,096-byte grant. The fixture requires the second
+write to be denied and immediately reads the target back, requiring the exact
+4,096-byte candidate to remain. The receipt binds the observed modification;
+the injected strict validator checks the same candidate bytes and digest before
+its sentinel rejection. Graph assertions retain the rejected assessment and
+receipt while preserving the accepted source/head and clearing pending state.
+The source-grant, patch-byte, and filesystem-write retry tests passed together:
+three methods, zero failures, errors, or skips. The retained [JUnit report](evidence/issue-734-active-repair-utf8-source-file-grant-2026-11-12.xml)
+has SHA-256 `5b4c406429346afa82073f9930b8633e0b69d1d71c528655db39ca38e3ed457d`;
+the [provenance record](evidence/issue-734-active-repair-utf8-source-file-grant-2026-11-12.json)
+binds the exact source commit/tree, selectors, command, and result.
+
+This is local scripted-ACP evidence with an injected validator. It does not
+qualify production validation under #236, live providers, publication recovery
+under #732, durable provenance under #733, hosted exact-head CI, or the full
+#734/#63 acceptance matrix. Keep #734 and #63 open.
