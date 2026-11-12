@@ -12,7 +12,7 @@ import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
-import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
+import { qualifyUpgrade, qualifyUpgradeCache, rewritePackagedShellBuildIdentity } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
@@ -35,7 +35,7 @@ if (values.help) {
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
-  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
+  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing; also verifies localStorage preference updates converge across two packaged tabs while counting key-specific setItem/removeItem and clear calls.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
@@ -926,6 +926,86 @@ try {
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'reset job library');
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
     report.dashboard = { emptyLibrary: !populated, populatedLibrary: populated, noMatches: true, filtersSurviveReload: true, resetFilters: true };
+    if (values.mode === 'session') {
+      const staleBuildId = '0'.repeat(64) === manifest.buildId ? 'f'.repeat(64) : '0'.repeat(64);
+      const staleProbe = await makeTarget();
+      const rewrittenResponses = [];
+      const interceptionFailures = [];
+      const responseTasks = [];
+      cdp.on('Fetch.requestPaused', (event) => {
+        const task = (async () => {
+          const url = new URL(event.request.url);
+          if (event.resourceType !== 'Document' || url.pathname !== '/nested/') {
+            await cdp.call('Fetch.continueResponse', { requestId: event.requestId }, staleProbe.sessionId);
+            return;
+          }
+          assert.equal(event.responseStatusCode, 200, 'Stale-shell fixture requires a successful packaged document');
+          const original = await cdp.call('Fetch.getResponseBody', { requestId: event.requestId }, staleProbe.sessionId);
+          const html = original.base64Encoded ? Buffer.from(original.body, 'base64').toString('utf8') : original.body;
+          const rewritten = rewritePackagedShellBuildIdentity(html, manifest.buildId, staleBuildId);
+          const responseHeaders = (event.responseHeaders ?? []).filter((header) =>
+            !['content-length', 'content-encoding', 'transfer-encoding'].includes(header.name.toLowerCase()));
+          responseHeaders.push({ name: 'Content-Length', value: String(Buffer.byteLength(rewritten)) });
+          await cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: event.responseStatusCode,
+            responseHeaders, body: Buffer.from(rewritten, 'utf8').toString('base64') }, staleProbe.sessionId);
+          rewrittenResponses.push({ requestId: event.requestId, status: event.responseStatusCode,
+            packagedBuildId: manifest.buildId, servedBuildId: staleBuildId, metadataOnly: true });
+        })().catch(async (error) => {
+          interceptionFailures.push(error.message);
+          await cdp.call('Fetch.continueResponse', { requestId: event.requestId }, staleProbe.sessionId).catch(() => {});
+        });
+        responseTasks.push(task);
+      }, staleProbe.sessionId);
+      await cdp.call('Network.setCacheDisabled', { cacheDisabled: true }, staleProbe.sessionId);
+      await cdp.call('Fetch.enable', { patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Response' }] }, staleProbe.sessionId);
+      try {
+        await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, staleProbe.sessionId);
+        await ready(staleProbe, `document.querySelector('#build-mismatch-title') !== null && document.querySelector('meta[name="decomp-ui-build"]')?.content === ${JSON.stringify(staleBuildId)} && [...document.querySelectorAll('button')].some(button => button.textContent === 'Reload application') && document.body.innerText.includes(${JSON.stringify(manifest.buildId)})`, 'first packaged stale-build recovery notice');
+        await Promise.all(responseTasks);
+        assert.deepEqual(interceptionFailures, []);
+        const firstNotice = await evaluate(staleProbe, `({ pageBuild: document.querySelector('meta[name="decomp-ui-build"]')?.content,
+          noticeCount: document.querySelectorAll('#build-mismatch-title').length,
+          reloadAvailable: [...document.querySelectorAll('button')].some(button => button.textContent === 'Reload application'),
+          manualGuidance: document.body.innerText.includes('Reloading in this tab did not load a different build.') })`);
+        assert.deepEqual(firstNotice, { pageBuild: staleBuildId, noticeCount: 1, reloadAvailable: true, manualGuidance: false });
+        assert.equal(staleProbe.requests.filter((entry) => entry.type === 'Document').length, 1,
+          'Initial stale build notice automatically reloaded the page');
+        await capture(staleProbe, 'version-stale-first-attempt.png');
+
+        try {
+          await evaluate(staleProbe, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Reload application').click()`);
+        } catch (error) {
+          if (!/context|navigat/i.test(error.message)) throw error;
+        }
+        await ready(staleProbe, `document.querySelector('#build-mismatch-title') !== null && document.querySelector('meta[name="decomp-ui-build"]')?.content === ${JSON.stringify(staleBuildId)} && document.body.innerText.includes('Reloading in this tab did not load a different build.') && ![...document.querySelectorAll('button')].some(button => button.textContent === 'Reload application')`, 'manual guidance after repeated packaged stale build');
+        await delay(5000);
+        await Promise.all(responseTasks);
+        assert.deepEqual(interceptionFailures, []);
+        assert.equal(rewrittenResponses.length, 2, 'Expected exactly two stale-shell document responses');
+        const exhaustedNotice = await evaluate(staleProbe, `({ pageBuild: document.querySelector('meta[name="decomp-ui-build"]')?.content,
+          noticeCount: document.querySelectorAll('#build-mismatch-title').length,
+          reloadAvailable: [...document.querySelectorAll('button')].some(button => button.textContent === 'Reload application'),
+          manualGuidance: document.body.innerText.includes('Reloading in this tab did not load a different build.'),
+          guardRecord: sessionStorage.getItem('decomp.reload-attempt.v1:/nested') })`);
+        assert.deepEqual(exhaustedNotice, { pageBuild: staleBuildId, noticeCount: 1, reloadAvailable: false,
+          manualGuidance: true, guardRecord: staleBuildId });
+        assert.equal(staleProbe.requests.filter((entry) => entry.type === 'Document').length, 2,
+          'Repeated stale build must not create another document request');
+        assert.ok(staleProbe.requests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Stale-build recovery sent a mutation');
+        assert.ok(staleProbe.requests.every((entry) => entry.url.startsWith(browserOrigin + '/')), 'Stale-build recovery fetched an external dependency');
+        assert.deepEqual(staleProbe.exceptions, []);
+        await capture(staleProbe, 'version-stale-manual-guidance.png');
+        report.versionReloadGuard = { staleBuildId, serverBuildId: manifest.buildId,
+          documentResponsesRewritten: rewrittenResponses.length, metadataOnlyStaleShellFixture: true,
+          firstNotice: { reloadAvailable: firstNotice.reloadAvailable, automaticReloads: 0 },
+          repeatedStaleNotice: { reloadAvailable: exhaustedNotice.reloadAvailable, manualGuidance: exhaustedNotice.manualGuidance,
+            automaticDocumentRequestsAfterExplicitReload: 0 }, mutationRequests: 0, externalRequests: 0,
+          devToolsRequests: rewrittenResponses.map(({ requestId, status }) => ({ requestId, status })) };
+        report.requests.versionReloadGuard = staleProbe.requests;
+      } finally {
+        await cdp.call('Fetch.disable', {}, staleProbe.sessionId).catch(() => {});
+      }
+    }
     if (historyFixture) {
       const row = await evaluate(authenticated, `(() => {
         const row = document.querySelector('ul[aria-label="Uploaded jobs"] li');

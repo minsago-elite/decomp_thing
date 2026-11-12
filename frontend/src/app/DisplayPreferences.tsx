@@ -19,15 +19,20 @@ function validValues(value: Record<string, unknown>): value is Record<string, un
 
 /** Read one bounded display-only record. Invalid data is neither displayed nor rewritten on startup. */
 export function readDisplayPreferences(storage: StorageAccess = browserStorage): DisplayPreferenceValues {
+  return readStoredDisplayPreferences(storage) ?? defaults;
+}
+
+/** Return only a fully admitted persisted record; absent, malformed, or inaccessible storage returns undefined. */
+function readStoredDisplayPreferences(storage: StorageAccess): DisplayPreferenceValues | undefined {
   try {
     const raw = storage().getItem(DISPLAY_PREFERENCES_KEY);
-    if (raw === null || raw.length > 256) return defaults;
+    if (raw === null || raw.length > 256) return undefined;
     const value: unknown = JSON.parse(raw);
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return defaults;
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
     const record = value as Record<string, unknown>;
-    if (Object.keys(record).sort().join(',') !== 'motion,theme,version' || record.version !== 1 || !validValues(record)) return defaults;
+    if (Object.keys(record).sort().join(',') !== 'motion,theme,version' || record.version !== 1 || !validValues(record)) return undefined;
     return { theme: record.theme, motion: record.motion };
-  } catch { return defaults; }
+  } catch { return undefined; }
 }
 
 /** Select the two admitted enums explicitly; other caller data can never enter storage. */
@@ -55,6 +60,26 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
   const [open, setOpen] = useState(false);
   const [saved, setSaved] = useState<'idle' | 'saved' | 'memory'>('idle');
   const trigger = useRef<HTMLButtonElement>(null);
+  const currentValues = useRef(values);
+  const unsavedValues = useRef<Partial<DisplayPreferenceValues>>({});
+
+  useLayoutEffect(() => {
+    function onStorage(event: StorageEvent) {
+      if (storage === browserStorage) {
+        try {
+          if (event.storageArea !== window.localStorage) return;
+        } catch { return; }
+      }
+      if (event.key !== null && event.key !== DISPLAY_PREFERENCES_KEY) return;
+      const next = readDisplayPreferences(storage);
+      currentValues.current = next;
+      unsavedValues.current = {};
+      setValues(next);
+      setSaved('idle');
+    }
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [storage]);
 
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -70,11 +95,28 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
     };
   }, [values.theme, values.motion]);
 
-  function update(theme: string, motion: string) {
-    const next = { theme, motion };
+  function rememberUnsavedValues(next: DisplayPreferenceValues, persisted: DisplayPreferenceValues | undefined,
+    patch: Partial<DisplayPreferenceValues>) {
+    const pending = { ...unsavedValues.current };
+    for (const field of Object.keys(patch) as (keyof DisplayPreferenceValues)[]) {
+      if (persisted && next[field] === persisted[field]) delete pending[field];
+      else if (field === 'theme') pending.theme = next.theme;
+      else pending.motion = next.motion;
+    }
+    unsavedValues.current = pending;
+  }
+
+  function update(patch: Partial<DisplayPreferenceValues>) {
+    const persisted = readStoredDisplayPreferences(storage);
+    const base = { ...(persisted ?? currentValues.current), ...unsavedValues.current };
+    const next = { ...base, ...patch };
     if (!validValues(next)) return;
+    currentValues.current = next;
     setValues(next);
-    setSaved(writeDisplayPreferences(next, storage) ? 'saved' : 'memory');
+    const wasSaved = writeDisplayPreferences(next, storage);
+    if (wasSaved) unsavedValues.current = {};
+    else rememberUnsavedValues(next, persisted, patch);
+    setSaved(wasSaved ? 'saved' : 'memory');
   }
 
   return <div class={`display-preferences${open ? ' is-open' : ''}`} onKeyDown={event => {
@@ -88,13 +130,13 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
       onClick={() => setOpen(current => !current)}>{copy.displayPreferences}</button>
     <div id="display-preferences-panel" class="display-preferences-panel" hidden={!open}>
       <div class="display-preference-fields">
-        <label>{copy.theme}<select value={values.theme} onChange={event => update(event.currentTarget.value, values.motion)}>
+        <label>{copy.theme}<select value={values.theme} onChange={event => update({ theme: event.currentTarget.value as DisplayPreferenceValues['theme'] })}>
             <option value="system">{copy.system}</option>
             <option value="light">{copy.light}</option>
             <option value="dark">{copy.dark}</option>
           </select>
         </label>
-        <label>{copy.reducedMotion}<select value={values.motion} onChange={event => update(values.theme, event.currentTarget.value)}>
+        <label>{copy.reducedMotion}<select value={values.motion} onChange={event => update({ motion: event.currentTarget.value as DisplayPreferenceValues['motion'] })}>
             <option value="system">{copy.system}</option>
             <option value="reduce">{copy.alwaysReduce}</option>
           </select>
@@ -102,8 +144,12 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
       </div>
       <p>{copy.systemFollowsYourDeviceSettingsChangesAreSavedInThis}</p>
       <button type="button" onClick={() => {
+        currentValues.current = defaults;
         setValues(defaults);
-        setSaved(resetDisplayPreferences(storage) ? 'saved' : 'memory');
+        const wasSaved = resetDisplayPreferences(storage);
+        if (wasSaved) unsavedValues.current = {};
+        else unsavedValues.current = { ...defaults };
+        setSaved(wasSaved ? 'saved' : 'memory');
       }}>{copy.resetDisplayPreferences}</button>
       <p role="status">{saved === 'saved' ? copy.displayPreferencesSavedInThisBrowser
         : saved === 'memory' ? copy.changesApplyToThisTabButCouldNotBeSaved : ''}</p>

@@ -237,6 +237,110 @@ describe('workbench display controls', () => {
     expect(storage.setItem).not.toHaveBeenCalled();
   });
 
+  it('converges on another tab preference update without writing back or losing untouched fields', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    records.set(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"dark","motion":"reduce"}');
+    fireEvent(window, new StorageEvent('storage', {
+      key: DISPLAY_PREFERENCES_KEY,
+      newValue: records.get(DISPLAY_PREFERENCES_KEY) ?? null,
+      storageArea: window.localStorage,
+    }));
+
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('dark');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('reduce');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    expect(storage.setItem).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'system' } });
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('dark');
+    expect(records.get(DISPLAY_PREFERENCES_KEY)).toBe('{"version":1,"theme":"dark","motion":"system"}');
+    expect(storage.setItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back after malformed preference updates and storage clearing without writing', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"dark","motion":"reduce"}',
+    });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    records.set(DISPLAY_PREFERENCES_KEY, '{malformed');
+    fireEvent(window, new StorageEvent('storage', {
+      key: DISPLAY_PREFERENCES_KEY,
+      newValue: '{malformed',
+      storageArea: window.localStorage,
+    }));
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('system');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('system');
+
+    records.clear();
+    fireEvent(window, new StorageEvent('storage', { key: null, newValue: null, storageArea: window.localStorage }));
+    expect(document.documentElement.getAttribute('data-theme')).toBe('system');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('system');
+    expect(storage.setItem).not.toHaveBeenCalled();
+  });
+
+  it('ignores storage events for unrelated keys', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    render(<DisplayPreferences storage={() => storage} />);
+    records.set(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"dark","motion":"reduce"}');
+    fireEvent(window, new StorageEvent('storage', {
+      key: 'unrelated.preference',
+      newValue: 'ignored',
+      storageArea: window.localStorage,
+    }));
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('system');
+    expect(storage.setItem).not.toHaveBeenCalled();
+  });
+
+  it('accepts preference events from local storage and ignores session storage events', () => {
+    window.localStorage.setItem(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"light","motion":"system"}');
+    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    render(<DisplayPreferences />);
+    window.localStorage.setItem(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"dark","motion":"reduce"}');
+    fireEvent(window, new StorageEvent('storage', {
+      key: DISPLAY_PREFERENCES_KEY,
+      newValue: '{"version":1,"theme":"dark","motion":"reduce"}',
+      storageArea: window.sessionStorage,
+    }));
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+
+    window.localStorage.setItem(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"dark","motion":"reduce"}');
+    writes.mockClear();
+    fireEvent(window, new StorageEvent('storage', {
+      key: DISPLAY_PREFERENCES_KEY,
+      newValue: '{"version":1,"theme":"dark","motion":"reduce"}',
+      storageArea: window.localStorage,
+    }));
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    expect(writes).not.toHaveBeenCalled();
+  });
+
+  it('merges a local field edit with the latest valid record when a storage event was missed', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    records.set(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"dark","motion":"system"}');
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'reduce' } });
+
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    expect(records.get(DISPLAY_PREFERENCES_KEY)).toBe('{"version":1,"theme":"dark","motion":"reduce"}');
+  });
+
   it('applies a tab-only choice when storage fails and withholds exception details', () => {
     render(<DisplayPreferences storage={() => { throw new Error(privateMarker); }} />);
     fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
@@ -244,6 +348,112 @@ describe('workbench display controls', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
     expect(screen.getByRole('status').textContent).toBe('Changes apply to this tab, but could not be saved in this browser.');
     expect(document.body.textContent).not.toContain(privateMarker);
+  });
+
+  it('preserves earlier tab-only choices when a readable stale record cannot be updated', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    storage.setItem.mockImplementation(() => { throw new Error(privateMarker); });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'reduce' } });
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    expect(screen.getByRole('status').textContent).toBe('Changes apply to this tab, but could not be saved in this browser.');
+    fireEvent.change(screen.getByLabelText('Theme'), { target: { value: 'dark' } });
+
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('dark');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('reduce');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+    expect(records.get(DISPLAY_PREFERENCES_KEY)).toBe('{"version":1,"theme":"light","motion":"system"}');
+    expect(document.body.textContent).not.toContain(privateMarker);
+  });
+
+  it('keeps a failed reset tab-only when the old readable record remains', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"dark","motion":"reduce"}',
+    });
+    storage.setItem.mockImplementation(() => { throw new Error(privateMarker); });
+    storage.removeItem.mockImplementation(() => { throw new Error(privateMarker); });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset display preferences' }));
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('system');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('system');
+    fireEvent.change(screen.getByLabelText('Theme'), { target: { value: 'light' } });
+
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('light');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('system');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('system');
+    expect(records.get(DISPLAY_PREFERENCES_KEY)).toBe('{"version":1,"theme":"dark","motion":"reduce"}');
+    expect(screen.getByRole('status').textContent).toBe('Changes apply to this tab, but could not be saved in this browser.');
+    expect(document.body.textContent).not.toContain(privateMarker);
+  });
+
+  it('drops a tab-only field when a missed storage update changes the persisted value', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    storage.setItem.mockImplementation(() => { throw new Error(privateMarker); });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'reduce' } });
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'system' } });
+    records.set(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"light","motion":"reduce"}');
+    fireEvent.change(screen.getByLabelText('Theme'), { target: { value: 'dark' } });
+
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('dark');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('reduce');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
+  });
+
+  it('clears tab-only fields on a remote storage event', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    storage.setItem.mockImplementation(() => { throw new Error(privateMarker); });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'reduce' } });
+    records.set(DISPLAY_PREFERENCES_KEY, '{"version":1,"theme":"dark","motion":"system"}');
+    fireEvent(window, new StorageEvent('storage', {
+      key: DISPLAY_PREFERENCES_KEY,
+      newValue: records.get(DISPLAY_PREFERENCES_KEY) ?? null,
+      storageArea: window.localStorage,
+    }));
+    storage.setItem.mockImplementation((key, value) => { records.set(key, value); });
+    fireEvent.change(screen.getByLabelText('Theme'), { target: { value: 'light' } });
+
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('light');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('system');
+    expect(records.get(DISPLAY_PREFERENCES_KEY)).toBe('{"version":1,"theme":"light","motion":"system"}');
+  });
+
+  it('flushes earlier tab-only fields when a later preference write succeeds', () => {
+    const { records, storage } = memoryStorage({
+      [DISPLAY_PREFERENCES_KEY]: '{"version":1,"theme":"light","motion":"system"}',
+    });
+    let allowWrite = false;
+    storage.setItem.mockImplementation((key, value) => {
+      if (!allowWrite) throw new Error(privateMarker);
+      records.set(key, value);
+    });
+    render(<DisplayPreferences storage={() => storage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Display preferences' }));
+
+    fireEvent.change(screen.getByLabelText('Reduced motion'), { target: { value: 'reduce' } });
+    allowWrite = true;
+    fireEvent.change(screen.getByLabelText('Theme'), { target: { value: 'dark' } });
+
+    expect(screen.getByLabelText<HTMLSelectElement>('Theme').value).toBe('dark');
+    expect(screen.getByLabelText<HTMLSelectElement>('Reduced motion').value).toBe('reduce');
+    expect(records.get(DISPLAY_PREFERENCES_KEY)).toBe('{"version":1,"theme":"dark","motion":"reduce"}');
+    expect(screen.getByRole('status').textContent).toBe('Display preferences saved in this browser.');
   });
 
   it('returns focus on Escape and restores the prior root attributes when unmounted', () => {

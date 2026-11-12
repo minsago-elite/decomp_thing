@@ -706,7 +706,7 @@ try {
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin, undefined,
-    { connectionNotice: false }); // #1896 trusted-network evidence is qualified by Chrome DevTools only.
+    { connectionNotice: false, crossTabPreferences: false }); // These DevTools-only checks are qualified by the Chrome runner.
   const records = [smoked.record, ...audited.records];
   const cspEvents = records.flatMap((record) => record.csp);
   const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);
