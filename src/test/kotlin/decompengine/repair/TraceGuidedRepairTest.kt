@@ -47,6 +47,8 @@ import decompengine.validation.ProcessOutput
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -5622,6 +5624,273 @@ class TraceGuidedRepairTest {
 
         runExactLimit()
         runOneByteUnder()
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair admits exact generated C structural entries and refuses one below before dispatch`() {
+        val targetPath = "src/modules/reconstructed.c"
+        val structuralEntryLimit = 65L
+        val candidate =
+            "/* indexed entity boundary candidate */\nint reconstructed_main(void) { return 1; }\n"
+                .toByteArray(Charsets.UTF_8)
+        val model = RecoveredProgramModel(
+            inputSha256 = "d".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    id = "fn_reconstructed",
+                    name = "reconstructed_main",
+                    address = 0x1000UL,
+                    prototype = "int reconstructed_main(void)",
+                    decompiledC = "int reconstructed_main(void) { return 41; }",
+                ),
+            ),
+        )
+
+        fun budget(dependencyLimit: Long) = RepairResourceBudget(maximumDependencyEdges = dependencyLimit)
+
+        fun project(prefix: String): Path {
+            val project = createRepairTempDirectory(prefix).resolve("project")
+            SourceTreeGenerator.generate(model, project)
+            val planPath = project.resolve("reports/module_plan.json")
+            val plan = Json.parseToJsonElement(planPath.readText()).jsonObject
+            val module = plan.getValue("modules").jsonArray.single().jsonObject
+            assertEquals(targetPath, module.getValue("sourcePath").jsonPrimitive.content)
+            assertEquals(1, module.getValue("functionIds").jsonArray.size)
+            assertTrue(module.getValue("globalIds").jsonArray.isEmpty())
+            assertTrue(module.getValue("typeIds").jsonArray.isEmpty())
+            val boundaryEvidence = JsonArray((0 until 64).map { JsonPrimitive("boundary-evidence-$it") })
+            val rewrittenModule = JsonObject(module.toMutableMap().apply {
+                put("boundaryEvidence", boundaryEvidence)
+            })
+            val rewrittenPlan = JsonObject(plan.toMutableMap().apply {
+                put("modules", JsonArray(listOf(rewrittenModule)))
+            })
+            Files.writeString(planPath, rewrittenPlan.toString())
+            val writtenPlan = Json.parseToJsonElement(planPath.readText()).jsonObject
+            val writtenModule = writtenPlan.getValue("modules").jsonArray.single().jsonObject
+            val modelWire = Json.parseToJsonElement(project.resolve("reports/program_model.json").readText()).jsonObject
+            val function = modelWire.getValue("functions").jsonArray.single().jsonObject
+            val measuredStructuralEntries =
+                writtenModule.getValue("functionIds").jsonArray.size +
+                    writtenModule.getValue("globalIds").jsonArray.size +
+                    writtenModule.getValue("typeIds").jsonArray.size +
+                    writtenModule.getValue("boundaryEvidence").jsonArray.size +
+                    writtenPlan.getValue("dependencyCycles").jsonArray.sumOf { it.jsonArray.size } +
+                    function.getValue("calls").jsonArray.size +
+                    function.getValue("referencedGlobals").jsonArray.size +
+                    function.getValue("strings").jsonArray.size
+            assertEquals(65, measuredStructuralEntries)
+            return project
+        }
+
+        fun runScenario(dependencyLimit: Long, exact: Boolean) {
+            val project = project(
+                if (exact) "repair-active-structural-entries-exact-" else "repair-active-structural-entries-under-",
+            )
+            val repairBudget = budget(dependencyLimit)
+            val resolved = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget())
+            assertEquals(1, resolved.modules.size)
+            assertEquals(1, resolved.modules.single().entityIds.size)
+            assertTrue(resolved.sourcePaths.size < 64, "include-closure traversal must remain below the refused limit")
+            val includeAndDeclaredDependencyEdges =
+                resolved.pathDependencies.values.sumOf { it.size.toLong() } +
+                    resolved.modules.sumOf { it.dependencyModuleIds.size.toLong() } +
+                    resolved.entities.sumOf { it.dependencyEntityIds.size.toLong() }
+            assertTrue(includeAndDeclaredDependencyEdges < 64, "other dependency-edge dimensions must have headroom")
+            assertTrue(targetPath in resolved.editablePaths)
+            val acceptedSources = resolved.sourcePaths.associateWith { project.resolve(it).readBytes() }
+            val planBefore = project.resolve("reports/module_plan.json").readBytes()
+            val modelBefore = project.resolve("reports/program_model.json").readBytes()
+            val baseline = if (exact) {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, repairBudget).use { it.snapshot }
+            } else null
+
+            val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-indexed-entities")
+            var dispatches = 0
+            var capturedReceipt: AgentExecutionReceipt? = null
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    dispatches++
+                    return acp.execute(request, onEvent)
+                }
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult {
+                    dispatches++
+                    return acp.executeCaptured(request, initialFiles, output, onEvent)
+                }
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    return acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+                }
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    val authority = assertNotNull(request.accessPolicy.mutationAuthority)
+                    val grant = authority.grants.single { it.path.relativePath == targetPath }
+                    assertEquals(setOf(AgentOperation.WRITE_FILE), grant.operations)
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                        .also { capturedReceipt = it }
+                }
+            }
+
+            var validationCalls = 0
+            val validationStop = IllegalStateException("structural entry equality reached candidate validator")
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    assertEquals(acceptedSources.keys, request.candidateSources.keys)
+                    acceptedSources.forEach { (path, beforeBytes) ->
+                        assertContentEquals(
+                            if (path == targetPath) candidate else beforeBytes,
+                            request.candidateSources.getValue(path),
+                            path,
+                        )
+                    }
+                    assertEquals(baseline!!.indexSha256, request.indexSha256)
+                    assertEquals(
+                        GeneratedCRepairIndexProfile.configurationSha256(repairBudget),
+                        request.profileSha256,
+                    )
+                    assertEquals(
+                        repairCandidateSourceSha256(request.candidateSources),
+                        request.sourceRevisionSha256,
+                    )
+                    throw validationStop
+                }
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("structural-entry admission test must use immutable candidate validation")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("structural-entry admission test must use immutable candidate validation")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport =
+                    error("structural-entry admission test must use immutable candidate validation")
+            }
+            val historyPath = project.resolve("reports/repair_history.json")
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = RepairHistory(historyPath),
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = repairBudget,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+            try {
+                if (exact) {
+                    val failure = assertFailsWith<IllegalStateException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertSame(validationStop, failure)
+                    assertEquals(1, dispatches)
+                    assertEquals(1, validationCalls)
+                    val receipt = assertNotNull(capturedReceipt)
+                    val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+                    assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, evidence.phaseReached)
+                    assertEquals(AcpExecutionCleanupDisposition.VERIFIED, evidence.cleanupDisposition)
+                    assertNotNull(evidence.completeExecutionEvidence)
+                    val result = assertIs<AgentExecutionOutcome.Returned>(receipt.outcome).result
+                    assertEquals(AgentStopReason.COMPLETED, result.stopReason)
+                    val change = result.changes.single()
+                    assertEquals(targetPath, change.path.relativePath)
+                    assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+                    assertEquals(sha256(acceptedSources.getValue(targetPath)), change.beforeSha256)
+                    assertEquals(sha256(candidate), change.afterSha256)
+                    assertEquals(candidate.size.toLong(), change.sizeBytes)
+                    assertEquals(2, evidence.filesystemAudit.size)
+                    assertTrue(evidence.filesystemAudit.all {
+                        it.outcome == decompengine.acp.AcpFilesystemAuditOutcome.ALLOWED &&
+                            it.reason == decompengine.acp.AcpFilesystemAuditReason.COMPLETED
+                    })
+                    acceptedSources.forEach { (path, bytes) ->
+                        assertContentEquals(bytes, project.resolve(path).readBytes(), path)
+                    }
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, repairBudget).use { graph ->
+                        assertNull(graph.snapshot.pendingAttemptId)
+                        assertEquals(baseline!!.headId, graph.snapshot.headId)
+                        assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                        assertEquals(1, graph.snapshot.runs.size)
+                    }
+                } else {
+                    val failure = assertFailsWith<RepairBudgetExceededException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertEquals(
+                        "generated C module boundary evidence structural entries exceed 64 entries",
+                        failure.message,
+                    )
+                    assertEquals(0, dispatches)
+                    assertEquals(0, validationCalls)
+                    acceptedSources.forEach { (path, bytes) ->
+                        assertContentEquals(bytes, project.resolve(path).readBytes(), path)
+                    }
+                    assertContentEquals(planBefore, project.resolve("reports/module_plan.json").readBytes())
+                    assertContentEquals(modelBefore, project.resolve("reports/program_model.json").readBytes())
+                    assertFalse(historyPath.exists())
+                    val graphPath = project.resolve("reports/repair-revisions/graph.json")
+                    if (graphPath.exists()) {
+                        val state = Json.parseToJsonElement(graphPath.readText()).jsonObject
+                        assertEquals(JsonNull, state.getValue("pending"))
+                        assertTrue(state.getValue("nodes").jsonArray.isEmpty())
+                        assertTrue(state.getValue("runs").jsonArray.isEmpty())
+                    }
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget(structuralEntryLimit)).use { graph ->
+                        assertNull(graph.snapshot.pendingAttemptId)
+                        assertEquals(1, graph.snapshot.nodes.size)
+                        assertEquals(ModuleRevisionStatus.ROOT, graph.snapshot.nodes.single().status)
+                        assertTrue(graph.snapshot.runs.isEmpty())
+                    }
+                }
+            } finally {
+                loop.close()
+            }
+        }
+
+        runScenario(dependencyLimit = structuralEntryLimit, exact = true)
+        runScenario(dependencyLimit = structuralEntryLimit - 1, exact = false)
     }
 
     @Test
