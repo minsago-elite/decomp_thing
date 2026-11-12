@@ -22,6 +22,7 @@ export const appCopy = {
   "workflowAttempt": "Workflow attempt",
   "attemptActivity": "Attempt activity",
   "attemptEvidence": "Attempt evidence",
+  "attemptLogs": "Attempt build log",
   "attemptHistory": "Attempt history",
   "pageUnavailable": "Page unavailable",
   "openingView": "Opening view…",

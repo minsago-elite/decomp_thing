@@ -10,6 +10,7 @@ import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './p
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
+import { seedLogs, qualifyLogs } from './packaged-browser-logs.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
@@ -31,13 +32,14 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|logs|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
+  console.log('logs: session plus real bounded hostile recordings, deep-scroll filtering, whole-log search/download redaction, atomic replacement and SPA teardown heap/DOM budgets. Inert terminal attempts; does not claim live-worker follow qualification.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -49,7 +51,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'logs', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, logs, restart, scale, live, proxy, upgrade, legacy or audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -506,12 +508,13 @@ try {
   recordInstallation(installation);
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
+  const logFixture = values.mode === 'logs' ? await seedLogs(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
-  const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+  const populated = !!(logFixture || historyFixture || restartFixture || scaleFixture || liveFixture);
+  const libraryText = (logFixture || historyFixture || restartFixture) ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
@@ -727,7 +730,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'scale' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -884,7 +887,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -912,13 +915,35 @@ try {
       assert.equal(apiProof.buildId, manifest.buildId);
       report.backendBootstrap = apiProof;
     }
-    await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    try {
+      await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    } catch (failure) {
+      // Keep the bounded route/status evidence when a seeded library fails to load.
+      // Do not retain response bodies, request identifiers, or the bootstrap token.
+      const visible = await evaluate(authenticated, `({ pathname: location.pathname,
+        alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.innerText.slice(0, 240)),
+        libraryVisible: document.body.innerText.includes(${JSON.stringify(libraryText)}) })`).catch(() => null);
+      const requests = authenticated.requests.slice(-12).map(({ method, url }) => ({ method, route: urlPath(url) }));
+      const responses = authenticated.responses.slice(-12).map(({ url, status }) => ({ route: urlPath(url), status }));
+      throw new Error(`Persistent job library diagnostic: ${JSON.stringify({ visible, requests, responses })}`, { cause: failure });
+    }
     await evaluate(authenticated, `(() => {
       const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
-    await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
+    try {
+      await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
+    } catch (failure) {
+      // A failed filter precondition prevents later route qualification. Preserve only a bounded
+      // visible-state summary and the last twelve same-origin route/status observations.
+      const visible = await evaluate(authenticated, `({ pathname: location.pathname,
+        alerts: [...document.querySelectorAll('[role="alert"]')].slice(0, 3).map(node => node.innerText.slice(0, 240)),
+        noMatches: document.body.innerText.includes('No jobs match these filters.') })`).catch(() => null);
+      const requests = authenticated.requests.slice(-12).map(({ method, url, type }) => ({ method, route: urlPath(url), type }));
+      const responses = authenticated.responses.slice(-12).map(({ url, status, type }) => ({ route: urlPath(url), status, type }));
+      throw new Error(`Filtered empty job library diagnostic: ${JSON.stringify({ visible, requests, responses })}`, { cause: failure });
+    }
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '?search=absent+fixture');
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes('No jobs match these filters.')`, 'saved job filters after reload');
@@ -1013,6 +1038,7 @@ try {
     assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
+    if (logFixture) report.logs = await qualifyLogs({ fixture: logFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
