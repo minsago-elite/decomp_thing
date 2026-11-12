@@ -14,6 +14,7 @@ import decompengine.agent.AgentWorkspacePath
 import decompengine.project.AcpExecutionOutcomeIssue
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
+import decompengine.project.DeclaredRoleMutationPolicy
 import decompengine.project.MvpPatchCompilerPolicy
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionProfile
@@ -126,7 +127,7 @@ class MvpPatchWorkflow(
                 )
                 val reconstructionInput = retainMvpCapturedRequest(
                     evidenceDir.resolve("reconstruction-request.md"), reconstructionRequest,
-                    "decompiled.c", resourceBudget, evidence,
+                    "decompiled.c", resourceBudget, evidence, profile,
                 )
                 val reconstruction = requestCapturedReplacement(
                     reconstructionInput,
@@ -194,7 +195,7 @@ class MvpPatchWorkflow(
                     ),
                 )
                 val patchInput = retainMvpCapturedRequest(
-                    evidenceDir.resolve("patch-request.md"), patchRequest, "patched.c", resourceBudget, evidence,
+                    evidenceDir.resolve("patch-request.md"), patchRequest, "patched.c", resourceBudget, evidence, profile,
                 )
                 val proposal = requestCapturedReplacement(
                     patchInput,
@@ -398,7 +399,16 @@ class MvpPatchWorkflow(
                     contextInputs = listOf(
                         AgentContextInput(RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID, request.failureKind),
                     ),
-                    accessPolicy = AgentAccessPolicy(rules),
+                    accessPolicy = AgentAccessPolicy(
+                        rules,
+                        mutationAuthority = DeclaredRoleMutationPolicy.forMvpStagedTarget(
+                            input.profile,
+                            ownerId = "mvp:${taskId}:${input.target}",
+                            stagedPath = target,
+                            maximumBytes = resourceBudget.maximumSourceFileBytes,
+                            policyId = "declared-role-mvp-staging-v1",
+                        ),
+                    ),
                     limits = agentLimits,
                 ).also { agentRequest = it }
             },
@@ -798,6 +808,7 @@ internal class MvpCapturedRequest(
     val target: String,
     val objective: String,
     val initialFiles: Map<String, ByteArray>,
+    val profile: ReconstructionProfile,
 )
 
 /** Admit the complete retained fields before encoding files or rendering their Markdown. */
@@ -805,6 +816,7 @@ internal fun prepareMvpCapturedRequest(
     request: RepairRequest,
     target: String,
     budget: RepairResourceBudget,
+    profile: ReconstructionProfile = ReconstructionProfiles.default,
 ): MvpCapturedRequest {
     if (request.projectFiles.size > budget.maximumContextFiles ||
         request.regressionInputs.size > budget.maximumRegressionInputs
@@ -845,6 +857,7 @@ internal fun prepareMvpCapturedRequest(
     return MvpCapturedRequest(
         frozen, target, objective,
         frozen.projectFiles.mapValues { (_, text) -> text.toByteArray(StandardCharsets.UTF_8) },
+        profile,
     )
 }
 
@@ -881,8 +894,9 @@ internal fun retainMvpCapturedRequest(
     target: String,
     budget: RepairResourceBudget,
     evidence: MvpRunEvidence,
+    profile: ReconstructionProfile = ReconstructionProfiles.default,
 ): MvpCapturedRequest {
-    val admitted = prepareMvpCapturedRequest(request, target, budget)
+    val admitted = prepareMvpCapturedRequest(request, target, budget, profile)
     retainRequest(path, admitted.request, evidence)
     return admitted
 }
