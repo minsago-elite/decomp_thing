@@ -1,0 +1,7 @@
+{
+  "schema": "packaged-upgrade-source-pin/v1",
+  "repository": "minsago-elite/decomp_thing",
+  "commit": "d9132c61f3cd2a1a357ead56010b488a8fdeeaf8",
+  "tree": "098fe6cfe201dace7ac6afa40faa45a67d1ff227",
+  "reason": "Pinned pre-notice source for comparing the prior Runtime lazy-chunk asset with later package builds."
+}
