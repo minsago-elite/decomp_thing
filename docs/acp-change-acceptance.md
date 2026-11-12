@@ -1829,3 +1829,26 @@ validation under #236 or live-provider acceptance. Each over-limit control
 starts from a separate empty-corpus project, so cumulative growth across calls
 remains unqualified. Hosted exact-head CI, remaining resource limits, and the
 complete #734/#63 matrix remain open. Keep #734 and #63 open.
+
+## Active repair diagnostic-character admission boundary — 2026-11-12
+
+Source commit `2a1e155b421f30ff1536c4349107a30bdb411b36` adds an active-loop
+control for the raw compile-diagnostic character budget. The exact 52-character
+diagnostic reaches scripted ACP and the injected receipt-bound compile-valid
+validator. A 53-character diagnostic is refused with the dimension-specific
+budget error before dispatch or validation; the active run is retained as
+`RESOURCE_EXHAUSTED`, while accepted source, graph head and node count stay
+unchanged and no attempt remains pending. The test also requires an empty
+retained regression corpus after refusal.
+
+The focused run passed all four diagnostic, regression-input byte, input-count,
+and argument-count boundary methods with zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-diagnostic-limit-2026-11-12.xml)
+has SHA-256 `1703c03427e9a45c7b29aa8d09018ba311a2c5a591568cc09559f8426dd9ea95`;
+the [provenance record](evidence/issue-734-active-repair-diagnostic-limit-2026-11-12.json)
+binds the source commit/tree, selectors, command, and result.
+
+This is local scripted-ACP evidence with an injected validator, not production
+validation under #236 or live-provider acceptance. Hosted exact-head CI,
+remaining resource limits, and the complete #734/#63 acceptance matrix remain
+open. Keep #734 and #63 open.

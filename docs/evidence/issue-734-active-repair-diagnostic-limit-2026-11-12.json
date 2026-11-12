@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "2a1e155b421f30ff1536c4349107a30bdb411b36",
+  "sourceParent": "9cb1d48a4b595176dca1cf02f8931e910fd71ed0",
+  "sourceTree": "0d91859c2da56baafc1afb1259442e5af28e5ce7",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact diagnostic character limit and records one over as resource exhaustion",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression argument count and refuses one argument over before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression input count and refuses one input over before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact diagnostic character limit and records one over as resource exhaustion' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression argument count and refuses one argument over before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression input count and refuses one input over before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch'",
+  "result": {
+    "tests": 4,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 5.7,
+    "suiteSeconds": 5.7,
+    "timestamp": "2026-11-12T06:08:52.677Z",
+    "junitSha256": "1703c03427e9a45c7b29aa8d09018ba311a2c5a591568cc09559f8426dd9ea95"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "At the exact 52-character raw diagnostic ceiling, active repair dispatches scripted ACP and reaches the injected receipt-bound compile-valid validator. A 53-character diagnostic is refused before dispatch or validation; the failed run is retained as RESOURCE_EXHAUSTED, with unchanged accepted source/head/node count, no pending attempt, and an empty retained corpus. The same invocation includes existing exact/one-over retained-input byte, input-count, and argument-count boundaries.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy rather than production validation under #236",
+      "no live-provider or hosted exact-head CI qualification",
+      "other resource limits and complete #734/#63 acceptance remain open"
+    ]
+  }
+}
