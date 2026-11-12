@@ -2201,3 +2201,26 @@ This is local scripted-ACP evidence. It does not qualify production validation
 under #236, live providers, publication crash recovery under #732, durable
 provenance under #733, hosted exact-head CI, or the complete #734/#63
 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair max-turn-request stop after acknowledged write — 2026-11-12
+
+The active repair fixture now returns the ACP `max_turn_requests` stop after
+acknowledging a modification to the declared implementation. The response
+includes usage below the configured ceilings. The active loop classifies the
+stop as `LIMIT_EXHAUSTED`, stores a `RESOURCE_EXHAUSTED` run and receipt-bound
+interrupted assessment, and skips candidate validation. The receipt binds the
+observed modification's path commitment, preimage/postimage hashes, and byte
+count. The accepted source/head remain unchanged, pending state is cleared,
+and the receipt records final-snapshot completion with verified cleanup.
+
+The focused scripted-ACP method passed with one test and zero failures,
+errors, or skips. The retained [JUnit report](evidence/issue-734-active-repair-max-turn-requests-2026-11-12.xml)
+has SHA-256
+`9afe32085744bf376ad464a544e335b49691474cf1f95f5e9b99774acfb84806`; the
+[provenance record](evidence/issue-734-active-repair-max-turn-requests-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence. It does not qualify live providers,
+production validation under #236, publication crash recovery under #732,
+durable provenance under #733, hosted exact-head CI, or the complete #734/#63
+acceptance matrix. Keep #734 and #63 open.
