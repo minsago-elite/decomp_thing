@@ -2159,6 +2159,30 @@ qualify production validation under #236, live providers, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
 
+## Active repair revision-node admission — 2026-11-12
+
+The active repair path now exercises the `maximumRevisionNodes` boundary with a
+two-node ceiling. A fresh graph has one root; the first scripted ACP candidate
+is dispatched, reaches the injected validator, and leaves exactly two nodes.
+A subsequent repair call is admitted as a run but is refused at
+`beginAttempt` with the revision-node-budget diagnostic, before a second ACP
+dispatch or validation call. The graph retains the `RESOURCE_EXHAUSTED` run,
+stays at two nodes with no pending attempt, and preserves the accepted source
+and head. The first receipt remains bound to its modification and assessment,
+and its process termination and sandbox cleanup are verified.
+
+The focused scripted-ACP test passed with one test and zero failures, errors,
+or skips. The retained [JUnit report](evidence/issue-734-active-repair-revision-node-limit-2026-11-12.xml)
+has SHA-256
+`3e33c77a43fd357443f29c17ed9d6089318443d73bcb5f62c2b2ec1dda0c78ce`; the
+[provenance record](evidence/issue-734-active-repair-revision-node-limit-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. It does not
+qualify production validation under #236, live providers, publication crash
+recovery under #732, durable provenance under #733, hosted exact-head CI, or
+the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
 ## Active repair stored-blob byte admission — 2026-11-12
 
 A paired active-repair test exercises the revision graph's aggregate stored-blob
