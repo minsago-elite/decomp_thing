@@ -1679,7 +1679,12 @@ class AcpAgentHarnessTest {
         assertEquals(sha256(expectedSource), exactModifiedChange.afterSha256)
         assertEquals(expectedSource.size.toLong(), exactModifiedChange.sizeBytes)
         assertContentEquals(expectedSource, Files.readAllBytes(exactModifiedResult.projectDir.resolve(implementationPath)))
-        assertEquals(7, exactModifiedBoundary.harness.latestFilesystemAudit().size)
+        val exactModifiedAudit = exactModifiedBoundary.harness.latestFilesystemAudit()
+        assertEquals(7, exactModifiedAudit.size, exactModifiedAudit.toString())
+        val exactModifiedWrite = exactModifiedAudit.last()
+        assertEquals(implementationPath, assertNotNull(exactModifiedWrite.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, exactModifiedWrite.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, exactModifiedWrite.reason)
         val exactModifiedExtracted = fixture.resolve("verified-exact-modified-source-boundary")
         ArchivalBundleVerifier.extractAndVerify(
             exactModifiedResult.bundle.archivePath,
