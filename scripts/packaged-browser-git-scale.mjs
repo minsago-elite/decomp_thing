@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
@@ -92,6 +93,17 @@ export function assertDiffPaths(files, expectedPaths, label) {
   const paths = files.map(file => file.path);
   assert.equal(new Set(paths).size, paths.length, `${label} repeated a path across its pages`);
   if (expectedPaths) assert.deepEqual(paths, expectedPaths, `${label} reordered, omitted, or introduced a path`);
+}
+
+/** Retains a compact commitment after the full ordered path list has been checked. */
+export function summarizeDiffPaths(files) {
+  const paths = files.map(file => file.path);
+  return {
+    fileCount: paths.length,
+    firstPath: paths[0] ?? null,
+    lastPath: paths.at(-1) ?? null,
+    orderedPathSha256: createHash('sha256').update(JSON.stringify(paths), 'utf8').digest('hex'),
+  };
 }
 
 async function browserRequest({ evaluate, tab, path, method = 'GET', headers = {}, body = null, label }) {
@@ -250,7 +262,8 @@ async function readDiffPages({ evaluate, tab, basePath, jobId, repositoryId, com
   assert.equal(files.length, expectedTotal, `${label} returned an unexpected retained file count`);
   assert.equal(last.nextCursor, null, `${label} did not terminate its bounded page walk`);
   assertDiffPaths(files, expectedPaths, label);
-  return { files, pages: Math.ceil(expectedTotal / 200), maximumElapsedMs: Math.max(...elapsed), complete: expectedComplete };
+  return { ...summarizeDiffPaths(files), pages: Math.ceil(expectedTotal / 200),
+    maximumElapsedMs: Math.max(...elapsed), complete: expectedComplete };
 }
 
 async function readPatch({ evaluate, tab, basePath, jobId, repositoryId, commit, fileId, label }) {

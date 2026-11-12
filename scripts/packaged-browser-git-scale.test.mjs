@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBoundedExchange, assertDiffPage, assertDiffPaths, assertHistoryEntries, buildInertElfUploadExpression, GIT_SCALE_DECLARED_REQUEST_BYTES, GIT_SCALE_RESPONSE_BYTES } from './packaged-browser-git-scale.mjs';
+import { boundReport } from './packaged-browser-restart.mjs';
+import { assertBoundedExchange, assertDiffPage, assertDiffPaths, assertHistoryEntries, buildInertElfUploadExpression,
+  GIT_SCALE_DECLARED_REQUEST_BYTES, GIT_SCALE_RESPONSE_BYTES, summarizeDiffPaths } from './packaged-browser-git-scale.mjs';
 
 function exchange(overrides = {}) {
   return { status: 200, declaredRequestBytes: 200, responseBytes: 300, elapsedMs: 15,
@@ -39,4 +41,28 @@ test('distinguishes exact and bounded incomplete diff results', () => {
   assert.doesNotThrow(() => assertDiffPaths(files, ['file-0', 'file-1'], 'fixture diff'));
   assert.throws(() => assertDiffPaths([...files, files[0]], undefined, 'fixture diff'), /repeated/);
   assert.throws(() => assertDiffPaths([...files].reverse(), ['file-0', 'file-1'], 'fixture diff'), /reordered/);
+});
+
+test('retains a bounded ordered-path commitment instead of full large diff pages', () => {
+  const files = Array.from({ length: 2000 }, (_, index) => ({
+    fileId: `file_${String(index).padStart(32, '0')}`,
+    path: `generated/source/member-${String(index).padStart(4, '0')}.c`,
+  }));
+  const summary = summarizeDiffPaths(files);
+  assert.deepEqual(Object.keys(summary).sort(), ['fileCount', 'firstPath', 'lastPath', 'orderedPathSha256'].sort());
+  assert.equal(summary.fileCount, 2000);
+  assert.equal(summary.firstPath, files[0].path);
+  assert.equal(summary.lastPath, files.at(-1).path);
+  assert.match(summary.orderedPathSha256, /^[0-9a-f]{64}$/);
+  assert.ok(Buffer.byteLength(JSON.stringify(summary), 'utf8') < 1024,
+    'The retained summary must remain small after the full path list is validated');
+  const report = boundReport({ status: 'passed', mode: 'git-scale', gitScale: {
+    history: { pages: 50, entries: 10000, maximumElapsedMs: 25, longSubjectTruncated: true },
+    diff: { exactTwoThousand: summary, boundedTwoThousandOne: summary },
+    patches: { utf8Truncated: true, binaryWithheld: true },
+  }, requests: { history: Array.from({ length: 50 }, (_, index) => ({ method: 'GET', page: index })) } });
+  assert.equal(report.gitScale.diff.exactTwoThousand.orderedPathSha256, summary.orderedPathSha256,
+    'Report bounding must preserve the validated ordered-path commitment');
+  assert.ok(Buffer.byteLength(JSON.stringify(report), 'utf8') <= 512 * 1024,
+    'The compact Git scale report must fit the retained-report budget');
 });
