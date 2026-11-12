@@ -6388,6 +6388,7 @@ class TraceGuidedRepairTest {
                 assertNull(graph.snapshot.pendingAttemptId)
                 assertEquals(baselineHead, graph.snapshot.headId)
                 assertEquals(2, graph.snapshot.nodes.size)
+                assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
                 assertEquals(
                     if (expectDispatch) RepairRunStatus.NO_CHANGES else RepairRunStatus.RESOURCE_EXHAUSTED,
                     graph.snapshot.runs.last().status,
