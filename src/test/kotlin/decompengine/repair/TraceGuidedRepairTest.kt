@@ -5279,6 +5279,202 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(value = 120, unit = TimeUnit.SECONDS)
+    fun `active repair admits exact generated C include closure traversal and refuses one below before dispatch`() {
+        val targetPath = "src/modules/reconstructed.c"
+        val sharedHeaderPath = "include/decomp_types.h"
+        val original = "#include \"decomp_types.h\"\nint reconstructed_value(void) { return BOUNDARY_VALUE; }\n"
+        val candidate = "#include \"decomp_types.h\"\nint reconstructed_value(void) { return BOUNDARY_VALUE + 1; }\n"
+
+        fun budget(edgeLimit: Long) = RepairResourceBudget(maximumDependencyEdges = edgeLimit)
+
+        fun project(prefix: String): Path {
+            val project = createRepairTempDirectory(prefix).resolve("project")
+            project.resolve("include").createDirectories()
+            project.resolve("src/modules").createDirectories()
+            project.resolve("reports").createDirectories()
+            project.resolve("Makefile").writeText(
+                "CC ?= cc\nCFLAGS ?= -Iinclude\nall:\n\t\$(CC) \$(CFLAGS) -c $targetPath -o build/reconstructed.o\n",
+            )
+            project.resolve(sharedHeaderPath).writeText(
+                "#ifndef DECOMP_TYPES_H\n#define DECOMP_TYPES_H\n#define BOUNDARY_VALUE 41\n#endif\n",
+            )
+            project.resolve(targetPath).writeText(original)
+            return project
+        }
+
+        fun runScenario(edgeLimit: Long, exact: Boolean) {
+            val project = project(if (exact) "repair-active-include-closure-exact-" else "repair-active-include-closure-under-")
+            val admissionLimit = budget(edgeLimit)
+            val layout = GeneratedCRepairIndexProfile.resolve(project, admissionLimit)
+            assertEquals(listOf("Makefile", sharedHeaderPath, targetPath), layout.sourcePaths)
+            assertEquals(listOf(sharedHeaderPath), layout.pathDependencies.getValue(targetPath))
+            assertTrue(targetPath in layout.editablePaths)
+            assertTrue(project.resolve(sharedHeaderPath).readText().contains("#define BOUNDARY_VALUE 41"))
+            val acceptedSources = layout.sourcePaths.associateWith { project.resolve(it).readBytes() }
+            val baseline = if (exact) {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, admissionLimit).use { it.snapshot }
+            } else null
+
+            val acp = AcpAgentHarnessTest().harness("repair-active-declared-role-include-closure")
+            var dispatches = 0
+            var capturedReceipt: AgentExecutionReceipt? = null
+            val harness = object : CapturedRepairAgentHarness {
+                override fun execute(
+                    request: AgentExecutionRequest,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.execute(request, onEvent)
+
+                override fun executeCaptured(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionResult = acp.executeCaptured(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt = acp.executeCapturedReceipt(request, initialFiles, output, onEvent)
+
+                override fun executeCapturedReceipt(
+                    request: AgentExecutionRequest,
+                    turnIdentity: decompengine.agent.AgentTurnIdentity,
+                    initialFiles: Map<String, ByteArray>,
+                    output: BoundedRepairOutput,
+                    onEvent: (AgentExecutionEvent) -> Unit,
+                ): AgentExecutionReceipt {
+                    dispatches++
+                    val authority = assertNotNull(request.accessPolicy.mutationAuthority)
+                    val grant = authority.grants.single { it.path.relativePath == targetPath }
+                    assertEquals(setOf(AgentOperation.WRITE_FILE), grant.operations)
+                    return acp.executeCapturedReceipt(request, turnIdentity, initialFiles, output, onEvent)
+                        .also { capturedReceipt = it }
+                }
+            }
+
+            var validationCalls = 0
+            val validationStop = IllegalStateException("include closure equality reached candidate validator")
+            val validation = object : RepairValidationStrategy {
+                override val assurance = RepairValidationAssurance.STRICT_CONTAINED
+                override fun requireAvailable() = Unit
+                override fun validateCandidate(
+                    request: RepairCandidateValidationRequest,
+                ): RepairCandidateValidationOutcome {
+                    validationCalls++
+                    assertEquals(acceptedSources.keys, request.candidateSources.keys)
+                    assertContentEquals(candidate.toByteArray(Charsets.UTF_8), request.candidateSources.getValue(targetPath))
+                    assertContentEquals(acceptedSources.getValue(sharedHeaderPath), request.candidateSources.getValue(sharedHeaderPath))
+                    assertEquals(baseline!!.indexSha256, request.indexSha256)
+                    assertEquals(GeneratedCRepairIndexProfile.configurationSha256(admissionLimit), request.profileSha256)
+                    assertEquals(repairCandidateSourceSha256(request.candidateSources), request.sourceRevisionSha256)
+                    throw validationStop
+                }
+                override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
+                    error("include-closure admission test must use immutable candidate validation")
+                override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
+                    error("include-closure admission test must use immutable candidate validation")
+                override fun evaluateBehavior(
+                    id: String,
+                    projectDir: Path,
+                    originalBinary: Path,
+                    rebuiltBinary: Path,
+                    inputs: List<ProcessInput>,
+                    reportsDir: Path,
+                    budget: RepairResourceBudget,
+                ): BehaviorComparisonReport =
+                    error("include-closure admission test must use immutable candidate validation")
+            }
+            val history = RepairHistory(project.resolve("reports/repair_history.json"))
+            val loop = TestRepairRuntimeAccess.openLoop(
+                harness = harness,
+                history = history,
+                profile = GeneratedCRepairIndexProfile,
+                validationStrategy = validation,
+                stagingAuthority = CapturedRepairStagingAuthority,
+                limits = AgentExecutionLimits(),
+                cancellation = AgentCancellation.NONE,
+                onAgentEvent = {},
+                resourceBudget = admissionLimit,
+                allowTestOnlyValidation = false,
+                faultInjector = null,
+            )
+            try {
+                if (exact) {
+                    val failure = assertFailsWith<IllegalStateException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertSame(validationStop, failure)
+                    assertEquals(1, dispatches)
+                    assertEquals(1, validationCalls)
+                    val receipt = assertNotNull(capturedReceipt)
+                    val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+                    assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, evidence.phaseReached)
+                    assertEquals(AcpExecutionCleanupDisposition.VERIFIED, evidence.cleanupDisposition)
+                    assertNotNull(evidence.completeExecutionEvidence)
+                    val result = assertIs<AgentExecutionOutcome.Returned>(receipt.outcome).result
+                    assertEquals(AgentStopReason.COMPLETED, result.stopReason)
+                    val change = result.changes.single()
+                    assertEquals(targetPath, change.path.relativePath)
+                    assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+                    assertEquals(sha256(acceptedSources.getValue(targetPath)), change.beforeSha256)
+                    assertEquals(sha256(candidate.toByteArray(Charsets.UTF_8)), change.afterSha256)
+                    assertEquals(candidate.toByteArray(Charsets.UTF_8).size.toLong(), change.sizeBytes)
+                    assertEquals(2, evidence.filesystemAudit.size)
+                    assertTrue(evidence.filesystemAudit.all {
+                        it.outcome == decompengine.acp.AcpFilesystemAuditOutcome.ALLOWED &&
+                            it.reason == decompengine.acp.AcpFilesystemAuditReason.COMPLETED
+                    })
+                    acceptedSources.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes()) }
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, admissionLimit).use { graph ->
+                        assertNull(graph.snapshot.pendingAttemptId)
+                        assertEquals(baseline!!.headId, graph.snapshot.headId)
+                        assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                        assertEquals(1, graph.snapshot.runs.size)
+                    }
+                } else {
+                    val failure = assertFailsWith<RepairBudgetExceededException> {
+                        loop.repairCompileError(
+                            project,
+                            CompileFailure(listOf("make"), 2, "", "$targetPath: compiler error"),
+                            emptyList(),
+                        )
+                    }
+                    assertEquals("repair include-closure traversal exceeds 1 entries", failure.message)
+                    assertEquals(0, dispatches)
+                    assertEquals(0, validationCalls)
+                    acceptedSources.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes()) }
+                    assertFalse(project.resolve("reports/repair_history.json").exists())
+                    val graphPath = project.resolve("reports/repair-revisions/graph.json")
+                    if (graphPath.exists()) {
+                        val state = Json.parseToJsonElement(graphPath.readText()).jsonObject
+                        assertEquals(JsonNull, state.getValue("pending"))
+                        assertTrue(state.getValue("nodes").jsonArray.isEmpty())
+                        assertTrue(state.getValue("runs").jsonArray.isEmpty())
+                    }
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget(2)).use { graph ->
+                        assertNull(graph.snapshot.pendingAttemptId)
+                        assertEquals(1, graph.snapshot.nodes.size)
+                        assertEquals(ModuleRevisionStatus.ROOT, graph.snapshot.nodes.single().status)
+                        assertTrue(graph.snapshot.runs.isEmpty())
+                    }
+                }
+            } finally {
+                loop.close()
+            }
+        }
+
+        runScenario(edgeLimit = 2, exact = true)
+        runScenario(edgeLimit = 1, exact = false)
+    }
+
+    @Test
     @org.junit.jupiter.api.Timeout(value = 180, unit = TimeUnit.SECONDS)
     fun `active ACP repair bounds the complete candidate source tree including an unselected sibling`() {
         val targetPath = "src/modules/reconstructed.c"
