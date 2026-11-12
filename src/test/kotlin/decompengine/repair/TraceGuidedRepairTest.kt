@@ -2084,6 +2084,10 @@ class TraceGuidedRepairTest {
                 AgentExecutionLimits(maxOutputTokens = 6), exhausted = true,
             ),
             TokenCase(
+                "max-turn-requests", "repair-active-declared-role-max-turn-requests-after-write",
+                AgentExecutionLimits(), exhausted = true,
+            ),
+            TokenCase(
                 "exact", "repair-active-declared-role-token-limit-after-write",
                 AgentExecutionLimits(maxInputTokens = 11, maxOutputTokens = 7),
                 exhausted = false,
@@ -2253,27 +2257,30 @@ class TraceGuidedRepairTest {
                         result.getValue("stopReason").jsonPrimitive.content,
                         case.label,
                     )
+                    val changes = result.getValue("changes").jsonObject
+                    assertEquals(1, changes.getValue("observedCount").jsonPrimitive.int, case.label)
+                    val change = changes.getValue("records").jsonArray.single().jsonObject
+                    assertEquals("modified", change.getValue("kind").jsonPrimitive.content, case.label)
+                    val relativePath = change.getValue("relativePath").jsonObject
+                    assertEquals(sha256("src/modules/reconstructed.c".toByteArray(Charsets.UTF_8)),
+                        relativePath.getValue("sha256").jsonPrimitive.content, case.label)
+                    assertEquals(sha256(acceptedSource),
+                        change.getValue("beforeSha256").jsonPrimitive.content, case.label)
+                    val candidateText = when {
+                        case.refused -> "/* active refusal candidate */\nint decomp_engine_main(void) { return 1; }\n"
+                        case.label == "max-turn-requests" ->
+                            "/* active max-turn candidate */\nint decomp_engine_main(void) { return 1; }\n"
+                        else -> "/* token-limit candidate */\nint decomp_engine_main(void) { return 1; }\n"
+                    }
+                    val candidate = candidateText.toByteArray(Charsets.UTF_8)
+                    assertEquals(sha256(candidate), change.getValue("afterSha256").jsonPrimitive.content, case.label)
+                    assertEquals(candidate.size.toLong(), change.getValue("sizeBytes").jsonPrimitive.content.toLong(), case.label)
                     if (!case.refused) {
                         val usage = result.getValue("usage").jsonObject
                         assertEquals(11, usage.getValue("inputTokens").jsonPrimitive.int, case.label)
                         assertEquals(7, usage.getValue("outputTokens").jsonPrimitive.int, case.label)
                         assertEquals(3, usage.getValue("cachedInputTokens").jsonPrimitive.int, case.label)
                         assertEquals(!case.exhausted, binding.receiptReleaseComplete, case.label)
-                    }
-                    if (case.refused) {
-                        val changes = result.getValue("changes").jsonObject
-                        assertEquals(1, changes.getValue("observedCount").jsonPrimitive.int, case.label)
-                        val change = changes.getValue("records").jsonArray.single().jsonObject
-                        assertEquals("modified", change.getValue("kind").jsonPrimitive.content, case.label)
-                        val relativePath = change.getValue("relativePath").jsonObject
-                        assertEquals(sha256("src/modules/reconstructed.c".toByteArray(Charsets.UTF_8)),
-                            relativePath.getValue("sha256").jsonPrimitive.content, case.label)
-                        assertEquals(sha256(acceptedSource),
-                            change.getValue("beforeSha256").jsonPrimitive.content, case.label)
-                        val candidate = "/* active refusal candidate */\nint decomp_engine_main(void) { return 1; }\n"
-                            .toByteArray(Charsets.UTF_8)
-                        assertEquals(sha256(candidate), change.getValue("afterSha256").jsonPrimitive.content, case.label)
-                        assertEquals(candidate.size.toLong(), change.getValue("sizeBytes").jsonPrimitive.content.toLong(), case.label)
                     }
                 }
                 val filesystem = receipt.getValue("policyAudits").jsonObject.getValue("filesystem").jsonObject

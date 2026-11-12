@@ -85,6 +85,7 @@ ACTIVE_REPAIR_MODES = {
     "repair-active-oversized-only",
     "repair-active-output-limit",
     "repair-active-declared-role-token-limit-after-write",
+    "repair-active-declared-role-max-turn-requests-after-write",
     "repair-active-declared-role-refusal-after-write",
     "repair-active-declared-role-missing-usage-after-write",
     "repair-active-declared-role-negative-usage-after-write",
@@ -292,6 +293,7 @@ expected_fs = {
     "repair-active-oversized-only": {"readTextFile": True, "writeTextFile": True},
     "repair-active-output-limit": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-token-limit-after-write": {"readTextFile": True, "writeTextFile": True},
+    "repair-active-declared-role-max-turn-requests-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-refusal-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-missing-usage-after-write": {"readTextFile": True, "writeTextFile": True},
     "repair-active-declared-role-negative-usage-after-write": {"readTextFile": True, "writeTextFile": True},
@@ -891,6 +893,7 @@ if MODE == "repair-active-declared-role-cancel-after-write":
             respond(prompt, {"stopReason": "cancelled"})
             raise SystemExit(0)
 if MODE in (
+    "repair-active-declared-role-max-turn-requests-after-write",
     "repair-active-declared-role-refusal-after-write",
     "repair-active-declared-role-token-limit-after-write",
     "repair-active-declared-role-missing-usage-after-write",
@@ -901,6 +904,8 @@ if MODE in (
         source,
         "/* active refusal candidate */\nint decomp_engine_main(void) { return 1; }\n"
         if MODE == "repair-active-declared-role-refusal-after-write"
+        else "/* active max-turn candidate */\nint decomp_engine_main(void) { return 1; }\n"
+        if MODE == "repair-active-declared-role-max-turn-requests-after-write"
         else "/* token-limit candidate */\nint decomp_engine_main(void) { return 1; }\n",
         149,
     )
@@ -909,6 +914,8 @@ if MODE in (
         respond(prompt, {"stopReason": "refusal"})
         raise SystemExit(0)
     prompt_result = {"stopReason": "end_turn"}
+    if MODE == "repair-active-declared-role-max-turn-requests-after-write":
+        prompt_result["stopReason"] = "max_turn_requests"
     if MODE != "repair-active-declared-role-missing-usage-after-write":
         prompt_result["usage"] = {
             "inputTokens": -1 if MODE == "repair-active-declared-role-negative-usage-after-write" else 11,
