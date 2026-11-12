@@ -657,7 +657,9 @@ class UploadServerTest {
             assertEquals(slowedJobIds, observedSlowRecords, "the dashboard should remain active across distinct records")
             val completedDashboard = dashboard.get(5, java.util.concurrent.TimeUnit.SECONDS)
             assertEquals(200, completedDashboard.status)
-            assertTrue(completedDashboard.body.decodeToString().contains("boundary.elf"))
+            val dashboardBody = completedDashboard.body.decodeToString()
+            for (jobId in jobIds) assertTrue(dashboardBody.contains(jobId), "completed listing should include $jobId")
+            assertTrue(dashboardBody.contains("boundary.elf"))
         } finally {
             // Unpark any physical read even when an assertion fails, then let the server drain.
             readPermits.release(slowedJobIds.size + 1)
