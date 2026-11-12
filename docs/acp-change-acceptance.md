@@ -2417,3 +2417,27 @@ This is local scripted-ACP evidence using an injected validator. It does not
 qualify production validation under #236, live providers, publication crash
 recovery under #732, durable provenance under #733, hosted exact-head CI, or
 the complete #734/#63 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair exact required-context admission — 2026-11-12
+
+The active repair loop now also has an equality control for all required
+context ceilings. A declarative profile seeds two required modules and two
+source files totaling exactly 77 bytes; `maximumContextModules`,
+`maximumContextFiles`, and `maximumContextBytes` are set to those exact counts
+and bytes. The loop reaches the captured harness once with both exact file
+bodies, then records `NO_CHANGES`; the accepted source/head remain unchanged
+and no attempt remains pending. The existing sibling matrix continues to
+check one-over refusal for each dimension before harness dispatch.
+
+The focused run passed with two tests and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-exact-context-admission-2026-11-12.xml)
+has SHA-256
+`8534e22b0c86406cdd637fb9cc9d91bf27486091a83de4ee8843988f5563c6fd`; the
+[provenance record](evidence/issue-734-active-repair-exact-context-admission-2026-11-12.json)
+binds the exact source commit/tree, selectors, command, and result.
+
+This is local strict captured-harness evidence; the equality case does not
+launch an ACP process. It does not qualify production validation under #236,
+live-provider behavior, publication crash recovery under #732, durable
+provenance under #733, hosted exact-head CI, or the complete #734/#63
+acceptance matrix. Keep #734 and #63 open.

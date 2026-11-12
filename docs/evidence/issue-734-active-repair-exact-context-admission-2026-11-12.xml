@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.repair.TraceGuidedRepairTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-11-12T11:10:46.420Z" hostname="whatsername" time="1.818">
+  <properties/>
+  <testcase name="active repair admits exact required context module file and byte limits()" classname="decompengine.repair.TraceGuidedRepairTest" time="1.225"/>
+  <testcase name="active repair required context module file and byte budgets refuse before dispatch()" classname="decompengine.repair.TraceGuidedRepairTest" time="0.568"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
