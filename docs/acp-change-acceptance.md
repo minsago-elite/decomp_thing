@@ -1852,3 +1852,27 @@ This is local scripted-ACP evidence with an injected validator, not production
 validation under #236 or live-provider acceptance. Hosted exact-head CI,
 remaining resource limits, and the complete #734/#63 acceptance matrix remain
 open. Keep #734 and #63 open.
+
+## Active repair request-byte admission boundary — 2026-11-12
+
+Source commit `d7351e0a31227b8ee2c71c1bb686c020500bcd99` adds the missing
+exact-boundary active request-size control. The test computes the request byte
+requirement from the selected context, compile prompt, empty-corpus text,
+serialized indexed context, and fixed request overhead. A budget equal to that
+computed size reaches scripted ACP and the injected receipt-bound compile-valid
+validator. A ceiling one byte lower requires the exact request-size diagnostic
+before dispatch or validation; it records `RESOURCE_EXHAUSTED` while preserving
+the accepted source, graph head, and node count, with no pending attempt and no
+retained inputs.
+
+The focused run passed all five request, diagnostic, and retained-regression
+byte/count boundary methods with zero failures, errors, or skips. The retained
+[JUnit report](evidence/issue-734-active-repair-request-bytes-2026-11-12.xml)
+has SHA-256 `881e6fcf277b11596219c7150779a14a6cea5ea8700fbf83cba3af463a73233f`;
+the [provenance record](evidence/issue-734-active-repair-request-bytes-2026-11-12.json)
+binds the source commit/tree, selectors, command, and result.
+
+This is local scripted-ACP evidence with an injected validator, not production
+validation under #236 or live-provider acceptance. Hosted exact-head CI,
+remaining resource limits, and the complete #734/#63 acceptance matrix remain
+open. Keep #734 and #63 open.

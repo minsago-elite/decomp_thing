@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "issue": 734,
+  "pullRequest": "https://github.com/minsago-elite/decomp_thing/pull/1943",
+  "sourceCommit": "d7351e0a31227b8ee2c71c1bb686c020500bcd99",
+  "sourceParent": "6029a0058fbf6df05440eddc9d0482daa117dd6e",
+  "sourceTree": "092a7bca3595b89084d481d7eee37a0df23432c5",
+  "tests": [
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact request byte limit and records one byte under as resource exhaustion",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact diagnostic character limit and records one over as resource exhaustion",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression argument count and refuses one argument over before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression input count and refuses one input over before dispatch",
+    "decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch"
+  ],
+  "command": "./gradlew --offline test --console=plain -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact request byte limit and records one byte under as resource exhaustion' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact diagnostic character limit and records one over as resource exhaustion' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression argument count and refuses one argument over before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact retained regression input count and refuses one input over before dispatch' --tests 'decompengine.repair.TraceGuidedRepairTest.active repair admits exact aggregate retained regression bytes and refuses one byte over before dispatch'",
+  "result": {
+    "tests": 5,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testSeconds": 10.135,
+    "suiteSeconds": 10.135,
+    "timestamp": "2026-11-12T06:15:03.543Z",
+    "junitSha256": "881e6fcf277b11596219c7150779a14a6cea5ea8700fbf83cba3af463a73233f"
+  },
+  "scope": {
+    "profile": "Generated C repair index profile",
+    "provider": "scripted ACP process through the active repair loop",
+    "coverage": "The exact maximumRequestBytes limit is computed from a matching project context, compile prompt, empty-corpus text, indexed-context JSON, and fixed request overhead. That ceiling dispatches scripted ACP and reaches the injected receipt-bound compile-valid validator. The one-byte-lower control asserts the exact computed required-byte diagnostic, zero dispatches/validation, unchanged source/head/node count, one retained RESOURCE_EXHAUSTED run, no pending attempt, and empty retained corpus. The same execution covers existing exact/one-over raw diagnostic characters and retained regression input bytes, count, and argument count.",
+    "qualificationLimits": [
+      "local scripted ACP evidence only",
+      "uses an injected validation strategy rather than production validation under #236",
+      "no live-provider or hosted exact-head CI qualification",
+      "other resource limits and complete #734/#63 acceptance remain open"
+    ]
+  }
+}
