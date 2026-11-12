@@ -4227,10 +4227,21 @@ class TraceGuidedRepairTest {
         val prefix = "/* exact repair quota-byte boundary: "
         val suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
         val candidateLimit = patchLimit + if (readQuota) 1 else 0
-        val candidateSource = (prefix + "q".repeat(
-            candidateLimit.toInt() - prefix.toByteArray(Charsets.UTF_8).size - suffix.toByteArray(Charsets.UTF_8).size,
-        ) + suffix).toByteArray(Charsets.UTF_8)
+        val paddingBytes =
+            candidateLimit.toInt() - prefix.toByteArray(Charsets.UTF_8).size - suffix.toByteArray(Charsets.UTF_8).size
+        val padding = if (readQuota) {
+            "q".repeat(paddingBytes)
+        } else {
+            "é".repeat(paddingBytes / 2) + if (paddingBytes % 2 == 1) "x" else ""
+        }
+        val candidateText = prefix + padding + suffix
+        val candidateSource = candidateText.toByteArray(Charsets.UTF_8)
         assertEquals(candidateLimit, candidateSource.size.toLong())
+        if (sourceFileQuota) {
+            assertTrue(candidateText.length < candidateSource.size,
+                "the source-file grant case must distinguish UTF-8 bytes from character count")
+            assertTrue('é' in candidateText)
+        }
         val budget = RepairResourceBudget(
             maximumSourceFileBytes = if (sourceFileQuota) patchLimit else 64L * 1024,
             maximumPatchBytes = if (quota == ActiveAcpRepairQuota.PATCH_BYTES) patchLimit else 8L * 1024,

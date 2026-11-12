@@ -981,12 +981,21 @@ if MODE == "repair-active-declared-role-quota-retry":
     source = join_path(cwd, "src/modules/reconstructed.c")
     prefix = "/* exact repair quota-byte boundary: "
     suffix = " */\nint decomp_engine_main(void) { return 1; }\n"
-    candidate = prefix + ("q" * (REPAIR_QUOTA_BOUNDARY_BYTES - len(prefix.encode()) - len(suffix.encode()))) + suffix
+    padding_bytes = REPAIR_QUOTA_BOUNDARY_BYTES - len(prefix.encode()) - len(suffix.encode())
+    padding = "é" * (padding_bytes // 2) + ("x" if padding_bytes % 2 else "")
+    candidate = prefix + padding + suffix
     if len(candidate.encode()) != REPAIR_QUOTA_BOUNDARY_BYTES:
         raise SystemExit(155)
+    if len(candidate) >= REPAIR_QUOTA_BOUNDARY_BYTES or "é" not in candidate:
+        raise SystemExit(162)
     write_workspace_file(source, candidate, 154)
 
-    oversized = try_write_workspace_file(source, candidate + " ", 155)
+    oversized_candidate = candidate + " "
+    if len(oversized_candidate.encode()) != REPAIR_QUOTA_BOUNDARY_BYTES + 1:
+        raise SystemExit(163)
+    if len(oversized_candidate) >= REPAIR_QUOTA_BOUNDARY_BYTES:
+        raise SystemExit(164)
+    oversized = try_write_workspace_file(source, oversized_candidate, 155)
     if oversized.get("error", {}).get("code") != -32602:
         raise SystemExit(156)
 
