@@ -988,14 +988,15 @@ reaches candidate validation. This removes the earlier scheduling-dependent
 
 ## Active repair delayed tool-limit response checkpoint — 2026-11-12
 
-Commit `acc27a014ab9ab658ef1aa634f3735de87a85a40` adds a separate ordering
-control for the case where the host observes tool-call exhaustion before the
-prompt response arrives. A test-only gate is reached after the harness has
-snapshotted the exhaustion outcome and before it cancels the prompt. The
-scripted peer then completes the prompt with usage while cancellation is held.
-After the bounded cancellation drain, the harness re-reads the recorded
-response, preserving the available input/output counters while retaining
-`LIMIT_EXHAUSTED` as the stop reason.
+Follow-up source commit `26ce828787ed75db3cd0a958ee409c6beba080a8` removes the
+earlier test-only response gate and makes the delayed-response control match
+the real cancellation order. The scripted peer sends two tool-call updates,
+waits until it receives `session/cancel`, and only then returns the final
+prompt response with usage. `AcpAgentHarness.cancelPrompt` keeps the prompt
+response collector active through the remaining bounded cancellation grace,
+then cancels it if the peer still has not completed. The harness re-reads the
+response after that drain, retaining available usage while the host-enforced
+tool limit remains authoritative.
 
 The companion case withholds the final prompt response until host cancellation
 and verifies that tool exhaustion remains `LIMIT_EXHAUSTED` even when configured
@@ -1003,9 +1004,10 @@ token ceilings cannot be checked because usage is absent. The returned receipt
 retains the observed tool-call count and leaves input/output usage null; missing
 usage remains a protocol failure for ordinary completed turns.
 
-Both cases passed the focused `TraceGuidedRepairTest` invocation at the source
-commit above (two tests, zero failures/errors/skips). These are scripted ACP
-controls through active repair; they do not qualify live-provider behavior,
+Both cases passed the focused `TraceGuidedRepairTest` invocation at source
+commit `26ce828787ed75db3cd0a958ee409c6beba080a8` (two tests, zero
+failures/errors/skips). These are scripted ACP controls through active repair;
+they do not qualify live-provider behavior,
 production validation under #236, or hosted exact-head CI. #734 and #63 remain
 open.
 
