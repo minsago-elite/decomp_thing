@@ -79,6 +79,7 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -331,7 +332,7 @@ class AgentExecutionEvidenceTest {
         val sessionId = "session-secret-must-not-be-archived"
         val message = "peer assistant text must be represented by digest"
         val toolTitle = "peer tool title must be represented by digest"
-        val harness = EvidenceHarness(sessionId, message, toolTitle)
+        val harness = EvidenceHarness(sessionId, message, toolTitle, includeTerminalOutputEvent = true)
         val factoryProvenance = harness.factoryProvenance
 
         val manifest = SourceTreeGenerator.generate(
@@ -377,7 +378,18 @@ class AgentExecutionEvidenceTest {
             evidence.getValue("agent").jsonObject
                 .getValue("negotiatedCapabilities").jsonObject.getValue("promptEmbeddedContext").jsonPrimitive.boolean,
         )
-        assertEquals(4, evidence.getValue("events").jsonObject.getValue("records").jsonArray.size)
+        val archivedEvents = evidence.getValue("events").jsonObject.getValue("records").jsonArray
+        assertEquals(5, archivedEvents.size)
+        val terminalOutput = archivedEvents.map { it.jsonObject }
+            .single { it.getValue("type").jsonPrimitive.content == "terminal_output" }
+        assertEquals(4L, terminalOutput.getValue("sequence").jsonPrimitive.long)
+        assertEquals(digest(sessionId), terminalOutput.getValue("sessionIdSha256").jsonPrimitive.content)
+        assertEquals(digest("terminal-1"), terminalOutput.getValue("terminalIdSha256").jsonPrimitive.content)
+        assertEquals(digest("tool-1"), terminalOutput.getValue("toolCallIdSha256").jsonPrimitive.content)
+        assertEquals(12, terminalOutput.getValue("retainedBytes").jsonPrimitive.int)
+        assertEquals(12L, terminalOutput.getValue("producedBytes").jsonPrimitive.long)
+        assertFalse(terminalOutput.getValue("truncated").jsonPrimitive.boolean)
+        assertFalse(terminalOutput.toString().contains("output text"))
         val turn = evidence.getValue("request").jsonObject
         assertEquals(harness.wirePromptSha256, turn.getValue("wirePromptSha256").jsonPrimitive.content)
         assertEquals(harness.requestBinding.requestSha256, turn.getValue("requestSha256").jsonPrimitive.content)
@@ -443,6 +455,13 @@ class AgentExecutionEvidenceTest {
             extracted,
         )
         assertEquals(text, extracted.resolve(evidencePath).readText())
+        val extractedReceipt = Json.parseToJsonElement(extracted.resolve(evidencePath).readText()).jsonObject
+        assertEquals(
+            terminalOutput,
+            extractedReceipt.getValue("events").jsonObject.getValue("records").jsonArray
+                .map { it.jsonObject }.single { it.getValue("type").jsonPrimitive.content == "terminal_output" },
+            "archive lineage verification must retain the typed terminal event",
+        )
         val contribution = candidateLineage.source.acceptedAcpContributions.single()
         assertEquals("reconstruction", contribution.workflow)
         assertEquals("parse", contribution.taskId)
@@ -882,6 +901,7 @@ class AgentExecutionEvidenceTest {
         private val beforeReturn: (AgentExecutionRequest) -> Unit = {},
         private val terminalStopReason: AgentStopReason = AgentStopReason.COMPLETED,
         private val failWithProtocolOutcome: Boolean = false,
+        private val includeTerminalOutputEvent: Boolean = false,
     ) : AgentHarness {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
         lateinit var requestBinding: AgentExecutionRequestBinding
@@ -939,6 +959,15 @@ class AgentExecutionEvidenceTest {
                 ),
             )
             changes.singleOrNull()?.let { change -> onEvent(AgentFileChangeEvent(3, change)) }
+            if (includeTerminalOutputEvent) onEvent(AgentTerminalOutputEvent(
+                sequence = 4,
+                sessionIdSha256 = digest(sessionId),
+                terminalIdSha256 = digest("terminal-1"),
+                toolCallIdSha256 = digest("tool-1"),
+                retainedByteCount = 12,
+                producedByteCount = 12,
+                truncated = false,
+            ))
             wirePromptSha256 = digest(decompengine.agent.renderAgentPrompt(request.objective, request.contextInputs))
             evidence = snapshot(target)
             beforeReturn(request)
