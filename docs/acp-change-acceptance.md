@@ -2521,3 +2521,30 @@ coverage for Generated C Make. It does not qualify live providers, production
 repair validation under #236, publication crash recovery under #732, durable
 provenance under #733, hosted exact-head CI, or the complete #734/#63
 acceptance matrix. Keep #734 and #63 open.
+
+## Active repair history-projection byte boundary — 2026-11-12
+
+The active repair loop now has a measured `maximumProjectionBytes` equality and
+one-byte-under pair after a scripted ACP agent acknowledges a 4,096-byte source
+write and readback. The test calibrates the exact 13,514-byte edge with the
+production history renderer over the recovered candidate state. At the measured
+limit the candidate reaches the injected validator; at 13,513 bytes the
+completed candidate is refused with the history-projection diagnostic before
+validation. The refusal preserves the accepted source and graph head, clears
+pending state, removes the unreferenced candidate blob, and retains the
+request-bound receipt and rejected assessment with verified process and sandbox
+cleanup.
+
+The focused test passed with one test and zero failures, errors, or skips. The
+retained [JUnit report](evidence/issue-734-active-repair-projection-byte-boundary-2026-11-12.xml)
+has SHA-256
+`6b629c6f94200350fe191d6fdb0ca0d6dd6e7ce48d7d393b89b6e4ad924ae967`; the
+[provenance record](evidence/issue-734-active-repair-projection-byte-boundary-2026-11-12.json)
+binds the exact source commit/tree, selector, command, and result.
+
+This is local scripted-ACP evidence using an injected validator. The test-only
+interruption used to calibrate and compare the recovery projection does not
+qualify crash recovery. This does not qualify production validation under #236,
+live providers, publication crash recovery under #732, durable provenance under
+#733, hosted exact-head CI, or the complete #734/#63 acceptance matrix. Keep
+#734 and #63 open.
