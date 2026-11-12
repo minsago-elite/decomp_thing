@@ -21,10 +21,13 @@ internal data class GhidraInvocation(
     val input: Path,
     val scripts: Path,
     val postScripts: List<GhidraPostScript>,
+    val timingInvocationId: String? = null,
+    val recordBundleVerification: ((() -> List<Path>) -> List<Path>)? = null,
 ) {
     fun arguments(): List<String> = listOf(
         "analyze", project.absolute(), projectName, input.absolute(), scripts.absolute(),
-    ) + postScripts.flatMap { listOf(it.name, it.arguments.size.toString()) + it.arguments }
+    ) + postScripts.flatMap { listOf(it.name, it.arguments.size.toString()) + it.arguments } +
+        (timingInvocationId?.let { listOf("timing-v1", it) } ?: emptyList())
 }
 
 class BundledGhidra private constructor(val root: Path) {
@@ -51,7 +54,8 @@ class BundledGhidra private constructor(val root: Path) {
 
     /** Only the generic exporter uses this opt-in gate; existing probe/oracle commands stay unchanged. */
     internal fun analysisCommandForOwnedLaunch(invocation: GhidraInvocation, checkpoint: (String) -> Unit): List<String> {
-        val libraries = BundledGhidraVerificationProcess().verifyAndGetLibraries(root, checkpoint)
+        val verify = { BundledGhidraVerificationProcess().verifyAndGetLibraries(root, checkpoint) }
+        val libraries = invocation.recordBundleVerification?.invoke(verify) ?: verify()
         val command = workerCommand(checkpoint, libraries) + "await-parent-launch" + invocation.arguments()
         checkpoint("before returning owned bundled Ghidra analysis command")
         return command

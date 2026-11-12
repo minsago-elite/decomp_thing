@@ -14,8 +14,25 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 
 class BestEffortProgressJournalTest {
+    @Test
+    fun `workflow run id is exposed for diagnostic sidecar correlation`() {
+        val parent = java.nio.file.Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-run-correlation"))
+        val reports = createTempDirectory(parent, "reports-")
+        try {
+            val runId = BestEffortProgressJournal(reports, "reconstruction").use { progress ->
+                val runId = kotlin.test.assertNotNull(progress.workflowRunId)
+                assertTrue(runId.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
+                runId
+            }
+            val snapshot = AgentProgressJournal.read(reports)!!
+            assertEquals(runId, snapshot.getValue("events").jsonArray.first().jsonObject.getValue("runId").jsonPrimitive.content)
+        } finally { reports.toFile().deleteRecursively() }
+    }
+
     @Test
     fun `asynchronous full history failure warns once without replacing workflow failure`() {
         val parent = java.nio.file.Files.createDirectories(

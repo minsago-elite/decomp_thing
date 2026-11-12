@@ -60,6 +60,7 @@ class AgentProgressJournal private constructor(
     private val failure = AtomicReference<Throwable?>()
     private val runId = UUID.randomUUID().toString()
     internal val journalRunId: String get() = runId
+    override val workflowRunId: String get() = runId
     internal val writerAlive: Boolean get() = writer.isAlive
     private var sequence = 0L
     private var queueDropped = 0L
@@ -99,6 +100,7 @@ class AgentProgressJournal private constructor(
                     hooks.maximumQueuedEvents,
                     hooks.beforeFinalize,
                     hooks.beforeAppend,
+                    hooks.afterBatchWritten,
                 )
             }
             requireSequenceCapacity()
