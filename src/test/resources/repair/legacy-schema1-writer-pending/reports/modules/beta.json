@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "fingerprint": "f4286f007037c7407bdbf47b422b85c0bb178b233ed57e7beb2a364675ce83db",
+  "sourceSha256": "545cc49668c54902d3b42724671b2bcbcc7cea8cff5be343d5cf8f653bfa3609",
+  "generator": "evidence-only",
+  "reconstructorIdentity": "evidence-only:v1",
+  "promptSha256": "97e267da2f3ee84d74b5863c4a18396c7090f53e3814481c9d86820c3a286828",
+  "promptCharacters": null,
+  "promptBudgetCharacters": null,
+  "accepted": false,
+  "retryable": false,
+  "entityStatuses": [
+    {"id":"fn_beta","status":"unresolved"}
+  ],
+  "issues": [    {
+      "code": "evidence-only-placeholder",
+      "message": "evidence-only mode emits placeholders and does not accept implementations",
+      "entityIds": ["fn_beta"]
+    },    {
+      "code": "generic-return-placeholder",
+      "message": "candidate implementation for fn_beta is indistinguishable from the evidence-only return stub",
+      "entityIds": ["fn_beta"]
+    }
+  ]
+}

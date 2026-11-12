@@ -310,14 +310,15 @@ class AgentExecutionEvidenceTest {
     @Test
     fun `ACP reconstruction archives bounded execution and validation evidence`() {
         val temp = createTempDirectory("acp-execution-evidence-")
-        val project = temp.resolve("project")
+        val output = temp.resolve("project")
         val sessionId = "session-secret-must-not-be-archived"
         val message = "peer assistant text must be represented by digest"
         val toolTitle = "peer tool title must be represented by digest"
         val harness = EvidenceHarness(sessionId, message, toolTitle)
         val factoryProvenance = harness.factoryProvenance
 
-        val manifest = SourceTreeGenerator.generate(
+        val (project, manifest) = generateTransactionalAgentProject(
+            output,
             RecoveredProgramModel(
                 inputSha256 = "a".repeat(64),
                 functions = listOf(
@@ -331,8 +332,7 @@ class AgentExecutionEvidenceTest {
                 globals = emptyList(),
                 types = emptyList(),
             ),
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(
+            BoundedLlmModuleReconstructor(
                 harness,
                 harnessProvenanceDescriptor = factoryProvenance.stableDescriptor,
             ),
@@ -519,11 +519,10 @@ class AgentExecutionEvidenceTest {
             "other peer message",
             "other tool title",
         )
-        val otherProject = temp.resolve("other-project")
-        SourceTreeGenerator.generate(
+        val (otherProject, _) = generateTransactionalAgentProject(
+            temp.resolve("other-project"),
             evidenceModel(),
-            otherProject,
-            reconstructor = BoundedLlmModuleReconstructor(
+            BoundedLlmModuleReconstructor(
                 otherHarness,
                 harnessProvenanceDescriptor = otherHarness.factoryProvenance.stableDescriptor,
             ),
@@ -680,13 +679,13 @@ class AgentExecutionEvidenceTest {
     @Test
     fun `agent candidate changed by publication normalization is rejected`() {
         val temp = createTempDirectory("acp-normalization-binding-")
-        val project = temp.resolve("project")
+        val output = temp.resolve("project")
         val harness = EvidenceHarness("session", "message", "tool", appendFinalNewline = false)
 
-        val manifest = SourceTreeGenerator.generate(
+        val (project, manifest) = generateTransactionalAgentProject(
+            output,
             evidenceModel(),
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(
+            BoundedLlmModuleReconstructor(
                 harness,
                 harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
             ),
@@ -704,7 +703,8 @@ class AgentExecutionEvidenceTest {
     @Test
     fun `receipt persistence failure never becomes an evidence-free fallback and can retry`() {
         val temp = createTempDirectory("acp-receipt-persistence-")
-        val project = temp.resolve("project")
+        val output = temp.resolve("project")
+        val project = output.resolve("source-tree")
         var blockPersistence = true
         val harness = EvidenceHarness("session", "message", "tool", beforeReturn = { request ->
             if (blockPersistence) {
@@ -720,15 +720,14 @@ class AgentExecutionEvidenceTest {
 
         repeat(2) {
             assertFailsWith<Exception> {
-                SourceTreeGenerator.generate(evidenceModel(), project, reconstructor = reconstructor)
+                generateTransactionalAgentProject(output, evidenceModel(), reconstructor)
             }
             assertFalse(project.resolve("reports/modules/parse.json").exists())
             assertFalse(project.resolve("src/modules/parse.c").exists())
         }
 
-        project.resolve("reports/agent-executions").deleteIfExists()
         blockPersistence = false
-        val manifest = SourceTreeGenerator.generate(evidenceModel(), project, reconstructor = reconstructor)
+        val (_, manifest) = generateTransactionalAgentProject(output, evidenceModel(), reconstructor)
         assertTrue(manifest.unresolvedImplementationIds.isEmpty())
         assertTrue(project.resolve("reports/agent-executions/parse.json").exists())
     }
@@ -752,43 +751,67 @@ class AgentExecutionEvidenceTest {
         )
 
         scenarios.forEach { (name, harness) ->
-            val project = temp.resolve(name)
+            val output = temp.resolve(name)
+            val project = output.resolve("source-tree")
             val reconstructor = BoundedLlmModuleReconstructor(
                 harness,
                 harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
             )
             if (name in setOf("cancelled", "limit-exhausted")) {
+                var receipt: String? = null
+                val input = output.resolveSibling("${output.fileName}.input").also { Files.write(it, byteArrayOf(7, 3, 2)) }
                 assertFailsWith<ModuleReconstructionInterruptedException> {
-                    SourceTreeGenerator.generate(evidenceModel(), project, reconstructor = reconstructor)
+                    ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+                        workspace.publish(setOf("source-tree", ".decomp-agent-sessions"), buildStage = { stage ->
+                            try {
+                                SourceTreeGenerator.generateWithCompilerFeedback(
+                                    evidenceModel().copy(inputSha256 = workspace.inputSha256),
+                                    stage.resolve("source-tree"),
+                                    hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                                    reconstructor = reconstructor,
+                                    profile = GeneratedCMakeReconstructionProfile.descriptor,
+                                    publicationLock = workspace.publicationLock,
+                                ).manifest
+                            } catch (failure: ModuleReconstructionInterruptedException) {
+                                receipt = stage.resolve("source-tree/reports/agent-executions/parse.json").readText()
+                                throw failure
+                            }
+                        })
+                    }
                 }
+                assertFalse(project.exists(), name)
+                val text = requireNotNull(receipt) { name }
+                assertTrue(text.contains("\"releaseComplete\": false"), name)
+                assertTrue(text.contains("\"stopReason\":\"${name}\""), name)
+                assertFalse(text.contains("typed protocol failure"), name)
             } else {
-                val manifest = SourceTreeGenerator.generate(evidenceModel(), project, reconstructor = reconstructor)
+                val (_, manifest) = generateTransactionalAgentProject(output, evidenceModel(), reconstructor)
                 assertTrue("fn_0000000000401000" in manifest.unresolvedImplementationIds)
+                val evidence = project.resolve("reports/agent-executions/parse.json")
+                assertTrue(evidence.exists(), name)
+                val text = evidence.readText()
+                assertTrue(text.contains("\"releaseComplete\": false"), name)
+                assertTrue(
+                    text.contains("\"stopReason\":\"${name.removePrefix("failed-")}\"") ||
+                        text.contains("\"kind\":\"protocol\""),
+                    name,
+                )
+                assertFalse(text.contains("typed protocol failure"), name)
             }
-            val evidence = project.resolve("reports/agent-executions/parse.json")
-            assertTrue(evidence.exists(), name)
-            val text = evidence.readText()
-            assertTrue(text.contains("\"releaseComplete\": false"), name)
-            assertTrue(
-                text.contains("\"stopReason\":\"${name.removePrefix("failed-")}\"") ||
-                    text.contains("\"kind\":\"protocol\""),
-                name,
-            )
-            assertFalse(text.contains("typed protocol failure"), name)
         }
     }
 
     @Test
     fun `malformed peer text persists as an injective partial v2 commitment`() {
         val temp = createTempDirectory("acp-malformed-receipt-")
-        val project = temp.resolve("project")
+        val output = temp.resolve("project")
         val malformed = "peer-\uD800-text"
         val harness = EvidenceHarness("session", malformed, "tool")
 
-        val manifest = SourceTreeGenerator.generate(
+        val (project, manifest) = generateTransactionalAgentProject(
+            output,
             evidenceModel(),
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(
+            BoundedLlmModuleReconstructor(
                 harness,
                 harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
             ),
@@ -1099,6 +1122,36 @@ class AgentExecutionEvidenceTest {
             ),
         ),
     )
+
+    /** Agent fixtures must exercise the same admitted-input publication stage as production. */
+    private fun generateTransactionalAgentProject(
+        output: Path,
+        model: RecoveredProgramModel,
+        reconstructor: ModuleReconstructor,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        observedBehavior: String? = null,
+    ): Pair<Path, SourceTreeManifest> {
+        val input = output.resolveSibling("${output.fileName}.input")
+        Files.write(input, byteArrayOf(7, 3, 2))
+        return ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+            var manifest: SourceTreeManifest? = null
+            assertEquals(PublicationResult.PUBLISHED, workspace.publish(
+                setOf("source-tree", ".decomp-agent-sessions"),
+                buildStage = { stage ->
+                    manifest = SourceTreeGenerator.generateWithCompilerFeedback(
+                        model.copy(inputSha256 = workspace.inputSha256),
+                        stage.resolve("source-tree"),
+                        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                        reconstructor = reconstructor,
+                        observedBehavior = observedBehavior,
+                        profile = profile,
+                        publicationLock = workspace.publicationLock,
+                    ).manifest
+                },
+            ))
+            output.resolve("source-tree") to requireNotNull(manifest)
+        }
+    }
 }
 
 private fun AcpExecutionEvidenceSnapshot.asInvocationEvidence(): AcpInvocationEvidenceSnapshot =

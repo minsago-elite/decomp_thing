@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "profileId": "generated-c-make-v1",
+  "profileSha256": "00fc99496420c34fbd9165476a839b2ebff81e6b2c24be76fc19acc9cd5b3391",
+  "budgetSha256": "be1c24a13257d56835f976878be18109e9d51b82181a4a3e6f60fe76c606fdec",
+  "sourcePaths": ["Makefile", "include/decomp_types.h", "include/modules/alpha.h", "include/modules/beta.h", "include/modules/charlie.h", "include/modules/delta.h", "src/main.c", "src/modules/alpha.c", "src/modules/alpha_internal.h", "src/modules/beta.c", "src/modules/beta_internal.h", "src/modules/charlie.c", "src/modules/charlie_internal.h", "src/modules/delta.c", "src/modules/delta_internal.h"],
+  "editablePaths": ["Makefile", "include/decomp_types.h", "include/modules/alpha.h", "include/modules/beta.h", "include/modules/charlie.h", "include/modules/delta.h", "src/main.c", "src/modules/alpha.c", "src/modules/alpha_internal.h", "src/modules/beta.c", "src/modules/beta_internal.h", "src/modules/charlie.c", "src/modules/charlie_internal.h", "src/modules/delta.c", "src/modules/delta_internal.h"],
+  "indexSha256": "a4761fcbf9844d2be90e13953362a1429640745d31554474cbf1f834106a13f5"
+}

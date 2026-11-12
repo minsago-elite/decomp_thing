@@ -112,7 +112,13 @@ data class DurableWebWorkflowPublicationContext(
  * [inputSourceTree] is the selected recorded revision's retained source for adapters that require one.
  */
 data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
-    val predecessorReportsDirectory: Path? = null, val inputSourceTree: Path? = null)
+    val predecessorReportsDirectory: Path? = null, val inputSourceTree: Path? = null,
+    /** Invoked only after the output journal durably records a committed reconstruction. */
+    val onReconstructionPublicationCommitted: (() -> Unit)? = null,
+    /** Invoked only after the output journal durably records a committed repair tree. */
+    val onRepairPublicationCommitted: ((WorkflowCandidate, decompengine.jobs.WorkflowRunState, WorkflowTerminalReason, WorkflowUsage) -> Unit)? = null,
+    /** Invoked after stage verification but before the durable publication decision. */
+    val onRepairPublicationPrepared: ((WorkflowCandidate, decompengine.jobs.WorkflowRunState, WorkflowTerminalReason, WorkflowUsage) -> Unit)? = null)
 
 sealed interface DurableWebWorkflowOutcome {
     data class Completed(val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null,

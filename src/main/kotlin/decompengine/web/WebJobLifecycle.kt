@@ -24,8 +24,11 @@ import java.time.Instant
  * A read-only reason a job must be retained, contributed by another subsystem. The managed Git
  * repositories register [WebGitRetentionHold], which reports in-progress, uncommitted and unpushed
  * Git work so deletion and maintenance refuse to discard it (#509). An implementation must be
- * fast and side-effect free; throwing fails closed. Holds are evaluated under the job service's
- * lock, which Git admission also takes first, so a check and a new Git operation never interleave.
+ * fast and side-effect free; throwing fails closed. Holds are normally evaluated under the job
+ * service's lock. During any Git admission reservation, deletion skips all Git holds and refuses
+ * conservatively, avoiding service/Git/publication lock inversion across different jobs. Git
+ * admission reserves under the service lock, then leaves it before acquiring Git or publication
+ * locks; the reservation remains until Git has persisted or rejected its operation.
  */
 fun interface JobRetentionHold {
     fun holds(jobId: String): List<JobRetentionHoldReason>

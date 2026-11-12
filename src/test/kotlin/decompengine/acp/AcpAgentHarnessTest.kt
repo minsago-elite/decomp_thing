@@ -40,6 +40,7 @@ import decompengine.project.ReconstructionProfiles
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.budgetedAnalyzer
 import java.nio.file.Path
 import java.nio.file.Files
@@ -1065,17 +1066,19 @@ class AcpAgentHarnessTest {
             )
             val output = temp.resolve(base.id)
             val result = try {
-                ArchivalReconstructionService(
-                    budgetedAnalyzer { supplied, _ ->
-                        assertEquals(binary, supplied)
-                        model
-                    },
-                    BoundedLlmModuleReconstructor(
-                        harness,
-                        harnessProvenanceDescriptor = factoryProvenance.stableDescriptor,
-                    ),
-                    profile = profile,
-                ).reconstruct(binary, output)
+                ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+                    ArchivalReconstructionService(
+                        budgetedAnalyzer { supplied, _ ->
+                            assertEquals(binary, supplied)
+                            model
+                        },
+                        BoundedLlmModuleReconstructor(
+                            harness,
+                            harnessProvenanceDescriptor = factoryProvenance.stableDescriptor,
+                        ),
+                        profile = profile,
+                    ).reconstructWithWorkspace(binary, output, workspace)
+                }
             } catch (failure: Exception) {
                 val checkpoint = output.resolve("source-tree").resolve(
                     profile.layout.declaration("module-evidence").materialize(mapOf("module" to "decomp")),

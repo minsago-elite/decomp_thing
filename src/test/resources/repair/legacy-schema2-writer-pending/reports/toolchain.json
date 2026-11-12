@@ -1,0 +1,7 @@
+{
+  "decompEngineVersion": "0.1.0",
+  "javaVersion": "21.0.12.1",
+  "gcc": "gcc (Gentoo 16.2.1_p20260926 p1) 16.2.1 20260926",
+  "make": "GNU Make 4.4.1",
+  "note": "LLM model and prompt hashes are recorded per generated module when applicable."
+}

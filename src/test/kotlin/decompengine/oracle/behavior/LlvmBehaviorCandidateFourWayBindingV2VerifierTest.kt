@@ -35,9 +35,13 @@ import decompengine.oracle.core.OracleSchemas
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.ArchivalPackager
 import decompengine.project.BoundedLlmModuleReconstructor
+import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.MakeProjectBuilder
+import decompengine.project.PublicationResult
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
+import decompengine.project.ReconstructionHostSafetyLimits
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.SourceTreeGenerator
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
@@ -390,26 +394,41 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
     }
 
     private fun createFixture(root: Path, id: String, elfPath: String): FourWayFixture {
-        val project = root.resolve("project-$id")
+        Files.createDirectories(root)
+        val output = root.resolve("project-$id")
+        val projectInput = "input-$id".toByteArray()
+        val input = root.resolve("project-$id.input").also { Files.write(it, projectInput) }
         val harness = FourWayEvidenceHarness(id)
-        SourceTreeGenerator.generate(
-            RecoveredProgramModel(
-                inputSha256 = sha256("input-$id".toByteArray()),
-                functions = listOf(
-                    RecoveredFunction(
-                        "fn_0000000000401000",
-                        "parse_input",
-                        0x401000UL,
-                        "int parse_input(void)",
-                    ),
+        val model = RecoveredProgramModel(
+            inputSha256 = sha256(projectInput),
+            functions = listOf(
+                RecoveredFunction(
+                    "fn_0000000000401000",
+                    "parse_input",
+                    0x401000UL,
+                    "int parse_input(void)",
                 ),
             ),
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(
-                harness,
-                harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
-            ),
         )
+        ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+            assertEquals(PublicationResult.PUBLISHED, workspace.publish(
+                setOf("source-tree", ".decomp-agent-sessions"),
+                buildStage = { stage ->
+                    SourceTreeGenerator.generateWithCompilerFeedback(
+                        model,
+                        stage.resolve("source-tree"),
+                        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                        profile = GeneratedCMakeReconstructionProfile.descriptor,
+                        reconstructor = BoundedLlmModuleReconstructor(
+                            harness,
+                            harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
+                        ),
+                        publicationLock = workspace.publicationLock,
+                    ).manifest
+                },
+            ))
+        }
+        val project = output.resolve("source-tree")
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         val archive = ArchivalPackager.create(project, root.resolve("candidate-$id.zip")).archivePath
         val lineageParent = root.resolve("lineage-$id").createDirectories()

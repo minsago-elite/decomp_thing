@@ -911,63 +911,106 @@ class ArchivalReconstructionService(
 
     private val adapter = ReconstructionAdapters.resolve(profile)
 
-    fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
+    fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult =
+        reconstructInternal(binaryPath, outputDir, null)
+
+    /** Production entry point for a caller that already owns the output workspace lease. */
+    internal fun reconstructWithWorkspace(
+        binaryPath: Path,
+        outputDir: Path,
+        workspace: ReconstructionOutputWorkspace,
+        publicationAdmission: () -> Unit = {},
+        onCommittedPublication: () -> Unit = {},
+    ): ArchivalReconstructionResult = reconstructInternal(binaryPath, outputDir, workspace, publicationAdmission,
+        onCommittedPublication)
+
+    private fun reconstructInternal(
+        binaryPath: Path,
+        outputDir: Path,
+        workspace: ReconstructionOutputWorkspace?,
+        publicationAdmission: () -> Unit = {},
+        onCommittedPublication: () -> Unit = {},
+    ): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
-        adapter.admitGeneration(outputDir.resolve("source-tree"), profile, reconstructor ?: adapter.defaultReconstructor())
-        outputDir.createDirectories()
+        // Canonicalize the caller's supplied root before comparing it with the lease. This
+        // accepts symlinked ancestors while still rejecting a caller path unrelated to the
+        // workspace that owns publication. Preserve the established refusal for an absent path.
+        val admittedOutputDir = if (workspace == null) outputDir else try {
+            outputDir.toRealPath()
+        } catch (failure: java.io.IOException) {
+            throw IllegalArgumentException("archival output directory must be the workspace's canonical root", failure)
+        }
+        val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        val publicationRequirement = selectedReconstructor.publicationRequirement()
+        require(publicationRequirement != ReconstructionPublicationRequirement.TRANSACTIONAL || workspace != null) {
+            "agent-backed archival reconstruction requires an active output workspace lease"
+        }
+        workspace?.publicationLock?.requireInvocation(admittedOutputDir, binaryPath, workspace.inputSha256)
+        adapter.admitGeneration(admittedOutputDir.resolve("source-tree"), profile, selectedReconstructor)
+        admittedOutputDir.createDirectories()
         val observedBehavior = ReconstructionExplorationInput.read(
-            outputDir, profile.budgets.reconstructionMaximumContextCharacters,
+            admittedOutputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
         val selectedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
             ?.withExportBudgets(profile.budgets)
             ?: analyzer
         adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
-        val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        val model = selectedAnalyzer.analyze(binaryPath, admittedOutputDir.resolve("analysis"))
         progress.runContext(model.inputSha256, profile.sha256)
-        val project = outputDir.resolve("source-tree")
-        val compilerFeedback = ModuleCompilerFeedbackStore(outputDir, model.inputSha256, profile.sha256)
-        val progressPath = outputDir.resolve("reconstruction_progress.json")
+        val project = admittedOutputDir.resolve("source-tree")
+        val compilerFeedback = ModuleCompilerFeedbackStore(admittedOutputDir, model.inputSha256, profile.sha256)
+        val progressPath = admittedOutputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        SourceTreeGenerator.generateWithCompilerFeedback(
-            model,
-            project,
-            hostSafetyLimits = hostSafetyLimits,
-            reconstructor = reconstructor,
-            observedBehavior = observedBehavior,
-            profile = profile,
-            progress = progress,
-            compilerFeedback = { moduleId -> runCatching { compilerFeedback.read(moduleId) }.getOrNull() },
-            onCompilerFeedback = { feedback -> runCatching { compilerFeedback.write(feedback) } },
-        ) { completed, total, module ->
-            moduleTotal = total
-            progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
-        }
-        progress.phase(AgentWorkflowPhase.BUILD_VALIDATING)
-        val build = adapter.build(project, profile, hostSafetyLimits)
-        val bundle = ArchivalPackager.create(
-            project,
-            outputDir.resolve("source-tree.zip"),
-            ArchivalBundleLimits(
-                maximumEntries = profile.budgets.archiveMaximumEntries,
-                maximumFileBytes = profile.budgets.archiveMaximumFileBytes,
-                maximumTotalBytes = profile.budgets.archiveMaximumTotalBytes,
-            ),
-            profile = profile,
-            hostSafetyLimits = hostSafetyLimits,
-        )
-        val unresolvedEntities = requireNotNull(bundle.audit).unresolvedEntityIds
-        val completeImplementation = !adapter.requiresUnresolvedOutput(profile) && unresolvedEntities.isEmpty()
-        val implementationStatus = if (completeImplementation) "complete" else "unresolved"
-        progressPath.writeText(
-            "{\"phase\":\"$implementationStatus\",\"completed\":$moduleTotal,\"total\":$moduleTotal," +
-                "\"unresolvedEntityCount\":${unresolvedEntities.size}}\n",
-        )
-        progress.phase(if (completeImplementation) AgentWorkflowPhase.COMPLETED else AgentWorkflowPhase.UNRESOLVED)
-        outputDir.resolve("reconstruction.json").writeText(
-            """
+        var publishedBuild: BuildReport? = null
+        var publishedBundle: ArchivalBundle? = null
+        var completeImplementation = false
+        var unresolvedEntityCount = 0
+        fun buildCandidate(candidateRoot: Path) {
+            val candidateProject = candidateRoot.resolve("source-tree")
+            val generated = SourceTreeGenerator.generateWithCompilerFeedback(
+                model,
+                candidateProject,
+                hostSafetyLimits = hostSafetyLimits,
+                reconstructor = selectedReconstructor,
+                observedBehavior = observedBehavior,
+                profile = profile,
+                progress = progress,
+                compilerFeedback = { moduleId -> runCatching { compilerFeedback.read(moduleId) }.getOrNull() },
+                onCompilerFeedback = { feedback -> runCatching { compilerFeedback.write(feedback) } },
+                onModuleProgress = { completed, total, module ->
+                    moduleTotal = total
+                    progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
+                },
+                publicationLock = workspace?.publicationLock,
+            )
+            require(generated.disposition.publicationRequirement == publicationRequirement) {
+                "reconstruction publication requirement changed during generation"
+            }
+            require(generated.disposition.committable) {
+                "agent generation contains a rejected module; validated source publication was refused"
+            }
+            progress.phase(AgentWorkflowPhase.BUILD_VALIDATING)
+            val build = adapter.build(candidateProject, profile, hostSafetyLimits)
+            val bundle = ArchivalPackager.create(
+                candidateProject,
+                candidateRoot.resolve("source-tree.zip"),
+                ArchivalBundleLimits(
+                    maximumEntries = profile.budgets.archiveMaximumEntries,
+                    maximumFileBytes = profile.budgets.archiveMaximumFileBytes,
+                    maximumTotalBytes = profile.budgets.archiveMaximumTotalBytes,
+                ),
+                profile = profile,
+                hostSafetyLimits = hostSafetyLimits,
+            )
+            val unresolvedEntities = requireNotNull(bundle.audit).unresolvedEntityIds
+            unresolvedEntityCount = unresolvedEntities.size
+            completeImplementation = !adapter.requiresUnresolvedOutput(profile) && unresolvedEntities.isEmpty()
+            val implementationStatus = if (completeImplementation) "complete" else "unresolved"
+            candidateRoot.resolve("reconstruction.json").writeText(
+                """
             {
               "inputSha256": "${model.inputSha256}",
               "project": "source-tree",
@@ -982,11 +1025,58 @@ class ArchivalReconstructionService(
               "typeCount": ${model.types.size},
               "buildExitCode": ${build.returnCode},
               "implementationStatus": "$implementationStatus",
-              "unresolvedEntityCount": ${unresolvedEntities.size}
+              "unresolvedEntityCount": $unresolvedEntityCount
             }
             """.trimIndent() + "\n",
-        )
-        return ArchivalReconstructionResult(project, build, bundle)
+            )
+            fun publishedPath(path: Path): Path {
+                val normalized = path.toAbsolutePath().normalize()
+                val candidate = candidateRoot.toAbsolutePath().normalize()
+                return if (normalized.startsWith(candidate)) admittedOutputDir.resolve(candidate.relativize(normalized)) else path
+            }
+            publishedBuild = build.copy(
+                projectDir = publishedPath(build.projectDir),
+                logPath = publishedPath(build.logPath),
+                diagnosticsDir = publishedPath(build.diagnosticsDir),
+            )
+            publishedBundle = bundle
+        }
+
+        val publicationResult = if (workspace == null) {
+            buildCandidate(admittedOutputDir)
+            PublicationResult.PUBLISHED
+        } else {
+            require(workspace.inputSha256 == model.inputSha256) { "reconstruction model input does not match the admitted workspace" }
+            workspace.publish(
+                setOf("source-tree", "source-tree.zip", "reconstruction.json", ".decomp-agent-sessions"),
+                ::buildCandidate,
+                cancellationCheck = {
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException("archival reconstruction cancelled")
+                    publicationAdmission()
+                },
+                onCommitted = onCommittedPublication,
+            )
+        }
+        when (publicationResult) {
+            PublicationResult.PUBLISHED -> Unit
+            PublicationResult.REJECTED -> error("validated reconstruction output was rejected before publication")
+            PublicationResult.PENDING -> throw ReconstructionPublicationPendingException()
+        }
+        val implementationStatus = if (completeImplementation) "complete" else "unresolved"
+        // Publication has crossed its durable commit decision. Progress is advisory and outside
+        // the transaction, so a late disk/observer failure must not turn committed output into a
+        // reported rejection. Keep interruption visible to the caller without undoing the commit.
+        try {
+            progressPath.writeText(
+                "{\"phase\":\"$implementationStatus\",\"completed\":$moduleTotal,\"total\":$moduleTotal," +
+                    "\"unresolvedEntityCount\":$unresolvedEntityCount}\n",
+            )
+        } catch (_: Exception) { /* The committed report is authoritative; progress is advisory. */ }
+        try {
+            progress.phase(if (completeImplementation) AgentWorkflowPhase.COMPLETED else AgentWorkflowPhase.UNRESOLVED)
+        } catch (_: Exception) { /* A failed observer cannot undo the durable publication decision. */ }
+        val bundle = requireNotNull(publishedBundle).copy(archivePath = admittedOutputDir.resolve("source-tree.zip"))
+        return ArchivalReconstructionResult(admittedOutputDir.resolve("source-tree"), requireNotNull(publishedBuild), bundle)
     }
 }
 

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 6,
+  "fingerprint": "3f40512b9d8aba2b1c9da49f6b4c158f939e67536c469194b9bc6f80f95656f4",
+  "sourceSha256": "75974694bde1a21a4c60ef802bf89301062125086d8f54303b73f46252b58033",
+  "generator": "evidence-only",
+  "workflowOrigin": "reconstructor-return",
+  "reconstructorIdentity": "evidence-only:v5",
+  "promptSha256": "13710f86f3cf21858903a234b50cceb97f8857c1782fceb35da42e0d3a69b918",
+  "promptCharacters": null,
+  "promptBudgetCharacters": null,
+  "executionEvidencePath": null,
+  "executionEvidenceSha256": null,
+  "executionEvidenceSchemaVersion": null,
+  "executionRequestSha256": null,
+  "executionTerminalOutcome": null,
+  "executionReleaseComplete": null,
+  "inputBinarySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "modelSchemaVersion": 1,
+  "profileSha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+  "accepted": false,
+  "compilation": null,
+  "retryable": false,
+  "entityStatuses": [
+    {"id":"fn_charlie","status":"unresolved"}
+  ],
+  "issues": [    {
+      "code": "evidence-only-placeholder",
+      "message": "evidence-only mode emits placeholders and does not accept implementations",
+      "entityIds": ["fn_charlie"]
+    },    {
+      "code": "generic-return-placeholder",
+      "message": "candidate implementation for fn_charlie is indistinguishable from the evidence-only return stub",
+      "entityIds": ["fn_charlie"]
+    }
+  ]
+}

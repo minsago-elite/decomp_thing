@@ -20,7 +20,7 @@ internal fun parseWebValidationHistoryQuery(raw: String?): RepairRecordedHistory
 
 internal fun WebJobService.readValidationHistory(jobId: String, runId: String,
     selection: RepairRecordedHistorySelection): WebValidationHistoryCapture = captureValidationHistory(selection,
-    version = { getAttempt(jobId, runId).version }, history = { readRecordedRepairHistory(jobId, runId) })
+    version = { getAttempt(jobId, runId).version }, history = { readRecordedRepairHistory(jobId, runId, failFast = true) })
 
 internal fun captureValidationHistory(selection: RepairRecordedHistorySelection, version: () -> String,
     history: () -> RepairHistoryReadResult): WebValidationHistoryCapture {

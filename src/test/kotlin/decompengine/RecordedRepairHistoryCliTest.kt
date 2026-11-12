@@ -1,6 +1,9 @@
 package decompengine
 
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.repair.*
+import decompengine.agent.AgentWorkflowPhase
+import decompengine.jobs.AgentProgressJournal
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionResult
@@ -8,17 +11,188 @@ import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.sha256
 import decompengine.validation.ProcessInput
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
 import kotlin.test.*
 
 class RecordedRepairHistoryCliTest {
+    @Test
+    fun `CLI repair runtime construction and repair history reads wait for publication`() {
+        val parent = root().parent
+        val input = parent.resolve("publication-input-${java.util.UUID.randomUUID()}").apply { writeText("input") }
+        val reports = parent.resolve("publication-reports-${java.util.UUID.randomUUID()}")
+        val sourceTree = Files.createDirectories(reports.resolve("source-tree"))
+        val workspace = ReconstructionOutputWorkspace.open(reports, input)
+        val executor = Executors.newSingleThreadExecutor()
+        val started = CountDownLatch(1)
+        val runtimeOpened = AtomicInteger()
+        val runtime = AutoCloseable {}
+        try {
+            val repair = executor.submit(java.util.concurrent.Callable {
+                started.countDown()
+                withRepairRuntimeUnderPublicationLease(
+                    projectDirectory = sourceTree,
+                    beforeRepairMarker = {},
+                    openRuntime = { _ ->
+                        runtimeOpened.incrementAndGet()
+                        runtime
+                    },
+                    canRetireRepairMarker = { true },
+                    action = { _, _ -> 7 },
+                )
+            })
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            assertEquals(0, runtimeOpened.get(), "repair runtime construction must wait behind publication")
+            assertFails { repair.get(100, TimeUnit.MILLISECONDS) }
+            workspace.close()
+            assertEquals(7, repair.get(5, TimeUnit.SECONDS))
+            assertEquals(1, runtimeOpened.get())
+
+            val secondWorkspace = ReconstructionOutputWorkspace.open(reports, input)
+            try {
+                val historyStarted = CountDownLatch(1)
+                val history = executor.submit(java.util.concurrent.Callable {
+                    historyStarted.countDown()
+                    readRecordedRepairHistoryUnderPublicationLease(
+                        parseRecordedRepairHistoryArguments(listOf(sourceTree.toString())),
+                    )
+                })
+                assertTrue(historyStarted.await(5, TimeUnit.SECONDS))
+                assertFails { history.get(100, TimeUnit.MILLISECONDS) }
+                secondWorkspace.close()
+                assertEquals(RepairHistoryReadStatus.UNAVAILABLE, history.get(5, TimeUnit.SECONDS).status,
+                    "the empty fixture tree has no valid recorded repair index")
+            } finally {
+                secondWorkspace.close()
+            }
+        } finally {
+            workspace.close()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+            input.toFile().delete()
+            reports.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `repair history reports unavailable when publication recovery is required`() {
+        val base = root()
+        val reports = base.resolve("reports")
+        val sourceTree = reports.resolve("source-tree")
+        val input = base.resolve("input.elf").apply { writeText("input") }
+        ReconstructionOutputWorkspace.open(reports, input).use { }
+        Files.createDirectories(sourceTree)
+        val options = parseRecordedRepairHistoryArguments(listOf(sourceTree.toString()))
+
+        Files.writeString(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION), "pending transaction")
+        assertEquals(RepairHistoryReadStatus.UNAVAILABLE,
+            readRecordedRepairHistoryUnderPublicationLease(options).status,
+            "pending publication must not escape the CLI's unavailable-history boundary")
+
+        Files.delete(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION))
+        Files.delete(reports.resolve(".reconstruction-active-input.json"))
+        assertTrue(Files.exists(reports.resolve(".reconstruction.lock")))
+        assertFalse(Files.exists(reports.resolve(".reconstruction-active-input.json")))
+        assertEquals(RepairHistoryReadStatus.UNAVAILABLE,
+            readRecordedRepairHistoryUnderPublicationLease(options).status,
+            "incomplete workspace markers must remain unavailable, not throw")
+    }
+
+    @Test
+    fun `normalized shared publication readers proceed concurrently across processes`() {
+        val base = root()
+        val reports = base.resolve("reports")
+        val sourceTree = reports.resolve("source-tree")
+        val input = base.resolve("input.elf").apply { writeText("input") }
+        ReconstructionOutputWorkspace.open(reports, input).use { }
+        Files.createDirectories(sourceTree)
+        sourceTree.resolve("code.c").writeText("int main(void) { return 0; }\n")
+        val profile = DeclarativeRepairIndexProfile("concurrent-history", RepairIndexLayout(
+            listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("m", listOf("code.c")))))
+        ModuleRevisionGraph.open(sourceTree, profile).use { graph ->
+            graph.enableRunContract()
+            graph.synchronizeRepairHistory()
+        }
+        val cli = Path.of("build/install/llm_bin_patch/bin/llm_bin_patch").toAbsolutePath()
+        assertTrue(Files.isExecutable(cli), "installed CLI must be available to the cross-process control")
+
+        ReconstructionOutputWorkspace.withProjectReadLease(sourceTree) { _ ->
+            val child = ProcessBuilder(cli.toString(), "repair-history", sourceTree.toString())
+                .redirectErrorStream(true).start()
+            val completed = child.waitFor(10, TimeUnit.SECONDS)
+            if (!completed) {
+                child.destroyForcibly()
+                child.waitFor(5, TimeUnit.SECONDS)
+            }
+            assertTrue(completed, "a second process must acquire a normalized shared lease alongside an existing reader")
+            val output = child.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(0, child.exitValue(), output)
+            assertTrue("No repair attempts are recorded." in output, output)
+        }
+    }
+
+    @Test
+    fun `repair progress projection retains project lease until delayed writer stops`() {
+        val base = root()
+        val reports = base.resolve("reports")
+        val sourceTree = Files.createDirectories(reports.resolve("source-tree"))
+        val input = base.resolve("input.elf").apply { writeText("input") }
+        ReconstructionOutputWorkspace.open(reports, input).use { }
+        val writerEntered = CountDownLatch(1)
+        val releaseWriter = CountDownLatch(1)
+        val closeTimedOut = CountDownLatch(1)
+        val journal = AtomicReference<AgentProgressJournal?>()
+        val projection = RepairProgressProjection(sourceTree.resolve("reports"),
+            onUnavailable = { closeTimedOut.countDown() },
+            journalFactory = { directory ->
+                AgentProgressJournal.withSnapshotWriteHook(directory, "repair") {
+                    writerEntered.countDown()
+                    releaseWriter.await()
+                }.also { created ->
+                    journal.set(created)
+                    created.phase(AgentWorkflowPhase.ANALYZING)
+                }
+            })
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val repair = executor.submit {
+                withRepairRuntimeUnderPublicationLease(
+                    projectDirectory = sourceTree,
+                    beforeRepairMarker = {},
+                    openRuntime = { _ -> projection },
+                    canRetireRepairMarker = { true },
+                    action = { runtime, _ -> runtime.closeAndAwaitWriterTermination() },
+                )
+            }
+            assertTrue(writerEntered.await(5, TimeUnit.SECONDS), "progress writer did not reach the delayed write")
+            assertTrue(closeTimedOut.await(7, TimeUnit.SECONDS), "bounded close did not report its writer timeout")
+            val publication = executor.submit {
+                ReconstructionOutputWorkspace.open(reports, input).use { }
+            }
+            assertFails { publication.get(100, TimeUnit.MILLISECONDS) }
+            releaseWriter.countDown()
+            repair.get(5, TimeUnit.SECONDS)
+            publication.get(5, TimeUnit.SECONDS)
+            assertFalse(requireNotNull(journal.get()).writerAlive)
+        } finally {
+            releaseWriter.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS))
+        }
+    }
+
     @Test
     fun `actual CLI reaches every cancelled run without attempts and preserves empty canonical history`() {
         val project = root()
@@ -152,13 +326,11 @@ class RecordedRepairHistoryCliTest {
                     publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
                 val attempt = graph.beginAttempt(listOf("code.c"), metadata)
                 graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate-source".toByteArray()))
-                assertContentEquals((if (detached) "PRIVATE-original-source" else "PRIVATE-candidate-source").toByteArray(),
-                    root.resolve("code.c").readBytes())
+                assertContentEquals("PRIVATE-original-source".toByteArray(), readCodeWithoutAtime(root))
                 val rejected = graph.reject(attempt, RepairEvidence("rejected", "PRIVATE-peer"))
                 val rollback = assertNotNull(rejected.rollbackRecord)
-                assertEquals(if (detached) RepairRollbackState.NOT_REQUIRED_VERIFIED else RepairRollbackState.RESTORED_VERIFIED,
-                    rollback.state)
-                assertEquals(!detached, rollback.candidateSourceInstallStarted)
+                assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, rollback.state)
+                assertEquals(false, rollback.candidateSourceInstallStarted)
                 assertEquals(rollback.expectedSourceRevisionSha256, rollback.observedSourceRevisionSha256)
                 assertContentEquals("PRIVATE-original-source".toByteArray(), root.resolve("code.c").readBytes())
             }
@@ -168,12 +340,9 @@ class RecordedRepairHistoryCliTest {
             assertEquals(first, second)
             assertTrue("Recorded repair metadata" in first)
             assertTrue("repair iteration 1: rejected" in first)
-            val expectedRollback = if (detached)
-                "Recorded restoration was not required; candidate source installation did not begin."
-            else "Recorded restoration completed and was verified."
+            val expectedRollback = "Recorded restoration was not required; candidate source installation did not begin."
             assertTrue(expectedRollback in first, first)
-            assertFalse((if (detached) "Recorded restoration completed and was verified."
-                else "Recorded restoration was not required;") in first, first)
+            assertFalse("Recorded restoration completed and was verified." in first, first)
             assertTrue("fully accepted revision: none" in first)
             assertTrue("retained regression cases: 1" in first)
             for (private in listOf("PRIVATE-", "code.c", "reports/")) assertFalse(private in first, first)
@@ -219,6 +388,14 @@ class RecordedRepairHistoryCliTest {
     }
 }
 
+private fun readCodeWithoutAtime(root: Path): ByteArray = LinuxFilesystemSyscalls.openRoot(root).use { rootDescriptor ->
+    requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(rootDescriptor.fd, "code.c")).use { file ->
+        LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(file).use { readable ->
+            LinuxFilesystemSyscalls.readWithoutAtime(readable, 1_048_576)
+        }
+    }
+}
+
 /** Actual repair producer with authored in-memory agent/validation; no compiler or model is run. */
 internal class RecordedTraceHistoryFixture {
     val agentInvocations = java.util.concurrent.atomic.AtomicInteger()
@@ -260,7 +437,7 @@ internal fun produceRejectedRecordedTraceHistory(project: Path, caseCount: Int =
         override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure {
             fixture.validations.incrementAndGet()
             assertContentEquals(candidate, Files.readAllBytes(projectDir.resolve("code.c")))
-            assertContentEquals(original, Files.readAllBytes(project.resolve("code.c")))
+            assertContentEquals(original, readCodeWithoutAtime(project))
             return CompileFailure(listOf("authored-validator"), 1, "", "code.c: PRIVATE diagnostic")
         }
         override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path = error("compile rejection fixture")

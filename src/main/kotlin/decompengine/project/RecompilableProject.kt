@@ -136,13 +136,17 @@ object RecompilableProjectGenerator {
         reconstructor: ModuleReconstructor? = null,
     ): Path {
         hostSafetyLimits.requireAllows(profile.budgets)
-        ReconstructionAdapters.resolve(profile)
+        val adapter = ReconstructionAdapters.resolve(profile)
+        val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        require(selectedReconstructor.publicationRequirement() != ReconstructionPublicationRequirement.TRANSACTIONAL) {
+            "agent-backed project generation requires a staged archival publication workflow"
+        }
         requireSupplementalReportLayout(profile)
         val manifest = SourceTreeGenerator.generate(
             analysis.programModel,
             projectDir,
             hostSafetyLimits = hostSafetyLimits,
-            reconstructor = reconstructor,
+            reconstructor = selectedReconstructor,
             profile = profile,
         )
         ReconstructionReports.write(analysis, projectDir, manifest, profile)
@@ -172,6 +176,10 @@ class ReconstructionPipeline(private val analyzer: GhidraJvmAnalyzer) {
         hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
         requireSupplementalReportLayout(profile)
+        val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        require(selectedReconstructor.publicationRequirement() != ReconstructionPublicationRequirement.TRANSACTIONAL) {
+            "agent-backed pipeline generation requires a staged archival publication workflow"
+        }
         val selectedAnalyzer = analyzer.withExportBudgets(profile.budgets)
         val analysis = selectedAnalyzer.analyze(binaryPath, workDir.resolve("analysis"))
         val projectDir = RecompilableProjectGenerator.generate(
@@ -179,7 +187,7 @@ class ReconstructionPipeline(private val analyzer: GhidraJvmAnalyzer) {
             workDir.resolve("project"),
             profile = profile,
             hostSafetyLimits = hostSafetyLimits,
-            reconstructor = reconstructor,
+            reconstructor = selectedReconstructor,
         )
         return adapter.build(projectDir, profile, hostSafetyLimits)
     }

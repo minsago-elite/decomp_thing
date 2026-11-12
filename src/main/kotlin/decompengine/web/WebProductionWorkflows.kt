@@ -1,6 +1,8 @@
 package decompengine.web
 
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
+import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxDescriptor
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.exploration.AutomaticExplorer
@@ -12,29 +14,34 @@ import decompengine.jobs.WorkflowCandidate
 import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowKind
 import decompengine.jobs.WorkflowTerminalReason
+import decompengine.jobs.WorkflowUsage
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.repair.ModuleRevisionStatus
 import decompengine.repair.RepairPublicationMode
 import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.RepairHistoryReadStatus
 import decompengine.repair.RepairHistorySnapshot
 import decompengine.repair.RepairRunStatus
+import decompengine.repair.RepairRunOutcome
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.repair.readProjectRecordedRepairHistory
+import decompengine.repair.readStableRegularFile
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import java.nio.file.FileVisitResult
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.SimpleFileVisitor
-import java.nio.file.StandardCopyOption
-import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.FileTime
+
+private const val MAXIMUM_WEB_SOURCE_COPY_DEPTH = 256
 
 /**
  * The existing CLI/legacy implementations behind each production adapter. Tests substitute inert
@@ -44,8 +51,16 @@ import java.nio.file.attribute.BasicFileAttributes
 internal interface WebWorkflowEngines {
     /** [activity] is called after each completed exploration sample. */
     fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
-    fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress)
-    fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus
+    fun reconstruct(
+        binary: Path,
+        reportsDirectory: Path,
+        mode: WebReconstructionMode,
+        progress: AgentWorkflowProgress,
+        workspace: ReconstructionOutputWorkspace,
+        publicationAdmission: () -> Unit,
+        onCommittedPublication: () -> Unit,
+    )
+    fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunOutcome
 
     companion object {
         fun production(environment: Map<String, String>, sensitiveValues: Collection<String>): WebWorkflowEngines = object : WebWorkflowEngines {
@@ -54,21 +69,31 @@ internal interface WebWorkflowEngines {
                     .explore(binary, listOf(CandidateInput("seed_default", CandidateSource.SEED)), reportsDirectory)
             }
 
-            override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
+            override fun reconstruct(
+                binary: Path,
+                reportsDirectory: Path,
+                mode: WebReconstructionMode,
+                progress: AgentWorkflowProgress,
+                workspace: ReconstructionOutputWorkspace,
+                publicationAdmission: () -> Unit,
+                onCommittedPublication: () -> Unit,
+            ) {
                 // The explicit request mode replaces the legacy WEB_RECONSTRUCTION_MODE environment choice.
                 val selected = environment + (WEB_RECONSTRUCTION_MODE_KEY to mode.configurationValue)
                 val strategy = selectWebReconstructionStrategy(selected, progress)
                 Files.createDirectories(reportsDirectory)
                 Files.writeString(reportsDirectory.resolve("reconstruction_harness_selection.json"), renderWebReconstructionHarnessSelection(strategy))
                 ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
-                    profile = strategy.profile, progress = progress).reconstruct(binary, reportsDirectory)
+                    profile = strategy.profile, progress = progress).reconstructWithWorkspace(
+                    binary, reportsDirectory, workspace, publicationAdmission, onCommittedPublication,
+                )
             }
 
-            override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
+            override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunOutcome {
                 val configuration = RepairRuntimeConfiguration("generated-c-make-v1", reportsDirectory.resolve("repair_history.json"),
                     harnessOverride = harness)
                 return SecureRepairRuntime.open(configuration).use { runtime ->
-                    runtime.runRepair(project, binary, listOf(ProcessInput("default")), reportsDirectory, REPAIR_ITERATIONS).runState.status
+                    runtime.runRepair(project, binary, listOf(ProcessInput("default")), reportsDirectory, REPAIR_ITERATIONS)
                 }
             }
         }
@@ -166,6 +191,8 @@ internal class ReconstructWorkflowAdapter(
     private val sensitiveValues: Collection<String>,
     // Inert integration controls only. Production registration never opts into uncontained compilation.
     private val allowTestOnlyExecution: Boolean = false,
+    // Injection seam for crash/durability tests; production always opens the ordinary workspace.
+    private val workspaceOpener: (Path, Path) -> ReconstructionOutputWorkspace = ReconstructionOutputWorkspace::open,
 ) : DurableWebWorkflowAdapter {
     private val agent = mode == WebReconstructionMode.AGENT
     override val workflow = WorkflowKind.RECONSTRUCT
@@ -189,19 +216,39 @@ internal class ReconstructWorkflowAdapter(
         if (agent && !allowTestOnlyExecution) return DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = true)
         val (result, usage) = executor.run(context.attempt.limits, meter) {
-            BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->
-                val progress = MeteredWorkflowProgress(journal, meter)
-                try {
-                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress)
-                } catch (failure: Exception) {
-                    progress.phase(AgentWorkflowPhase.FAILED)
-                    throw failure
+            // Include workspace admission in the same bounded child as reconstruction. In
+            // particular, acquiring the exclusive publication gate may wait behind a long-lived
+            // reader; cancellation and limits must be able to interrupt that wait.
+            workspaceOpener(context.reportsDirectory, context.job.binaryPath).use { workspace ->
+                BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->
+                    val progress = MeteredWorkflowProgress(journal, meter)
+                    try {
+                        engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress, workspace, {
+                            if (Thread.currentThread().isInterrupted) throw InterruptedException("reconstruction cancelled before publication")
+                            meter.admitPublication(context.attempt.limits)
+                        }, context.onReconstructionPublicationCommitted ?: {})
+                    } catch (failure: Exception) {
+                        progress.phase(AgentWorkflowPhase.FAILED)
+                        throw failure
+                    }
                 }
+                // Read the candidate while this adapter still owns the exclusive workspace lease.
+                // Once publication admission wins, caller cancellation must not interrupt a later
+                // read-lease reacquisition and turn a completed publication into a cancelled run.
+                reconstructionCandidate(context.reportsDirectory.resolve("source-tree"))
             }
         }
-        // Candidate output is recorded whenever a canonical source revision exists; it is never acceptance.
-        val candidate = reconstructionCandidate(context.reportsDirectory.resolve("source-tree"))
-        return when (unwrap(result)) {
+        // Only a completed publication belongs to this attempt. On a rejected, exhausted, or
+        // uncertain transaction, the live tree may be the prior accepted generation (or be
+        // intentionally unavailable behind a pending journal); never report it as this attempt's
+        // candidate.
+        val completed = unwrap(result)
+        if (completed is BoundedWorkflowResult.Threw &&
+            completed.failure is decompengine.project.ReconstructionPublicationPendingException) {
+            throw completed.failure
+        }
+        val candidate = (completed as? BoundedWorkflowResult.Returned)?.value
+        return when (completed) {
             is BoundedWorkflowResult.Returned -> DurableWebWorkflowOutcome.Completed(candidate, usage)
             is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
             is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
@@ -211,10 +258,9 @@ internal class ReconstructWorkflowAdapter(
 
 /** The schema-3 build contract records the canonical source digest of the generated inputs. */
 internal fun reconstructionCandidate(sourceTree: Path): WorkflowCandidate? {
-    val contract = sourceTree.resolve("reports").resolve("build_contract.json")
     return try {
-        if (!Files.isRegularFile(contract, NOFOLLOW_LINKS) || Files.size(contract) > MAXIMUM_CONTRACT_BYTES) return null
-        val document = OracleJson.parse(Files.readAllBytes(contract), StrictJsonLimits(MAXIMUM_CONTRACT_BYTES.toInt(),
+        val contract = readStableRegularFile(sourceTree, "reports/build_contract.json", MAXIMUM_CONTRACT_BYTES).bytes
+        val document = OracleJson.parse(contract, StrictJsonLimits(MAXIMUM_CONTRACT_BYTES.toInt(),
             MAXIMUM_CONTRACT_BYTES.toInt(), 16, 100_000, 64 * 1024, MAXIMUM_CONTRACT_BYTES.toInt(), 32)) as? JsonObject ?: return null
         val sha = (document["sourceRevisionSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
         if (!sha.matches(Regex("[0-9a-f]{64}"))) null else WorkflowCandidate(webSourceRevisionId(sha), sha)
@@ -229,6 +275,8 @@ internal class RepairWorkflowAdapter(
     override val harnessCapabilityId: String,
     // Inert integration seam only; metadata cannot attest production acceptance (see #478).
     private val acceptTestOnlyPublication: Boolean = false,
+    // Fault injection only. Production always checks the live attempt limits at the decision boundary.
+    private val publicationAdmission: ((WorkflowExecutionLimits, WorkflowExecutionMeter) -> Unit)? = null,
 ) : DurableWebWorkflowAdapter {
     override val workflow = WorkflowKind.REPAIR
     // No production checkpoint policy yet (no agent-session journal reconciliation), so POST R/recover
@@ -253,19 +301,84 @@ internal class RepairWorkflowAdapter(
 
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
         val input = checkNotNull(context.inputSourceTree) { "repair requires a recorded input revision" }
-        val project = context.reportsDirectory.resolve("source-tree")
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = false)
+        var publishedCandidate: WorkflowCandidate? = null
+        var preparedCandidate: WorkflowCandidate? = null
+        var preparedState: Pair<decompengine.jobs.WorkflowRunState, WorkflowTerminalReason>? = null
+        var preparedUsage: WorkflowUsage? = null
         val (result, usage) = executor.run(context.attempt.limits, meter) {
-            // The attempt owns a private copy; the selected revision's retained evidence is never modified.
-            copyWebSourceTree(input, project)
-            engines.repair(project, context.job.binaryPath, context.reportsDirectory, harness)
+            ReconstructionOutputWorkspace.open(context.reportsDirectory, context.job.binaryPath).use { workspace ->
+                var repairOutcome: RepairRunOutcome? = null
+                val publication = workspace.publish(setOf("source-tree"), { stage ->
+                    val project = stage.resolve("source-tree")
+                    // The attempt owns a private staged copy; selected revision evidence is never modified.
+                    ReconstructionOutputWorkspace.withReadLeaseIfManaged(input.parent, failFast = false) {
+                        copyWebSourceTree(input, project)
+                    }
+                    val outcome = engines.repair(project, context.job.binaryPath, context.reportsDirectory, harness)
+                    repairOutcome = outcome
+                    check(outcome.recoveryComplete && outcome.runState.terminal &&
+                        outcome.runState.rollbackFailureAttemptId == null && outcome.runState.rollbackResolution == null) {
+                        "repair recovery is incomplete or has unresolved rollback state"
+                    }
+                }, {
+                    val injectedAdmission = publicationAdmission
+                    if (injectedAdmission != null) injectedAdmission(context.attempt.limits, meter) else {
+                        if (Thread.currentThread().isInterrupted) throw InterruptedException("repair cancelled before publication")
+                        meter.admitPublication(context.attempt.limits)
+                    }
+                }, {
+                    val outcome = checkNotNull(repairOutcome) { "repair did not return before publication" }
+                    val candidate = checkNotNull(repairCandidate(context.reportsDirectory.resolve("source-tree"),
+                        context.attempt.startedAt?.toEpochMilli(), allowTestOnly = true)) {
+                        "committed repair has no verifiable candidate identity"
+                    }
+                    val (state, reason) = repairWorkflowTerminal(outcome.runState.status)
+                    val expectedCandidate = checkNotNull(preparedCandidate)
+                    val expectedState = checkNotNull(preparedState)
+                    val expectedUsage = checkNotNull(preparedUsage)
+                    check(candidate == expectedCandidate && expectedState == (state to reason)) {
+                        "committed repair differs from its durable pre-decision receipt"
+                    }
+                    context.onRepairPublicationCommitted?.invoke(candidate, state, reason, expectedUsage)
+                    publishedCandidate = candidate
+                }, beforeDecision = { stage ->
+                    val outcome = checkNotNull(repairOutcome) { "repair did not return before publication" }
+                    val candidate = checkNotNull(repairCandidate(stage.resolve("source-tree"),
+                        context.attempt.startedAt?.toEpochMilli(), allowTestOnly = true)) {
+                        "staged repair has no verifiable candidate identity"
+                    }
+                    val terminal = repairWorkflowTerminal(outcome.runState.status)
+                    val usage = meter.usageSoFar()
+                    context.onRepairPublicationPrepared?.invoke(candidate, terminal.first, terminal.second, usage)
+                    preparedCandidate = candidate
+                    preparedState = terminal
+                    preparedUsage = usage
+                })
+                if (publication == decompengine.project.PublicationResult.PENDING)
+                    throw decompengine.project.ReconstructionPublicationPendingException()
+                if (publication == decompengine.project.PublicationResult.REJECTED)
+                    throw InterruptedException("repair publication was rejected before its decision")
+                val outcome = checkNotNull(repairOutcome) { "repair did not return an outcome" }
+                outcome
+            }
         }
-        val candidate = repairCandidate(project, context.attempt.startedAt?.toEpochMilli(), acceptTestOnlyPublication)
-        return when (val completed = unwrap(result)) {
-            is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
-            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
-            is BoundedWorkflowResult.Returned -> when (completed.value) {
-                RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID -> DurableWebWorkflowOutcome.Completed(candidate, usage)
+        val completedResult = unwrap(result)
+        if (completedResult is BoundedWorkflowResult.Threw &&
+            completedResult.failure is decompengine.project.ReconstructionPublicationPendingException) {
+            throw completedResult.failure
+        }
+        val completedOutcome = (completedResult as? BoundedWorkflowResult.Returned)?.value
+        val publishable = completedOutcome?.let { it.recoveryComplete && it.runState.terminal &&
+            it.runState.rollbackFailureAttemptId == null && it.runState.rollbackResolution == null } == true
+        val candidate = if (publishable) publishedCandidate else null
+        return when (completedResult) {
+            is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, null, usage)
+            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = null, usage = usage)
+            is BoundedWorkflowResult.Returned -> when (completedResult.value.runState.status) {
+                RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID ->
+                    if (publishable) DurableWebWorkflowOutcome.Completed(candidate, usage)
+                    else DurableWebWorkflowOutcome.Failed(candidate = null, usage = usage)
                 RepairRunStatus.NO_CHANGES -> DurableWebWorkflowOutcome.Completed(candidate, usage, WorkflowTerminalReason.NO_CHANGES)
                 RepairRunStatus.ITERATION_EXHAUSTED, RepairRunStatus.RESOURCE_EXHAUSTED ->
                     DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
@@ -319,6 +432,34 @@ private fun repairCandidate(project: Path, attemptStartedMillis: Long?, allowTes
     return WorkflowCandidate(webSourceRevisionId(sha), sha)
 }
 
+internal data class CommittedRepairPublication(
+    val candidate: WorkflowCandidate,
+    val state: decompengine.jobs.WorkflowRunState,
+    val reason: WorkflowTerminalReason,
+)
+
+private fun repairWorkflowTerminal(status: RepairRunStatus): Pair<decompengine.jobs.WorkflowRunState, WorkflowTerminalReason> =
+    when (status) {
+        RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID ->
+            decompengine.jobs.WorkflowRunState.COMPLETED to WorkflowTerminalReason.COMPLETED
+        RepairRunStatus.NO_CHANGES ->
+            decompengine.jobs.WorkflowRunState.COMPLETED to WorkflowTerminalReason.NO_CHANGES
+        RepairRunStatus.ITERATION_EXHAUSTED, RepairRunStatus.RESOURCE_EXHAUSTED ->
+            decompengine.jobs.WorkflowRunState.FAILED to WorkflowTerminalReason.LIMIT_EXHAUSTED
+        else -> decompengine.jobs.WorkflowRunState.FAILED to WorkflowTerminalReason.FAILED
+    }
+
+/** Reconstruct the committed repair outcome from its durable graph after process death. */
+internal fun committedRepairPublication(project: Path, attemptStartedMillis: Long?): CommittedRepairPublication? {
+    val started = attemptStartedMillis ?: return null
+    val snapshot = recordedHistory(project) ?: return null
+    val run = snapshot.runs.singleOrNull { it.startedEpochMillis >= started } ?: return null
+    if (run.status == RepairRunStatus.RUNNING || run.rollbackFailureAttempt != null || run.rollbackResolution != null) return null
+    val candidate = repairCandidate(project, started, allowTestOnly = true) ?: return null
+    val (state, reason) = repairWorkflowTerminal(run.status)
+    return CommittedRepairPublication(candidate, state, reason)
+}
+
 /**
  * Inert publication control only. Recorded history is metadata, NOT acceptance authority: it does
  * not verify installed sources, blobs, receipt bodies or their binary/profile/corpus commitments.
@@ -342,26 +483,123 @@ internal fun verifyRepairAcceptance(context: DurableWebWorkflowPublicationContex
 
 /** Bounded copy of regular files and directories only; links and special files refuse the copy. */
 internal fun copyWebSourceTree(source: Path, target: Path, maximumEntries: Int = 200_000, maximumBytes: Long = 4L * 1024 * 1024 * 1024) {
-    require(Files.isDirectory(source, NOFOLLOW_LINKS)) { "selected source tree is unavailable" }
+    require(maximumEntries > 0 && maximumBytes >= 0) { "selected source tree copy limits are invalid" }
     require(!Files.exists(target, NOFOLLOW_LINKS)) { "attempt source tree already exists" }
-    var entries = 0
-    var bytes = 0L
-    Files.walkFileTree(source, object : SimpleFileVisitor<Path>() {
-        override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
-            check(!attrs.isSymbolicLink && ++entries <= maximumEntries) { "selected source tree exceeds its copy limits" }
-            if (Thread.currentThread().isInterrupted) throw InterruptedException("source copy interrupted")
-            Files.createDirectory(target.resolve(source.relativize(dir).toString()))
-            return FileVisitResult.CONTINUE
+    val sourceRoot = LinuxFilesystemSyscalls.openAbsolutePathOrNull(source)
+        ?: throw IOException("selected source tree is unavailable")
+    sourceRoot.use { rootPath ->
+        require(rootPath.identity.isDirectory && !rootPath.identity.isSymbolicLink) {
+            "selected source tree is unavailable"
         }
-        override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-            check(attrs.isRegularFile && ++entries <= maximumEntries) { "selected source tree contains an unsupported entry" }
-            bytes += attrs.size()
-            check(bytes <= maximumBytes) { "selected source tree exceeds its copy limits" }
-            if (Thread.currentThread().isInterrupted) throw InterruptedException("source copy interrupted")
-            Files.copy(file, target.resolve(source.relativize(file).toString()), StandardCopyOption.COPY_ATTRIBUTES, java.nio.file.LinkOption.NOFOLLOW_LINKS)
-            return FileVisitResult.CONTINUE
+        LinuxFilesystemSyscalls.openDirectoryFrom(rootPath).use { root ->
+            var entries = 0
+            var bytes = 0L
+            copyWebDirectory(root, target, maximumEntries, maximumBytes,
+                countEntry = { size ->
+                    entries = Math.addExact(entries, 1)
+                    check(entries <= maximumEntries) { "selected source tree exceeds its copy limits" }
+                    bytes = Math.addExact(bytes, size)
+                    check(bytes <= maximumBytes) { "selected source tree exceeds its copy limits" }
+                })
         }
-    })
+    }
+}
+
+private fun copyWebDirectory(
+    source: LinuxDescriptor,
+    target: Path,
+    maximumEntries: Int,
+    maximumBytes: Long,
+    countEntry: (Long) -> Unit,
+    depth: Int = 0,
+) {
+    check(depth <= MAXIMUM_WEB_SOURCE_COPY_DEPTH) { "selected source tree exceeds its copy depth limit" }
+    check(!Thread.currentThread().isInterrupted) { "source copy interrupted" }
+    val initial = LinuxFilesystemSyscalls.directoryMetadata(source)
+    val names = LinuxFilesystemSyscalls.directoryEntryNamesWithoutAtime(source, maximumEntries) {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("source copy interrupted")
+    }.sorted()
+    Files.createDirectory(target)
+    for (name in names) {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("source copy interrupted")
+        val path = target.resolve(name)
+        val entry = LinuxFilesystemSyscalls.openPathAtOrNull(source.fd, name)
+            ?: throw IOException("selected source tree entry disappeared")
+        entry.use { observed ->
+            when {
+                observed.identity.isDirectory && !observed.identity.isSymbolicLink -> {
+                    countEntry(0)
+                    LinuxFilesystemSyscalls.openDirectoryAt(source.fd, name).use { child ->
+                        require(child.identity.key == observed.identity.key) { "selected source directory changed during copy" }
+                        copyWebDirectory(child, path, maximumEntries, maximumBytes, countEntry, depth + 1)
+                    }
+                }
+                observed.identity.isRegularFile && !observed.identity.isSymbolicLink -> {
+                    LinuxFilesystemSyscalls.openRegularFileAtOrNull(source.fd, name)?.use { authorized ->
+                        require(authorized.identity.key == observed.identity.key) { "selected source file changed during copy" }
+                        val before = LinuxFilesystemSyscalls.fileState(authorized)
+                        check(before.size <= maximumBytes) { "selected source tree exceeds its copy limits" }
+                        countEntry(before.size)
+                        var copiedBytes = 0L
+                        Files.newOutputStream(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { output ->
+                            LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized).use { readable ->
+                                val openedState = LinuxFilesystemSyscalls.fileState(readable)
+                                require(openedState == before) { "selected source file changed before metadata-neutral copy" }
+                                while (true) {
+                                    if (Thread.currentThread().isInterrupted) throw InterruptedException("source copy interrupted")
+                                    val remaining = before.size - copiedBytes
+                                    require(remaining >= 0) { "selected source file exceeds its admitted size" }
+                                    val request = if (remaining >= 64 * 1024L) 64 * 1024 else remaining.toInt() + 1
+                                    val chunk = LinuxFilesystemSyscalls.readWithoutAtime(readable, request)
+                                    if (chunk.isEmpty()) break
+                                    require(chunk.size.toLong() <= remaining) {
+                                        "selected source file grew beyond its admitted size"
+                                    }
+                                    output.write(chunk)
+                                    copiedBytes = Math.addExact(copiedBytes, chunk.size.toLong())
+                                }
+                                require(LinuxFilesystemSyscalls.fileState(readable) == before) {
+                                    "selected source file changed during metadata-neutral copy"
+                                }
+                            }
+                        }
+                        require(copiedBytes == before.size) { "selected source file copy was incomplete" }
+                        applyWebCopyMetadata(path, before.identity.mode, before.accessTimeSeconds,
+                            before.accessTimeNanoseconds, before.modificationTimeSeconds,
+                            before.modificationTimeNanoseconds)
+                    } ?: throw IOException("selected source file disappeared")
+                }
+                else -> throw IOException("selected source tree contains an unsupported entry")
+            }
+        }
+    }
+    require(LinuxFilesystemSyscalls.directoryMetadata(source) == initial) {
+        "selected source directory changed during metadata-neutral copy"
+    }
+    val afterNames = LinuxFilesystemSyscalls.directoryEntryNamesWithoutAtime(source, maximumEntries) {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("source copy interrupted")
+    }.sorted()
+    require(afterNames == names) { "selected source directory entries changed during copy" }
+    applyWebCopyMetadata(target, initial.mode, initial.accessTimeSeconds, initial.accessTimeNanoseconds,
+        initial.modificationTimeSeconds, initial.modificationTimeNanoseconds)
+}
+
+private fun applyWebCopyMetadata(
+    path: Path,
+    mode: Int,
+    accessSeconds: Long,
+    accessNanos: Int,
+    modificationSeconds: Long,
+    modificationNanos: Int,
+) {
+    Files.setAttribute(path, "unix:mode", mode and 0xfff, NOFOLLOW_LINKS)
+    val view = Files.getFileAttributeView(path, java.nio.file.attribute.BasicFileAttributeView::class.java, NOFOLLOW_LINKS)
+        ?: throw IOException("private source copy cannot preserve timestamps")
+    view.setTimes(
+        FileTime.from(java.time.Instant.ofEpochSecond(modificationSeconds, modificationNanos.toLong())),
+        FileTime.from(java.time.Instant.ofEpochSecond(accessSeconds, accessNanos.toLong())),
+        null,
+    )
 }
 
 internal val WEB_AGENT_CONTRACT_VERSION: Int = AGENT_EXECUTION_CONTRACT_VERSION

@@ -23,6 +23,7 @@ import decompengine.jobs.BestEffortProgressJournal
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.project.ArchivalReconstructionService
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
@@ -89,23 +90,25 @@ class SourceTreeJobReconstructor(
     private val analyzer: decompengine.project.ProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer.bundled(),
 ) : JobReconstructor {
     override fun reconstruct(job: Job, reportsDir: Path) {
-        BestEffortProgressJournal(reportsDir, "reconstruction", environment.values).use { progress ->
-            try {
-                val strategy = selectWebReconstructionStrategy(environment, progress)
-                java.nio.file.Files.createDirectories(reportsDir)
-                java.nio.file.Files.writeString(
-                    reportsDir.resolve(WEB_RECONSTRUCTION_HARNESS_REPORT),
-                    renderWebReconstructionHarnessSelection(strategy),
-                )
-                ArchivalReconstructionService(
-                    analyzer,
-                    strategy.reconstructor,
-                    profile = strategy.profile,
-                    progress = progress,
-                ).reconstruct(job.binaryPath, reportsDir)
-            } catch (failure: Exception) {
-                progress.phase(AgentWorkflowPhase.FAILED)
-                throw failure
+        ReconstructionOutputWorkspace.open(reportsDir, job.binaryPath).use { workspace ->
+            BestEffortProgressJournal(reportsDir, "reconstruction", environment.values).use { progress ->
+                try {
+                    val strategy = selectWebReconstructionStrategy(environment, progress)
+                    java.nio.file.Files.createDirectories(reportsDir)
+                    java.nio.file.Files.writeString(
+                        reportsDir.resolve(WEB_RECONSTRUCTION_HARNESS_REPORT),
+                        renderWebReconstructionHarnessSelection(strategy),
+                    )
+                    ArchivalReconstructionService(
+                        analyzer,
+                        strategy.reconstructor,
+                        profile = strategy.profile,
+                        progress = progress,
+                    ).reconstructWithWorkspace(job.binaryPath, reportsDir, workspace)
+                } catch (failure: Exception) {
+                    progress.phase(AgentWorkflowPhase.FAILED)
+                    throw failure
+                }
             }
         }
     }
@@ -774,6 +777,10 @@ class UploadServer(
             legacyError(exchange, 409, "ARTIFACT_CHANGED", publicWebDiagnosticMessage("ARTIFACT_CHANGED"), requestDiagnosticOutput) {
                 renderErrorPage(409, "Artifact changed", publicWebDiagnosticMessage("ARTIFACT_CHANGED"))
             }
+        } catch (_: decompengine.project.ReconstructionOutputReadUnavailableException) {
+            legacyError(exchange, 503, "JOB_STORAGE_UNAVAILABLE", publicWebDiagnosticMessage("JOB_STORAGE_UNAVAILABLE"), requestDiagnosticOutput) {
+                renderErrorPage(503, "Job storage unavailable", publicWebDiagnosticMessage("JOB_STORAGE_UNAVAILABLE"))
+            }
         } catch (exception: JobStoreException) {
             legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.", requestDiagnosticOutput) {
                 renderErrorPage(404, "Job not found", "The requested job is unavailable.")
@@ -888,35 +895,67 @@ class UploadServer(
         val view = jobs.presentation(jobId)
         val query = parseRecordedRepairHistoryQuery(exchange.requestURI.rawQuery)
         val reports = query.runId?.let { jobs.reportContext(jobId, it) } ?: view.reports
-        val recorded = jobs.readRecordedRepairHistory(jobId, reports.runId)
-        val page = try {
-            decompengine.repair.recordedRepairHistoryPage(recorded, query.selection, MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS)
-        } catch (failure: decompengine.repair.RepairRecordedSelectionFailure) {
-            val status = if (failure.problem == decompengine.repair.RepairRecordedSelectionProblem.OUT_OF_RANGE) 400 else 409
-            exchange.sendHtml(status, renderErrorPage(status, "History selection unavailable", requireNotNull(failure.message)))
+        val captured = try { jobs.withRunSourceReadLease(jobId, reports.runId, failFast = true) {
+            val recorded = jobs.readRecordedRepairHistory(jobId, reports.runId, failFast = true)
+            val page = try {
+                decompengine.repair.recordedRepairHistoryPage(recorded, query.selection, MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS)
+            } catch (failure: decompengine.repair.RepairRecordedSelectionFailure) {
+                val status = if (failure.problem == decompengine.repair.RepairRecordedSelectionProblem.OUT_OF_RANGE) 400 else 409
+                return@withRunSourceReadLease JobPageCapture.SelectionFailure(status, requireNotNull(failure.message))
+            }
+            // Keep every source/history/archive/artifact capture on the selected generation.
+            val source = runCatching { archiveEvidence.read(jobId, reportPrefix = reports.artifactPrefix).source }
+                .recoverCatching { sourceEvidence.read(jobId, reports.artifactPrefix).view() }
+            val progress = runCatching { readLegacyProgress(jobId, reports.runId) }.getOrNull()
+            val legacyOnly = recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED
+            val repairHistory = if (legacyOnly) readLegacyJsonReport(jobId, reports, LegacyJsonReport.REPAIR_HISTORY) else null
+            val artifacts = runCatching { jobs.listArtifactSummaries(jobId, reports.runId, recorded, page) }.getOrNull()
+            val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
+                repairEvidenceArtifactStates(jobId, reports, history, it)
+            } }
+            val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page, query.validationCasePageNumber)
+            JobPageCapture.Ready(source.getOrNull(), source.isFailure, progress,
+                readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION), repairHistory,
+                readLegacyJsonReport(jobId, reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS), artifacts,
+                repairEvidenceStates?.first, repairEvidenceStates?.second, recordedView)
+        } } catch (_: decompengine.project.ReconstructionOutputReadUnavailableException) {
+            // Publication owns this source generation right now. Keep the job page and durable
+            // state responsive while withholding report files until a consistent snapshot can
+            // be acquired. Do not perform fallback report reads outside the failed lease.
+            JobPageCapture.Ready(source = null, sourceUnavailable = true,
+                progress = null,
+                exploration = null,
+                repairHistory = null,
+                reconstructionProgress = null,
+                artifacts = null, repairEvidenceStates = null, repairReceiptBindingStates = null, recordedView = null)
+        }
+        if (captured is JobPageCapture.SelectionFailure) {
+            exchange.sendHtml(captured.status, renderErrorPage(captured.status, "History selection unavailable", captured.message))
             return
         }
-        // Resolve all page/stale checks before any report, evidence or receipt payload work.
-        val source = runCatching { archiveEvidence.read(jobId, reportPrefix = reports.artifactPrefix).source }
-            .recoverCatching { sourceEvidence.read(jobId, reports.artifactPrefix).view() }
-        val progress = runCatching { readLegacyProgress(jobId, reports.runId) }.getOrNull()
-        // The fixed reader already captured diagnostic H once. Never reread it as display input.
-        val legacyOnly = recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED
-        val repairHistory = if (legacyOnly) readLegacyJsonReport(jobId, reports, LegacyJsonReport.REPAIR_HISTORY) else null
-        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, reports.runId, recorded, page) }.getOrNull()
-        val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
-            repairEvidenceArtifactStates(jobId, reports, history, it)
-        } }
-        val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page, query.validationCasePageNumber)
-        exchange.sendHtml(200, renderJobDocument(view.job, reports, view.diagnostics, source.getOrNull(), source.isFailure,
-            progressSnapshot = progress,
-            explorationReport = readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION),
-            repairHistory = repairHistory,
-            reconstructionProgress = readLegacyJsonReport(jobId, reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
-            artifacts = artifacts,
-            repairEvidenceArtifactStates = repairEvidenceStates?.first,
-            repairReceiptBindingStates = repairEvidenceStates?.second,
-            recordedRepairHistory = recordedView))
+        captured as JobPageCapture.Ready
+        exchange.sendHtml(200, renderJobDocument(view.job, reports, view.diagnostics, captured.source, captured.sourceUnavailable,
+            progressSnapshot = captured.progress,
+            explorationReport = captured.exploration,
+            repairHistory = captured.repairHistory,
+            reconstructionProgress = captured.reconstructionProgress,
+            artifacts = captured.artifacts,
+            repairEvidenceArtifactStates = captured.repairEvidenceStates,
+            repairReceiptBindingStates = captured.repairReceiptBindingStates,
+            recordedRepairHistory = captured.recordedView))
+    }
+
+    private sealed interface JobPageCapture {
+        data class SelectionFailure(val status: Int, val message: String) : JobPageCapture
+        data class Ready(
+            val source: SourceTreeView?, val sourceUnavailable: Boolean,
+            val progress: kotlinx.serialization.json.JsonObject?,
+            val exploration: kotlinx.serialization.json.JsonObject?, val repairHistory: kotlinx.serialization.json.JsonObject?,
+            val reconstructionProgress: kotlinx.serialization.json.JsonObject?, val artifacts: List<WebArtifactSummary>?,
+            val repairEvidenceStates: Map<String, RepairEvidenceArtifactState>?,
+            val repairReceiptBindingStates: Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>?,
+            val recordedView: RecordedRepairHistoryView?,
+        ) : JobPageCapture
     }
 
     /** Links need the same checked listing; receipt integrity is checked per canonical attempt. */
@@ -1117,18 +1156,21 @@ class UploadServer(
             it.removePrefix("runId=")
         }
         val context = jobs.reportContext(jobId, runId)
-        val source = sourceEvidence.read(jobId, context.artifactPrefix)
-        val text = source.text(normalized)
-        val currentBuild = runCatching { archiveEvidence.read(jobId, reportPrefix = context.artifactPrefix) }.getOrNull()
+        val captured = jobs.withRunSourceReadLease(jobId, context.runId, failFast = true) {
+            val source = sourceEvidence.read(jobId, context.artifactPrefix)
+            val text = source.text(normalized)
+            val currentBuild = runCatching { archiveEvidence.read(jobId, reportPrefix = context.artifactPrefix) }.getOrNull()
+            Triple(source, text, currentBuild)
+        }
         exchange.sendHtml(200, renderSourceFile(
             jobs.get(jobId),
             normalized,
-            text,
+            captured.second,
             context,
-            source.manifestDocument,
-            source.confidence,
-            currentBuild?.manifestDocument == source.manifestDocument,
-            source.moduleId(normalized),
+            captured.first.manifestDocument,
+            captured.first.confidence,
+            captured.third?.manifestDocument == captured.first.manifestDocument,
+            captured.first.moduleId(normalized),
         ))
     }
 
@@ -1144,7 +1186,7 @@ class UploadServer(
             return
         }
         val limit = if (isProgressJournalArtifact(relativePath)) AgentProgressJournal.MAXIMUM_READ_BYTES.toLong() else MAX_ARTIFACT_BYTES
-        val artifact = jobs.readArtifact(jobId, relativePath, limit)
+        val artifact = jobs.readArtifact(jobId, relativePath, limit, failFast = true)
         val name = Path.of(relativePath).fileName
         exchange.sendUntrustedAttachment(200, progressArtifactProjection(relativePath, artifact.bytes), contentType(name), name.toString())
     }

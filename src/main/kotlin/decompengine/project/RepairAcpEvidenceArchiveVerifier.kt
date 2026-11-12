@@ -43,6 +43,8 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 
 /**
  * Historical and current source identities authenticated by one completed repair graph.
@@ -157,6 +159,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         require(graph.nodes.size <= graph.budget.maximumRevisionNodes) {
             "repair release graph has no bounded revision lineage"
         }
+        val preservedLegacyGraphs = mutableListOf<ReleaseRepairGraph>()
         var declaredSourcesScanned = false
         fun scanDeclaredSources(consume: (String, ByteArray) -> Unit) {
             check(!declaredSourcesScanned) { "repair release declared source inventory was already consumed" }
@@ -186,14 +189,22 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 require(bytes.size.toLong() == admitted)
                 // Preserve existing byte-credit refusal precedence (including its digest diagnostic).
                 consume(path.substringAfterLast('/'), bytes)
-                verifyPreservedLegacyBytes(path, bytes)
+                val legacy = verifyPreservedLegacyBytes(path, bytes)
+                if (REPAIR_LEGACY_GRAPH_PATH.matches(path)) {
+                    // A self-named JSON object is only an integrity witness. Parse the complete
+                    // historical schema here; an arbitrary object carrying a current node ID
+                    // cannot authorize omission of schema-5 physical metadata.
+                    val schema = legacy["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1
+                    if (schema in 3..4) preservedLegacyGraphs += parseGraph(bytes)
+                }
             }
         }
         requireRepairReleaseGraphAdmission(graphBytes, graph.budget) { consume -> scanDeclaredSources(consume) }
         // Combined admission consumes at most one inventory; fallback preserves ordinary inventory checks.
         // Validate their resource inventory even when byte-credit admission returns early.
         if (!declaredSourcesScanned) scanDeclaredSources { _, _ -> }
-        require(graph.schemaVersion in 3..4) {
+        val preservedLegacyNodeIds = validatedLegacyPhysicalMetadataNodeIds(graph, preservedLegacyGraphs)
+        require(graph.schemaVersion in 3..6) {
             "legacy schema-v1/v2 repair evidence is non-release"
         }
         require(graph.pending == null) {
@@ -248,6 +259,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
             payloadSizes,
             manifestByPath,
             repairProfile,
+            preservedLegacyNodeIds,
         )
         require(graph.nodes.none { it.status == "rejected" && it.rollbackRecord == null }) {
             "repair release rejected attempt lacks a finalized rollback record"
@@ -313,6 +325,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         payloadSizes: Map<String, Long>,
         manifestByPath: Map<String, GeneratedFileEvidence>,
         repairProfile: RepairIndexProfile,
+        preservedLegacyNodeIds: Set<String>,
     ): List<ArchivedRepairSourceLineage> {
         require(graph.nodes.isNotEmpty() && graph.nodes.size <= graph.budget.maximumRevisionNodes) {
             "repair release graph has no bounded revision lineage"
@@ -421,6 +434,23 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 node.changes.map(ReleaseRepairDelta::path).distinct().sorted() &&
                 node.changes.size <= graph.budget.maximumPatchFiles
             ) { "repair release graph changes are missing, duplicated, or unordered: ${node.id}" }
+            if (graph.schemaVersion >= 5) {
+                require(node.publicationChanges.map(ReleaseRepairDelta::path) ==
+                    node.publicationChanges.map(ReleaseRepairDelta::path).distinct().sorted() &&
+                    node.publicationChanges.size <= graph.budget.maximumSourceFiles
+                ) { "repair release physical publication plan is missing, duplicated, or unordered: ${node.id}" }
+                node.publicationChanges.forEach { validateDelta(it, rootDelta = false) }
+                require(node.publicationPreimageMetadata.keys.sorted() == node.publicationChanges.map { it.path }.sorted()) {
+                    "repair release physical preimage metadata does not exactly cover its publication plan: ${node.id}"
+                }
+                node.publicationChanges.forEach { change ->
+                    val metadata = node.publicationPreimageMetadata.getValue(change.path)
+                    require(metadata.size == change.beforeBytes &&
+                        metadata.retainedName == ".${node.id}-${sha256(change.path.toByteArray(Charsets.UTF_8))}.preimage") {
+                        "repair release physical preimage metadata is not bound to its delta: ${node.id}:${change.path}"
+                    }
+                }
+            }
             val patchBytes = node.changes.fold(0L) { total, delta -> Math.addExact(total, delta.afterBytes) }
             require(patchBytes <= graph.budget.maximumPatchBytes) {
                 "repair release graph patch exceeds its byte bound: ${node.id}"
@@ -439,9 +469,30 @@ internal object RepairAcpEvidenceArchiveVerifier {
             require(node.sourceRevisionSha256 == revisionSha256(candidate.values)) {
                 "repair release graph revision digest is invalid: ${node.id}"
             }
+            if (graph.schemaVersion >= 5) {
+                val historicalWithoutPhysicalCommitment = node.id in preservedLegacyNodeIds &&
+                    node.publicationChanges.isEmpty() && node.publicationPreimageMetadata.isEmpty()
+                if (!historicalWithoutPhysicalCommitment) {
+                    val expectedPhysicalChanges = when (node.status) {
+                        "accepted" -> expectedPhysicalTransition(accepted, candidate)
+                        "provisional" -> if (node.rollbackRecord?.candidateSourceInstallStarted == true)
+                            node.changes else emptyList()
+                        "rejected" -> when {
+                            node.rollbackRecord?.legacyPendingStateUnknown == true -> null
+                            node.rollbackRecord?.candidateSourceInstallStarted == true ->
+                                expectedPhysicalTransition(accepted, candidate)
+                            else -> emptyList()
+                        }
+                        else -> emptyList()
+                    }
+                    if (expectedPhysicalChanges != null) require(node.publicationChanges == expectedPhysicalChanges) {
+                        "repair release physical publication plan does not match the source transition: ${node.id}"
+                    }
+                }
+            }
             node.rollbackRecord?.let { rollback ->
                 require(node.status == "rejected" && rollback.attemptId == node.id &&
-                    rollback.runId == node.repairMetadata?.runId &&
+                    rollback.runId == runId &&
                     rollback.targetRevisionId == derivedHead &&
                     rollback.expectedSourceRevisionSha256 == revisionSha256(accepted.values)
                 ) { "repair release rollback outcome is cross-paired with its attempt or target: ${node.id}" }
@@ -563,11 +614,130 @@ internal object RepairAcpEvidenceArchiveVerifier {
         val digest = requireNotNull(REPAIR_LEGACY_PATH.matchEntire(path)).groupValues[1]
         require(sha256(bytes) == digest) { "preserved legacy repair evidence has changed" }
         val legacy = strictObject(bytes, GRAPH_JSON_LIMITS, "preserved legacy repair evidence")
-        val maximumSchema = if (REPAIR_LEGACY_GRAPH_PATH.matches(path)) 3 else 2
+        val maximumSchema = if (REPAIR_LEGACY_GRAPH_PATH.matches(path)) 4 else 2
         require((legacy["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1) in 1..maximumSchema) {
             "preserved legacy repair evidence has an unsupported schema"
         }
         return legacy
+    }
+
+    /**
+     * Schema-3/4 graph snapshots are a compatibility witness only when their complete context
+     * and logical node prefix join this graph. A node ID copied into an arbitrary self-hashed JSON
+     * object is not authority to omit the schema-5 physical preimage commitment.
+     */
+    private fun validatedLegacyPhysicalMetadataNodeIds(
+        current: ReleaseRepairGraph,
+        historicalGraphs: List<ReleaseRepairGraph>,
+    ): Set<String> {
+        val authorized = linkedSetOf<String>()
+        historicalGraphs.forEach { historical ->
+            if (historical.schemaVersion !in 3..4 || historical.nodes.isEmpty() ||
+                historical.nodes.size > current.nodes.size ||
+                historical.budget != current.budget || historical.profileId != current.profileId ||
+                historical.profileSha256 != current.profileSha256 || historical.editablePaths != current.editablePaths ||
+                historical.indexSha256 != current.indexSha256 ||
+                historical.regressionCorpusSha256 != regressionCorpusSha256(historical.retainedRegressionInputs) ||
+                historical.retainedRegressionInputs.distinctBy(ReleaseRegressionInput::id).size !=
+                    historical.retainedRegressionInputs.size ||
+                !current.retainedRegressionInputs.containsAll(historical.retainedRegressionInputs)
+            ) return@forEach
+
+            val nodePrefixMatches = historical.nodes.indices.all { index ->
+                current.nodes[index].copy(
+                    publicationChanges = emptyList(),
+                    publicationPreimageMetadata = emptyMap(),
+                ) == historical.nodes[index]
+            }
+            if (!nodePrefixMatches) return@forEach
+            val pendingElement = historical.pending
+            val hasPendingOrigin = pendingElement != null && pendingElement !is JsonNull
+            val runPrefixMatches = historical.runs.indices.all { index ->
+                val old = historical.runs[index]
+                val now = current.runs.getOrNull(index) ?: return@all false
+                old.id == now.id && old.baselineId == now.baselineId &&
+                    old.regressionCorpusSha256 == now.regressionCorpusSha256 &&
+                    old.maximumAttempts == now.maximumAttempts &&
+                    old.startedEpochMillis == now.startedEpochMillis && old.deadlineEpochMillis == now.deadlineEpochMillis &&
+                    old.expectedObservationsSha256 == now.expectedObservationsSha256 &&
+                    old.originalBinarySha256 == now.originalBinarySha256 &&
+                    (hasPendingOrigin || old.document == now.document)
+            }
+            if (!runPrefixMatches) return@forEach
+            val historicalRunIds = historical.runs.map(ReleaseRepairRun::id)
+            if (historicalRunIds.isEmpty() && historical.nodes.size > 1 ||
+                historicalRunIds.distinct().size != historicalRunIds.size
+            ) return@forEach
+            val nodeRunIds = historical.nodes.drop(1).map { node ->
+                node.repairMetadata?.runId ?: return@forEach
+            }
+            if (nodeRunIds.any { it !in historicalRunIds } ||
+                nodeRunIds.map { historicalRunIds.indexOf(it) } != nodeRunIds.map { historicalRunIds.indexOf(it) }.sorted()
+            ) return@forEach
+            if (historical.nodes.drop(1).groupingBy { requireNotNull(it.repairMetadata?.runId) }
+                    .eachCount().any { (runId, count) ->
+                        count > requireNotNull(historical.runs.singleOrNull { it.id == runId }).maximumAttempts
+                    }
+            ) return@forEach
+
+            if (pendingElement == null || pendingElement is JsonNull) {
+                val historicalHead = historical.nodes.lastOrNull { it.status == "accepted" }?.id
+                    ?: historical.nodes.first().id
+                if (historical.headId != historicalHead ||
+                    historical.nextOrdinal != historical.nodes.last().ordinal + 1 ||
+                    historical.fullyAcceptedHeadId?.let { it != historicalHead } == true
+                ) return@forEach
+                if (historical.runs.any { it.status == "running" }) return@forEach
+                authorized += historical.nodes.map(ReleaseRepairNode::id)
+                return@forEach
+            }
+
+            val pending = pendingElement.requiredObject("preserved legacy pending repair")
+            val historicalHead = historical.nodes.lastOrNull { it.status == "accepted" }?.id
+                ?: historical.nodes.first().id
+            val pendingOrdinal = pending.requiredInt("ordinal", "preserved legacy pending repair")
+            val historicalRunId = pending.requiredObject("repairMetadata", "preserved legacy pending repair")
+                .requiredString("runId", "preserved legacy pending metadata")
+            if (historical.headId != historicalHead ||
+                pendingOrdinal != historical.nodes.last().ordinal + 1 ||
+                historical.nextOrdinal != pendingOrdinal + 1 ||
+                historical.fullyAcceptedHeadId?.let { it != historicalHead } == true
+            ) return@forEach
+            if (historical.runs.count { it.id == historicalRunId && it.status == "running" } != 1 ||
+                historical.runs.any { it.status == "running" && it.id != historicalRunId }
+            ) return@forEach
+            val index = historical.nodes.size
+            val resolved = current.nodes.getOrNull(index) ?: return@forEach
+            if (resolved.status != "rejected" || !resolved.recoveredAfterCrash ||
+                resolved.id != pending.requiredString("id", "preserved legacy pending repair") ||
+                resolved.parentId != pending.requiredString("parentId", "preserved legacy pending repair") ||
+                resolved.ordinal != pending.requiredInt("ordinal", "preserved legacy pending repair") ||
+                resolved.changes != pending.requiredArray("candidateChanges", "preserved legacy pending repair").map(::parseDelta)
+            ) return@forEach
+            val parentDigest = pending.requiredSha256("parentSourceRevisionSha256", "preserved legacy pending repair")
+            val candidateDigest = pending.optionalSha256("candidateSourceRevisionSha256", "preserved legacy pending repair")
+                ?: parentDigest
+            if (resolved.sourceRevisionSha256 != candidateDigest) return@forEach
+            val rollback = resolved.rollbackRecord ?: return@forEach
+            val canonicalDigest = historical.nodes.singleOrNull { it.id == historicalHead }?.sourceRevisionSha256
+                ?: return@forEach
+            if (rollback.attemptId != resolved.id || rollback.targetRevisionId != historicalHead ||
+                rollback.expectedSourceRevisionSha256 != canonicalDigest || resolved.repairMetadata?.runId != historicalRunId
+            ) return@forEach
+            val sourceRollback = pending["rollbackRecord"]?.takeUnless { it is JsonNull }
+                ?.requiredObject("preserved legacy rollback record")
+            if (sourceRollback != null && (
+                    sourceRollback.requiredString("attemptId", "preserved legacy rollback record") != rollback.attemptId ||
+                    sourceRollback.optionalString("runId", "preserved legacy rollback record") != rollback.runId ||
+                    sourceRollback.requiredString("targetRevisionId", "preserved legacy rollback record") != rollback.targetRevisionId ||
+                    sourceRollback.requiredSha256("expectedSourceRevisionSha256", "preserved legacy rollback record") != canonicalDigest ||
+                    sourceRollback.requiredBoolean("legacyPendingStateUnknown", "preserved legacy rollback record") != rollback.legacyPendingStateUnknown ||
+                    sourceRollback.optionalBoolean("candidateSourceInstallStarted", "preserved legacy rollback record") != rollback.candidateSourceInstallStarted
+                )) return@forEach
+            authorized += historical.nodes.map(ReleaseRepairNode::id)
+            authorized += resolved.id
+        }
+        return authorized
     }
 
     private fun verifyReceipts(
@@ -908,8 +1078,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
     private fun parseGraph(bytes: ByteArray): ReleaseRepairGraph {
         val root = strictObject(bytes, GRAPH_JSON_LIMITS, "repair release graph")
         val schema = root.requiredInt("schemaVersion", "repair release graph")
-        require(schema in 1..4) { "unsupported repair release graph schema" }
-        require(schema in 3..4) { "legacy schema-v1/v2 repair evidence is non-release; accepted labels lack full validation authority" }
+        require(schema in 1..6) { "unsupported repair release graph schema" }
+        require(schema in 3..6) { "legacy schema-v1/v2 repair evidence is non-release; accepted labels lack full validation authority" }
         root.requireExactKeys(GRAPH_FIELDS, "repair release graph")
         val budget = parseBudget(root.requiredObject("budget", "repair release graph"))
         val nodes = root.requiredArray("nodes", "repair release graph")
@@ -943,9 +1113,14 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
     private fun parseNode(element: JsonElement, schemaVersion: Int): ReleaseRepairNode {
         val root = element.requiredObject("repair release graph node")
-        // Only a null schema4 node record may be omitted. Null presence is homogeneous above;
+        // Only a null rollback record may be omitted. Null presence is homogeneous above;
         // archive whitespace remains independent of the persistent graph's canonical formatting.
-        val fields = if (schemaVersion >= 4 && "rollbackRecord" in root) NODE_FIELDS_V4 else NODE_FIELDS_V3
+        val fields = when {
+            schemaVersion >= 5 && "rollbackRecord" in root -> NODE_FIELDS_V5
+            schemaVersion >= 5 -> NODE_FIELDS_V5 - "rollbackRecord"
+            schemaVersion >= 4 && "rollbackRecord" in root -> NODE_FIELDS_V4
+            else -> NODE_FIELDS_V3
+        }
         root.requireExactKeys(fields, "repair release graph node")
         return ReleaseRepairNode(
             id = root.requiredString("id", "repair release graph node"),
@@ -962,13 +1137,103 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 ?.let { parseMetadata(it, schemaVersion) },
             recoveredAfterCrash = root.requiredBoolean("recoveredAfterCrash", "repair release graph node"),
             changes = root.requiredArray("changes", "repair release graph node").map(::parseDelta),
+            publicationChanges = if (schemaVersion >= 5) {
+                root.requiredArray("publicationChanges", "repair release graph node").map(::parseDelta)
+            } else emptyList(),
+            publicationPreimageMetadata = if (schemaVersion >= 5) {
+                root.requiredObject("publicationPreimageMetadata", "repair release graph node")
+                    .mapValues { (_, value) -> parsePreimageMetadata(value) }
+            } else emptyMap(),
             validationProof = root.optionalValidationProof("validationProof", "repair release graph node"),
             rollbackRecord = if (schemaVersion >= 4) root.optionalRollbackRecord("rollbackRecord") else null,
         ).also { node ->
             require((node.evidenceKind == null) == (node.evidenceSummary == null)) {
                 "repair release graph evidence kind and summary are incomplete: ${node.id}"
             }
+            if (schemaVersion >= 6 && node.status == "accepted") {
+                require(node.publicationChanges.isNotEmpty() &&
+                    node.publicationPreimageMetadata.keys == node.publicationChanges.map { it.path }.toSet() &&
+                    node.publicationChanges.all { change ->
+                        requireNormalizedPath(change.path, "schema-6 repair publication path")
+                        val components = change.path.split('/')
+                        val expectedAncestors = listOf(".") + components.dropLast(1).indices.map { index ->
+                            components.take(index + 1).joinToString("/")
+                        }
+                        val metadata = requireNotNull(node.publicationPreimageMetadata[change.path])
+                        metadata.metadataVersion == 2 &&
+                            metadata.ancestorMetadata.map(ReleaseAncestorMetadata::path) == expectedAncestors
+                    }) {
+                    "schema-6 accepted repair release node lacks exact publication and ancestor metadata: ${node.id}"
+                }
+            }
         }
+    }
+
+    private fun parsePreimageMetadata(element: JsonElement): ReleasePreimageMetadata {
+        val root = element.requiredObject("repair release preimage metadata")
+        val metadataVersion = root.requiredInt("metadataVersion", "repair release preimage metadata")
+        val expectedKeys = setOf(
+            "metadataVersion", "device", "inode", "mode", "uid", "gid", "size",
+            "mtimeSeconds", "mtimeNanoseconds", "ctimeSeconds", "ctimeNanoseconds", "retainedName", "xattrPolicy",
+        ) + if (metadataVersion >= 2) setOf("atimeSeconds", "atimeNanoseconds") else emptySet()
+        require(metadataVersion in 1..2)
+        // Schema-6 pending decisions bind the parent-directory chain as well as the file.
+        // Historical schema-5 node records do not carry that extension, so it is optional on
+        // the shared wire shape and remains strictly parsed when present.
+        root.requireExactKeys(
+            expectedKeys + if ("ancestorMetadata" in root) setOf("ancestorMetadata") else emptySet(),
+            "repair release preimage metadata",
+        )
+        return ReleasePreimageMetadata(
+            metadataVersion = metadataVersion,
+            device = root.requiredNonNegativeLong("device", "repair release preimage metadata"),
+            inode = root.requiredNonNegativeLong("inode", "repair release preimage metadata"),
+            mode = root.requiredInt("mode", "repair release preimage metadata"),
+            uid = root.requiredInt("uid", "repair release preimage metadata"),
+            gid = root.requiredInt("gid", "repair release preimage metadata"),
+            size = root.requiredNonNegativeLong("size", "repair release preimage metadata"),
+            atimeSeconds = if (metadataVersion >= 2) root.requiredLong("atimeSeconds", "repair release preimage metadata") else null,
+            atimeNanoseconds = if (metadataVersion >= 2) root.requiredInt("atimeNanoseconds", "repair release preimage metadata") else null,
+            mtimeSeconds = root.requiredLong("mtimeSeconds", "repair release preimage metadata"),
+            mtimeNanoseconds = root.requiredInt("mtimeNanoseconds", "repair release preimage metadata"),
+            ctimeSeconds = root.requiredLong("ctimeSeconds", "repair release preimage metadata"),
+            ctimeNanoseconds = root.requiredInt("ctimeNanoseconds", "repair release preimage metadata"),
+            retainedName = root.requiredString("retainedName", "repair release preimage metadata"),
+            xattrPolicy = root.requiredString("xattrPolicy", "repair release preimage metadata"),
+            ancestorMetadata = if ("ancestorMetadata" in root) {
+                (root["ancestorMetadata"] as? JsonArray
+                    ?: error("repair release ancestor metadata must be an array")).map(::parseAncestorMetadata)
+            } else emptyList(),
+        )
+    }
+
+    private fun parseAncestorMetadata(element: JsonElement): ReleaseAncestorMetadata {
+        val root = element.requiredObject("repair release ancestor metadata")
+        root.requireExactKeys(
+            setOf("path", "device", "inode", "mode", "uid", "gid", "linkCount", "mountId", "size",
+                "mtimeSeconds", "mtimeNanoseconds", "ctimeSeconds", "ctimeNanoseconds", "atimeSeconds",
+                "atimeNanoseconds", "entryCount", "entriesSha256"),
+            "repair release ancestor metadata",
+        )
+        return ReleaseAncestorMetadata(
+            path = root.requiredString("path", "repair release ancestor metadata"),
+            device = root.requiredNonNegativeLong("device", "repair release ancestor metadata"),
+            inode = root.requiredNonNegativeLong("inode", "repair release ancestor metadata"),
+            mode = root.requiredInt("mode", "repair release ancestor metadata"),
+            uid = root.requiredInt("uid", "repair release ancestor metadata"),
+            gid = root.requiredInt("gid", "repair release ancestor metadata"),
+            linkCount = root.requiredInt("linkCount", "repair release ancestor metadata"),
+            mountId = root.requiredNonNegativeLong("mountId", "repair release ancestor metadata"),
+            size = root.requiredNonNegativeLong("size", "repair release ancestor metadata"),
+            mtimeSeconds = root.requiredLong("mtimeSeconds", "repair release ancestor metadata"),
+            mtimeNanoseconds = root.requiredInt("mtimeNanoseconds", "repair release ancestor metadata"),
+            ctimeSeconds = root.requiredLong("ctimeSeconds", "repair release ancestor metadata"),
+            ctimeNanoseconds = root.requiredInt("ctimeNanoseconds", "repair release ancestor metadata"),
+            atimeSeconds = root.requiredLong("atimeSeconds", "repair release ancestor metadata"),
+            atimeNanoseconds = root.requiredInt("atimeNanoseconds", "repair release ancestor metadata"),
+            entryCount = root.requiredInt("entryCount", "repair release ancestor metadata"),
+            entriesSha256 = root.requiredString("entriesSha256", "repair release ancestor metadata"),
+        )
     }
 
     private fun parseMetadata(element: JsonElement, schemaVersion: Int): ReleaseRepairMetadata {
@@ -1149,11 +1414,73 @@ private data class ReleaseRepairNode(
     val repairMetadata: ReleaseRepairMetadata?,
     val recoveredAfterCrash: Boolean,
     val changes: List<ReleaseRepairDelta>,
+    val publicationChanges: List<ReleaseRepairDelta>,
+    val publicationPreimageMetadata: Map<String, ReleasePreimageMetadata>,
     val validationProof: ReleaseValidationProof?,
     val rollbackRecord: ReleaseRollbackRecord?,
 ) {
     val evidence: ReleaseRepairEvidence?
         get() = evidenceKind?.let { ReleaseRepairEvidence(it, evidenceSummary.orEmpty(), evidenceArtifact) }
+}
+
+private data class ReleasePreimageMetadata(
+    val metadataVersion: Int,
+    val device: Long,
+    val inode: Long,
+    val mode: Int,
+    val uid: Int,
+    val gid: Int,
+    val size: Long,
+    val atimeSeconds: Long?,
+    val atimeNanoseconds: Int?,
+    val mtimeSeconds: Long,
+    val mtimeNanoseconds: Int,
+    val ctimeSeconds: Long,
+    val ctimeNanoseconds: Int,
+    val retainedName: String,
+    val xattrPolicy: String,
+    val ancestorMetadata: List<ReleaseAncestorMetadata>,
+) {
+    init {
+        require(metadataVersion in 1..2 && device >= 0 && inode >= 0 && size >= 0)
+        if (metadataVersion == 1) require(atimeSeconds == null && atimeNanoseconds == null)
+        else {
+            require(atimeSeconds != null && atimeNanoseconds != null)
+            require(atimeNanoseconds in 0 until 1_000_000_000)
+        }
+        require(mtimeNanoseconds in 0 until 1_000_000_000 && ctimeNanoseconds in 0 until 1_000_000_000)
+        require(retainedName.matches(Regex("\\.[A-Za-z0-9_-]+-[0-9a-f]{64}\\.preimage")))
+        require(xattrPolicy == "NONE")
+        require(ancestorMetadata.map { it.path } == ancestorMetadata.map { it.path }.distinct().sortedBy { it.count { c -> c == '/' } })
+    }
+}
+
+private data class ReleaseAncestorMetadata(
+    val path: String,
+    val device: Long,
+    val inode: Long,
+    val mode: Int,
+    val uid: Int,
+    val gid: Int,
+    val linkCount: Int,
+    val mountId: Long,
+    val size: Long,
+    val mtimeSeconds: Long,
+    val mtimeNanoseconds: Int,
+    val ctimeSeconds: Long,
+    val ctimeNanoseconds: Int,
+    val atimeSeconds: Long,
+    val atimeNanoseconds: Int,
+    val entryCount: Int,
+    val entriesSha256: String,
+) {
+    init {
+        require(path == "." || path.isNotBlank() && path.split('/').all { it.isNotBlank() && it != "." && it != ".." })
+        require(device >= 0 && inode >= 0 && linkCount >= 1 && mountId >= 0 && size >= 0 && entryCount >= 0)
+        require(mtimeNanoseconds in 0 until 1_000_000_000 && ctimeNanoseconds in 0 until 1_000_000_000 &&
+            atimeNanoseconds in 0 until 1_000_000_000)
+        require(entriesSha256.matches(Regex("[0-9a-f]{64}")))
+    }
 }
 
 private val RELEASE_ROLLBACK_FAILURE_PAIRS = setOf(
@@ -1260,6 +1587,17 @@ private data class ReleaseRegressionInput(val id: String, val args: List<String>
 }
 
 private data class ReleaseSourceIdentity(val path: String, val bytes: Long, val sha256: String)
+
+/** Physical promotion and rollback use the complete canonical-to-candidate transition. */
+private fun expectedPhysicalTransition(
+    canonical: Map<String, ReleaseSourceIdentity>,
+    candidate: Map<String, ReleaseSourceIdentity>,
+): List<ReleaseRepairDelta> = canonical.toSortedMap().mapNotNull { (path, before) ->
+    val after = candidate[path]
+    if (after == null || after == before) null else ReleaseRepairDelta(
+        path, before.sha256, before.bytes, after.sha256, before.sha256, after.sha256, after.bytes,
+    )
+}
 
 /** Canonical observation ownership selects the receipt; a label alias adds no authority. */
 internal fun selectRepairValidationReceiptForArchive(evidenceSha256: String,
@@ -1944,6 +2282,12 @@ private fun JsonObject.requiredNonNegativeLong(field: String, label: String): Lo
     }
 }
 
+private fun JsonObject.requiredLong(field: String, label: String): Long {
+    val value = get(field) as? JsonPrimitive ?: error("$label is missing integer $field")
+    require(!value.isString) { "$label $field must be a JSON integer" }
+    return value.longOrNull ?: error("$label is missing integer $field")
+}
+
 private fun JsonObject.optionalLong(field: String, label: String): Long? = when (val value = getValue(field)) {
     JsonNull -> null
     is JsonPrimitive -> {
@@ -1957,6 +2301,15 @@ private fun JsonObject.requiredBoolean(field: String, label: String): Boolean {
     val value = get(field) as? JsonPrimitive ?: error("$label is missing boolean $field")
     require(!value.isString) { "$label $field must be a JSON boolean" }
     return value.booleanOrNull ?: error("$label is missing boolean $field")
+}
+
+private fun JsonObject.optionalBoolean(field: String, label: String): Boolean? = when (val value = this[field]) {
+    null, JsonNull -> null
+    is JsonPrimitive -> {
+        require(!value.isString) { "$label $field must be a JSON boolean" }
+        value.booleanOrNull ?: error("$label $field must be a JSON boolean")
+    }
+    else -> error("$label $field must be a JSON boolean")
 }
 
 private fun JsonObject.requiredNullableBoolean(field: String, label: String): Boolean? {
@@ -2055,6 +2408,7 @@ private val NODE_FIELDS_V3 = setOf(
     "evidenceKind", "evidenceArtifact", "evidenceSummary", "repairMetadata", "recoveredAfterCrash", "changes", "validationProof",
 )
 private val NODE_FIELDS_V4 = NODE_FIELDS_V3 + "rollbackRecord"
+private val NODE_FIELDS_V5 = NODE_FIELDS_V4 + setOf("publicationChanges", "publicationPreimageMetadata")
 private val ROLLBACK_RECORD_FIELDS = setOf(
     "schemaVersion", "attemptId", "runId", "targetRevisionId", "expectedSourceRevisionSha256", "state",
     "failureStage", "failureCode", "observedSourceRevisionSha256", "legacyPendingStateUnknown",

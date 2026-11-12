@@ -1351,6 +1351,93 @@ data class RevisionFileDelta(
     val afterBytes: Long,
 )
 
+/** Durable identity of the accepted inode a pending repair is allowed to restore. */
+data class RepairPreimageMetadata(
+    val metadataVersion: Int,
+    val device: Long,
+    val inode: Long,
+    val mode: Int,
+    val uid: Int,
+    val gid: Int,
+    val size: Long,
+    val atimeSeconds: Long?,
+    val atimeNanoseconds: Int?,
+    val mtimeSeconds: Long,
+    val mtimeNanoseconds: Int,
+    val ctimeSeconds: Long,
+    val ctimeNanoseconds: Int,
+    val retainedName: String,
+    val xattrPolicy: String = "NONE",
+    val ancestorMetadata: List<RepairAncestorMetadata> = emptyList(),
+) {
+    init {
+        require(metadataVersion in 1..2)
+        require(device >= 0 && inode >= 0 && size >= 0)
+        if (metadataVersion == 1) require(atimeSeconds == null && atimeNanoseconds == null)
+        else {
+            require(atimeSeconds != null && atimeNanoseconds != null)
+            require(atimeNanoseconds in 0 until 1_000_000_000)
+        }
+        require(mtimeNanoseconds in 0 until 1_000_000_000)
+        require(ctimeNanoseconds in 0 until 1_000_000_000)
+        require(retainedName.matches(Regex("\\.[A-Za-z0-9_-]+-[0-9a-f]{64}\\.preimage")))
+        require(xattrPolicy == "NONE")
+        require(ancestorMetadata.map { it.path } == ancestorMetadata.map { it.path }.distinct().sortedBy { it.count { c -> c == '/' } })
+    }
+
+    internal fun matches(state: decompengine.acp.LinuxFileState, includeAtime: Boolean = true): Boolean =
+        state.identity.key.device == device && state.identity.key.inode == inode &&
+            state.identity.mode == mode && state.identity.uid == uid && state.identity.gid == gid &&
+            state.size == size && state.modificationTimeSeconds == mtimeSeconds &&
+            state.modificationTimeNanoseconds == mtimeNanoseconds &&
+            (metadataVersion == 1 || !includeAtime || state.accessTimeSeconds == atimeSeconds &&
+                state.accessTimeNanoseconds == atimeNanoseconds) &&
+            (state.changeTimeSeconds > ctimeSeconds ||
+                state.changeTimeSeconds == ctimeSeconds && state.changeTimeNanoseconds >= ctimeNanoseconds)
+
+    internal fun matchesExactly(state: decompengine.acp.LinuxFileState): Boolean =
+        state.identity.key.device == device && state.identity.key.inode == inode &&
+            state.identity.mode == mode && state.identity.uid == uid && state.identity.gid == gid &&
+            state.size == size && state.modificationTimeSeconds == mtimeSeconds &&
+            state.modificationTimeNanoseconds == mtimeNanoseconds &&
+            (metadataVersion == 1 || state.accessTimeSeconds == atimeSeconds &&
+                state.accessTimeNanoseconds == atimeNanoseconds) &&
+            state.changeTimeSeconds == ctimeSeconds && state.changeTimeNanoseconds == ctimeNanoseconds
+}
+
+/** Exact descriptor-bound metadata for each parent directory entry in an authorized path. */
+data class RepairAncestorMetadata(
+    val path: String,
+    val device: Long,
+    val inode: Long,
+    val mode: Int,
+    val uid: Int,
+    val gid: Int,
+    val linkCount: Int,
+    val mountId: Long,
+    val size: Long,
+    val mtimeSeconds: Long,
+    val mtimeNanoseconds: Int,
+    val ctimeSeconds: Long,
+    val ctimeNanoseconds: Int,
+    val atimeSeconds: Long? = null,
+    val atimeNanoseconds: Int? = null,
+    val entryCount: Int? = null,
+    val entriesSha256: String? = null,
+) {
+    init {
+        require(path == "." || path == normalizedRelative(path))
+        require(device >= 0 && inode >= 0 && mountId >= 0 && size >= 0 && linkCount >= 1)
+        require(mtimeNanoseconds in 0 until 1_000_000_000)
+        require(ctimeNanoseconds in 0 until 1_000_000_000)
+        require((atimeSeconds == null) == (atimeNanoseconds == null))
+        require(atimeNanoseconds == null || atimeNanoseconds in 0 until 1_000_000_000)
+        require((entryCount == null) == (entriesSha256 == null))
+        require(entryCount == null || entryCount >= 0)
+        require(entriesSha256 == null || entriesSha256.matches(REPAIR_BLOB_DIGEST))
+    }
+}
+
 enum class ModuleRevisionStatus { ROOT, ACCEPTED, REJECTED, PROVISIONAL, LEGACY_UNVERIFIED }
 
 data class ModuleRevisionNode(
@@ -1369,6 +1456,10 @@ data class ModuleRevisionNode(
     val repairMetadata: RevisionRepairMetadata? = null,
     val validationProof: RepairValidationProof? = null,
     val rollbackRecord: RepairRollbackRecord? = null,
+    /** Physical preimages displaced by this node's publication, distinct from logical ACP changes. */
+    val publicationChanges: List<RevisionFileDelta> = emptyList(),
+    /** Durable identity commitments required to finish cleaning retained physical preimages. */
+    val publicationPreimageMetadata: Map<String, RepairPreimageMetadata> = emptyMap(),
 )
 
 enum class RepairRollbackState {
@@ -1493,12 +1584,22 @@ internal sealed interface ModuleRevisionFaultPoint {
     data class AfterDescriptorBoundRead(val path: String, val index: Int) : ModuleRevisionFaultPoint
     data class BeforePublicationExchange(val phase: String, val path: String, val index: Int) : ModuleRevisionFaultPoint
     data class AfterPublicationExchange(val phase: String, val path: String, val index: Int) : ModuleRevisionFaultPoint
+    data class AfterPublicationTargetDirectorySync(val phase: String, val path: String, val index: Int) : ModuleRevisionFaultPoint
     data class AfterPublicationMove(val phase: String, val path: String, val index: Int) : ModuleRevisionFaultPoint
     data class BeforeOwnedEntryUnlink(val phase: String, val path: String, val index: Int) : ModuleRevisionFaultPoint
     data class BeforeRollbackExchange(val phase: String, val path: String, val index: Int) : ModuleRevisionFaultPoint
     data object BeforeHeadIndexValidation : ModuleRevisionFaultPoint
     data object AfterHeadIndexValidation : ModuleRevisionFaultPoint
+    data object BeforeSchema6DecisionPersist : ModuleRevisionFaultPoint
+    data object BeforeSchema6DecisionValidation : ModuleRevisionFaultPoint
+    data object Schema6DecisionPrevalidated : ModuleRevisionFaultPoint
+    data class AfterPublicationStageIntentPersist(val path: String, val index: Int) : ModuleRevisionFaultPoint
+    data class AfterPublicationStage(val path: String, val index: Int) : ModuleRevisionFaultPoint
+    data class BeforeUndecidedStageUnlink(val path: String) : ModuleRevisionFaultPoint
+    data object AfterCandidateStatePersist : ModuleRevisionFaultPoint
     data object AfterHeadPersist : ModuleRevisionFaultPoint
+    data object BeforeRecoveredAcceptancePersist : ModuleRevisionFaultPoint
+    data object AfterRecoveredAcceptancePersist : ModuleRevisionFaultPoint
     data object BeforeSourceManifestSync : ModuleRevisionFaultPoint
     data object BeforeCompatibilityLogSync : ModuleRevisionFaultPoint
     data class AfterStateTemporaryDirectorySync(val scope: String, val name: String) : ModuleRevisionFaultPoint
@@ -1585,16 +1686,121 @@ private data class PendingAttempt(
     val promotionChanges: List<RevisionFileDelta> = emptyList(),
     val rollbackRecord: RepairRollbackRecord? = null,
     val legacyRecoveryRequired: Boolean = false,
+    val preimageMetadata: Map<String, RepairPreimageMetadata>? = null,
+    val promotionPreimageMetadata: Map<String, RepairPreimageMetadata>? = null,
+    /** Present only after the durable schema-6 acceptance decision has been written. */
+    val acceptanceDecision: RepairAcceptanceDecision? = null,
+    /** Compact exact metadata commitment for the full accepted source tree at attempt admission. */
+    val sourceWitnessSha256: String? = null,
+    /** Schema-6 private inodes authenticated before they are linked into publication staging. */
+    val predecisionStageFiles: List<RepairPredecisionStage> = emptyList(),
 )
+
+/** The point of no return for a schema-6 detached candidate. */
+private data class RepairAcceptanceDecision(
+    val proof: RepairValidationProof,
+    val evidenceKind: String,
+    val evidenceSummary: String,
+    val evidenceArtifact: String?,
+    val promotionChanges: List<RevisionFileDelta>,
+    val intendedHeadId: String,
+    val intendedRunId: String?,
+    val intendedRunStatus: RepairRunStatus?,
+    val stagedFiles: List<RepairStagedFile> = emptyList(),
+    val committedNode: ModuleRevisionNode? = null,
+    val committedRun: RepairRunState? = null,
+) {
+    init {
+        require(evidenceKind.isNotBlank())
+        require(intendedHeadId.matches(Regex("revision_[A-Za-z0-9_]+")))
+        require(intendedRunId == null || intendedRunId.matches(Regex("run_[0-9]{8}")))
+        require((intendedRunId == null) == (intendedRunStatus == null))
+        require(intendedRunStatus == null || intendedRunStatus == RepairRunStatus.FULLY_ACCEPTED)
+        require((intendedRunId == null) == (committedRun == null))
+        require(committedRun == null || committedRun.id == intendedRunId &&
+            committedRun.status == intendedRunStatus && committedRun.acceptedHeadId == intendedHeadId)
+        require(promotionChanges.isNotEmpty())
+        require(promotionChanges.map { it.path } == promotionChanges.map { it.path }.distinct().sorted())
+        require(stagedFiles.map { it.path } == promotionChanges.map { it.path })
+        require(stagedFiles.map { it.stagingName }.distinct().size == stagedFiles.size)
+        require(committedNode == null || committedNode.id == intendedHeadId)
+    }
+}
+
+private data class RepairStagedFile(
+    val path: String,
+    val stagingName: String,
+    val device: Long,
+    val inode: Long,
+    val mountId: Long,
+    val mode: Int,
+    val uid: Int,
+    val gid: Int,
+    val linkCount: Int,
+    val sha256: String,
+    val size: Long,
+    val atimeSeconds: Long,
+    val atimeNanoseconds: Int,
+    val mtimeSeconds: Long,
+    val mtimeNanoseconds: Int,
+    val parentDevice: Long,
+    val parentInode: Long,
+    val parentMountId: Long,
+) {
+    init {
+        require(path == normalizedRelative(path))
+        require(stagingName.matches(Regex("\\.revision_[A-Za-z0-9_]+-[0-9a-f]{64}\\.preimage")))
+        require(device >= 0 && inode >= 0 && mountId >= 0 && linkCount == 1 && size >= 0)
+        require(parentDevice >= 0 && parentInode >= 0 && parentMountId >= 0)
+        require(sha256.matches(REPAIR_BLOB_DIGEST))
+        require(atimeNanoseconds in 0 until 1_000_000_000 && mtimeNanoseconds in 0 until 1_000_000_000)
+    }
+}
+
+/** Inode identity durably registered before its private staging name is created. */
+internal data class RepairPredecisionStage(
+    val path: String,
+    val stagingName: String,
+    val device: Long,
+    val inode: Long,
+    val mountId: Long,
+    val mode: Int,
+    val uid: Int,
+    val gid: Int,
+    val sha256: String,
+    val size: Long,
+) {
+    init {
+        require(path == normalizedRelative(path))
+        require(stagingName.matches(Regex("\\.revision_[A-Za-z0-9_]+-[0-9a-f]{64}\\.preimage")))
+        require(device >= 0 && inode >= 0 && mountId >= 0 && mode >= 0 && uid >= 0 && gid >= 0 && size >= 0)
+        require(sha256.matches(REPAIR_BLOB_DIGEST))
+    }
+}
+
+/** A durable acceptance decision exists, but source publication could not be safely completed. */
+class RepairAcceptancePendingException(message: String, cause: Throwable? = null) :
+    IllegalStateException(message, cause)
 
 private fun validatePendingPreimageAggregate(
     allowedPaths: List<String>,
     preimages: List<RevisionFileDelta>,
     budget: RepairResourceBudget,
+    metadata: Map<String, RepairPreimageMetadata>? = null,
 ) {
     require(allowedPaths == allowedPaths.distinct().sorted() && allowedPaths.isNotEmpty())
     require(preimages.map { it.path } == allowedPaths) {
         "pending repair preimages do not exactly cover authorized paths"
+    }
+    if (metadata != null) {
+        require(metadata.keys.sorted() == allowedPaths) {
+            "pending repair metadata does not exactly cover authorized paths"
+        }
+        preimages.forEach { preimage ->
+            require(metadata.getValue(preimage.path).size == preimage.afterBytes) {
+                "pending repair metadata size differs from its content commitment"
+            }
+        }
     }
     if (allowedPaths.size > budget.maximumContextFiles) {
         throw RepairBudgetExceededException(
@@ -1633,6 +1839,148 @@ private data class RevisionGraphState(
     val acceptedProof: RepairValidationProof? = null,
     val runs: List<RepairRunState> = emptyList(),
 )
+
+private fun deriveSchema6PromotionChanges(state: RevisionGraphState, pending: PendingAttempt): List<RevisionFileDelta> {
+    val baseSources = revisionSourcesAt(state.nodes, revisionCanonicalBase(state.nodes, state.headId))
+    val finalSources = revisionSourcesAt(state.nodes, pending.parentId).toMutableMap()
+    pending.candidateChanges.forEach { change ->
+        finalSources[change.path] = IndexedSource(change.path, change.afterBytes, change.afterSha256)
+    }
+    return finalSources.toSortedMap().mapNotNull { (path, after) ->
+        val before = baseSources.getValue(path)
+        if (before == after) null else RevisionFileDelta(
+            path, before.sha256, before.bytes, after.sha256, before.sha256, after.sha256, after.bytes,
+        )
+    }
+}
+
+private fun discardUndecidedPublicationStages(
+    store: RepairStateStore,
+    changes: List<RevisionFileDelta>,
+    attemptId: String,
+    registeredStages: List<RepairPredecisionStage> = emptyList(),
+) {
+    val stagesByPath = registeredStages.associateBy { it.path }
+    require(stagesByPath.size == registeredStages.size &&
+        registeredStages.map { it.path } == changes.map { it.path }.filter { it in stagesByPath }.sorted()) {
+        "schema-6 predecision stage manifest is duplicate or outside the publication plan"
+    }
+    val registeredNames = registeredStages.map { it.stagingName }.toSet()
+    val unexpected = store.publicationStagingEntries(100_000).filter {
+        it.startsWith(".$attemptId-") && it !in registeredNames
+    }
+    require(unexpected.isEmpty()) { "schema-6 predecision staging contains uncommitted attempt entries" }
+    changes.sortedBy { it.path }.forEach { change ->
+        val expectedName = sourceTransactionPreimageName(change.path, attemptId)
+        val registered = stagesByPath[change.path]
+        if (registered != null) {
+            require(registered.stagingName == expectedName && registered.sha256 == change.afterSha256 &&
+                registered.size == change.afterBytes) {
+                "schema-6 predecision stage manifest differs from its candidate: ${change.path}"
+            }
+        }
+        store.discardUndecidedPublicationStage(expectedName, change.afterSha256, change.afterBytes, registered)
+    }
+}
+
+private fun verifySchema6PendingWitness(
+    projectRoot: Path,
+    state: RevisionGraphState,
+    pending: PendingAttempt,
+    budget: RepairResourceBudget,
+) {
+    require(state.schemaVersion == 6 && pending.detached && pending.acceptanceDecision == null)
+    val published = revisionSourcesAt(state.nodes, revisionCanonicalBase(state.nodes, state.headId))
+    val metadata = requireNotNull(pending.preimageMetadata)
+    metadata.forEach { (path, witness) ->
+        val expected = requireNotNull(published[path]) { "schema-6 witness path is absent from its accepted base: $path" }
+        val observed = readStableRegularFile(projectRoot, path, budget.maximumSourceFileBytes,
+            requireNoExtendedAttributes = true)
+        require(observed.sha256 == expected.sha256 && observed.bytes.size.toLong() == expected.bytes &&
+            witness.matchesExactly(observed.state) &&
+            witness.ancestorMetadata == captureSchema6AncestorMetadata(projectRoot, path, budget.maximumStateDirectoryEntries)) {
+            "schema-6 undecided source differs from its exact attempt witness: $path"
+        }
+    }
+    val expectedDigest = requireNotNull(pending.sourceWitnessSha256) {
+        "schema-6 pending attempt is missing its complete source-tree metadata commitment"
+    }
+    require(schema6SourceWitnessSha256(projectRoot, published, budget) == expectedDigest) {
+        "schema-6 accepted source tree differs from its exact attempt-time metadata commitment"
+    }
+}
+
+private fun schema6SourceWitnessSha256(
+    projectRoot: Path,
+    sources: Map<String, IndexedSource>,
+    budget: RepairResourceBudget,
+): String {
+    require(sources.isNotEmpty() && sources.size <= budget.maximumSourceFiles) {
+        "schema-6 source witness exceeds its bounded file inventory"
+    }
+    var totalBytes = 0L
+    val digest = MessageDigest.getInstance("SHA-256")
+    val ancestorCache = HashMap<String, RepairAncestorMetadata>()
+    fun update(value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        digest.update(bytes.size.toString().toByteArray(Charsets.US_ASCII))
+        digest.update(':'.code.toByte())
+        digest.update(bytes)
+    }
+    sources.toSortedMap().forEach { (path, expected) ->
+        val observed = readStableRegularFile(projectRoot, path, budget.maximumSourceFileBytes,
+            requireNoExtendedAttributes = true)
+        totalBytes = Math.addExact(totalBytes, observed.bytes.size.toLong())
+        require(totalBytes <= budget.maximumSourceBytes && observed.sha256 == expected.sha256 &&
+            observed.bytes.size.toLong() == expected.bytes) {
+            "schema-6 source witness content differs from its accepted revision: $path"
+        }
+        update(path)
+        update(expected.sha256)
+        update(expected.bytes.toString())
+        update(observed.state.toString())
+        val parentPaths = listOf(".") + path.split('/').dropLast(1).mapIndexed { index, _ ->
+            path.split('/').take(index + 1).joinToString("/")
+        }
+        if (parentPaths.any { it !in ancestorCache }) {
+            captureSchema6AncestorMetadata(projectRoot, path, budget.maximumStateDirectoryEntries)
+                .forEach { ancestorCache.putIfAbsent(it.path, it) }
+        }
+        update(parentPaths.map { requireNotNull(ancestorCache[it]) }.toString())
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+private fun captureSchema6AncestorMetadata(projectRoot: Path, relative: String, maximumEntries: Int): List<RepairAncestorMetadata> {
+    val parts = normalizedRelative(relative).split('/')
+    val root = openRepairRootDirectory(projectRoot)
+    val owned = mutableListOf<LinuxDescriptor>()
+    val result = mutableListOf<RepairAncestorMetadata>()
+    try {
+        fun capture(path: String, directory: LinuxDescriptor) {
+            val state = LinuxFilesystemSyscalls.fileState(directory)
+            val names = LinuxFilesystemSyscalls.directoryEntryNamesWithoutAtime(directory, maximumEntries).sorted()
+            val id = state.identity
+            result += RepairAncestorMetadata(
+                path, id.key.device, id.key.inode, id.mode, id.uid, id.gid, id.linkCount, id.mountId, state.size,
+                state.modificationTimeSeconds, state.modificationTimeNanoseconds,
+                state.changeTimeSeconds, state.changeTimeNanoseconds,
+                state.accessTimeSeconds, state.accessTimeNanoseconds, names.size, repairDirectoryEntriesSha256(names),
+            )
+        }
+        capture(".", root)
+        var parent = root
+        parts.dropLast(1).forEachIndexed { index, component ->
+            parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, component)
+            owned += parent
+            capture(parts.take(index + 1).joinToString("/"), parent)
+        }
+        return immutableList(result)
+    } finally {
+        owned.asReversed().forEach(LinuxDescriptor::close)
+        root.close()
+    }
+}
 
 /** The only failure transition: callers publish this entire candidate in one canonical write. */
 private fun withCommittedRollbackFailure(candidate: RevisionGraphState, record: RepairRollbackRecord): RevisionGraphState {
@@ -1726,6 +2074,19 @@ private fun finalizedRepairNode(
         }
         metadata.copy(agentInvocation = invocation?.copy(assessmentStatus = assessment))
     }
+    // A pre-schema-5 pending record has no durable inode/metadata witness.  Recovery may
+    // restore its content, but must not manufacture schema-5 physical-publication authority.
+    val hasPhysicalPreimageCommitment = if (pending.detached) pending.promotionPreimageMetadata != null
+        else pending.preimageMetadata != null
+    val physicalChanges = if (!hasPhysicalPreimageCommitment) emptyList() else when {
+        status == ModuleRevisionStatus.ACCEPTED || pending.rollbackRecord?.candidateSourceInstallStarted == true ->
+            if (pending.detached) pending.promotionChanges else pending.candidateChanges
+        else -> emptyList()
+    }
+    val allPhysicalMetadata = if (pending.detached) pending.promotionPreimageMetadata else pending.preimageMetadata
+    val physicalPreimageMetadata = physicalChanges.mapNotNull { change ->
+        allPhysicalMetadata?.get(change.path)?.let { change.path to it }
+    }.toMap()
     return ModuleRevisionNode(
         id = pending.id,
         parentId = pending.parentId,
@@ -1741,6 +2102,8 @@ private fun finalizedRepairNode(
         evidenceSummary = evidence?.summary?.let(normalizeText),
         repairMetadata = finalizedMetadata,
         rollbackRecord = rollbackRecord?.copy(),
+        publicationChanges = immutableList(physicalChanges.map(RevisionFileDelta::copy)),
+        publicationPreimageMetadata = immutableRepairMap(physicalPreimageMetadata),
     )
 }
 
@@ -1801,7 +2164,7 @@ private fun forEachRecoveryPublicationCandidate(
     invalidatedModules: () -> List<String>,
     consume: (RecoveryPublicationCase, RevisionGraphState) -> Unit,
 ) {
-    require(candidate.schemaVersion == 4)
+    require(candidate.schemaVersion >= 4)
     val originalPending = requireNotNull(candidate.pending)
     val prior = originalPending.rollbackRecord ?: initialRollbackRecord(candidate, originalPending, originalPending.legacyRecoveryRequired)
     val markedRecord = if (prior.failureCode != null) prior else prior.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS)
@@ -1963,7 +2326,12 @@ private fun ModuleRevisionNode.deepFrozenCopy(): ModuleRevisionNode = copy(
     invalidatedModules = immutableList(invalidatedModules),
     repairMetadata = repairMetadata?.deepFrozenCopy(),
     rollbackRecord = rollbackRecord?.copy(),
+    publicationChanges = immutableList(publicationChanges.map(RevisionFileDelta::copy)),
+    publicationPreimageMetadata = immutableRepairMap(publicationPreimageMetadata),
 )
+
+private fun <K, V> immutableRepairMap(values: Map<K, V>): Map<K, V> =
+    Collections.unmodifiableMap(LinkedHashMap(values))
 
 private fun PendingAttempt.deepFrozenCopy(): PendingAttempt = copy(
     allowedPaths = immutableList(allowedPaths),
@@ -1972,6 +2340,16 @@ private fun PendingAttempt.deepFrozenCopy(): PendingAttempt = copy(
     promotionChanges = immutableList(promotionChanges.map(RevisionFileDelta::copy)),
     repairMetadata = repairMetadata?.deepFrozenCopy(),
     rollbackRecord = rollbackRecord?.copy(),
+    acceptanceDecision = acceptanceDecision?.copy(
+        promotionChanges = immutableList(acceptanceDecision.promotionChanges.map(RevisionFileDelta::copy)),
+    ),
+    predecisionStageFiles = immutableList(predecisionStageFiles.map(RepairPredecisionStage::copy)),
+    preimageMetadata = preimageMetadata?.toSortedMap()?.mapValues { (_, metadata) ->
+        metadata.copy(ancestorMetadata = immutableList(metadata.ancestorMetadata.map(RepairAncestorMetadata::copy)))
+    }?.toMap(),
+    promotionPreimageMetadata = promotionPreimageMetadata?.toSortedMap()?.mapValues { (_, metadata) ->
+        metadata.copy(ancestorMetadata = immutableList(metadata.ancestorMetadata.map(RepairAncestorMetadata::copy)))
+    }?.toMap(),
 )
 
 private fun RevisionGraphState.deepFrozenCopy(): RevisionGraphState = copy(
@@ -2277,6 +2655,7 @@ internal class ModuleRevisionGraph private constructor(
         cleanupUnreferencedValidationArtifacts()
         cleanupSourceTemporaries(state.pending)
         recoverPendingAttempt()
+        cleanupCommittedPreimages()
         state.runs.lastOrNull()?.takeUnless { it.terminal }?.let {
             finishRun(RepairRunStatus.INTERRUPTED, RESTART_INTERRUPTION_EVIDENCE)
         }
@@ -2326,26 +2705,31 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     private fun upgradeGraphToRollbackContract(allowPending: Boolean) {
-        if (state.schemaVersion >= 4) return
+        if (state.schemaVersion >= 5) return
         require(allowPending || state.pending == null)
+        // A pending attempt has already crossed the write-ahead boundary.  Startup recovery
+        // records its own marker without upgrading its source schema; manufacturing a new
+        // "legacy origin" for that marker would either lose the true schema-1..3 origin or
+        // classify a native schema-4 rollback record as legacy.  Preserve the source bytes at
+        // admission time and leave pending recovery in its original rollback contract.
+        if (state.pending != null) return
         preserveLegacyRunState()
         persist(rollbackContractState())
     }
 
     /** Construct the exact upgrade without publishing it, so rejection can preflight all bytes. */
     private fun rollbackContractState(): RevisionGraphState {
-        if (state.schemaVersion >= 4) return state
+        if (state.schemaVersion >= 5) return state
+        // A pending pre-v5 attempt has no durable filesystem-metadata witness. Preserve its
+        // legacy schema during content-only recovery instead of claiming v5 verification.
+        if (state.pending != null) {
+            return state
+        }
         val upgradedNodes = if (state.schemaVersion < 3) state.nodes.map { node ->
             if (node.status == ModuleRevisionStatus.ACCEPTED) node.copy(status = ModuleRevisionStatus.LEGACY_UNVERIFIED)
             else node
         } else state.nodes
-        val upgradedPending = state.pending?.let { pending ->
-            pending.copy(
-                legacyRecoveryRequired = true,
-                rollbackRecord = pending.rollbackRecord ?: initialRollbackRecord(state, pending, true),
-            )
-        }
-        return state.copy(schemaVersion = 4, nodes = upgradedNodes, pending = upgradedPending)
+        return state.copy(schemaVersion = 5, nodes = upgradedNodes)
     }
 
     private fun preserveLegacyRunState() {
@@ -2417,6 +2801,146 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun portableEvidence(evidence: RepairEvidence?): RepairEvidence? = evidence?.let {
         RepairEvidence(portableEvidenceText(it.kind), portableEvidenceText(it.summary), it.artifactPath?.let(::portableEvidencePath))
+    }
+
+    private fun captureAncestorMetadata(relative: String): List<RepairAncestorMetadata> {
+        return captureSchema6AncestorMetadata(projectRoot, relative, state.budget.maximumStateDirectoryEntries)
+    }
+
+    private fun stagePublicationFiles(
+        pending: PendingAttempt,
+        changes: List<RevisionFileDelta>,
+        contents: Map<String, ByteArray>,
+        metadata: Map<String, RepairPreimageMetadata>,
+    ): Pair<PendingAttempt, List<RepairStagedFile>> {
+        val stageIdentity = stateStore.publicationStagingIdentity()
+        val result = mutableListOf<RepairStagedFile>()
+        var registeredPending = pending.copy(
+            rollbackRecord = pending.rollbackRecord?.copy(candidateSourceInstallStarted = false),
+            predecisionStageFiles = emptyList(),
+        )
+        if (pending.predecisionStageFiles.isNotEmpty()) {
+            // A prior predecision cleanup may have removed only a prefix before failing. Keep
+            // every surviving inode bound until the complete old stage set is authenticated
+            // and removed; only then may a retry replace the manifest with a new stage set.
+            discardUndecidedPublicationStages(
+                stateStore, changes, pending.id, pending.predecisionStageFiles,
+            )
+            persist(state.copy(pending = registeredPending))
+        }
+        changes.sortedBy { it.path }.forEachIndexed { indexInPublication, change ->
+            val preimage = requireNotNull(metadata[change.path])
+            val expectedParent = requireNotNull(preimage.ancestorMetadata.lastOrNull()) {
+                "schema-6 publication witness has no target parent: ${change.path}"
+            }
+            val parts = normalizedRelative(change.path).split('/')
+            val opened = mutableListOf<LinuxDescriptor>()
+            try {
+                var parent = openRepairRootDirectory(projectRoot)
+                opened += parent
+                parts.dropLast(1).forEach { segment ->
+                    parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+                    opened += parent
+                }
+                val parentState = LinuxFilesystemSyscalls.fileState(parent)
+                require(parentState.identity.key.device == expectedParent.device &&
+                    parentState.identity.key.inode == expectedParent.inode &&
+                    parentState.identity.mountId == expectedParent.mountId &&
+                    parentState.identity.mode == expectedParent.mode &&
+                    parentState.identity.uid == expectedParent.uid && parentState.identity.gid == expectedParent.gid &&
+                    parentState.size == expectedParent.size &&
+                    parentState.modificationTimeSeconds == expectedParent.mtimeSeconds &&
+                    parentState.modificationTimeNanoseconds == expectedParent.mtimeNanoseconds &&
+                    parentState.changeTimeSeconds == expectedParent.ctimeSeconds &&
+                    parentState.changeTimeNanoseconds == expectedParent.ctimeNanoseconds &&
+                    parentState.accessTimeSeconds == expectedParent.atimeSeconds &&
+                    parentState.accessTimeNanoseconds == expectedParent.atimeNanoseconds) {
+                    "schema-6 target parent changed before publication staging: ${change.path}"
+                }
+                require(stageIdentity.mountId == parent.identity.mountId &&
+                    stageIdentity.key.device == parent.identity.key.device &&
+                    preimage.ancestorMetadata.none { it.device == stageIdentity.key.device && it.inode == stageIdentity.key.inode }) {
+                    "schema-6 private staging must be on the target mount and outside witnessed source ancestors"
+                }
+                val source = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())) {
+                    "schema-6 source disappeared before staging: ${change.path}"
+                }
+                source.use { held ->
+                    val sourceState = LinuxFilesystemSyscalls.fileState(held)
+                    require(sourceState.identity.key.device == preimage.device && sourceState.identity.key.inode == preimage.inode &&
+                        sourceState.identity.mountId == expectedParent.mountId && preimage.matchesExactly(sourceState) &&
+                        sourceState.identity.linkCount == 1 && sourceState.size == change.beforeBytes &&
+                        LinuxFilesystemSyscalls.sha256WithoutAtime(held, sourceState.size) == change.beforeSha256) {
+                        "schema-6 source differs from its durable attempt witness: ${change.path}"
+                    }
+                }
+                val name = preimage.retainedName
+                val bytes = requireNotNull(contents[change.path])
+                require(bytes.size.toLong() == change.afterBytes && sha256(bytes) == change.afterSha256)
+                val staged = stateStore.stagePublicationFile(name, bytes, preimage.mode.permissions) { identity ->
+                    require(identity.isRegularFile && identity.linkCount == 0 && identity.mode.permissions == preimage.mode.permissions &&
+                        identity.uid == preimage.uid && identity.gid == preimage.gid &&
+                        identity.mountId == parent.identity.mountId && identity.key.device == parent.identity.key.device) {
+                        "schema-6 unlinked staged inode has unexpected metadata: ${change.path}"
+                    }
+                    val registered = RepairPredecisionStage(
+                        change.path, name, identity.key.device, identity.key.inode, identity.mountId,
+                        identity.mode, identity.uid, identity.gid, change.afterSha256, change.afterBytes,
+                    )
+                    require(registeredPending.predecisionStageFiles.none { it.path == change.path })
+                    val next = registeredPending.copy(predecisionStageFiles = immutableList(
+                        registeredPending.predecisionStageFiles + registered,
+                    ))
+                    // The exact inode identity is durable before linkat gives it a name.
+                    persist(state.copy(pending = next))
+                    registeredPending = next
+                    faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationStageIntentPersist(change.path, indexInPublication))
+                }
+                faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationStage(change.path, indexInPublication))
+                require(staged.mountId == parent.identity.mountId && staged.key.device == parent.identity.key.device &&
+                    staged.mode.permissions == preimage.mode.permissions && staged.uid == preimage.uid && staged.gid == preimage.gid &&
+                    staged.linkCount == 1) {
+                    "schema-6 staged inode does not preserve source ownership/mode or share its mount: ${change.path}"
+                }
+                val stagedState = stateStore.publicationStageState(name)
+                result += RepairStagedFile(change.path, name, staged.key.device, staged.key.inode, staged.mountId,
+                    staged.mode, staged.uid, staged.gid, staged.linkCount, change.afterSha256, change.afterBytes,
+                    stagedState.accessTimeSeconds, stagedState.accessTimeNanoseconds,
+                    stagedState.modificationTimeSeconds, stagedState.modificationTimeNanoseconds,
+                    parent.identity.key.device, parent.identity.key.inode, parent.identity.mountId)
+            } finally {
+                opened.asReversed().forEach(LinuxDescriptor::close)
+            }
+        }
+        // Staging is private, so the original source and every witnessed ancestor must still match.
+        changes.forEach { change ->
+            val committed = requireNotNull(metadata[change.path])
+            val source = readStableRegularFile(projectRoot, change.path, state.budget.maximumSourceFileBytes,
+                requireNoExtendedAttributes = true)
+            require(source.sha256 == change.beforeSha256 && source.bytes.size.toLong() == change.beforeBytes &&
+                committed.matchesExactly(source.state) && committed.ancestorMetadata == captureAncestorMetadata(change.path)) {
+                "schema-6 source changed while its replacement was staged: ${change.path}"
+            }
+        }
+        return registeredPending.copy(
+            rollbackRecord = pending.rollbackRecord,
+            predecisionStageFiles = immutableList(registeredPending.predecisionStageFiles),
+        ) to immutableList(result)
+    }
+
+    private fun cleanupUndecidedPublicationStages(
+        originalState: RevisionGraphState,
+        changes: List<RevisionFileDelta>,
+        attemptId: String,
+    ) {
+        val currentPending = state.pending?.takeIf { it.id == attemptId }
+        discardUndecidedPublicationStages(stateStore, changes, attemptId,
+            currentPending?.predecisionStageFiles.orEmpty())
+        if (currentPending?.predecisionStageFiles.orEmpty().isNotEmpty()) {
+            val originalPending = originalState.pending?.takeIf { it.id == attemptId }
+                ?: error("predecision stage cleanup lost its original pending attempt")
+            persist(state.copy(pending = originalPending))
+        }
     }
 
     @Synchronized
@@ -2686,6 +3210,9 @@ internal class ModuleRevisionGraph private constructor(
         repairMetadata: RevisionRepairMetadata? = null,
     ): ModuleRevisionAttempt = graphOperation {
         require(state.pending == null) { "revision graph already has a pending attempt" }
+        if (repairMetadata != null) require(state.schemaVersion >= 2) {
+            "legacy repair revision graphs are non-release, read-only and cannot record agent attempts"
+        }
         if (state.nodes.size >= state.budget.maximumRevisionNodes) {
             throw RepairBudgetExceededException("revision graph reached its node budget")
         }
@@ -2700,9 +3227,6 @@ internal class ModuleRevisionGraph private constructor(
         require(allowed.all { it in indexedEditablePaths }) { "repair attempt authorizes a non-editable source path" }
         val frozenMetadata = repairMetadata?.deepFrozenCopy()
         frozenMetadata?.let { metadata ->
-            require(state.schemaVersion >= 2) {
-                "legacy repair revision graphs are non-release and cannot begin a new agent repair"
-            }
             require(receiptCommitmentBytes(metadata.prompt).size.toLong() <= state.budget.maximumRequestBytes) {
                 "repair prompt exceeds the request-byte budget"
             }
@@ -2721,8 +3245,15 @@ internal class ModuleRevisionGraph private constructor(
             }
         }
         requireCurrentHead()
+        // Schema 6 makes every new candidate detached until its explicit acceptance decision.
+        // Historical schema-1..5 graphs retain their prior publication semantics.
+        val detached = state.schemaVersion >= 6 || state.schemaVersion >= 3 &&
+            (state.runs.lastOrNull()?.terminal == false || workingHeadId() == state.provisionalHeadId)
         val currentHeadSnapshot = sourcesAt(workingHeadId()).values.toList()
         val parent = state.nodes.single { it.id == workingHeadId() }
+        val ordinal = state.nextOrdinal
+        val idMaterial = parent.id + "\n" + ordinal + "\n" + allowed.joinToString("\n")
+        val attemptId = "revision_${ordinal.toString().padStart(8, '0')}_${sha256(idMaterial.toByteArray()).take(16)}"
         val snapshotByPath = currentHeadSnapshot.associateBy { it.path }
         val preimages = allowed.map { path ->
             val indexedSource = snapshotByPath.getValue(path)
@@ -2737,12 +3268,13 @@ internal class ModuleRevisionGraph private constructor(
             )
         }
         validatePendingPreimageAggregate(allowed, preimages, state.budget)
-        val capturedPreimages = if (state.schemaVersion >= 3) emptyList() else allowed.mapIndexed { preimageIndex, path ->
+        val capturedPreimages = if (detached) emptyList() else allowed.mapIndexed { preimageIndex, path ->
             faultInjector?.hit(ModuleRevisionFaultPoint.BeforePreimageRead(path, preimageIndex))
             val source = readStableRegularFile(
                 projectRoot,
                 path,
                 state.budget.maximumSourceFileBytes,
+                requireNoExtendedAttributes = true,
                 afterAuthorization = {
                     faultInjector?.hit(ModuleRevisionFaultPoint.BeforeDescriptorBoundRead(path, preimageIndex))
                 },
@@ -2756,6 +3288,47 @@ internal class ModuleRevisionGraph private constructor(
             }
             source
         }
+        val detachedDecisionPreimageMetadata = if (detached && state.schemaVersion >= 6) {
+            // Provisional nodes advance headId but are deliberately detached from the canonical
+            // source tree. The physical publication witness must compare the working view with
+            // the fully accepted source head, not with the logical graph head.
+            val publishedHeadId = revisionCanonicalBase(state.nodes, state.headId)
+            val publishedSources = sourcesAt(publishedHeadId)
+            val workingSources = sourcesAt(workingHeadId())
+            val provisionalDeltaPaths = (publishedSources.keys + workingSources.keys).filter { path ->
+                publishedSources[path]?.let { before -> workingSources[path]?.let { after ->
+                    before.sha256 == after.sha256 && before.bytes == after.bytes
+                } } != true
+            }
+            val decisionWitnessPaths = (allowed + provisionalDeltaPaths).distinct().sorted()
+            decisionWitnessPaths.associateWith { path ->
+                val observed = readStableRegularFile(
+                    projectRoot, path, state.budget.maximumSourceFileBytes, requireNoExtendedAttributes = true,
+                )
+                val published = publishedSources.getValue(path)
+                require(observed.sha256 == published.sha256 && observed.bytes.size.toLong() == published.bytes) {
+                    "published source changed while its schema-6 decision preimage was captured: $path"
+                }
+                val fileState = observed.state
+                RepairPreimageMetadata(
+                    metadataVersion = 2,
+                    device = observed.identity.key.device,
+                    inode = observed.identity.key.inode,
+                    mode = fileState.identity.mode,
+                    uid = fileState.identity.uid,
+                    gid = fileState.identity.gid,
+                    size = fileState.size,
+                    atimeSeconds = fileState.accessTimeSeconds,
+                    atimeNanoseconds = fileState.accessTimeNanoseconds,
+                    mtimeSeconds = fileState.modificationTimeSeconds,
+                    mtimeNanoseconds = fileState.modificationTimeNanoseconds,
+                    ctimeSeconds = fileState.changeTimeSeconds,
+                    ctimeNanoseconds = fileState.changeTimeNanoseconds,
+                    retainedName = sourceTransactionPreimageName(path, attemptId),
+                    ancestorMetadata = captureAncestorMetadata(path),
+                )
+            }
+        } else null
         capturedPreimages.forEach { source ->
             require(storeBlob(source.bytes) == source.sha256) { "repair preimage blob digest changed while stored" }
         }
@@ -2769,9 +3342,6 @@ internal class ModuleRevisionGraph private constructor(
                 "repair preimage no longer matches the source tree: ${preimage.path}"
             }
         }
-        val ordinal = state.nextOrdinal
-        val idMaterial = parent.id + "\n" + ordinal + "\n" + allowed.joinToString("\n")
-        val attemptId = "revision_${ordinal.toString().padStart(8, '0')}_${sha256(idMaterial.toByteArray()).take(16)}"
         val portableMetadata = frozenMetadata?.let { metadata ->
             metadata.copy(
                 failureKind = portableEvidenceText(metadata.failureKind),
@@ -2799,15 +3369,42 @@ internal class ModuleRevisionGraph private constructor(
             null,
             emptyList(),
             portableMetadata,
-            detached = state.schemaVersion >= 3 &&
-                (state.runs.lastOrNull()?.terminal == false || parent.id == state.provisionalHeadId),
+            detached = detached,
+            preimageMetadata = detachedDecisionPreimageMetadata ?: if (detached) emptyMap() else capturedPreimages.zip(allowed).associate { (source, path) ->
+                val state = source.state
+                path to RepairPreimageMetadata(
+                    metadataVersion = 2,
+                    device = source.identity.key.device,
+                    inode = source.identity.key.inode,
+                    mode = state.identity.mode,
+                    uid = state.identity.uid,
+                    gid = state.identity.gid,
+                    size = state.size,
+                    atimeSeconds = state.accessTimeSeconds,
+                    atimeNanoseconds = state.accessTimeNanoseconds,
+                    mtimeSeconds = state.modificationTimeSeconds,
+                    mtimeNanoseconds = state.modificationTimeNanoseconds,
+                    ctimeSeconds = state.changeTimeSeconds,
+                    ctimeNanoseconds = state.changeTimeNanoseconds,
+                    retainedName = sourceTransactionPreimageName(path, attemptId),
+                )
+            },
+            sourceWitnessSha256 = if (detached && state.schemaVersion >= 6) {
+                schema6SourceWitnessSha256(projectRoot, sourcesAt(revisionCanonicalBase(state.nodes, state.headId)), state.budget)
+            } else null,
         )
         val run = state.runs.lastOrNull()?.takeUnless { it.terminal }
         run?.let {
             if (it.remainingAttempts <= 0) throw RepairBudgetExceededException("repair run attempt budget exhausted")
             if (System.currentTimeMillis() >= it.deadlineEpochMillis) throw RepairBudgetExceededException("repair run wall budget exhausted")
         }
-        val pendingState = state.copy(nextOrdinal = ordinal + 1, pending = pending,
+        // Do not mutate a legacy graph merely because a caller supplied an invalid attempt.
+        // Upgrade only after path, content, metadata and aggregate-budget preflight completed.
+        if (state.schemaVersion < 5) upgradeGraphToRollbackContract(allowPending = false)
+        val pendingState = state.copy(schemaVersion = if (detached && state.schemaVersion == 6) 6 else state.schemaVersion,
+            nextOrdinal = ordinal + 1, pending = if (detached && state.schemaVersion == 6) {
+                pending.copy(rollbackRecord = initialRollbackRecord(state.copy(schemaVersion = 6), pending, false))
+            } else pending,
             runs = if (run == null) state.runs else state.runs.dropLast(1) + run.copy(attemptedCount = run.attemptedCount + 1))
         requireRecoverablePendingState(pendingState)
         persist(pendingState)
@@ -2984,6 +3581,7 @@ internal class ModuleRevisionGraph private constructor(
             throw failure
         }
         persist(candidateState)
+        faultInjector?.hit(ModuleRevisionFaultPoint.AfterCandidateStatePersist)
         if (pending.detached) return@graphOperation immutableList(changes.map(RevisionFileDelta::copy))
         try {
             installFiles(
@@ -2991,6 +3589,7 @@ internal class ModuleRevisionGraph private constructor(
                 changes.associate { it.path to requireNotNull(it.beforeSha256) },
                 transactionId = pending.id,
                 phase = "candidate",
+                preimageMetadata = pending.preimageMetadata.orEmpty(),
             )
             val observed = revisionSha256(index.sourceSnapshot())
             require(observed == candidateRevision) {
@@ -3019,6 +3618,12 @@ internal class ModuleRevisionGraph private constructor(
         cancellationCheck: () -> Unit = {}): ModuleRevisionNode = graphOperation {
         cancellationCheck()
         var pending = requirePending(attempt)
+        val acceptanceBaseState = state
+        if (pending.acceptanceDecision != null) {
+            throw RepairAcceptancePendingException(
+                "repair acceptance decision is already durable; only roll-forward recovery is permitted",
+            )
+        }
         require(state.runs.none { it.id == pending.repairMetadata?.runId && it.status == RepairRunStatus.ROLLBACK_FAILED }) {
             "a failed rollback attempt must be restored and finalized before further acceptance"
         }
@@ -3041,19 +3646,24 @@ internal class ModuleRevisionGraph private constructor(
             )
         }
         val candidate = requireNotNull(pending.candidateSourceRevisionSha256) { "repair candidate has not been installed" }
+        var prevalidatedNode: ModuleRevisionNode? = null
+        var prevalidatedAcceptance: PreparedRevisionGraphState? = null
+        var preparedDecisionWrite: PreparedRevisionGraphState? = null
         if (pending.detached) {
             require(evidence?.kind == "valid") { "only full retained behavior validation may promote source" }
             requireValidationProof(candidate, requireNotNull(proof), full = true)
             if (pending.repairMetadata?.publicationMode == RepairPublicationMode.ACP_RELEASE) {
                 require(proof.assurance == RepairValidationAssurance.STRICT_CONTAINED)
             }
-            val baseSources = requireCurrentHead().associateBy { it.path }
-            val finalSources = sourcesAt(pending.parentId).toMutableMap()
-            pending.candidateChanges.forEach { finalSources[it.path] = IndexedSource(it.path, it.afterBytes, it.afterSha256) }
-            val promotion = finalSources.toSortedMap().mapNotNull { (path, after) ->
-                val before = baseSources.getValue(path)
-                if (before == after) null else RevisionFileDelta(path, before.sha256, before.bytes,
-                    after.sha256, before.sha256, after.sha256, after.bytes)
+            val promotion = if (state.schemaVersion >= 6) deriveSchema6PromotionChanges(state, pending) else {
+                val baseSources = requireCurrentHead().associateBy { it.path }
+                val finalSources = sourcesAt(pending.parentId).toMutableMap()
+                pending.candidateChanges.forEach { finalSources[it.path] = IndexedSource(it.path, it.afterBytes, it.afterSha256) }
+                finalSources.toSortedMap().mapNotNull { (path, after) ->
+                    val before = baseSources.getValue(path)
+                    if (before == after) null else RevisionFileDelta(path, before.sha256, before.bytes,
+                        after.sha256, before.sha256, after.sha256, after.bytes)
+                }
             }
             require(promotion.isNotEmpty())
             cancellationCheck()
@@ -3063,22 +3673,282 @@ internal class ModuleRevisionGraph private constructor(
                     index.profile.validateSourceContent(change.path, it)
                 }
             }
+            if (state.schemaVersion >= 6) {
+                val finalSources = sourcesAt(pending.parentId).toMutableMap()
+                pending.candidateChanges.forEach { change ->
+                    finalSources[change.path] = IndexedSource(change.path, change.afterBytes, change.afterSha256)
+                }
+                val candidateView = object : RepairRecoverySourceView {
+                    override val sourcePaths: List<String> get() = index.sourcePaths
+                    override val editablePaths: List<String> get() = index.editablePaths.sorted()
+                    override fun readSource(relative: String): ByteArray {
+                        require(relative == normalizedRelative(relative))
+                        val source = requireNotNull(finalSources[relative]) {
+                            "candidate source view path is absent: $relative"
+                        }
+                        return readBlob(source.sha256).also { bytes ->
+                            require(bytes.size.toLong() == source.bytes && sha256(bytes) == source.sha256)
+                        }
+                    }
+                }
+                val candidateIndex = SecureRepairRuntime.loadRecoveryIndex(
+                    graphAuthority, projectRoot, index.profile, state.budget, candidateView,
+                )
+                require(candidateIndex.sourceRevisionSha256 == candidate &&
+                    candidateIndex.profileId == state.profileId &&
+                    candidateIndex.profileSha256 == state.profileSha256 &&
+                    candidateIndex.sourcePaths == index.sourcePaths &&
+                    candidateIndex.editablePaths.sorted() == state.editablePaths &&
+                    candidateIndex.indexSha256 == state.indexSha256) {
+                    "repair candidate changes compiler/source dependency evidence or differs from its validation proof"
+                }
+            }
+            val promotionPreimageMetadata = promotion.associate { change ->
+                val observed = readStableRegularFile(
+                    projectRoot,
+                    change.path,
+                    state.budget.maximumSourceFileBytes,
+                    requireNoExtendedAttributes = true,
+                )
+                if (state.schemaVersion >= 6) {
+                    require(change.path in pending.preimageMetadata.orEmpty()) {
+                        "schema-6 promotion path lacks an attempt-time metadata witness: ${change.path}"
+                    }
+                    val captured = requireNotNull(pending.preimageMetadata?.get(change.path)) {
+                        "schema-6 promotion is missing its attempt-time source witness: ${change.path}; " +
+                            "captured=${pending.preimageMetadata?.keys?.sorted()}"
+                    }
+                    require(observed.sha256 == change.beforeSha256 && observed.bytes.size.toLong() == change.beforeBytes &&
+                        captured.matchesExactly(observed.state) &&
+                        captured.ancestorMetadata == captureAncestorMetadata(change.path)) {
+                        "schema-6 source or ancestor metadata changed after attempt start: ${change.path}"
+                    }
+                    change.path to captured
+                } else {
+                require(observed.sha256 == change.beforeSha256 && observed.bytes.size.toLong() == change.beforeBytes) {
+                    "promotion source changed while its preimage metadata was captured: ${change.path}"
+                }
+                change.path to RepairPreimageMetadata(
+                    metadataVersion = 2,
+                    device = observed.identity.key.device,
+                    inode = observed.identity.key.inode,
+                    mode = observed.state.identity.mode,
+                    uid = observed.state.identity.uid,
+                    gid = observed.state.identity.gid,
+                    size = observed.state.size,
+                    atimeSeconds = observed.state.accessTimeSeconds,
+                    atimeNanoseconds = observed.state.accessTimeNanoseconds,
+                    mtimeSeconds = observed.state.modificationTimeSeconds,
+                    mtimeNanoseconds = observed.state.modificationTimeNanoseconds,
+                    ctimeSeconds = observed.state.changeTimeSeconds,
+                    ctimeNanoseconds = observed.state.changeTimeNanoseconds,
+                    retainedName = sourceTransactionPreimageName(change.path, pending.id),
+                )
+                }
+            }
             pending = pending.copy(
                 promotionChanges = promotion,
+                promotionPreimageMetadata = promotionPreimageMetadata,
                 rollbackRecord = (pending.rollbackRecord ?: initialRollbackRecord(state, pending, false))
                     .copy(candidateSourceInstallStarted = true),
             )
-            cancellationCheck()
-            val promotionState = state.copy(pending = pending)
-            requireRecoverablePendingState(promotionState)
-            persist(promotionState)
-            installFiles(promotionBytes,
-                promotion.associate { it.path to requireNotNull(it.beforeSha256) }, pending.id, "promotion")
+            val promotionState = if (state.schemaVersion >= 6) {
+                val (stagedPending, stagedFiles) = try {
+                    stagePublicationFiles(pending, promotion, promotionBytes, promotionPreimageMetadata)
+                } catch (failure: Exception) {
+                    // Staging is outside the source tree and may be safely discarded before a
+                    // decision exists. Any failed authentication leaves the graph unavailable.
+                    runCatching { cleanupUndecidedPublicationStages(acceptanceBaseState, promotion, pending.id) }
+                        .exceptionOrNull()?.let(failure::addSuppressed)
+                    throw failure
+                }
+                pending = stagedPending
+                try {
+                    cancellationCheck()
+                    // Staging is intentionally off-tree. Revalidate both the complete live
+                    // canonical source/index and the attempt-time metadata witness after those
+                    // writes, immediately before the durable acceptance decision.
+                    faultInjector?.hit(ModuleRevisionFaultPoint.BeforeSchema6DecisionValidation)
+                    verifySchema6PendingWitness(projectRoot, state, pending, state.budget)
+                    val canonicalBase = revisionCanonicalBase(state.nodes, pending.parentId)
+                    val expectedCanonicalRevision = state.nodes.single { it.id == canonicalBase }.sourceRevisionSha256
+                    val freshCanonical = SecureRepairRuntime.loadIndex(
+                        graphAuthority, projectRoot, index.profile, state.budget,
+                    )
+                    require(freshCanonical.sourceRevisionSha256 == expectedCanonicalRevision &&
+                        freshCanonical.profileId == state.profileId &&
+                        freshCanonical.profileSha256 == state.profileSha256 &&
+                        freshCanonical.sourcePaths == index.sourcePaths &&
+                        freshCanonical.editablePaths.sorted() == state.editablePaths &&
+                        freshCanonical.indexSha256 == state.indexSha256) {
+                        "canonical source or dependency evidence changed before schema-6 acceptance decision"
+                    }
+                    val finalSources = sourcesAt(pending.parentId).toMutableMap()
+                    pending.candidateChanges.forEach { change ->
+                        finalSources[change.path] = IndexedSource(change.path, change.afterBytes, change.afterSha256)
+                    }
+                    val finalCandidateView = object : RepairRecoverySourceView {
+                        override val sourcePaths: List<String> get() = index.sourcePaths
+                        override val editablePaths: List<String> get() = index.editablePaths.sorted()
+                        override fun readSource(relative: String): ByteArray {
+                            require(relative == normalizedRelative(relative))
+                            val source = requireNotNull(finalSources[relative]) {
+                                "candidate source view path is absent: $relative"
+                            }
+                            return readBlob(source.sha256).also { bytes ->
+                                require(bytes.size.toLong() == source.bytes && sha256(bytes) == source.sha256)
+                            }
+                        }
+                    }
+                    val finalCandidateIndex = SecureRepairRuntime.loadRecoveryIndex(
+                        graphAuthority, projectRoot, index.profile, state.budget, finalCandidateView,
+                    )
+                    require(finalCandidateIndex.sourceRevisionSha256 == candidate &&
+                        finalCandidateIndex.profileId == state.profileId &&
+                        finalCandidateIndex.profileSha256 == state.profileSha256 &&
+                        finalCandidateIndex.sourcePaths == index.sourcePaths &&
+                        finalCandidateIndex.editablePaths.sorted() == state.editablePaths &&
+                        finalCandidateIndex.indexSha256 == state.indexSha256) {
+                        "candidate dependency evidence changed before schema-6 acceptance decision"
+                    }
+                } catch (failure: Exception) {
+                    runCatching { cleanupUndecidedPublicationStages(acceptanceBaseState, promotion, pending.id) }
+                        .exceptionOrNull()?.let(failure::addSuppressed)
+                    throw failure
+                }
+                try {
+                    val acceptedEvidence = requireNotNull(portableEvidence(evidence))
+                    val decidedNode = finalizeNode(pending, ModuleRevisionStatus.ACCEPTED, acceptedEvidence,
+                        recovered = false).copy(validationProof = proof)
+                    val activeRun = state.runs.lastOrNull()?.takeUnless { it.terminal }
+                    val acceptedState = state.copy(headId = decidedNode.id, nodes = state.nodes + decidedNode,
+                        pending = null, provisionalHeadId = null,
+                        fullyAcceptedHeadId = decidedNode.id,
+                        acceptedProof = proof,
+                        runs = if (activeRun == null) state.runs else state.runs.dropLast(1) + activeRun.copy(
+                            status = RepairRunStatus.FULLY_ACCEPTED,
+                            acceptedHeadId = decidedNode.id,
+                            provisionalHeadId = state.provisionalHeadId,
+                            lastEvidence = acceptedEvidence,
+                        ))
+                    prevalidatedNode = decidedNode
+                    prevalidatedAcceptance = requireCommitReadyState(acceptedState)
+                    val decision = RepairAcceptanceDecision(
+                        proof = proof,
+                        evidenceKind = acceptedEvidence.kind,
+                        evidenceSummary = acceptedEvidence.summary,
+                        evidenceArtifact = acceptedEvidence.artifactPath,
+                        promotionChanges = immutableList(promotion.map(RevisionFileDelta::copy)),
+                        intendedHeadId = pending.id,
+                        intendedRunId = activeRun?.id,
+                        intendedRunStatus = RepairRunStatus.FULLY_ACCEPTED.takeIf { activeRun != null },
+                        stagedFiles = stagedFiles,
+                        committedNode = decidedNode,
+                        committedRun = activeRun?.let { acceptedState.runs.lastOrNull() },
+                    )
+                    pending = pending.copy(acceptanceDecision = decision)
+                    pending = pending.copy(predecisionStageFiles = emptyList())
+                    validateSchema6DecisionNode(pending, decision)
+                    state.copy(pending = pending)
+                } catch (failure: Exception) {
+                    runCatching { cleanupUndecidedPublicationStages(acceptanceBaseState, promotion, pending.id) }
+                        .exceptionOrNull()?.let(failure::addSuppressed)
+                    throw failure
+                }
+            } else {
+                cancellationCheck()
+                state.copy(pending = pending)
+            }
+            // Schema 6 persists an accepted graph and its complete publication plan as the
+            // decision. A rollback-shaped recoverability projection is no longer applicable:
+            // after this point recovery may only roll that recorded decision forward.
+            if (state.schemaVersion >= 6) {
+                try {
+                    // Prepare and admit the exact decision bytes before entering the ambiguous
+                    // durable-write boundary. Then run the final live-source check after all
+                    // candidate-index and accepted-state work has completed.
+                    preparedDecisionWrite = prepareStateForPersistence(promotionState)
+                } catch (failure: Exception) {
+                    val decisionPending = promotionState.pending
+                    if (decisionPending != null) {
+                        runCatching { cleanupUndecidedPublicationStages(acceptanceBaseState, promotion, decisionPending.id) }
+                            .exceptionOrNull()?.let(failure::addSuppressed)
+                    }
+                    throw failure
+                }
+            } else requireRecoverablePendingState(promotionState)
+            var decisionChecksPassedImmediatelyBeforePublication = false
+            try {
+                if (state.schemaVersion >= 6) {
+                    persist(requireNotNull(preparedDecisionWrite)) {
+                        faultInjector?.hit(ModuleRevisionFaultPoint.Schema6DecisionPrevalidated)
+                        faultInjector?.hit(ModuleRevisionFaultPoint.BeforeSchema6DecisionPersist)
+                        val witnessPending = requireNotNull(promotionState.pending).copy(acceptanceDecision = null)
+                        val canonicalBase = revisionCanonicalBase(state.nodes, witnessPending.parentId)
+                        val expectedCanonicalRevision = state.nodes.single { it.id == canonicalBase }.sourceRevisionSha256
+                        val finalCanonical = SecureRepairRuntime.loadIndex(
+                            graphAuthority, projectRoot, index.profile, state.budget,
+                        )
+                        require(finalCanonical.sourceRevisionSha256 == expectedCanonicalRevision &&
+                            finalCanonical.profileId == state.profileId &&
+                            finalCanonical.profileSha256 == state.profileSha256 &&
+                            finalCanonical.sourcePaths == index.sourcePaths &&
+                            finalCanonical.editablePaths.sorted() == state.editablePaths &&
+                            finalCanonical.indexSha256 == state.indexSha256) {
+                            "canonical source or dependency evidence changed at the schema-6 decision boundary"
+                        }
+                        // This must be the final live-tree observation. The canonical index
+                        // load above reads the live source tree; check the complete file and
+                        // ancestor witness after it, once the graph temp is durable and just
+                        // before the decision record replaces the live graph.
+                        verifySchema6PendingWitness(projectRoot, state, witnessPending, state.budget)
+                        // Validation, state preparation, stage writes, and the final source
+                        // observation may consume the remaining run budget or race with
+                        // cancellation. This is the last cancellable point before the durable
+                        // acceptance decision; after the graph exchange recovery must roll
+                        // the accepted publication forward.
+                        cancellationCheck()
+                        decisionChecksPassedImmediatelyBeforePublication = true
+                    }
+                }
+                else persist(promotionState)
+            } catch (failure: Throwable) {
+                if (state.schemaVersion >= 6 && !decisionChecksPassedImmediatelyBeforePublication) {
+                    val decisionPending = promotionState.pending
+                    if (decisionPending != null) {
+                        runCatching { cleanupUndecidedPublicationStages(acceptanceBaseState, promotion, decisionPending.id) }
+                            .exceptionOrNull()?.let(failure::addSuppressed)
+                    }
+                    throw failure
+                }
+                if (state.schemaVersion < 6) throw failure
+                lifecycle = Lifecycle.POISONED
+                if (failure !is Exception) throw failure
+                throw RepairAcceptancePendingException(
+                    "repair acceptance decision write is ambiguous; graph is unavailable and rollback is forbidden",
+                    failure,
+                )
+            }
+            try {
+                if (state.schemaVersion >= 6) {
+                    rollForwardRepairPublication(projectRoot, stateStore, requireNotNull(pending.acceptanceDecision), faultInjector)
+                } else {
+                    installFiles(promotionBytes,
+                        promotion.associate { it.path to requireNotNull(it.beforeSha256) }, pending.id, "promotion",
+                        preimageMetadata = promotionPreimageMetadata)
+                }
+            } catch (failure: Exception) {
+                if (state.schemaVersion < 6) throw failure
+                throw RepairAcceptancePendingException(
+                    "repair acceptance decision is durable; publication recovery is required and rollback is forbidden",
+                    failure,
+                )
+            }
         }
         fun requireAcceptingIndex() {
             val acceptingIndex = SecureRepairRuntime.loadIndex(graphAuthority, projectRoot, index.profile, state.budget)
             require(acceptingIndex.sourceRevisionSha256 == candidate) {
-                "accepted source tree changed after candidate installation"
+                "accepted source tree changed after candidate installation (expected=$candidate observed=${acceptingIndex.sourceRevisionSha256})"
             }
             require(
                 acceptingIndex.profileId == state.profileId &&
@@ -3088,24 +3958,53 @@ internal class ModuleRevisionGraph private constructor(
                     acceptingIndex.indexSha256 == state.indexSha256,
             ) { "repair dependency/profile evidence changed after candidate installation" }
         }
-        faultInjector?.hit(ModuleRevisionFaultPoint.BeforeHeadIndexValidation)
-        requireAcceptingIndex()
-        faultInjector?.hit(ModuleRevisionFaultPoint.AfterHeadIndexValidation)
-        // Repeat the complete source/evidence rebuild after the deterministic commit-gap hook. This
-        // is the final fallible check before the canonical head write; cooperating writers are
-        // excluded by the graph lock and non-cooperating changes observed here fail closed.
-        requireAcceptingIndex()
-        cancellationCheck()
-        val node = finalizeNode(pending, ModuleRevisionStatus.ACCEPTED, evidence, recovered = false).copy(validationProof = proof)
-        val run = state.runs.lastOrNull()?.takeUnless { it.terminal }
-        val acceptedState = state.copy(headId = node.id, nodes = state.nodes + node, pending = null,
-            provisionalHeadId = null, fullyAcceptedHeadId = if (pending.detached) node.id else state.fullyAcceptedHeadId,
-            acceptedProof = proof ?: state.acceptedProof,
-            runs = if (run == null) state.runs else state.runs.dropLast(1) + run.copy(status = RepairRunStatus.FULLY_ACCEPTED,
-                acceptedHeadId = node.id, provisionalHeadId = state.provisionalHeadId, lastEvidence = portableEvidence(evidence)))
-        val preparedAcceptance = requireCommitReadyState(acceptedState)
-        cancellationCheck()
-        persist(preparedAcceptance)
+        if (prevalidatedAcceptance == null) {
+            faultInjector?.hit(ModuleRevisionFaultPoint.BeforeHeadIndexValidation)
+            requireAcceptingIndex()
+            faultInjector?.hit(ModuleRevisionFaultPoint.AfterHeadIndexValidation)
+            // Historical schema-1..5 publication keeps its pre-existing commit-gap checks.
+            requireAcceptingIndex()
+            cancellationCheck()
+        }
+        val node = prevalidatedNode ?: finalizeNode(pending, ModuleRevisionStatus.ACCEPTED, evidence,
+            recovered = false).copy(validationProof = proof)
+        val preparedAcceptance = prevalidatedAcceptance ?: run {
+            val activeRun = state.runs.lastOrNull()?.takeUnless { it.terminal }
+            val acceptedState = state.copy(headId = node.id, nodes = state.nodes + node, pending = null,
+                provisionalHeadId = null, fullyAcceptedHeadId = if (pending.detached) node.id else state.fullyAcceptedHeadId,
+                acceptedProof = proof ?: state.acceptedProof,
+                runs = if (activeRun == null) state.runs else state.runs.dropLast(1) + activeRun.copy(
+                    status = RepairRunStatus.FULLY_ACCEPTED,
+                    acceptedHeadId = node.id,
+                    provisionalHeadId = state.provisionalHeadId,
+                    lastEvidence = portableEvidence(evidence),
+                ))
+            requireCommitReadyState(acceptedState)
+        }
+        if (state.schemaVersion >= 6) {
+            try {
+                persist(preparedAcceptance)
+            } catch (failure: Throwable) {
+                lifecycle = Lifecycle.POISONED
+                if (failure !is Exception) throw failure
+                throw RepairAcceptancePendingException(
+                    "repair acceptance decision is durable but graph-head publication is ambiguous; rollback is forbidden",
+                    failure,
+                )
+            }
+        } else {
+            persist(preparedAcceptance)
+        }
+        // The accepted graph head is the canonical commit record. Its preimage links are
+        // now cleanup residue rather than rollback authority; an ordinary cleanup failure
+        // must not turn a durably accepted repair into an API-level rejection. Startup and
+        // the next graph mutation retry this authenticated cleanup and fail closed if the
+        // retained entries cannot be reconciled.
+        try {
+            cleanupCommittedPreimages()
+        } catch (_: Exception) {
+            // Retain the committed result; cleanup is retried before the next mutation/open.
+        }
         try {
             faultInjector?.hit(ModuleRevisionFaultPoint.AfterHeadPersist)
         } catch (crash: Error) {
@@ -3155,6 +4054,11 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun reject(attempt: ModuleRevisionAttempt, evidence: RepairEvidence? = null): ModuleRevisionNode = graphOperation {
         val pending = requirePending(attempt)
+        if (pending.acceptanceDecision != null) {
+            throw RepairAcceptancePendingException(
+                "repair acceptance decision is durable; rejection and rollback are forbidden",
+            )
+        }
         // Invalid caller evidence must not publish a rollback marker or change source bytes.
         validateEvidence(evidence)
         if (state.schemaVersion < 4) preserveLegacyRunState()
@@ -3186,6 +4090,7 @@ internal class ModuleRevisionGraph private constructor(
         val preparedRejection = requireCommitReadyState(withFinalizedRollback(
             state.copy(nodes = state.nodes + node, pending = null), rollbackRecord))
         persist(preparedRejection)
+        cleanupCommittedPreimages()
         try {
             synchronizeCompatibilityLog()
         } catch (_: Exception) {
@@ -3222,6 +4127,18 @@ internal class ModuleRevisionGraph private constructor(
                 state.runs,
             ).toByteArray(Charsets.UTF_8),
         )
+    }
+
+    /**
+     * Reconcile every reader-visible projection of the canonical graph before a publication
+     * lease may be retired. The graph commit is authoritative; these files are derived, but a
+     * cooperating reader must not be admitted while one still describes an older accepted head.
+     */
+    @Synchronized
+    internal fun synchronizePublicationProjections() = graphOperation {
+        synchronizeSourceManifest()
+        synchronizeCompatibilityLog()
+        synchronizeRepairHistory()
     }
 
     private fun requireProjectableState(candidate: RevisionGraphState) {
@@ -3311,6 +4228,7 @@ internal class ModuleRevisionGraph private constructor(
             listOf(node),
             null,
             referencedBlobBytes(listOf(node), null),
+            schemaVersion = 6,
         )
         requireProjectableState(initial)
         val payload = renderGraph(initial).toByteArray(Charsets.UTF_8)
@@ -3322,7 +4240,7 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     private fun validateLoadedState(verifyBlobContents: Boolean = true) {
-    require(state.schemaVersion in 1..4) { "unsupported repair revision graph schema" }
+        require(state.schemaVersion in 1..6) { "unsupported repair revision graph schema" }
         require(state.budget == index.budget) { "revision graph resource budget differs from the requested budget" }
         require(state.profileId == index.profileId && state.profileSha256 == index.profileSha256) {
             "revision graph repair index profile does not match current project evidence"
@@ -3379,6 +4297,22 @@ internal class ModuleRevisionGraph private constructor(
             require(node.changes.map { it.path } == node.changes.map { it.path }.distinct().sorted()) {
                 "revision graph node changes are not unique and sorted: ${node.id}"
             }
+            require(node.publicationChanges.map { it.path } ==
+                node.publicationChanges.map { it.path }.distinct().sorted()) {
+                "revision graph physical publication changes are not unique and sorted: ${node.id}"
+            }
+            if (state.schemaVersion >= 5) {
+                require(node.publicationPreimageMetadata.keys.sorted() == node.publicationChanges.map { it.path }.sorted()) {
+                    "schema-5 physical preimage metadata does not exactly cover publication changes: ${node.id}"
+                }
+                node.publicationChanges.forEach { change ->
+                    val metadata = node.publicationPreimageMetadata.getValue(change.path)
+                    require(metadata.size == change.beforeBytes &&
+                        metadata.retainedName == sourceTransactionPreimageName(change.path, node.id)) {
+                        "schema-5 physical preimage metadata is not bound to its publication: ${node.id}:${change.path}"
+                    }
+                }
+            }
             require((node.evidenceKind == null) == (node.evidenceSummary == null)) {
                 "revision graph evidence kind and summary must both be present or absent: ${node.id}"
             }
@@ -3419,6 +4353,7 @@ internal class ModuleRevisionGraph private constructor(
                 previousRepairIteration = metadata.iterationIndex
             }
             node.changes.forEach { validateDelta(it) }
+            node.publicationChanges.forEach { validateDelta(it) }
             if (indexInGraph == 0) {
                 require(node.changes.map { it.path } == index.sourcePaths) {
                     "revision graph root does not cover the exact indexed source set"
@@ -3484,7 +4419,122 @@ internal class ModuleRevisionGraph private constructor(
         }
         require(state.nextOrdinal > previousOrdinal) { "revision graph next ordinal is not ahead of completed nodes" }
         state.pending?.let { pending ->
+            if (state.schemaVersion >= 5) {
+                require(pending.preimageMetadata != null) {
+                    "schema-5 pending repair is missing its preimage metadata commitment"
+                }
+                if (pending.detached) {
+                    if (state.schemaVersion < 6) require(pending.preimageMetadata.isEmpty()) {
+                        "legacy detached repair cannot invent a physical metadata commitment"
+                    } else {
+                        val published = sourcesAt(revisionCanonicalBase(state.nodes, state.headId))
+                        val working = sourcesAt(pending.parentId)
+                        val provisionalDeltaPaths = (published.keys + working.keys).filter { path ->
+                            published[path]?.let { before -> working[path]?.let { after ->
+                                before.sha256 == after.sha256 && before.bytes == after.bytes
+                            } } != true
+                        }
+                        val expectedWitnessPaths = (pending.allowedPaths + provisionalDeltaPaths).distinct().sorted()
+                        require(pending.preimageMetadata.keys.sorted() == expectedWitnessPaths) {
+                            "schema-6 attempt witness does not cover allowed paths and provisional promotion paths"
+                        }
+                        pending.preimageMetadata.forEach { (path, metadata) ->
+                            require(metadata.size == published.getValue(path).bytes)
+                        }
+                        require(pending.sourceWitnessSha256?.matches(REPAIR_BLOB_DIGEST) == true) {
+                            "schema-6 attempt is missing its complete accepted-source witness commitment"
+                        }
+                    }
+                } else {
+                    validatePendingPreimageAggregate(pending.allowedPaths, pending.preimages, state.budget,
+                        pending.preimageMetadata)
+                }
+                if (pending.promotionChanges.isNotEmpty()) require(
+                    pending.promotionPreimageMetadata?.keys?.sorted() == pending.promotionChanges.map { it.path }.sorted(),
+                ) { "schema-5 promotion is missing its physical preimage metadata commitment" }
+                pending.promotionChanges.forEach { change ->
+                    require(pending.promotionPreimageMetadata?.get(change.path)?.size == change.beforeBytes) {
+                        "schema-5 promotion preimage metadata size differs from its content commitment: ${change.path}"
+                    }
+                    if (state.schemaVersion >= 6) require(
+                        pending.promotionPreimageMetadata?.get(change.path) == pending.preimageMetadata?.get(change.path),
+                    ) { "schema-6 promotion metadata differs from the attempt-time witness: ${change.path}" }
+                }
+            }
             require(pending.id.matches(Regex("revision_[A-Za-z0-9_]+"))) { "pending repair attempt ID is invalid" }
+            if (state.schemaVersion >= 6) {
+                if (pending.acceptanceDecision != null) {
+                    require(pending.predecisionStageFiles.isEmpty()) {
+                        "schema-6 committed decision retains a predecision-only stage manifest"
+                    }
+                } else {
+                    val predecision = pending.predecisionStageFiles
+                    require(predecision.map { it.path } == pending.promotionChanges.take(predecision.size).map { it.path }) {
+                        "schema-6 predecision stage manifest is not a sorted publication prefix"
+                    }
+                    predecision.zip(pending.promotionChanges).forEach { (staged, change) ->
+                        val sourceMetadata = requireNotNull(pending.promotionPreimageMetadata?.get(change.path))
+                        require(staged.path == change.path &&
+                            staged.stagingName == sourceTransactionPreimageName(change.path, pending.id) &&
+                            staged.sha256 == change.afterSha256 && staged.size == change.afterBytes &&
+                            staged.mode == sourceMetadata.mode && staged.uid == sourceMetadata.uid &&
+                            staged.gid == sourceMetadata.gid) {
+                            "schema-6 predecision stage is not bound to its candidate and source metadata: ${change.path}"
+                        }
+                    }
+                }
+            } else require(pending.predecisionStageFiles.isEmpty()) {
+                "legacy repair record contains schema-6 staging metadata"
+            }
+            pending.acceptanceDecision?.let { decision ->
+                require(state.schemaVersion == 6 && pending.detached) {
+                    "acceptance decision is only valid for a schema-6 detached candidate"
+                }
+                require(decision.intendedHeadId == pending.id)
+                require(decision.promotionChanges == pending.promotionChanges) {
+                    "schema-6 acceptance decision differs from its exact promotion changes"
+                }
+                require(pending.repairMetadata?.runId == null || decision.intendedRunId == pending.repairMetadata.runId) {
+                    "schema-6 acceptance decision run transition differs from pending attempt"
+                }
+                require(decision.intendedRunStatus == RepairRunStatus.FULLY_ACCEPTED.takeIf { decision.intendedRunId != null })
+                validateAcceptanceRunTransition(state, decision)
+                require(decision.proof.sourceRevisionSha256 == pending.candidateSourceRevisionSha256 &&
+                    decision.proof.profileSha256 == state.profileSha256 &&
+                    decision.proof.indexSha256 == state.indexSha256 &&
+                    decision.proof.regressionCorpusSha256 == state.regressionCorpusSha256) {
+                    "schema-6 acceptance decision proof is not bound to the persisted candidate"
+                }
+                val committedNode = requireNotNull(decision.committedNode)
+                require(committedNode.id == decision.intendedHeadId && committedNode.status == ModuleRevisionStatus.ACCEPTED &&
+                    committedNode.publicationChanges == decision.promotionChanges &&
+                    committedNode.publicationPreimageMetadata == pending.promotionPreimageMetadata.orEmpty()) {
+                    "schema-6 decision does not retain the complete accepted node"
+                }
+                require(decision.stagedFiles.map { it.path } == decision.promotionChanges.map { it.path })
+                decision.stagedFiles.zip(decision.promotionChanges).forEach { (staged, change) ->
+                    val metadata = requireNotNull(pending.promotionPreimageMetadata?.get(change.path))
+                    val parent = metadata.ancestorMetadata.lastOrNull()
+                        ?: error("schema-6 source publication is missing its parent-directory witness")
+                    require(staged.stagingName == metadata.retainedName && staged.sha256 == change.afterSha256 &&
+                        staged.size == change.afterBytes && staged.parentDevice == parent.device &&
+                        staged.parentInode == parent.inode && staged.parentMountId == parent.mountId &&
+                        staged.device == staged.parentDevice && staged.mountId == staged.parentMountId &&
+                        staged.mode == metadata.mode && staged.uid == metadata.uid && staged.gid == metadata.gid) {
+                        "schema-6 staged publication is not bound to its source and directory witness: ${change.path}"
+                    }
+                }
+            }
+            pending.preimageMetadata.orEmpty().forEach { (path, metadata) ->
+                require(metadata.retainedName == sourceTransactionPreimageName(path, pending.id)) {
+                    "schema-5 preimage name is not bound to its path and transaction: $path"
+                }
+            }
+            pending.promotionPreimageMetadata.orEmpty().forEach { (path, metadata) ->
+                require(metadata.retainedName == sourceTransactionPreimageName(path, pending.id)) {
+                    "schema-5 promotion preimage name is not bound to its path and transaction: $path"
+                }
+            }
             require(pending.parentId == workingHeadId() && pending.ordinal == state.nextOrdinal - 1) {
                 "pending repair attempt is not attached to the current graph head"
             }
@@ -3508,7 +4558,8 @@ internal class ModuleRevisionGraph private constructor(
                     "pending repair preimage is not bound to the accepted head: ${preimage.path}"
                 }
             }
-            validatePendingPreimageAggregate(pending.allowedPaths, pending.preimages, state.budget)
+            validatePendingPreimageAggregate(pending.allowedPaths, pending.preimages, state.budget,
+                pending.preimageMetadata?.takeUnless { pending.detached })
             require(pending.candidateChanges.map { it.path } == pending.candidateChanges.map { it.path }.distinct().sorted())
             require(pending.candidateChanges.all { it.path in pending.allowedPaths })
             val pendingCandidateSources = parentSources.toMutableMap()
@@ -3672,6 +4723,11 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun recoverPendingAttempt() {
         val pending = state.pending ?: return
+        if (pending.acceptanceDecision != null) {
+            throw RepairAcceptancePendingException(
+                "repair acceptance decision is durable; graph is unavailable until roll-forward publication recovery completes",
+            )
+        }
         val recoverablePending = recoverPersistedInvocationBinding(pending)
         if (recoverablePending !== pending) persist(state.copy(pending = recoverablePending))
         val rollbackRecord = rollbackPending(recoverablePending)
@@ -3719,9 +4775,20 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     private fun rollbackPending(pending: PendingAttempt): RepairRollbackRecord {
+        require(pending.acceptanceDecision == null) {
+            "durable acceptance decision forbids rejection or rollback"
+        }
+        if (state.schemaVersion >= 6 && pending.detached) {
+            verifySchema6PendingWitness(projectRoot, state, pending, state.budget)
+            discardUndecidedPublicationStages(stateStore, deriveSchema6PromotionChanges(state, pending), pending.id,
+                pending.predecisionStageFiles)
+        }
         upgradeGraphToRollbackContract(allowPending = true)
         val activePending = requireNotNull(state.pending)
         require(activePending.id == pending.id) { "rollback attempt does not match pending graph state" }
+        require(activePending.acceptanceDecision == null) {
+            "durable acceptance decision forbids rejection or rollback"
+        }
         val priorRecord = activePending.rollbackRecord ?: initialRollbackRecord(
             state,
             activePending,
@@ -3783,7 +4850,20 @@ internal class ModuleRevisionGraph private constructor(
                 state.budget.maximumSourceFileBytes,
             )
             when (observed.sha256) {
-                parent.beforeSha256 -> Unit
+                parent.beforeSha256 -> {
+                    // A crash can happen after a content-only rollback exchange but before the
+                    // retained inode is swapped back into the canonical name. If the durable
+                    // transaction link exists, repeat restoration through that inode even though
+                    // the bytes already match.
+                    val parts = normalizedRelative(candidate.path).split('/')
+                    val retained = stateStore.revisionsPath.resolve(
+                        sourceTransactionPreimageName(candidate.path, pending.id),
+                    )
+                    if (Files.exists(retained, LinkOption.NOFOLLOW_LINKS)) {
+                        replacements[candidate.path] = readBlob(requireNotNull(parent.beforeBlobSha256))
+                        expectedCurrent[candidate.path] = observed.sha256
+                    }
+                }
                 candidate.afterSha256 -> {
                     replacements[candidate.path] = readBlob(requireNotNull(parent.beforeBlobSha256))
                     expectedCurrent[candidate.path] = candidate.afterSha256
@@ -3801,6 +4881,8 @@ internal class ModuleRevisionGraph private constructor(
             expectedCurrent,
             transactionId = pending.id,
             phase = "rollback",
+            rollbackCandidateSha256 = pending.candidateChanges.associate { it.path to it.afterSha256 },
+            preimageMetadata = pending.preimageMetadata.orEmpty(),
         )
         }
         val restored = revisionSha256(index.sourceSnapshot())
@@ -3809,6 +4891,10 @@ internal class ModuleRevisionGraph private constructor(
             RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
             "could not restore the exact parent source revision",
         )
+        pending.preimageMetadata?.forEach { (path, expected) ->
+            requireRestoredPreimageMetadata(path, expected, "rollback")
+        }
+        cleanupRollbackPublicationResidue(pending.candidateChanges, pending.id, "rollback")
     }
 
     private fun restoreDetachedPromotion(pending: PendingAttempt) {
@@ -3833,8 +4919,86 @@ internal class ModuleRevisionGraph private constructor(
                 )
             }
         }
-        if (replacements.isNotEmpty()) installFiles(replacements, expected, pending.id, "promotion-rollback")
+        if (replacements.isNotEmpty()) installFiles(replacements, expected, pending.id, "promotion-rollback",
+            rollbackCandidateSha256 = pending.promotionChanges.associate { it.path to it.afterSha256 },
+            preimageMetadata = pending.promotionPreimageMetadata.orEmpty())
         verifyDetachedRollbackTarget()
+        pending.promotionPreimageMetadata?.forEach { (path, metadata) ->
+            requireRestoredPreimageMetadata(path, metadata, "promotion rollback")
+        }
+        cleanupRollbackPublicationResidue(pending.promotionChanges, pending.id, "promotion-rollback")
+    }
+
+    /**
+     * A prior rollback can have restored the canonical bytes and then failed while unlinking
+     * its transaction-owned `.restore` entry. On retry, content comparison alone would skip
+     * publication and strand that candidate beside the source. Reconcile both the active name
+     * and its `.cleanup` quarantine before rollback is allowed to become terminal.
+     */
+    private fun cleanupRollbackPublicationResidue(
+        changes: List<RevisionFileDelta>,
+        transactionId: String,
+        phase: String,
+    ) {
+        changes.forEachIndexed { indexInCleanup, change ->
+            val parts = normalizedRelative(change.path).split('/')
+            val parent = parts.dropLast(1).joinToString("/")
+            val temporary = sourceTransactionTemporaryName(parts.last(), transactionId)
+            val allowedDigests = setOfNotNull(change.beforeSha256, change.afterSha256)
+            cleanupRepairOwnedEntry(
+                projectRoot, parent, "$temporary.restore", allowedDigests, null,
+                state.budget.maximumSourceFileBytes, phase, change.path, indexInCleanup,
+                faultInjector, required = false, expectedLinkCount = -1,
+            )
+            cleanupRepairOwnedEntry(
+                projectRoot, parent, temporary, allowedDigests, null,
+                state.budget.maximumSourceFileBytes, phase, change.path, indexInCleanup,
+                faultInjector, required = false, expectedLinkCount = -1,
+            )
+        }
+    }
+
+    /** Verify restored content identity and metadata through the same descriptor chain. */
+    private fun requireRestoredPreimageMetadata(
+        path: String,
+        expected: RepairPreimageMetadata,
+        operation: String,
+    ) {
+        val descriptors = mutableListOf<decompengine.acp.LinuxDescriptor>()
+        try {
+            var parent = openRepairRootDirectory(projectRoot)
+            descriptors += parent
+            val segments = normalizedRelative(path).split('/')
+            segments.dropLast(1).forEach { segment ->
+                parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+                descriptors += parent
+            }
+            val source = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, segments.last())) {
+                "$operation source disappeared during metadata verification: $path"
+            }
+            source.use {
+                if (expected.metadataVersion == 2) {
+                    if (!expected.matches(LinuxFilesystemSyscalls.fileState(source), includeAtime = false)) throw RepairRollbackException(
+                        RepairRollbackStage.SOURCE_VERIFICATION,
+                        RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+                        "$operation restored source identity or metadata differs from the committed preimage: $path",
+                    )
+                    normalizeCommittedPreimageAtime(source, expected)
+                }
+                if (!expected.matches(LinuxFilesystemSyscalls.fileState(source))) throw RepairRollbackException(
+                    RepairRollbackStage.SOURCE_VERIFICATION,
+                    RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+                    "$operation restored bytes without the committed preimage metadata: $path",
+                )
+                if (LinuxFilesystemSyscalls.extendedAttributeNames(source).isNotEmpty()) throw RepairRollbackException(
+                    RepairRollbackStage.SOURCE_VERIFICATION,
+                    RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+                    "$operation violated the committed no-xattr policy: $path",
+                )
+            }
+        } finally {
+            descriptors.asReversed().forEach { it.close() }
+        }
     }
 
     private fun verifyDetachedRollbackTarget() {
@@ -3852,15 +5016,20 @@ internal class ModuleRevisionGraph private constructor(
         expectedCurrentSha256: Map<String, String>,
         transactionId: String,
         phase: String,
+        rollbackCandidateSha256: Map<String, String> = emptyMap(),
+        preimageMetadata: Map<String, RepairPreimageMetadata> = emptyMap(),
     ) {
         require(replacements.keys.all { it in index.editablePaths })
         publishRepairFiles(
             projectRoot,
+            stateStore.revisionsPath,
             replacements,
             expectedCurrentSha256,
             state.budget.maximumSourceFileBytes,
             transactionId,
             phase,
+            rollbackCandidateSha256,
+            preimageMetadata,
             faultInjector,
         )
     }
@@ -4067,7 +5236,65 @@ internal class ModuleRevisionGraph private constructor(
                 index,
                 faultInjector,
                 required = false,
+                expectedLinkCount = -1,
             )
+        }
+    }
+
+    /** Remove transaction-owned preimage links only after the canonical graph has committed. */
+    private fun cleanupCommittedPreimages() {
+        if (state.pending != null) return
+        state.nodes.forEachIndexed { nodeIndex, node ->
+            if (node.status == ModuleRevisionStatus.ROOT) {
+                return@forEachIndexed
+            }
+            // Keep the actual publication plan separate from logical ACP contribution changes:
+            // provisional promotion can displace files that are absent from node.changes.
+            val physicalChanges = if (state.schemaVersion >= 5) node.publicationChanges else
+                if (node.id.matches(Regex("revision_[A-Za-z0-9_]+"))) node.changes else emptyList()
+            physicalChanges.forEachIndexed { changeIndex, change ->
+                val preimageDigest = requireNotNull(change.beforeSha256) {
+                    "committed physical publication is missing its preimage digest"
+                }
+                val metadata = node.publicationPreimageMetadata[change.path]
+                if (state.schemaVersion >= 5) requireNotNull(metadata) {
+                    "schema-5 committed publication is missing its preimage identity: ${node.id}:${change.path}"
+                }
+                if (state.schemaVersion >= 6) {
+                    val committed = requireNotNull(metadata)
+                    val parentMount = requireNotNull(committed.ancestorMetadata.lastOrNull()).mountId
+                    val expectedIdentity = LinuxFileIdentity(
+                        LinuxFileKey(committed.device, committed.inode), committed.mode, committed.uid, committed.gid,
+                        1, parentMount, true, false, false,
+                    )
+                    stateStore.removePublicationStage(
+                        committed.retainedName, expectedIdentity, preimageDigest, requireNotNull(change.beforeBytes),
+                    )
+                    return@forEachIndexed
+                }
+                cleanupRepairOwnedEntry(
+                    stateStore.revisionsPath,
+                    "",
+                    metadata?.retainedName ?: sourceTransactionPreimageName(change.path, node.id),
+                    setOf(preimageDigest),
+                    metadata?.let { LinuxFileKey(it.device, it.inode) },
+                    state.budget.maximumSourceFileBytes,
+                    "committed-preimage-cleanup",
+                    change.path,
+                    nodeIndex + changeIndex,
+                    faultInjector,
+                    required = false,
+                    // A committed candidate leaves the retained preimage as the sole link. A
+                    // committed rejection restores the preimage as the canonical source too.
+                    // Schema-5 carries a durable inode commitment and therefore has an exact
+                    // expected link count. Legacy records are content-only; recovery may have
+                    // restored by exchange or by a bounded copy, so accept either owned state
+                    // without promoting that observation into metadata provenance.
+                    expectedLinkCount = if (metadata == null) -1
+                        else if (node.status == ModuleRevisionStatus.REJECTED) 2 else 1,
+                    expectedMetadata = metadata,
+                )
+            }
         }
     }
 
@@ -4171,8 +5398,8 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun persist(candidate: RevisionGraphState) = persist(prepareStateForPersistence(candidate))
 
-    private fun persist(prepared: PreparedRevisionGraphState) {
-        stateStore.writeGraph(prepared.payload)
+    private fun persist(prepared: PreparedRevisionGraphState, beforePublication: (() -> Unit)? = null) {
+        stateStore.writeGraph(prepared.payload, beforePublication)
         state = prepared.state
     }
 
@@ -4416,8 +5643,16 @@ internal class ModuleRevisionGraph private constructor(
     private inline fun <T> graphOperation(action: () -> T): T {
         check(Thread.holdsLock(this)) { "revision graph operation monitor is not held" }
         check(lifecycle == Lifecycle.OPEN) { "revision graph is closed" }
+        if (state.pending?.acceptanceDecision != null) {
+            throw RepairAcceptancePendingException(
+                "repair acceptance decision is durable; graph mutations are unavailable pending roll-forward recovery",
+            )
+        }
         val current = Thread.currentThread()
         if (operationDepth == 0) {
+            // A committed graph may still have durable cleanup work after an interrupted unlink.
+            // Reconcile it before any later graph mutation or publication can proceed.
+            cleanupCommittedPreimages()
             operationThread = current
         } else {
             check(operationThread === current) { "revision graph operation ownership changed" }
@@ -4548,6 +5783,18 @@ internal class ModuleRevisionGraph private constructor(
             }
         }
     }
+}
+
+private fun repairDirectoryEntriesSha256(names: List<String>): String {
+    val ordered = names.sorted()
+    require(ordered.distinct().size == ordered.size && ordered.none { it.isEmpty() || '/' in it || '\u0000' in it })
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    ordered.forEach { name ->
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        digest.update(java.nio.ByteBuffer.allocate(Int.SIZE_BYTES).putInt(bytes.size).array())
+        digest.update(bytes)
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 private fun recoveryBinding(index: ModuleRepairIndex): RepairRecoveryBinding = RepairRecoveryBinding(
@@ -4760,8 +6007,11 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
             require(state.runs.none { !it.terminal }) {
                 "standalone pending repair cannot belong to an active run"
             }
-            require(pending.detached == (pending.parentId == state.provisionalHeadId)) {
-                "standalone repair must keep its provisional parent detached"
+            require(pending.parentId == state.headId || pending.parentId == state.provisionalHeadId) {
+                "standalone repair must descend from the canonical or provisional head"
+            }
+            if (pending.parentId == state.provisionalHeadId) require(pending.detached) {
+                "standalone repair from a provisional parent must remain detached"
             }
             require(pending.promotionChanges.isEmpty()) {
                 "standalone repair cannot publish an unvalidated provisional tree"
@@ -4942,6 +6192,23 @@ private fun validateRecordedGraphBody(state: RevisionGraphState, rootPaths: List
         node.repairMetadata?.let {
             priorRepairIteration = validatePortableMetadata(it, priorRepairIteration + 1)
         }
+        require(node.publicationChanges.map { it.path } ==
+            node.publicationChanges.map { it.path }.distinct().sorted()) {
+            "revision graph physical publication changes are not unique and sorted: ${node.id}"
+        }
+        node.publicationChanges.forEach { validateDeltaPortable(it) }
+        if (state.schemaVersion >= 5) {
+            require(node.publicationPreimageMetadata.keys.sorted() == node.publicationChanges.map { it.path }.sorted()) {
+                "schema-5 physical preimage metadata does not exactly cover publication changes: ${node.id}"
+            }
+            node.publicationChanges.forEach { change ->
+                val metadata = node.publicationPreimageMetadata.getValue(change.path)
+                require(metadata.size == change.beforeBytes &&
+                    metadata.retainedName == sourceTransactionPreimageName(change.path, node.id)) {
+                    "schema-5 physical preimage metadata is not bound to its publication: ${node.id}:${change.path}"
+                }
+            }
+        }
         if (nodeIndex == 0) {
             require(node.parentId == null && node.ordinal == 0 && node.status == ModuleRevisionStatus.ROOT)
             require(node.changedModules.isEmpty() && node.invalidatedModules.isEmpty())
@@ -5026,6 +6293,92 @@ private fun validateRecordedGraphBody(state: RevisionGraphState, rootPaths: List
         require(
             pending.id == "revision_${pending.ordinal.toString().padStart(8, '0')}_${sha256(expectedIdMaterial.toByteArray()).take(16)}",
         ) { "pending repair attempt ID is not bound to its parent and authorization" }
+        if (state.schemaVersion >= 5) {
+            val metadata = requireNotNull(pending.preimageMetadata) {
+                "schema-5 pending repair is missing its preimage metadata commitment"
+            }
+            if (pending.detached) {
+                if (state.schemaVersion < 6) {
+                    require(metadata.isEmpty()) { "legacy detached repair cannot invent physical metadata commitments" }
+                } else {
+                    val published = revisionSourcesAt(state.nodes, revisionCanonicalBase(state.nodes, state.headId))
+                    val working = revisionSourcesAt(state.nodes, pending.parentId)
+                    val provisionalDeltaPaths = (published.keys + working.keys).filter { path ->
+                        published[path]?.let { before -> working[path]?.let { after ->
+                            before.sha256 == after.sha256 && before.bytes == after.bytes
+                        } } != true
+                    }
+                    val expectedWitnessPaths = (pending.allowedPaths + provisionalDeltaPaths).distinct().sorted()
+                    require(metadata.keys.sorted() == expectedWitnessPaths) {
+                        "schema-6 recorded attempt witness does not cover allowed and provisional promotion paths"
+                    }
+                    metadata.forEach { (path, value) ->
+                        require(value.size == published.getValue(path).bytes)
+                        require(value.ancestorMetadata.isNotEmpty() && value.ancestorMetadata.first().path == "." &&
+                            value.ancestorMetadata.all { it.atimeSeconds != null && it.entryCount != null && it.entriesSha256 != null }) {
+                            "schema-6 witness is missing exact ancestor timestamps or entry inventory: $path"
+                        }
+                        require(value.ancestorMetadata.map { it.path } ==
+                            listOf(".") + path.split('/').dropLast(1).mapIndexed { index, _ ->
+                                path.split('/').take(index + 1).joinToString("/")
+                            }) { "schema-6 ancestor witness does not cover the complete path parent chain: $path" }
+                    }
+                    require(pending.sourceWitnessSha256?.matches(REPAIR_BLOB_DIGEST) == true) {
+                        "schema-6 attempt is missing its complete accepted-source witness commitment"
+                    }
+                }
+            } else {
+                validatePendingPreimageAggregate(pending.allowedPaths, pending.preimages, state.budget, metadata)
+            }
+            if (pending.promotionChanges.isNotEmpty()) require(
+                pending.promotionPreimageMetadata?.keys?.sorted() == pending.promotionChanges.map { it.path }.sorted(),
+            ) { "schema-5 promotion is missing its physical preimage metadata commitment" }
+            pending.promotionChanges.forEach { change ->
+                require(pending.promotionPreimageMetadata?.get(change.path)?.size == change.beforeBytes) {
+                    "schema-5 promotion preimage metadata size differs from its content commitment: ${change.path}"
+                }
+                if (state.schemaVersion >= 6) require(
+                    pending.promotionPreimageMetadata?.get(change.path) == pending.preimageMetadata?.get(change.path),
+                ) { "schema-6 promotion metadata differs from the attempt-time witness: ${change.path}" }
+            }
+        }
+        pending.preimageMetadata.orEmpty().forEach { (path, metadata) ->
+            require(metadata.retainedName == sourceTransactionPreimageName(path, pending.id)) {
+                "schema-5 preimage name is not bound to its path and transaction: $path"
+            }
+        }
+        pending.promotionPreimageMetadata.orEmpty().forEach { (path, metadata) ->
+            require(metadata.retainedName == sourceTransactionPreimageName(path, pending.id)) {
+                "schema-5 promotion preimage name is not bound to its path and transaction: $path"
+            }
+        }
+        pending.acceptanceDecision?.let { decision ->
+            require(state.schemaVersion == 6 && pending.detached)
+            require(decision.intendedHeadId == pending.id &&
+                (pending.repairMetadata?.runId == null || decision.intendedRunId == pending.repairMetadata.runId))
+            require(decision.intendedRunStatus == RepairRunStatus.FULLY_ACCEPTED.takeIf { decision.intendedRunId != null })
+            validateAcceptanceRunTransition(state, decision)
+            validateSchema6DecisionNode(pending, decision)
+            require(decision.promotionChanges == pending.promotionChanges)
+            require(decision.proof.sourceRevisionSha256 == pending.candidateSourceRevisionSha256 &&
+                decision.proof.profileSha256 == state.profileSha256 &&
+                decision.proof.indexSha256 == state.indexSha256 &&
+                decision.proof.regressionCorpusSha256 == state.regressionCorpusSha256)
+            require(decision.stagedFiles.map { it.path } == decision.promotionChanges.map { it.path })
+            require(decision.committedNode?.id == decision.intendedHeadId &&
+                decision.committedNode?.publicationChanges == decision.promotionChanges &&
+                decision.committedNode?.publicationPreimageMetadata == pending.promotionPreimageMetadata.orEmpty())
+            decision.stagedFiles.zip(decision.promotionChanges).forEach { (staged, change) ->
+                val metadata = requireNotNull(pending.promotionPreimageMetadata?.get(change.path))
+                val parent = requireNotNull(metadata.ancestorMetadata.lastOrNull())
+                require(staged.stagingName == metadata.retainedName && staged.sha256 == change.afterSha256 &&
+                    staged.size == change.afterBytes && staged.device == staged.parentDevice &&
+                    staged.mountId == staged.parentMountId && staged.parentDevice == parent.device &&
+                    staged.parentInode == parent.inode && staged.parentMountId == parent.mountId &&
+                    staged.mode == metadata.mode && staged.uid == metadata.uid && staged.gid == metadata.gid)
+            }
+            validatePortableEvidence(decision.evidenceKind, decision.evidenceSummary, decision.evidenceArtifact)
+        }
         val parentSources = revisionSourcesAt(state.nodes, pending.parentId)
         require(pending.parentSourceRevisionSha256 == revisionSha256(parentSources.values))
         pending.repairMetadata?.let { validatePortableMetadata(it, priorRepairIteration + 1) }
@@ -5035,7 +6388,8 @@ private fun validateRecordedGraphBody(state: RevisionGraphState, rootPaths: List
             require(preimage.beforeSha256 == parent.sha256 && preimage.beforeBytes == parent.bytes)
             require(preimage.afterSha256 == parent.sha256 && preimage.afterBytes == parent.bytes)
         }
-        validatePendingPreimageAggregate(pending.allowedPaths, pending.preimages, state.budget)
+        validatePendingPreimageAggregate(pending.allowedPaths, pending.preimages, state.budget,
+            pending.preimageMetadata?.takeUnless { pending.detached })
         require(pending.candidateChanges.map { it.path } ==
             pending.candidateChanges.map { it.path }.distinct().sorted())
         require(pending.candidateChanges.size <= state.budget.maximumPatchFiles) {
@@ -5621,6 +6975,247 @@ private fun validateGraphBeforeRecovery(
  * canonical index. This deliberately leaves the pending record in place; the fully validated graph instance records the recovered
  * rejection after the source tree is back at its parent revision.
  */
+private fun acceptedStateFromDecision(
+    source: RevisionGraphState,
+    decision: RepairAcceptanceDecision,
+): RevisionGraphState {
+    val node = requireNotNull(decision.committedNode)
+    require(source.schemaVersion == 6 && source.pending?.acceptanceDecision == decision)
+    validateSchema6DecisionNode(requireNotNull(source.pending), decision)
+    require(source.nodes.none { it.id == node.id } && node.status == ModuleRevisionStatus.ACCEPTED &&
+        node.sourceRevisionSha256 == decision.proof.sourceRevisionSha256)
+    validateAcceptanceRunTransition(source, decision)
+    val runs = if (decision.intendedRunId == null) source.runs else {
+        val runIndex = source.runs.indexOfFirst { it.id == decision.intendedRunId }
+        source.runs.mapIndexed { index, run ->
+            if (index != runIndex) run else requireNotNull(decision.committedRun)
+        }
+    }
+    val committed = source.copy(
+        headId = node.id,
+        nodes = source.nodes + node,
+        pending = null,
+        provisionalHeadId = null,
+        fullyAcceptedHeadId = node.id,
+        acceptedProof = decision.proof,
+        runs = runs,
+    )
+    return committed.copy(storedBlobBytes = source.storedBlobBytes)
+}
+
+/** Verify the complete run transition before any decided source exchange is attempted. */
+private fun validateAcceptanceRunTransition(source: RevisionGraphState, decision: RepairAcceptanceDecision) {
+    val activeRun = source.runs.lastOrNull()?.takeUnless { it.terminal }
+    if (decision.intendedRunId == null) {
+        require(decision.committedRun == null && activeRun == null) {
+            "schema-6 decision omits the active accepted-run transition"
+        }
+        return
+    }
+    val runIndex = source.runs.indexOfFirst { it.id == decision.intendedRunId }
+    require(runIndex >= 0 && runIndex == source.runs.lastIndex && !source.runs[runIndex].terminal &&
+        activeRun?.id == decision.intendedRunId) {
+        "schema-6 accepted run transition is unavailable for deterministic recovery"
+    }
+    val expected = source.runs[runIndex].copy(
+        status = requireNotNull(decision.intendedRunStatus),
+        acceptedHeadId = decision.intendedHeadId,
+        provisionalHeadId = source.provisionalHeadId,
+        lastEvidence = RepairEvidence(decision.evidenceKind, decision.evidenceSummary, decision.evidenceArtifact),
+    )
+    require(decision.committedRun == expected) {
+        "schema-6 decision does not retain the complete accepted run state"
+    }
+}
+
+/** Authenticate immutable ACP evidence before recovery can publish accepted source bytes. */
+private fun validateSchema6DecisionReceipt(
+    store: RepairStateStore,
+    pending: PendingAttempt,
+    decision: RepairAcceptanceDecision,
+    preDecisionState: RevisionGraphState,
+    budget: RepairResourceBudget,
+) {
+    val metadata = pending.repairMetadata
+    val binding = metadata?.agentInvocation
+    if (metadata?.publicationMode == RepairPublicationMode.ACP_RELEASE) {
+        requireNotNull(binding) { "schema-6 release decision is missing its ACP receipt binding" }
+    }
+    val expectedReceiptNames = sortedSetOf<String>()
+    binding?.let {
+        expectedReceiptNames += validateSchema6ReceiptBinding(
+            store = store,
+            binding = it,
+            attemptId = pending.id,
+            promptSha256 = requireNotNull(metadata).prompt,
+            expectedAssessment = RepairAgentAssessmentStatus.PENDING,
+            expectedChangeSetSha256 = recordedAgentChangeSetSha256(pending.candidateChanges),
+            requireReleaseCompletion = metadata.publicationMode == RepairPublicationMode.ACP_RELEASE,
+        )
+    }
+    decision.committedNode?.let { committedNode ->
+        committedNode.repairMetadata?.agentInvocation?.let { acceptedBinding ->
+            require(binding != null && acceptedBinding == binding.copy(
+                assessmentStatus = RepairAgentAssessmentStatus.ACCEPTED,
+            )) { "schema-6 accepted node does not retain the authenticated ACP receipt binding" }
+        }
+    }
+    // Authenticate every receipt referenced by retained graph nodes, including provisional
+    // ancestors folded into this physical publication. These checks use only immutable graph
+    // bindings and receipt bytes; they do not depend on the source index.
+    decision.committedNode?.let { committedNode ->
+        // The committed node replaces the pending attempt's logical record, so it is covered by
+        // the pending receipt above and its finalized binding equality check.
+        committedNode.id
+    }
+    preDecisionState.nodes.forEach { node ->
+        val metadataForNode = node.repairMetadata ?: return@forEach
+        val nodeBinding = metadataForNode.agentInvocation ?: return@forEach
+        val assessment = when (node.status) {
+            ModuleRevisionStatus.ACCEPTED, ModuleRevisionStatus.LEGACY_UNVERIFIED -> RepairAgentAssessmentStatus.ACCEPTED
+            ModuleRevisionStatus.PROVISIONAL -> RepairAgentAssessmentStatus.PROVISIONAL
+            ModuleRevisionStatus.REJECTED -> RepairAgentAssessmentStatus.REJECTED
+            ModuleRevisionStatus.ROOT -> error("root node cannot contain an ACP invocation receipt")
+        }
+        expectedReceiptNames += validateSchema6ReceiptBinding(
+            store = store,
+            binding = nodeBinding,
+            attemptId = node.id,
+            promptSha256 = metadataForNode.prompt,
+            expectedAssessment = assessment,
+            expectedChangeSetSha256 = recordedAgentChangeSetSha256(node.changes)
+                .takeIf { node.status in setOf(ModuleRevisionStatus.ACCEPTED, ModuleRevisionStatus.PROVISIONAL) },
+            requireReleaseCompletion = node.status == ModuleRevisionStatus.ACCEPTED &&
+                metadataForNode.publicationMode == RepairPublicationMode.ACP_RELEASE,
+        )
+    }
+    val diskReceiptNames = store.revisionFileNames(repairRevisionDirectoryEntryLimit(budget))
+        .filter { it.matches(Regex("revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")) }
+        .toSortedSet()
+    require(diskReceiptNames == expectedReceiptNames) {
+        "schema-6 ACP receipt inventory differs from retained graph bindings"
+    }
+}
+
+private fun validateSchema6ReceiptBinding(
+    store: RepairStateStore,
+    binding: RepairAgentInvocationBinding,
+    attemptId: String,
+    promptSha256: String,
+    expectedAssessment: RepairAgentAssessmentStatus,
+    expectedChangeSetSha256: String?,
+    requireReleaseCompletion: Boolean,
+): String {
+    val expectedName = validateRecordedInvocationBinding(6, binding, attemptId, expectedAssessment)
+    if (expectedChangeSetSha256 != null) {
+        require(binding.resultChangesSha256 == expectedChangeSetSha256) {
+            "schema-6 ACP receipt does not bind its retained change set: $attemptId"
+        }
+    }
+    val receipt = store.readRevisionFile(expectedName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+    require(receipt.sha256 == binding.receiptSha256) {
+        "schema-6 ACP receipt digest differs from its immutable graph binding: $attemptId"
+    }
+    val verified = verifyAcpExecutionReceiptDocument(
+        receipt.bytes,
+        TRACE_REPAIR_ACP_RECEIPT_KIND,
+        TRACE_REPAIR_ACP_TASK_FIELD,
+        attemptId,
+    )
+    require(verified.requestSha256 == binding.requestSha256 &&
+        verified.promptSha256 == promptSha256 &&
+        verified.resultChangesSha256 == binding.resultChangesSha256 &&
+        verified.terminalOutcome == binding.terminalOutcome &&
+        verified.releaseComplete == binding.receiptReleaseComplete) {
+        "schema-6 ACP receipt content is cross-paired with its graph binding: $attemptId"
+    }
+    if (requireReleaseCompletion) {
+        require(verified.releaseComplete && verified.terminalOutcome == "returned-completed") {
+            "schema-6 release receipt is not release-complete: $attemptId"
+        }
+    }
+    return expectedName
+}
+
+/** Derive the decided node's module projections from its committed candidate bytes pre-publication. */
+private fun validateSchema6DecisionModuleClassifications(
+    graphAuthority: Any,
+    projectRoot: Path,
+    profile: RepairIndexProfile,
+    budget: RepairResourceBudget,
+    binding: RepairRecoveryBinding,
+    committed: RevisionGraphState,
+    decision: RepairAcceptanceDecision,
+    store: RepairStateStore,
+) {
+    val recordedNode = requireNotNull(decision.committedNode)
+    val committedSources = revisionSourcesAt(committed.nodes, committed.headId)
+    val candidateView = object : RepairRecoverySourceView {
+        override val sourcePaths: List<String> = binding.sourcePaths
+        override val editablePaths: List<String> = binding.editablePaths
+
+        override fun readSource(relative: String): ByteArray {
+            require(relative == normalizedRelative(relative))
+            val source = requireNotNull(committedSources[relative]) {
+                "schema-6 accepted source view omits a bound path: $relative"
+            }
+            val blob = store.readBlob(source.sha256, budget.maximumSourceFileBytes)
+            require(blob.sha256 == source.sha256 && blob.bytes.size.toLong() == source.bytes) {
+                "schema-6 accepted source blob differs from its graph commitment: $relative"
+            }
+            return blob.bytes
+        }
+    }
+    val candidateIndex = SecureRepairRuntime.loadRecoveryIndex(
+        graphAuthority,
+        projectRoot,
+        profile,
+        budget,
+        candidateView,
+    )
+    require(candidateIndex.profileId == committed.profileId &&
+        candidateIndex.profileSha256 == committed.profileSha256 &&
+        candidateIndex.indexSha256 == committed.indexSha256 &&
+        candidateIndex.sourceRevisionSha256 == recordedNode.sourceRevisionSha256 &&
+        candidateIndex.sourcePaths == binding.sourcePaths &&
+        candidateIndex.editablePaths.sorted() == binding.editablePaths) {
+        "schema-6 accepted decision candidate index differs from its immutable recovery binding"
+    }
+    val changedPaths = recordedNode.changes.map { it.path }
+    require(recordedNode.changedModules == candidateIndex.changedModules(changedPaths) &&
+        recordedNode.invalidatedModules == candidateIndex.downstreamInvalidations(changedPaths)) {
+        "schema-6 accepted node module classifications differ from the authenticated candidate index"
+    }
+}
+
+/**
+ * A schema-6 decision must not be able to promote a hand-edited accepted node. Rebuild every
+ * index-independent node field from the pending candidate and durable decision payload. The
+ * module classifications are separately derived from the authenticated recovery index before
+ * any source exchange.
+ */
+private fun validateSchema6DecisionNode(pending: PendingAttempt, decision: RepairAcceptanceDecision) {
+    val recorded = requireNotNull(decision.committedNode) {
+        "schema-6 acceptance decision is missing its committed node"
+    }
+    val expected = finalizedRepairNode(
+        pending = pending,
+        status = ModuleRevisionStatus.ACCEPTED,
+        evidence = RepairEvidence(decision.evidenceKind, decision.evidenceSummary, decision.evidenceArtifact),
+        recovered = false,
+        rollbackRecord = null,
+        changedModules = { recorded.changedModules },
+        invalidatedModules = { recorded.invalidatedModules },
+        // Decision evidence has already passed validatePortableEvidence; identity normalization
+        // makes the persisted value itself part of the deterministic node commitment.
+        normalizeText = { it },
+        normalizePath = { it },
+    ).copy(validationProof = decision.proof)
+    require(recorded == expected) {
+        "schema-6 accepted node is not derivable from the pending candidate and decision evidence"
+    }
+}
+
 private fun restorePendingPreimagesBeforeIndex(
     projectRoot: Path,
     store: RepairStateStore,
@@ -5645,10 +7240,76 @@ private fun restorePendingPreimagesBeforeIndex(
         requestedBudget,
     )
     val persistedPending = loaded.pending ?: return
+    if (persistedPending.acceptanceDecision != null) {
+        require(loaded.schemaVersion == 6 && persistedPending.detached)
+        val decision = persistedPending.acceptanceDecision
+        // Validate the complete committed graph, proof, run transition, and candidate blobs
+        // before the first source exchange. A malformed decision must never mutate source and
+        // only then discover that its intended accepted state cannot be committed.
+        val committed = acceptedStateFromDecision(loaded, decision)
+        validateGraphBeforeRecovery(committed, profile, binding, store.blobsPath, requestedBudget)
+        validateSchema6DecisionReceipt(store, persistedPending, decision, loaded, requestedBudget)
+        validateSchema6DecisionModuleClassifications(
+            graphAuthority = graphAuthority,
+            projectRoot = projectRoot,
+            profile = profile,
+            budget = requestedBudget,
+            binding = binding,
+            committed = committed,
+            decision = decision,
+            store = store,
+        )
+        rollForwardRepairPublication(projectRoot, store, decision, faultInjector)
+        val expectedSources = revisionSourcesAt(committed.nodes, committed.headId)
+        val observedSources = expectedSources.values.map { expected ->
+            val observed = readStableRegularFile(projectRoot, expected.path,
+                requestedBudget.maximumSourceFileBytes, requireNoExtendedAttributes = true)
+            require(observed.sha256 == expected.sha256 && observed.bytes.size.toLong() == expected.bytes) {
+                "schema-6 decided source differs from its accepted graph node: ${expected.path}"
+            }
+            profile.validateSourceContent(expected.path, observed.bytes)
+            expected
+        }
+        require(revisionSha256(observedSources) == requireNotNull(decision.committedNode).sourceRevisionSha256) {
+            "schema-6 roll-forward did not produce the recorded accepted source revision"
+        }
+        val bytes = renderGraph(committed).toByteArray(Charsets.UTF_8)
+        require(bytes.size.toLong() <= requestedBudget.maximumGraphBytes)
+        requireRevisionGraphAdmission(committed, bytes.size.toLong(), purpose = DeclaredOriginPurpose.LOCAL_RECORDED,
+            forEachDeclaredGraph = { consume -> store.forEachDeclaredLegacyGraph(requestedBudget, consume) })
+        faultInjector?.hit(ModuleRevisionFaultPoint.BeforeRecoveredAcceptancePersist)
+        store.writeGraph(bytes)
+        faultInjector?.hit(ModuleRevisionFaultPoint.AfterRecoveredAcceptancePersist)
+        return
+    }
+    if (loaded.schemaVersion == 6 && persistedPending.detached) {
+        // In schema 6 a detached candidate is staged privately until the durable decision.
+        // The install marker is therefore the recovery authority boundary: if it is absent or
+        // says installation may have started, this path must not guess or invoke legacy restore.
+        val rollback = requireNotNull(persistedPending.rollbackRecord) {
+            "schema-6 detached attempt is missing its rollback authority"
+        }
+        require(rollback.candidateSourceInstallStarted == false) {
+            "schema-6 undecided detached attempt has contradictory install authority"
+        }
+        recoverUndecidedSchema6BeforeIndex(
+            projectRoot, store, loaded, persistedPending, profile, binding, requestedBudget, faultInjector, graphAuthority,
+        )
+        return
+    }
     val oldPending = recoverPersistedInvocationBinding(persistedPending, loaded.schemaVersion, store)
     val legacyRunContract = loaded.schemaVersion < 3
-    if (loaded.schemaVersion < 4) {
+    if (loaded.schemaVersion < 5 &&
+        !(loaded.schemaVersion == 4 && persistedPending.legacyRecoveryRequired)) {
+        // Schema-4 records can classify whether candidate installation began, but they do not
+        // carry the schema-5 physical inode/metadata commitment. Keep their exact source bytes
+        // available as a historical witness when the recovered graph is later archived. A
+        // schema-4 recovery marker for an original schema-1..3 graph is not a new origin: that
+        // exact earlier source was retained before the marker was published, and preserving the
+        // enlarged marker would duplicate unbounded legacy payload under a second identity.
         store.preserveLegacyState("graph", graphBytes, requestedBudget.maximumGraphBytes)
+    }
+    if (loaded.schemaVersion < 4) {
         val historyPath = projectRoot.resolve("reports/repair_history.json")
         if (legacyRunContract && Files.exists(historyPath, LinkOption.NOFOLLOW_LINKS)) {
             store.preserveLegacyState(
@@ -5663,9 +7324,15 @@ private fun restorePendingPreimagesBeforeIndex(
         else node
     } else loaded.nodes
     val upgradedPending = oldPending.copy(
+        // Schema 4 already has a durable install-start marker.  It lacks schema-5 physical
+        // metadata, but that is a separate unverified property and must not erase the native
+        // rollback classification.  Only schemas 1..3 need the unknown-install legacy marker.
         legacyRecoveryRequired = oldPending.legacyRecoveryRequired || loaded.schemaVersion < 4,
     )
-    val upgraded = loaded.copy(schemaVersion = 4, nodes = upgradedNodes, pending = upgradedPending)
+    // Preserve schema-5 recovery authority across every startup marker write. Older pending
+    // records stay at v4 because they have no historical metadata commitment and must not be
+    // relabeled as metadata-verified merely to use the current wire schema.
+    val upgraded = loaded.copy(schemaVersion = maxOf(loaded.schemaVersion, 4), nodes = upgradedNodes, pending = upgradedPending)
     val targetId = if (upgradedPending.detached) upgraded.headId else upgradedPending.parentId
     val targetSources = revisionSourcesAt(upgraded.nodes, targetId)
     require(targetSources.keys.sorted() == binding.sourcePaths)
@@ -5735,12 +7402,43 @@ private fun restorePendingPreimagesBeforeIndex(
         val candidateByPath = (if (pending.detached) pending.promotionChanges else pending.candidateChanges)
             .associateBy { it.path }
         val replacements = TreeMap<String, ByteArray>()
+        val expectedCurrent = TreeMap<String, String>()
         // Preflight the entire source set. Unknown replacements are never overwritten.
         targetSources.toSortedMap().forEach { (relative, expected) ->
             val observed = readStableRegularFile(projectRoot, relative, requestedBudget.maximumSourceFileBytes)
             val candidate = candidateByPath[relative]
             when {
-                observed.sha256 == expected.sha256 && observed.bytes.size.toLong() == expected.bytes -> Unit
+                observed.sha256 == expected.sha256 && observed.bytes.size.toLong() == expected.bytes -> {
+                    val retained = store.revisionsPath.resolve(sourceTransactionPreimageName(relative, pending.id))
+                    if (candidate != null && Files.exists(retained, LinkOption.NOFOLLOW_LINKS)) {
+                        val beforeDigest = requireNotNull(candidate.beforeBlobSha256)
+                        val preimage = readStableRegularFile(store.blobsPath, beforeDigest,
+                            requestedBudget.maximumSourceFileBytes)
+                        require(preimage.sha256 == beforeDigest) {
+                            "pending repair recovery blob changed after graph validation"
+                        }
+                        replacements[relative] = preimage.bytes
+                        expectedCurrent[relative] = observed.sha256
+                    } else if (candidate != null) {
+                        val committed = (if (pending.detached) pending.promotionPreimageMetadata
+                            else pending.preimageMetadata)?.get(relative)
+                        if (committed != null) {
+                            if (!committed.matches(observed.state, includeAtime = false)) {
+                                throw RepairRollbackException(
+                                    RepairRollbackStage.SOURCE_RESTORE,
+                                    RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+                                    "restored repair source metadata lacks its retained preimage witness: $relative",
+                                )
+                            }
+                            // Before the first candidate exchange there is no retained hard link.
+                            // A normal source read may have advanced atime, so authenticate the
+                            // still-original inode through a descriptor and restore only atime.
+                            normalizeCommittedPreimageAtimeAt(
+                                projectRoot, relative, committed, expected.sha256, expected.bytes,
+                            )
+                        }
+                    }
+                }
                 candidate != null && observed.sha256 == candidate.afterSha256 &&
                     observed.bytes.size.toLong() == candidate.afterBytes -> {
                     val beforeDigest = requireNotNull(candidate.beforeBlobSha256)
@@ -5753,6 +7451,7 @@ private fun restorePendingPreimagesBeforeIndex(
                         "pending repair recovery blob changed after graph validation"
                     }
                     replacements[relative] = preimage.bytes
+                    expectedCurrent[relative] = candidate.afterSha256
                 }
                 else -> throw RepairRollbackException(
                     RepairRollbackStage.SOURCE_RESTORE,
@@ -5768,11 +7467,14 @@ private fun restorePendingPreimagesBeforeIndex(
         if (replacements.isNotEmpty()) {
             publishRepairFiles(
                 projectRoot,
+                store.revisionsPath,
                 replacements,
-                replacements.keys.associateWith { candidateByPath.getValue(it).afterSha256 },
+                expectedCurrent,
                 requestedBudget.maximumSourceFileBytes,
                 pending.id,
                 "startup-rollback",
+                candidateByPath.mapValues { it.value.afterSha256 },
+                (if (pending.detached) pending.promotionPreimageMetadata else pending.preimageMetadata).orEmpty(),
                 faultInjector,
             )
         }
@@ -5811,6 +7513,133 @@ private fun restorePendingPreimagesBeforeIndex(
     }
 }
 
+/**
+ * Schema-6 candidates are blob-only until an acceptance decision is durable. An undecided
+ * recovery therefore never restores or reads the live source through the legacy rollback path:
+ * it verifies the exact witness, removes only authenticated private stages, and records a
+ * deterministic rejected outcome while the source remains untouched.
+ */
+private fun recoverUndecidedSchema6BeforeIndex(
+    projectRoot: Path,
+    store: RepairStateStore,
+    source: RevisionGraphState,
+    persistedPending: PendingAttempt,
+    profile: RepairIndexProfile,
+    binding: RepairRecoveryBinding,
+    budget: RepairResourceBudget,
+    faultInjector: ModuleRevisionFaultInjector?,
+    graphAuthority: Any,
+) {
+    require(source.schemaVersion == 6 && persistedPending.detached && persistedPending.acceptanceDecision == null)
+    val durableRollback = requireNotNull(persistedPending.rollbackRecord) {
+        "schema-6 undecided recovery is missing its durable no-install authority"
+    }
+    require(durableRollback.candidateSourceInstallStarted == false &&
+        durableRollback.legacyPendingStateUnknown == persistedPending.legacyRecoveryRequired) {
+        "schema-6 undecided recovery has contradictory rollback authority"
+    }
+
+    // Authenticate the whole accepted source tree before stage cleanup. A failed check leaves
+    // both the pending graph and every stage in place so readers remain unavailable.
+    verifySchema6PendingWitness(projectRoot, source, persistedPending, budget)
+    val changes = deriveSchema6PromotionChanges(source, persistedPending)
+    discardUndecidedPublicationStages(store, changes, persistedPending.id, persistedPending.predecisionStageFiles)
+
+    val pending = recoverPersistedInvocationBinding(persistedPending, source.schemaVersion, store)
+    val targetId = source.headId // Physical source remains the accepted head, even with provisional lineage.
+    val targetSources = revisionSourcesAt(source.nodes, targetId)
+    require(targetSources.keys.sorted() == binding.sourcePaths) {
+        "schema-6 rollback target does not cover its immutable source authorization"
+    }
+    val targetBytes = targetSources.values.fold(0L) { total, item -> Math.addExact(total, item.bytes) }
+    require(targetBytes <= budget.maximumSourceBytes) { "schema-6 rollback source view exceeds its byte budget" }
+    val sourceView = object : RepairRecoverySourceView {
+        override val sourcePaths: List<String> get() = binding.sourcePaths
+        override val editablePaths: List<String> get() = binding.editablePaths
+        override fun readSource(relative: String): ByteArray {
+            require(relative == normalizedRelative(relative))
+            val expected = requireNotNull(targetSources[relative]) {
+                "schema-6 rollback source view path is absent: $relative"
+            }
+            val blob = store.readBlob(expected.sha256, budget.maximumSourceFileBytes)
+            require(blob.sha256 == expected.sha256 && blob.bytes.size.toLong() == expected.bytes) {
+                "schema-6 rollback source blob differs from its graph commitment: $relative"
+            }
+            return blob.bytes
+        }
+    }
+    val recoveryIndex = SecureRepairRuntime.loadRecoveryIndex(
+        graphAuthority, projectRoot, profile, budget, sourceView,
+    )
+    require(recoveryIndex.belongsTo(projectRoot) && recoveryIndex.budget == budget &&
+        recoveryBinding(recoveryIndex) == binding) {
+        "schema-6 rollback recovery index differs from immutable source authorization"
+    }
+
+    val expectedRevision = revisionSha256(targetSources.values)
+    val rollback = pending.rollbackRecord ?: durableRollback
+    validatePendingRollbackRecord(rollback, pending, targetId, expectedRevision)
+    require(rollback.candidateSourceInstallStarted == false) {
+        "schema-6 undecided recovery cannot prove that source installation was unnecessary"
+    }
+    val outcome = rollbackOutcomeRecord(rollback, expectedRevision)
+    val changedPaths = pending.candidateChanges.map { it.path }
+    val rejected = finalizedRepairNode(
+        pending,
+        ModuleRevisionStatus.REJECTED,
+        RESTART_RECOVERY_EVIDENCE,
+        recovered = true,
+        rollbackRecord = outcome,
+        changedModules = { recoveryIndex.changedModules(changedPaths) },
+        invalidatedModules = { recoveryIndex.downstreamInvalidations(changedPaths) },
+    )
+    val finalized = withFinalizedRollback(
+        source.copy(nodes = source.nodes + rejected, pending = null),
+        outcome,
+    )
+    val complete = if (finalized.runs.lastOrNull()?.terminal == false) {
+        finishedRunCandidate(finalized, RepairRunStatus.INTERRUPTED, RESTART_INTERRUPTION_EVIDENCE)
+    } else {
+        // Standalone repair attempts intentionally have no synthetic run record.
+        finalized
+    }
+    // Finalizing a rejected node moves the candidate deltas from `pending` into `nodes`; it
+    // does not add or remove any referenced blob. Keep the already-admitted accounting exact.
+    val storedBytes = source.storedBlobBytes
+    require(storedBytes <= budget.maximumStoredBlobBytes) {
+        "schema-6 recovered graph exceeds its stored blob budget"
+    }
+    val ready = complete.copy(storedBlobBytes = storedBytes)
+    val payload = renderGraph(ready).toByteArray(Charsets.UTF_8)
+    require(payload.size.toLong() <= budget.maximumGraphBytes) {
+        "schema-6 recovered graph exceeds its graph-byte budget"
+    }
+    requireRevisionGraphAdmission(
+        ready,
+        payload.size.toLong(),
+        purpose = DeclaredOriginPurpose.LOCAL_RECORDED,
+        forEachDeclaredGraph = { consume -> store.forEachDeclaredLegacyGraph(budget, consume) },
+    )
+    validateGraphBeforeRecovery(ready, profile, binding, store.blobsPath, budget)
+    val iterations = deriveRepairIterations(ready.nodes, ready.budget, ready.schemaVersion) { digest ->
+        val blob = store.readBlob(digest, budget.maximumSourceFileBytes)
+        require(blob.sha256 == digest)
+        blob.bytes
+    }
+    renderRepairHistoryProjection(
+        iterations, ready.retainedRegressionInputs, budget.maximumProjectionBytes,
+        minOf(ready.schemaVersion, 3), ready.runs,
+    )
+    renderCompatibilityProjection(ready.nodes, budget.maximumProjectionBytes)
+
+    // Recheck after the recovered graph temp and directory entry have been synced. If anything
+    // changed during serialization or staging cleanup, the callback refuses publication and the
+    // old pending graph remains authoritative; no legacy source restore is attempted.
+    store.writeGraph(payload) {
+        verifySchema6PendingWitness(projectRoot, source, persistedPending, budget)
+    }
+}
+
 private fun measureSourceRevision(projectRoot: Path, sourcePaths: List<String>, maximumSourceFileBytes: Long): String {
     val sources = sourcePaths.sorted().map { relative ->
         val observed = readStableRegularFile(projectRoot, relative, maximumSourceFileBytes)
@@ -5822,18 +7651,212 @@ private fun measureSourceRevision(projectRoot: Path, sourcePaths: List<String>, 
 private data class RepairStagedReplacement(
     val relative: String,
     val temporaryName: String,
+    val retainedPreimageName: String,
     val parentRelative: String,
     val preparedSha256: String,
     val preparedIdentity: LinuxFileIdentity,
+    val preimageMetadata: RepairPreimageMetadata?,
 )
+
+private fun schema6PublicationPreimageMatches(
+    file: LinuxDescriptor,
+    preimage: RepairPreimageMetadata,
+    mountId: Long,
+    digest: String?,
+): Boolean {
+    val expectedDigest = digest ?: return false
+    val state = LinuxFilesystemSyscalls.fileState(file)
+    return state.identity.key.device == preimage.device && state.identity.key.inode == preimage.inode &&
+        state.identity.mountId == mountId && state.identity.linkCount == 1 &&
+        state.identity.mode == preimage.mode && state.identity.uid == preimage.uid && state.identity.gid == preimage.gid &&
+        state.size == preimage.size && state.modificationTimeSeconds == preimage.mtimeSeconds &&
+        state.modificationTimeNanoseconds == preimage.mtimeNanoseconds &&
+        LinuxFilesystemSyscalls.sha256WithoutAtime(file, preimage.size) == expectedDigest &&
+        LinuxFilesystemSyscalls.extendedAttributeNames(file).isEmpty()
+}
+
+private fun schema6PublicationCandidateMatches(file: LinuxDescriptor, staged: RepairStagedFile): Boolean {
+    val state = LinuxFilesystemSyscalls.fileState(file)
+    return state.identity.key.device == staged.device && state.identity.key.inode == staged.inode &&
+        state.identity.mountId == staged.mountId && state.identity.linkCount == 1 &&
+        state.identity.mode == staged.mode && state.identity.uid == staged.uid && state.identity.gid == staged.gid &&
+        state.size == staged.size && state.accessTimeSeconds == staged.atimeSeconds &&
+        state.accessTimeNanoseconds == staged.atimeNanoseconds &&
+        state.modificationTimeSeconds == staged.mtimeSeconds &&
+        state.modificationTimeNanoseconds == staged.mtimeNanoseconds &&
+        LinuxFilesystemSyscalls.sha256WithoutAtime(file, staged.size) == staged.sha256 &&
+        LinuxFilesystemSyscalls.extendedAttributeNames(file).isEmpty()
+}
+
+/** Idempotently rolls a durable schema-6 decision forward before any source index is built. */
+private fun rollForwardRepairPublication(
+    projectRoot: Path,
+    store: RepairStateStore,
+    decision: RepairAcceptanceDecision,
+    faultInjector: ModuleRevisionFaultInjector?,
+) {
+    val stageDirectory = store.openPublicationStagingDirectory()
+    val root = openRepairRootDirectory(projectRoot)
+    val openedParents = mutableListOf<LinuxDescriptor>()
+    try {
+        val stageIdentity = LinuxFilesystemSyscalls.identity(stageDirectory.fd)
+        require(stageIdentity.key == store.publicationStagingIdentity().key && stageIdentity.mountId == store.publicationStagingIdentity().mountId)
+        val node = requireNotNull(decision.committedNode)
+        val metadataByPath = node.publicationPreimageMetadata
+        require(decision.stagedFiles.map { it.path } == decision.promotionChanges.map { it.path })
+        // Preflight every pair before changing any target. If a later staged inode is missing,
+        // tampered, or bound to an unexpected target, no earlier path may already have moved.
+        decision.stagedFiles.zip(decision.promotionChanges).forEach { (staged, change) ->
+            val preimage = requireNotNull(metadataByPath[change.path])
+            require(staged.path == change.path && staged.stagingName == preimage.retainedName &&
+                staged.sha256 == change.afterSha256 && staged.size == change.afterBytes)
+            val parts = normalizedRelative(change.path).split('/')
+            val parents = mutableListOf<LinuxDescriptor>()
+            try {
+                var parent = openRepairRootDirectory(projectRoot)
+                parents += parent
+                parts.dropLast(1).forEach { segment ->
+                    parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+                    parents += parent
+                }
+                val parentState = LinuxFilesystemSyscalls.fileState(parent)
+                require(parentState.identity.key.device == staged.parentDevice &&
+                    parentState.identity.key.inode == staged.parentInode &&
+                    parentState.identity.mountId == staged.parentMountId &&
+                    stageIdentity.key.device == staged.parentDevice && stageIdentity.mountId == staged.parentMountId) {
+                    "schema-6 publication target parent or mount changed: ${change.path}"
+                }
+                val target = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())) {
+                    "schema-6 publication target is missing: ${change.path}"
+                }
+                val stagedFile = requireNotNull(store.openPublicationStage(staged.stagingName)) {
+                    "schema-6 publication stage is missing: ${change.path}"
+                }
+                target.use { targetFile -> stagedFile.use { replacementFile ->
+                    val targetPreimage = schema6PublicationPreimageMatches(targetFile, preimage, staged.parentMountId, change.beforeSha256)
+                    val stagedCandidate = schema6PublicationCandidateMatches(replacementFile, staged)
+                    val targetCandidate = schema6PublicationCandidateMatches(targetFile, staged)
+                    val stagedPreimage = schema6PublicationPreimageMatches(replacementFile, preimage, staged.parentMountId, change.beforeSha256)
+                    require(targetPreimage && stagedCandidate || targetCandidate && stagedPreimage) {
+                        "schema-6 publication pair failed preflight: ${change.path} " +
+                            "targetPreimage=$targetPreimage stagedCandidate=$stagedCandidate " +
+                            "targetCandidate=$targetCandidate stagedPreimage=$stagedPreimage"
+                    }
+                } }
+            } finally {
+                parents.asReversed().forEach { runCatching { it.close() } }
+            }
+        }
+        decision.stagedFiles.zip(decision.promotionChanges).forEach { (staged, change) ->
+            val preimage = requireNotNull(metadataByPath[change.path])
+            require(staged.path == change.path && staged.stagingName == preimage.retainedName &&
+                staged.sha256 == change.afterSha256 && staged.size == change.afterBytes &&
+                preimage.device >= 0 && preimage.inode >= 0)
+            val parts = normalizedRelative(change.path).split('/')
+            var parent = LinuxFilesystemSyscalls.openDirectoryAt(root.fd, ".")
+            openedParents += parent
+            parts.dropLast(1).forEach { segment ->
+                parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+                openedParents += parent
+            }
+            val parentState = LinuxFilesystemSyscalls.fileState(parent)
+            require(parentState.identity.key.device == staged.parentDevice &&
+                parentState.identity.key.inode == staged.parentInode && parentState.identity.mountId == staged.parentMountId &&
+                stageIdentity.key.device == staged.parentDevice && stageIdentity.mountId == staged.parentMountId) {
+                "schema-6 publication target parent or mount changed: ${change.path}"
+            }
+
+            fun openTarget(): LinuxDescriptor = requireNotNull(
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last()),
+            ) { "schema-6 publication target is missing: ${change.path}" }
+            fun openStage(): LinuxDescriptor = requireNotNull(store.openPublicationStage(staged.stagingName)) {
+                "schema-6 publication stage is missing: ${change.path}"
+            }
+            fun isPreimage(file: LinuxDescriptor): Boolean =
+                schema6PublicationPreimageMatches(file, preimage, staged.parentMountId, change.beforeSha256)
+            fun isCandidate(file: LinuxDescriptor): Boolean = schema6PublicationCandidateMatches(file, staged)
+            val target = openTarget()
+            val stagedName = openStage()
+            val exchanged = try {
+                val targetIsPreimage = isPreimage(target)
+                val stageIsCandidate = isCandidate(stagedName)
+                val targetIsCandidate = isCandidate(target)
+                val stageIsPreimage = isPreimage(stagedName)
+                val targetState = LinuxFilesystemSyscalls.fileState(target)
+                when {
+                    targetIsPreimage && stageIsCandidate -> {
+                        val publicationIndex = decision.stagedFiles.indexOf(staged)
+                        faultInjector?.hit(ModuleRevisionFaultPoint.BeforePublicationExchange(
+                            "schema6-roll-forward", change.path, publicationIndex,
+                        ))
+                        LinuxFilesystemSyscalls.exchange(parent.fd, parts.last(), stageDirectory.fd, staged.stagingName)
+                        faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationExchange(
+                            "schema6-roll-forward", change.path, publicationIndex,
+                        ))
+                        LinuxFilesystemSyscalls.synchronize(parent)
+                        faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationTargetDirectorySync(
+                            "schema6-roll-forward", change.path, publicationIndex,
+                        ))
+                        LinuxFilesystemSyscalls.synchronize(stageDirectory)
+                        faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationMove(
+                            "schema6-roll-forward", change.path, publicationIndex,
+                        ))
+                        true
+                    }
+                    targetIsCandidate && stageIsPreimage -> false
+                    else -> throw RepairAcceptancePendingException(
+                        "schema-6 repair publication has an unknown target/stage binding: ${change.path} " +
+                            "targetPreimage=$targetIsPreimage stageCandidate=$stageIsCandidate " +
+                            "targetCandidate=$targetIsCandidate stagePreimage=$stageIsPreimage " +
+                            "targetId=${targetState.identity.key} expectedPreimageId=${LinuxFileKey(preimage.device, preimage.inode)} " +
+                            "candidateId=${staged.device}:${staged.inode}",
+                    )
+                }
+            } finally {
+                stagedName.close()
+                target.close()
+            }
+            val installed = openTarget()
+            val retained = openStage()
+            try {
+                require(isCandidate(installed) && isPreimage(retained)) {
+                    "schema-6 repair publication exchange did not install its recorded inode: ${change.path}"
+                }
+                // Re-sync an already exchanged pair too; this makes recovery safe across a crash
+                // between renameat2 and either directory fsync.
+                if (!exchanged) {
+                    LinuxFilesystemSyscalls.synchronize(parent)
+                    LinuxFilesystemSyscalls.synchronize(stageDirectory)
+                }
+            } finally {
+                retained.close()
+                installed.close()
+            }
+            openedParents.asReversed().forEach(LinuxDescriptor::close)
+            openedParents.clear()
+        }
+        LinuxFilesystemSyscalls.synchronize(stageDirectory)
+    } catch (failure: RepairAcceptancePendingException) {
+        throw failure
+    } catch (failure: Exception) {
+        throw RepairAcceptancePendingException("schema-6 repair publication remains unavailable", failure)
+    } finally {
+        openedParents.asReversed().forEach { runCatching { it.close() } }
+        root.close()
+        stageDirectory.close()
+    }
+}
 
 private fun publishRepairFiles(
     projectRoot: Path,
+    preimageRoot: Path,
     replacements: Map<String, ByteArray>,
     expectedCurrentSha256: Map<String, String>,
     maximumSourceFileBytes: Long,
     transactionId: String,
     phase: String,
+    rollbackCandidateSha256: Map<String, String>,
+    preimageMetadata: Map<String, RepairPreimageMetadata>,
     faultInjector: ModuleRevisionFaultInjector?,
 ) {
     require(replacements.isNotEmpty())
@@ -5850,6 +7873,7 @@ private fun publishRepairFiles(
             }
             staged += stageRepairReplacement(
                 projectRoot,
+                preimageRoot,
                 normalized,
                 bytes,
                 expectedCurrentSha256.getValue(relative),
@@ -5857,15 +7881,20 @@ private fun publishRepairFiles(
                 transactionId,
                 phase,
                 stageIndex,
+                preimageMetadata[normalized],
                 faultInjector,
             )
         }
         staged.forEachIndexed { moveIndex, replacement ->
             exchangeRepairFile(
                 projectRoot,
+                preimageRoot,
                 replacement.relative,
                 replacement.temporaryName,
+                replacement.retainedPreimageName,
                 expectedCurrentSha256.getValue(replacement.relative),
+                rollbackCandidateSha256[replacement.relative],
+                replacement.preimageMetadata,
                 replacements.getValue(replacement.relative),
                 replacement.preparedIdentity,
                 maximumSourceFileBytes,
@@ -5906,6 +7935,7 @@ private fun publishRepairFiles(
 
 private fun stageRepairReplacement(
     projectRoot: Path,
+    preimageRoot: Path,
     relative: String,
     replacement: ByteArray,
     expectedCurrentSha256: String,
@@ -5913,11 +7943,16 @@ private fun stageRepairReplacement(
     transactionId: String,
     phase: String,
     stageIndex: Int,
+    preimageMetadata: RepairPreimageMetadata?,
     faultInjector: ModuleRevisionFaultInjector?,
 ): RepairStagedReplacement {
     val parts = normalizedRelative(relative).split('/')
     val parentRelative = parts.dropLast(1).joinToString("/")
     val temporaryName = sourceTransactionTemporaryName(parts.last(), transactionId)
+    val retainedPreimageName = sourceTransactionPreimageName(relative, transactionId)
+    if (preimageMetadata != null) require(preimageMetadata.retainedName == retainedPreimageName) {
+        "repair retained-preimage name differs from its durable metadata commitment: $relative"
+    }
     cleanupRepairOwnedEntry(
         projectRoot,
         parentRelative,
@@ -5930,6 +7965,7 @@ private fun stageRepairReplacement(
         stageIndex,
         faultInjector,
         required = false,
+        expectedLinkCount = if (phase in setOf("rollback", "startup-rollback", "promotion-rollback")) -1 else 1,
     )
     val directories = mutableListOf<decompengine.acp.LinuxDescriptor>()
     var target: decompengine.acp.LinuxDescriptor? = null
@@ -5946,17 +7982,37 @@ private fun stageRepairReplacement(
             directories += child
             parent = child
         }
+        val preimageDirectory = openRepairRootDirectory(preimageRoot)
+        require(preimageDirectory.identity.mountId == directories.first().identity.mountId) {
+            preimageDirectory.close()
+            "repair preimage retention crosses a filesystem mount: $relative"
+        }
+        directories += preimageDirectory
         target = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())) {
             "repair publication target disappeared while staging: $relative"
         }
-        require(target.identity.isRegularFile && !target.identity.isSymbolicLink && target.identity.linkCount == 1) {
-            "repair publication requires a single-link regular source file: $relative"
+        require(target.identity.isRegularFile && !target.identity.isSymbolicLink &&
+            (target.identity.linkCount == 1 ||
+                phase in setOf("rollback", "startup-rollback", "promotion-rollback") && target.identity.linkCount == 2)) {
+            "repair publication requires a regular source file with a transaction-bounded link count: $relative"
+        }
+        if (preimageMetadata != null && phase !in setOf("rollback", "startup-rollback", "promotion-rollback")) require(preimageMetadata.matches(
+            LinuxFilesystemSyscalls.fileState(target), includeAtime = false,
+        )) {
+            "repair source metadata changed after its durable preimage commitment: $relative"
         }
         require(LinuxFilesystemSyscalls.extendedAttributeNames(target).isEmpty()) {
             "repair publication refuses to discard extended source metadata: $relative"
         }
         require(sha256(readAuthorizedRepairFile(target, maximumSourceFileBytes)) == expectedCurrentSha256) {
             "source changed while repair replacement was staged: $relative"
+        }
+        if (preimageMetadata?.metadataVersion == 2 && phase !in setOf("rollback", "startup-rollback", "promotion-rollback")) {
+            // Reads performed by the agent are allowed to advance atime. Restore the captured
+            // pre-turn timestamp on the retained original inode immediately before publication;
+            // after exchange, rollback can then restore the exact atime without trusting a later
+            // read or mutable filesystem state as its source of truth.
+            normalizeCommittedPreimageAtime(target, preimageMetadata)
         }
         temporary = LinuxFilesystemSyscalls.createTemporaryAt(parent.fd)
         LinuxFilesystemSyscalls.write(temporary, replacement) { }
@@ -5988,9 +8044,11 @@ private fun stageRepairReplacement(
             return RepairStagedReplacement(
                 relative,
                 temporaryName,
+                retainedPreimageName,
                 parentRelative,
                 sha256(replacement),
                 identity,
+                preimageMetadata,
             )
         }
     } catch (failure: Throwable) {
@@ -6021,9 +8079,13 @@ private fun stageRepairReplacement(
 
 private fun exchangeRepairFile(
     projectRoot: Path,
+    preimageRoot: Path,
     relative: String,
     temporaryName: String,
+    retainedPreimageName: String,
     expectedCurrentSha256: String,
+    rollbackCandidateSha256: String?,
+    preimageMetadata: RepairPreimageMetadata?,
     replacement: ByteArray,
     preparedIdentity: LinuxFileIdentity,
     maximumSourceFileBytes: Long,
@@ -6032,6 +8094,9 @@ private fun exchangeRepairFile(
     faultInjector: ModuleRevisionFaultInjector?,
 ) {
     val parts = normalizedRelative(relative).split('/')
+    if (preimageMetadata != null) require(preimageMetadata.retainedName == retainedPreimageName) {
+        "repair retained-preimage name differs from its durable metadata commitment: $relative"
+    }
     val directories = mutableListOf<decompengine.acp.LinuxDescriptor>()
     var authorizedTarget: decompengine.acp.LinuxDescriptor? = null
     var authorizedTemporary: decompengine.acp.LinuxDescriptor? = null
@@ -6047,6 +8112,12 @@ private fun exchangeRepairFile(
             directories += child
             parent = child
         }
+        val preimageDirectory = openRepairRootDirectory(preimageRoot)
+        require(preimageDirectory.identity.mountId == directories.first().identity.mountId) {
+            preimageDirectory.close()
+            "repair preimage retention crosses a filesystem mount: $relative"
+        }
+        directories += preimageDirectory
         authorizedTarget = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())) {
             "repair publication target disappeared: $relative"
         }
@@ -6056,6 +8127,9 @@ private fun exchangeRepairFile(
         require(authorizedTarget.identity.isRegularFile && !authorizedTarget.identity.isSymbolicLink &&
             authorizedTarget.identity.mountId == directories.first().identity.mountId) {
             "repair publication target is not a regular file: $relative"
+        }
+        if (preimageMetadata != null && phase !in setOf("rollback", "startup-rollback", "promotion-rollback")) require(preimageMetadata.matches(LinuxFilesystemSyscalls.fileState(authorizedTarget))) {
+            "repair source metadata changed at the publication boundary: $relative"
         }
         require(authorizedTemporary.identity.isRegularFile && !authorizedTemporary.identity.isSymbolicLink &&
             authorizedTemporary.identity.mountId == directories.first().identity.mountId) {
@@ -6069,19 +8143,192 @@ private fun exchangeRepairFile(
         }
         require(
             authorizedTemporary.identity.key == preparedIdentity.key &&
-                authorizedTarget.identity.linkCount == 1 && authorizedTemporary.identity.linkCount == 1 &&
+                authorizedTarget.identity.linkCount in
+                    (if (phase == "candidate" || phase == "promotion") setOf(1)
+                    else if (phase in setOf("rollback", "startup-rollback", "promotion-rollback")) setOf(1, 2) else setOf(1)) &&
+                authorizedTemporary.identity.linkCount == 1 &&
                 authorizedTemporary.identity.mode.permissions == authorizedTarget.identity.mode.permissions &&
                 authorizedTemporary.identity.uid == authorizedTarget.identity.uid &&
                 authorizedTemporary.identity.gid == authorizedTarget.identity.gid &&
                 LinuxFilesystemSyscalls.extendedAttributeNames(authorizedTarget).isEmpty() &&
                 LinuxFilesystemSyscalls.extendedAttributeNames(authorizedTemporary).isEmpty(),
-        ) { "repair publication cannot preserve source metadata: $relative" }
+        ) { "repair publication cannot preserve source metadata: $relative " +
+            "preparedKey=${authorizedTemporary.identity.key == preparedIdentity.key} " +
+            "targetLinks=${authorizedTarget.identity.linkCount} tempLinks=${authorizedTemporary.identity.linkCount} " +
+            "mode=${authorizedTemporary.identity.mode.permissions}/${authorizedTarget.identity.mode.permissions} " +
+            "owner=${authorizedTemporary.identity.uid}:${authorizedTemporary.identity.gid}/" +
+            "${authorizedTarget.identity.uid}:${authorizedTarget.identity.gid} " +
+            "xattr=${LinuxFilesystemSyscalls.extendedAttributeNames(authorizedTarget).size}/" +
+            "${LinuxFilesystemSyscalls.extendedAttributeNames(authorizedTemporary).size}" }
         val portablePath = relative.replace('\\', '/')
         parent.requireNamedRepairIdentity(parts.last(), authorizedTarget.identity)
         parent.requireNamedRepairIdentity(temporaryName, authorizedTemporary.identity)
+        if (phase in setOf("rollback", "startup-rollback", "promotion-rollback")) {
+            val retainedEntry = LinuxFilesystemSyscalls.openPathAtOrNull(preimageDirectory.fd, retainedPreimageName)
+            if (retainedEntry == null && preimageMetadata == null) {
+                // Pre-schema-5 pending attempts have no durable inode commitment. Restore their
+                // authenticated content blob, but keep the outcome explicitly legacy/unverified;
+                // never infer metadata identity from the candidate's current filesystem state.
+                faultInjector?.hit(ModuleRevisionFaultPoint.BeforePublicationExchange(phase, portablePath, moveIndex))
+                parent.requireNamedRepairIdentity(parts.last(), authorizedTarget.identity)
+                LinuxFilesystemSyscalls.exchange(parent.fd, temporaryName, parts.last())
+                exchanged = true
+                faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationExchange(phase, portablePath, moveIndex))
+                val restored = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last()))
+                restored.use {
+                    require(sha256(readAuthorizedRepairFile(restored, maximumSourceFileBytes)) == sha256(replacement)) {
+                        "legacy repair rollback did not restore its authenticated content preimage: $relative"
+                    }
+                }
+                val displaced = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, temporaryName))
+                displaced.use {
+                    require(sha256(readAuthorizedRepairFile(displaced, maximumSourceFileBytes)) == expectedCurrentSha256 ||
+                        sha256(readAuthorizedRepairFile(displaced, maximumSourceFileBytes)) == rollbackCandidateSha256) {
+                        "legacy repair rollback displaced an unrecognized source: $relative"
+                    }
+                    cleanupRepairOwnedEntryAt(
+                        parent.fd, temporaryName,
+                        setOfNotNull(expectedCurrentSha256, rollbackCandidateSha256),
+                        displaced.identity.key, maximumSourceFileBytes, phase, portablePath, moveIndex,
+                        faultInjector, required = true, expectedLinkCount = 1,
+                    )
+                }
+                LinuxFilesystemSyscalls.synchronize(parent)
+                exchanged = false
+                faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationMove(phase, portablePath, moveIndex))
+                return
+            }
+            val retained = requireNotNull(retainedEntry) {
+                "repair retained preimage is missing during rollback: $relative"
+            }
+            retained.use {
+                val targetBytes = readAuthorizedRepairFile(authorizedTarget, maximumSourceFileBytes)
+                val retainedBytes = readAuthorizedRepairFile(retained, maximumSourceFileBytes)
+                val targetDigest = sha256(targetBytes)
+                val retainedDigest = sha256(retainedBytes)
+                val targetIsPreimage = targetBytes.contentEquals(replacement)
+                val retainedIsPreimage = retainedBytes.contentEquals(replacement)
+                val targetIsCandidate = targetDigest == expectedCurrentSha256
+                val retainedIsCandidate = retainedDigest == expectedCurrentSha256
+                require((targetIsPreimage || targetIsCandidate) &&
+                    (retainedIsPreimage || retainedIsCandidate)) {
+                    "repair retained preimage is ambiguous or corrupt: $relative"
+                }
+                if (preimageMetadata?.metadataVersion == 2) {
+                    require(preimageMetadata.matches(LinuxFilesystemSyscalls.fileState(retained), includeAtime = false)) {
+                        "retained repair preimage identity or metadata differs from its durable commitment: $relative"
+                    }
+                    normalizeCommittedPreimageAtime(retained, preimageMetadata)
+                }
+                if (preimageMetadata != null) require(preimageMetadata.matches(LinuxFilesystemSyscalls.fileState(retained))) {
+                    "retained repair preimage metadata differs from its durable commitment: $relative"
+                }
+                require(LinuxFilesystemSyscalls.extendedAttributeNames(retained).isEmpty()) {
+                    "retained repair preimage violates the committed no-xattr policy: $relative"
+                }
+                val alreadyRestored = targetIsPreimage &&
+                    (preimageMetadata == null || preimageMetadata.matches(LinuxFilesystemSyscalls.fileState(authorizedTarget))) &&
+                    (retainedIsCandidate || retained.identity.key == authorizedTarget.identity.key)
+                if (!alreadyRestored) {
+                    require((targetIsCandidate || targetIsPreimage) && retainedIsPreimage) {
+                        "repair retained preimage cannot safely restore the current source: $relative"
+                    }
+                    faultInjector?.hit(ModuleRevisionFaultPoint.BeforePublicationExchange(phase, portablePath, moveIndex))
+                    parent.requireNamedRepairIdentity(parts.last(), authorizedTarget.identity)
+                    val targetAtExchange = sha256(readAuthorizedRepairFile(authorizedTarget, maximumSourceFileBytes))
+                    require(targetAtExchange == expectedCurrentSha256 || targetAtExchange == sha256(replacement)) {
+                        "repair rollback target changed at the exchange boundary: $relative"
+                    }
+                    val restoreName = "$temporaryName.restore"
+                    val stagedRestore = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, restoreName)
+                    if (stagedRestore == null) {
+                        LinuxFilesystemSyscalls.linkTemporaryAt(retained, parent.fd, restoreName)
+                    } else {
+                        stagedRestore.use {
+                            require(stagedRestore.identity.key == retained.identity.key &&
+                                stagedRestore.identity.linkCount == 2 &&
+                                readAuthorizedRepairFile(stagedRestore, maximumSourceFileBytes)
+                                    .contentEquals(readAuthorizedRepairFile(retained, maximumSourceFileBytes))) {
+                                "staged repair preimage link is ambiguous or corrupt: $relative"
+                            }
+                        }
+                    }
+                    LinuxFilesystemSyscalls.exchange(parent.fd, restoreName, parts.last())
+                    faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationExchange(phase, portablePath, moveIndex))
+                    parent.requireNamedRepairIdentity(parts.last(), retained.identity)
+                    cleanupRepairOwnedEntryAt(
+                        parent.fd, restoreName, setOf(expectedCurrentSha256, sha256(replacement)), null,
+                        maximumSourceFileBytes, phase, portablePath, moveIndex, faultInjector,
+                        required = true, expectedLinkCount = 1,
+                    )
+                    LinuxFilesystemSyscalls.synchronize(parent)
+                }
+            }
+            val restoreName = "$temporaryName.restore"
+            // This point is reached only after the target has been verified/restored to the
+            // preimage. Reconcile both the active staging name and its deterministic cleanup
+            // quarantine: process death can occur after cleanupRepairOwnedEntryAt renames
+            // `.restore` to `.restore.cleanup` but before it unlinks the candidate inode.
+            // The helper authenticates the surviving name/content before retrying cleanup.
+            cleanupRepairOwnedEntryAt(
+                parent.fd,
+                restoreName,
+                setOfNotNull(expectedCurrentSha256, sha256(replacement), rollbackCandidateSha256),
+                expectedKey = null,
+                maximumBytes = maximumSourceFileBytes,
+                phase = phase,
+                relative = portablePath,
+                index = moveIndex,
+                faultInjector = faultInjector,
+                required = false,
+                expectedLinkCount = -1,
+            )
+            cleanupRepairOwnedEntryAt(
+                parent.fd,
+                temporaryName,
+                setOf(sha256(replacement)),
+                preparedIdentity.key,
+                maximumSourceFileBytes,
+                phase,
+                portablePath,
+                moveIndex,
+                faultInjector,
+                required = false,
+            )
+            exchanged = false
+            faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationMove(phase, portablePath, moveIndex))
+            return
+        }
         // This hook is intentionally after the last name check and immediately before renameat2;
         // adversarial tests exercise the actual check-to-commit gap.
         faultInjector?.hit(ModuleRevisionFaultPoint.BeforePublicationExchange(phase, portablePath, moveIndex))
+        // Keep the accepted inode under a transaction-bound name before exchanging the candidate
+        // into place. The link is durable before the exchange, so every partially installed
+        // multi-file transaction retains the actual preimage rather than only its content blob.
+        if (phase == "candidate" || phase == "promotion") {
+            val existing = LinuxFilesystemSyscalls.openPathAtOrNull(preimageDirectory.fd, retainedPreimageName)
+            if (existing == null) {
+                LinuxFilesystemSyscalls.linkTemporaryAt(authorizedTarget, preimageDirectory.fd, retainedPreimageName)
+                requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(preimageDirectory.fd, retainedPreimageName)).use { linked ->
+                    require(linked.identity.key == authorizedTarget.identity.key && linked.identity.linkCount == 2 &&
+                        linked.identity.mode == authorizedTarget.identity.mode &&
+                        linked.identity.uid == authorizedTarget.identity.uid && linked.identity.gid == authorizedTarget.identity.gid &&
+                        readAuthorizedRepairFile(linked, maximumSourceFileBytes)
+                            .contentEquals(readAuthorizedRepairFile(authorizedTarget, maximumSourceFileBytes))) {
+                        "repair retained preimage could not be verified after linking: $relative"
+                    }
+                }
+                LinuxFilesystemSyscalls.synchronize(preimageDirectory)
+            } else {
+                existing.use {
+                    require(existing.identity.key == authorizedTarget.identity.key &&
+                        readAuthorizedRepairFile(existing, maximumSourceFileBytes)
+                            .contentEquals(readAuthorizedRepairFile(authorizedTarget, maximumSourceFileBytes))) {
+                        "repair retained preimage is ambiguous or corrupt: $relative"
+                    }
+                }
+            }
+        }
         try {
             LinuxFilesystemSyscalls.exchange(parent.fd, temporaryName, parts.last())
             exchanged = true
@@ -6097,7 +8344,7 @@ private fun exchangeRepairFile(
                             displacedCurrent.mode.permissions == authorizedTarget.identity.mode.permissions &&
                             displacedCurrent.uid == authorizedTarget.identity.uid &&
                             displacedCurrent.gid == authorizedTarget.identity.gid &&
-                            displacedCurrent.linkCount == 1 &&
+                            displacedCurrent.linkCount == (if (phase == "candidate" || phase == "promotion") 2 else 1) &&
                             installedCurrent.key == authorizedTemporary.identity.key &&
                             installedCurrent.mode.permissions == authorizedTarget.identity.mode.permissions &&
                             installedCurrent.uid == authorizedTarget.identity.uid &&
@@ -6135,16 +8382,9 @@ private fun exchangeRepairFile(
         // The old inode is now reachable only at the exact journal-owned name. Revalidate its
         // identity at unlink; an unknown name is preserved and makes the transaction fail closed.
         cleanupRepairOwnedEntryAt(
-            parent.fd,
-            temporaryName,
-            setOf(expectedCurrentSha256),
-            authorizedTarget.identity.key,
-            maximumSourceFileBytes,
-            phase,
-            portablePath,
-            moveIndex,
-            faultInjector,
-            required = true,
+            parent.fd, temporaryName, setOf(expectedCurrentSha256), authorizedTarget.identity.key,
+            maximumSourceFileBytes, phase, portablePath, moveIndex, faultInjector, required = true,
+            expectedLinkCount = if (phase == "candidate" || phase == "promotion") 2 else 1,
         )
         exchanged = false
         faultInjector?.hit(ModuleRevisionFaultPoint.AfterPublicationMove(phase, portablePath, moveIndex))
@@ -6174,7 +8414,9 @@ private fun readAuthorizedRepairFile(
     maximumBytes: Long,
 ): ByteArray {
     require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
-    return LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+    // Rollback retains and restores the original inode. Validation and recovery reads must not
+    // change its access time; if O_NOATIME is unavailable, fail closed before accepting the read.
+    return LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized).use { readable ->
         val bytes = try {
             LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt()) { }
         } catch (_: LinuxResourceLimitException) {
@@ -6184,6 +8426,54 @@ private fun readAuthorizedRepairFile(
             "repair publication descriptor changed while it was read"
         }
         bytes
+    }
+}
+
+/** Reset only atime on the authenticated original inode before it is retained or restored. */
+private fun normalizeCommittedPreimageAtime(authorized: LinuxDescriptor, metadata: RepairPreimageMetadata) {
+    if (metadata.metadataVersion < 2) return
+    LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized).use { readable ->
+        LinuxFilesystemSyscalls.setAccessTime(readable,
+            requireNotNull(metadata.atimeSeconds), requireNotNull(metadata.atimeNanoseconds))
+        require(metadata.matches(LinuxFilesystemSyscalls.fileState(readable))) {
+            "repair preimage could not be normalized to its committed metadata"
+        }
+    }
+}
+
+/** Normalize atime only when the source name still denotes the committed pre-turn inode. */
+private fun normalizeCommittedPreimageAtimeAt(
+    projectRoot: Path,
+    relative: String,
+    metadata: RepairPreimageMetadata,
+    expectedSha256: String,
+    expectedBytes: Long,
+) {
+    if (metadata.metadataVersion < 2) return
+    val parts = normalizedRelative(relative).split('/')
+    val directories = mutableListOf<LinuxDescriptor>()
+    try {
+        var parent = openRepairRootDirectory(projectRoot)
+        directories += parent
+        parts.dropLast(1).forEach { component ->
+            parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, component)
+            directories += parent
+        }
+        val source = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last()) ?: return
+        source.use {
+            val before = LinuxFilesystemSyscalls.fileState(source)
+            if (before.identity.key.device != metadata.device || before.identity.key.inode != metadata.inode) return
+            require(metadata.matches(before, includeAtime = false)) {
+                "restored repair source changed metadata before atime normalization: $relative"
+            }
+            require(before.size == expectedBytes &&
+                LinuxFilesystemSyscalls.sha256WithoutAtime(source, expectedBytes) == expectedSha256) {
+                "restored repair source differs from its committed preimage: $relative"
+            }
+            normalizeCommittedPreimageAtime(source, metadata)
+        }
+    } finally {
+        directories.asReversed().forEach { it.close() }
     }
 }
 
@@ -6199,6 +8489,8 @@ private fun cleanupRepairOwnedEntry(
     index: Int,
     faultInjector: ModuleRevisionFaultInjector?,
     required: Boolean,
+    expectedLinkCount: Int = 1,
+    expectedMetadata: RepairPreimageMetadata? = null,
 ) {
     val directories = mutableListOf<decompengine.acp.LinuxDescriptor>()
     try {
@@ -6225,6 +8517,8 @@ private fun cleanupRepairOwnedEntry(
             index,
             faultInjector,
             required,
+            expectedLinkCount,
+            expectedMetadata,
         )
     } finally {
         directories.asReversed().forEach { it.close() }
@@ -6242,6 +8536,8 @@ private fun cleanupRepairOwnedEntryAt(
     index: Int,
     faultInjector: ModuleRevisionFaultInjector?,
     required: Boolean,
+    expectedLinkCount: Int = 1,
+    expectedMetadata: RepairPreimageMetadata? = null,
 ) {
     require(expectedSha256.isNotEmpty() && expectedSha256.all { it.matches(Regex("[0-9a-f]{64}")) })
     val quarantine = "$name.cleanup"
@@ -6272,11 +8568,20 @@ private fun cleanupRepairOwnedEntryAt(
                 "quarantined repair entry disappeared during cleanup"
             }
             entry.use {
-                require(entry.identity.isRegularFile && !entry.identity.isSymbolicLink && entry.identity.linkCount == 1) {
+                require(entry.identity.isRegularFile && !entry.identity.isSymbolicLink &&
+                    (entry.identity.linkCount == expectedLinkCount ||
+                        expectedLinkCount == -1 && entry.identity.linkCount in 1..2)) {
                     "quarantined repair entry has unsupported identity"
                 }
                 require(expectedKey == null || entry.identity.key == expectedKey) {
                     "quarantined repair entry changed inode identity"
+                }
+                if (expectedMetadata != null) {
+                    require(expectedMetadata.retainedName == name &&
+                        expectedMetadata.matches(LinuxFilesystemSyscalls.fileState(entry), includeAtime = false) &&
+                        LinuxFilesystemSyscalls.extendedAttributeNames(entry).isEmpty()) {
+                        "quarantined repair entry differs from its committed preimage metadata"
+                    }
                 }
                 require(sha256(readAuthorizedRepairFile(entry, maximumBytes)) in expectedSha256) {
                     "quarantined repair entry has unrecognized content"
@@ -6454,7 +8759,15 @@ private fun ModuleRevisionNode.toJson(
     append("\n  \"recoveredAfterCrash\": ").append(recoveredAfterCrash).append(',')
     append("\n  \"changes\": [")
     append(changes.joinToString(",") { "\n" + it.toJson().prependIndent("    ") })
-    append("\n  ]\n}")
+    append("\n  ]")
+    if (schemaVersion >= 5) {
+        append(",\n  \"publicationChanges\": [")
+        append(publicationChanges.joinToString(",") { "\n" + it.toJson().prependIndent("    ") })
+        append("\n  ],")
+        append("\n  \"publicationPreimageMetadata\": ")
+            .append(publicationPreimageMetadata.toRepairPreimageMetadataJson())
+    }
+    append("\n}")
 }
 
 private fun RevisionFileDelta.toJson(): String =
@@ -6482,8 +8795,73 @@ private fun PendingAttempt.toJson(schemaVersion: Int): String = buildString {
         append(",\"legacyRecoveryRequired\":").append(legacyRecoveryRequired)
         append(",\"rollbackRecord\":").append(rollbackRecord?.toJson() ?: "null")
     }
+    if (schemaVersion >= 5) {
+        append(",\"preimageMetadata\":").append(preimageMetadata.toRepairPreimageMetadataJson())
+        append(",\"promotionPreimageMetadata\":").append(promotionPreimageMetadata.toRepairPreimageMetadataJson())
+    }
+    if (schemaVersion >= 6) {
+        append(",\"sourceWitnessSha256\":").append(sourceWitnessSha256?.let { "\"$it\"" } ?: "null")
+        append(",\"acceptanceDecision\":").append(acceptanceDecision?.toJson() ?: "null")
+        append(",\"predecisionStageFiles\":").append(predecisionStageFiles.toJson())
+    }
     append('}')
 }
+
+private fun RepairAcceptanceDecision.toJson(): String = buildString {
+    append("{\"proof\":").append(proof.toStateJson())
+    append(",\"evidenceKind\":\"").append(evidenceKind.jsonEscape()).append('\"')
+    append(",\"evidenceSummary\":\"").append(evidenceSummary.jsonEscape()).append('\"')
+    append(",\"evidenceArtifact\":").append(evidenceArtifact?.let { "\"${it.jsonEscape()}\"" } ?: "null")
+    append(",\"promotionChanges\":[").append(promotionChanges.joinToString(",") { it.toJson() }).append(']')
+    append(",\"intendedHeadId\":\"").append(intendedHeadId.jsonEscape()).append('\"')
+    append(",\"intendedRunId\":").append(intendedRunId?.let { "\"${it.jsonEscape()}\"" } ?: "null")
+    append(",\"intendedRunStatus\":").append(intendedRunStatus?.name?.let { "\"$it\"" } ?: "null")
+    append(",\"stagedFiles\":[").append(stagedFiles.joinToString(",") { it.toJson() }).append(']')
+    append(",\"committedNode\":").append(requireNotNull(committedNode).toJson(6))
+    append(",\"committedRun\":").append(committedRun?.toJson() ?: "null")
+    append('}')
+}
+
+private fun RepairStagedFile.toJson(): String =
+    "{\"path\":\"${path.jsonEscape()}\",\"stagingName\":\"${stagingName.jsonEscape()}\"," +
+        "\"device\":$device,\"inode\":$inode,\"mountId\":$mountId,\"mode\":$mode," +
+        "\"uid\":$uid,\"gid\":$gid,\"linkCount\":$linkCount,\"sha256\":\"$sha256\"," +
+        "\"size\":$size,\"atimeSeconds\":$atimeSeconds,\"atimeNanoseconds\":$atimeNanoseconds," +
+        "\"mtimeSeconds\":$mtimeSeconds,\"mtimeNanoseconds\":$mtimeNanoseconds," +
+        "\"parentDevice\":$parentDevice,\"parentInode\":$parentInode," +
+        "\"parentMountId\":$parentMountId}"
+
+private fun List<RepairPredecisionStage>.toJson(): String = joinToString(prefix = "[", postfix = "]") { staged ->
+    "{\"path\":\"${staged.path.jsonEscape()}\",\"stagingName\":\"${staged.stagingName.jsonEscape()}\"," +
+        "\"device\":${staged.device},\"inode\":${staged.inode},\"mountId\":${staged.mountId}," +
+        "\"mode\":${staged.mode},\"uid\":${staged.uid},\"gid\":${staged.gid}," +
+        "\"sha256\":\"${staged.sha256}\",\"size\":${staged.size}}"
+}
+
+private fun Map<String, RepairPreimageMetadata>?.toRepairPreimageMetadataJson(): String =
+    this?.toSortedMap()?.entries?.joinToString(prefix = "{", postfix = "}", separator = ",") { (path, metadata) ->
+        "\"${path.jsonEscape()}\":${metadata.toJson()}"
+    } ?: "null"
+
+private fun RepairPreimageMetadata.toJson(): String =
+    "{\"metadataVersion\":$metadataVersion,\"device\":$device,\"inode\":$inode," +
+        "\"mode\":$mode,\"uid\":$uid,\"gid\":$gid," +
+        "\"size\":$size" +
+        (if (metadataVersion >= 2) ",\"atimeSeconds\":$atimeSeconds,\"atimeNanoseconds\":$atimeNanoseconds" else "") +
+        ",\"mtimeSeconds\":$mtimeSeconds,\"mtimeNanoseconds\":$mtimeNanoseconds," +
+        "\"ctimeSeconds\":$ctimeSeconds,\"ctimeNanoseconds\":$ctimeNanoseconds," +
+        "\"retainedName\":\"${retainedName.jsonEscape()}\",\"xattrPolicy\":\"$xattrPolicy\"" +
+        (if (ancestorMetadata.isEmpty()) "" else ",\"ancestorMetadata\":[" +
+            ancestorMetadata.joinToString(",") { it.toJson() } + "]") + "}"
+
+private fun RepairAncestorMetadata.toJson(): String =
+    "{\"path\":\"${path.jsonEscape()}\",\"device\":$device,\"inode\":$inode," +
+        "\"mode\":$mode,\"uid\":$uid,\"gid\":$gid,\"linkCount\":$linkCount," +
+        "\"mountId\":$mountId,\"size\":$size," +
+        "\"mtimeSeconds\":$mtimeSeconds,\"mtimeNanoseconds\":$mtimeNanoseconds," +
+        "\"ctimeSeconds\":$ctimeSeconds,\"ctimeNanoseconds\":$ctimeNanoseconds" +
+        (if (atimeSeconds == null) "" else ",\"atimeSeconds\":$atimeSeconds,\"atimeNanoseconds\":$atimeNanoseconds") +
+        (if (entryCount == null) "" else ",\"entryCount\":$entryCount,\"entriesSha256\":\"$entriesSha256\"") + "}"
 
 private fun RepairRollbackRecord.toJson(): String =
     "{\"schemaVersion\":$schemaVersion,\"attemptId\":\"${attemptId.jsonEscape()}\"," +
@@ -6602,7 +8980,9 @@ internal fun requireSingleLegacyRollbackOrigin(legacyFlags: List<Boolean>) {
     }
 }
 
-private enum class DeclaredLegacyGraphOrigin(val schema: Int) { SCHEMA1(1), SCHEMA2(2), SCHEMA3(3) }
+private enum class DeclaredLegacyGraphOrigin(val schema: Int) {
+    SCHEMA1(1), SCHEMA2(2), SCHEMA3(3), SCHEMA4(4),
+}
 
 /** Current declared compatibility input; a self hash is integrity, never chronology/execution. */
 private data class DeclaredLegacyGraph(val graph: CanonicalRevisionGraph, val origin: DeclaredLegacyGraphOrigin)
@@ -6779,7 +9159,7 @@ private fun selectDeclaredRollbackOrigins(
         require(sha256(bytes) == match.groupValues[1]) { "declared legacy graph digest changed" }
         val parsed = parseCanonicalGraph(bytes, "declared legacy graph")
         val origin = requireNotNull(DeclaredLegacyGraphOrigin.entries.singleOrNull { it.schema == parsed.state.schemaVersion }) {
-            "declared legacy graph must have schema1,2 or3" }
+            "declared legacy graph must have schema1,2,3 or4" }
         val source = parsed.state
         require(bytes.size.toLong() <= source.budget.maximumGraphBytes) { "declared legacy graph exceeds its original byte budget" }
         validateDeclaredGraphSemantics(source)
@@ -6817,8 +9197,11 @@ private fun selectDeclaredLegacyGraph(
         require(sha256(bytes) == match.groupValues[1]) { "declared legacy graph digest changed" }
         val parsed = parseCanonicalGraph(bytes, "declared legacy graph")
         val origin = requireNotNull(DeclaredLegacyGraphOrigin.entries.singleOrNull { it.schema == parsed.state.schemaVersion }) {
-            "declared legacy graph must have schema1,2 or3"
+            "declared legacy graph must have schema1,2,3 or4"
         }
+        // Schema-4 snapshots can be preserved as a pre-upgrade byte witness, but they are not
+        // eligible as the schema-1..3 authority for legacy run/pending recovery.
+        if (origin == DeclaredLegacyGraphOrigin.SCHEMA4) return@scan
         if (joinedLegacyPending(parsed.state, state) != null) {
             require(selected == null) { "multiple declared legacy graphs join the same migration origin" }
             selected = DeclaredLegacyGraph(parsed, origin)
@@ -6981,9 +9364,9 @@ private fun requireRevisionGraphAdmission(
     forEachDeclaredGraph: ((String, ByteArray) -> Unit) -> Unit = { _ -> },
 ) {
     requireRollbackRecordBounds(state)
-    val missing = if (state.schemaVersion == 4) state.nodes.filter {
+    val missing = if (state.schemaVersion >= 4) state.nodes.filter {
         it.status == ModuleRevisionStatus.REJECTED && it.rollbackRecord == null }.map { it.id }.toSet() else emptySet()
-    val flagged = state.schemaVersion == 4 && (state.pending?.rollbackRecord?.legacyPendingStateUnknown == true ||
+    val flagged = state.schemaVersion >= 4 && (state.pending?.rollbackRecord?.legacyPendingStateUnknown == true ||
         state.nodes.any { it.rollbackRecord?.legacyPendingStateUnknown == true })
     val needed = flagged || (purpose == DeclaredOriginPurpose.LOCAL_RECORDED && missing.isNotEmpty())
     val origins = if (needed) selectDeclaredRollbackOrigins(state, missing, flagged, forEachDeclaredGraph) else null
@@ -7006,7 +9389,7 @@ private fun requireRevisionGraphByteBudget(
 ) {
     requireRollbackRecordBounds(state)
     if (bytes <= state.budget.maximumGraphBytes) return
-    val flagged = state.schemaVersion == 4 && (state.pending?.rollbackRecord?.legacyPendingStateUnknown == true ||
+    val flagged = state.schemaVersion >= 4 && (state.pending?.rollbackRecord?.legacyPendingStateUnknown == true ||
         state.nodes.any { it.rollbackRecord?.legacyPendingStateUnknown == true })
     val source = if (flagged) selectDeclaredLegacyGraph(state, forEachDeclaredGraph) else null
     requireDeclaredGraphBytes(state, bytes, nullNodeWire, source)
@@ -7031,7 +9414,7 @@ private fun parseGraph(payload: String): RevisionGraphState {
     val root = Json.parseToJsonElement(payload).jsonObject
     val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull
         ?: error("repair revision graph is missing schemaVersion")
-    require(schemaVersion in 1..4) { "unsupported repair revision graph schema" }
+    require(schemaVersion in 1..6) { "unsupported repair revision graph schema" }
     val budget = root.getValue("budget").jsonObject.let { value ->
         RepairResourceBudget(
             maximumIndexedModules = value.requiredInt("maximumIndexedModules"),
@@ -7110,6 +9493,9 @@ private fun parseNode(element: JsonElement, schemaVersion: Int): ModuleRevisionN
         value["repairMetadata"]?.takeUnless { it is JsonNull }?.let { parseRepairMetadata(it, schemaVersion) },
         if (schemaVersion >= 3) value["validationProof"]?.takeUnless { it is JsonNull }?.jsonObject?.let(::parseRepairValidationProof) else null,
         if (schemaVersion >= 4) value["rollbackRecord"]?.takeUnless { it is JsonNull }?.let(::parseRepairRollbackRecord) else null,
+        if (schemaVersion >= 5) value.getValue("publicationChanges").jsonArray.map(::parseDelta) else emptyList(),
+        if (schemaVersion >= 5) parsePreimageMetadataMap(value.getValue("publicationPreimageMetadata")).orEmpty()
+        else emptyMap(),
     )
 }
 
@@ -7129,7 +9515,146 @@ private fun parsePending(element: JsonElement, schemaVersion: Int): PendingAttem
         if (schemaVersion >= 3) value.getValue("promotionChanges").jsonArray.map(::parseDelta) else emptyList(),
         if (schemaVersion >= 4) value["rollbackRecord"]?.takeUnless { it is JsonNull }?.let(::parseRepairRollbackRecord) else null,
         if (schemaVersion >= 4) value["legacyRecoveryRequired"]?.jsonPrimitive?.content?.toBooleanStrict() ?: false else false,
+        if (schemaVersion >= 5) value["preimageMetadata"]?.let(::parsePreimageMetadataMap) else null,
+        if (schemaVersion >= 5) value["promotionPreimageMetadata"]?.let(::parsePreimageMetadataMap) else null,
+        if (schemaVersion >= 6) value["acceptanceDecision"]?.takeUnless { it is JsonNull }?.let(::parseAcceptanceDecision) else null,
+        if (schemaVersion >= 6) value.optionalString("sourceWitnessSha256") else null,
+        if (schemaVersion >= 6) value.getValue("predecisionStageFiles").jsonArray.map(::parseRepairPredecisionStage)
+        else emptyList(),
     )
+}
+
+private fun parseRepairPredecisionStage(element: JsonElement): RepairPredecisionStage {
+    val value = element.jsonObject
+    require(value.keys == setOf("path", "stagingName", "device", "inode", "mountId", "mode", "uid", "gid", "sha256", "size")) {
+        "schema-6 predecision stage has an unknown or missing field"
+    }
+    return RepairPredecisionStage(
+        path = value.strictString("path"), stagingName = value.strictString("stagingName"),
+        device = value.requiredLong("device"), inode = value.requiredLong("inode"),
+        mountId = value.requiredLong("mountId"), mode = value.requiredInt("mode"),
+        uid = value.requiredInt("uid"), gid = value.requiredInt("gid"),
+        sha256 = value.strictString("sha256"), size = value.requiredLong("size"),
+    )
+}
+
+private fun parseAcceptanceDecision(element: JsonElement): RepairAcceptanceDecision {
+    val value = element.jsonObject
+    require(value.keys == setOf("proof", "evidenceKind", "evidenceSummary", "evidenceArtifact", "promotionChanges",
+        "intendedHeadId", "intendedRunId", "intendedRunStatus", "stagedFiles", "committedNode", "committedRun")) {
+        "schema-6 acceptance decision has an unknown or missing field"
+    }
+    return RepairAcceptanceDecision(
+        proof = parseRepairValidationProof(value.getValue("proof").jsonObject),
+        evidenceKind = value.requiredString("evidenceKind"),
+        evidenceSummary = value.requiredString("evidenceSummary"),
+        evidenceArtifact = value.optionalString("evidenceArtifact"),
+        promotionChanges = value.getValue("promotionChanges").jsonArray.map(::parseDelta),
+        intendedHeadId = value.requiredString("intendedHeadId"),
+        intendedRunId = value.optionalString("intendedRunId"),
+        intendedRunStatus = value.optionalString("intendedRunStatus")?.let { RepairRunStatus.valueOf(it) },
+        stagedFiles = value.getValue("stagedFiles").jsonArray.map(::parseRepairStagedFile),
+        committedNode = parseNode(value.getValue("committedNode"), 6),
+        committedRun = value["committedRun"]?.takeUnless { it is JsonNull }?.let { parseRepairRunState(it.toString()) },
+    )
+}
+
+private fun parseRepairStagedFile(element: JsonElement): RepairStagedFile {
+    val value = element.jsonObject
+    require(value.keys == setOf("path", "stagingName", "device", "inode", "mountId", "mode", "uid", "gid",
+        "linkCount", "sha256", "size", "atimeSeconds", "atimeNanoseconds", "mtimeSeconds", "mtimeNanoseconds",
+        "parentDevice", "parentInode", "parentMountId"))
+    return RepairStagedFile(
+        path = value.strictString("path"), stagingName = value.strictString("stagingName"),
+        device = value.strictLong("device"), inode = value.strictLong("inode"), mountId = value.strictLong("mountId"),
+        mode = value.strictInt("mode"), uid = value.strictInt("uid"), gid = value.strictInt("gid"),
+        linkCount = value.strictInt("linkCount"), sha256 = value.strictString("sha256"), size = value.strictLong("size"),
+        atimeSeconds = value.strictLong("atimeSeconds"), atimeNanoseconds = value.strictInt("atimeNanoseconds"),
+        mtimeSeconds = value.strictLong("mtimeSeconds"), mtimeNanoseconds = value.strictInt("mtimeNanoseconds"),
+        parentDevice = value.strictLong("parentDevice"), parentInode = value.strictLong("parentInode"),
+        parentMountId = value.strictLong("parentMountId"),
+    )
+}
+
+private fun parsePreimageMetadataMap(element: JsonElement): Map<String, RepairPreimageMetadata>? {
+    if (element is JsonNull) return null
+    return element.jsonObject.mapValues { (_, raw) ->
+        val value = raw.jsonObject
+        val metadataVersion = value.strictInt("metadataVersion")
+        val expectedKeys = setOf(
+            "metadataVersion", "device", "inode", "mode", "uid", "gid", "size",
+            "mtimeSeconds", "mtimeNanoseconds", "ctimeSeconds", "ctimeNanoseconds", "retainedName", "xattrPolicy",
+        ) + if (metadataVersion >= 2) setOf("atimeSeconds", "atimeNanoseconds") else emptySet()
+        require(metadataVersion in 1..2 &&
+            (value.keys == expectedKeys || value.keys == expectedKeys + "ancestorMetadata")) {
+            "repair preimage metadata contains unknown or missing fields"
+        }
+        RepairPreimageMetadata(
+            metadataVersion = metadataVersion,
+            device = value.strictLong("device"),
+            inode = value.strictLong("inode"),
+            mode = value.strictInt("mode"),
+            uid = value.strictInt("uid"),
+            gid = value.strictInt("gid"),
+            size = value.strictLong("size"),
+            atimeSeconds = if (metadataVersion >= 2) value.strictLong("atimeSeconds") else null,
+            atimeNanoseconds = if (metadataVersion >= 2) value.strictInt("atimeNanoseconds") else null,
+            mtimeSeconds = value.strictLong("mtimeSeconds"),
+            mtimeNanoseconds = value.strictInt("mtimeNanoseconds"),
+            ctimeSeconds = value.strictLong("ctimeSeconds"),
+            ctimeNanoseconds = value.strictInt("ctimeNanoseconds"),
+            retainedName = value.strictString("retainedName"),
+            xattrPolicy = value.strictString("xattrPolicy"),
+            ancestorMetadata = value["ancestorMetadata"]?.jsonArray?.map(::parseRepairAncestorMetadata).orEmpty(),
+        )
+    }
+}
+
+private fun parseRepairAncestorMetadata(element: JsonElement): RepairAncestorMetadata {
+    val value = element.jsonObject
+    val legacyKeys = setOf("path", "device", "inode", "mode", "uid", "gid", "linkCount", "mountId",
+        "size", "mtimeSeconds", "mtimeNanoseconds", "ctimeSeconds", "ctimeNanoseconds")
+    val extendedKeys = legacyKeys + setOf("atimeSeconds", "atimeNanoseconds", "entryCount", "entriesSha256")
+    require(value.keys == legacyKeys || value.keys == extendedKeys) {
+        "repair ancestor metadata contains unknown or missing fields"
+    }
+    return RepairAncestorMetadata(
+        path = value.strictString("path"),
+        device = value.strictLong("device"),
+        inode = value.strictLong("inode"),
+        mode = value.strictInt("mode"),
+        uid = value.strictInt("uid"),
+        gid = value.strictInt("gid"),
+        linkCount = value.strictInt("linkCount"),
+        mountId = value.strictLong("mountId"),
+        size = value.strictLong("size"),
+        mtimeSeconds = value.strictLong("mtimeSeconds"),
+        mtimeNanoseconds = value.strictInt("mtimeNanoseconds"),
+        ctimeSeconds = value.strictLong("ctimeSeconds"),
+        ctimeNanoseconds = value.strictInt("ctimeNanoseconds"),
+        atimeSeconds = value["atimeSeconds"]?.let { value.strictLong("atimeSeconds") },
+        atimeNanoseconds = value["atimeNanoseconds"]?.let { value.strictInt("atimeNanoseconds") },
+        entryCount = value["entryCount"]?.let { value.strictInt("entryCount") },
+        entriesSha256 = value["entriesSha256"]?.let { value.strictString("entriesSha256") },
+    )
+}
+
+private fun JsonObject.strictString(name: String): String {
+    val primitive = get(name)?.jsonPrimitive ?: error("repair preimage metadata is missing $name")
+    require(primitive.isString) { "repair preimage metadata $name must be a string" }
+    return primitive.content
+}
+
+private fun JsonObject.strictInt(name: String): Int {
+    val primitive = get(name)?.jsonPrimitive ?: error("repair preimage metadata is missing $name")
+    require(!primitive.isString) { "repair preimage metadata $name must be an integer" }
+    return primitive.intOrNull ?: error("repair preimage metadata $name must be an integer")
+}
+
+private fun JsonObject.strictLong(name: String): Long {
+    val primitive = get(name)?.jsonPrimitive ?: error("repair preimage metadata is missing $name")
+    require(!primitive.isString) { "repair preimage metadata $name must be an integer" }
+    return primitive.longOrNull ?: error("repair preimage metadata $name must be an integer")
 }
 
 private fun parseRepairRollbackRecord(element: JsonElement): RepairRollbackRecord {
@@ -7276,6 +9801,9 @@ internal data class StableRegularFile(
     val bytes: ByteArray,
     val sha256: String,
     val identity: LinuxFileIdentity,
+    val state: decompengine.acp.LinuxFileState = decompengine.acp.LinuxFileState(
+        identity, bytes.size.toLong(), 0, 0, 0, 0, 0, 0,
+    ),
 )
 
 internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity, val validUtf8: Boolean)
@@ -7398,8 +9926,9 @@ internal fun readStableRegularFile(
     afterAuthorization: (() -> Unit)? = null,
     afterRead: (() -> Unit)? = null,
     cancellationCheck: () -> Unit = {},
+    requireNoExtendedAttributes: Boolean = false,
 ): StableRegularFile = readStableRegularFileInternal(
-    root, relative, maximumBytes, afterAuthorization, afterRead, cancellationCheck,
+    root, relative, maximumBytes, afterAuthorization, afterRead, cancellationCheck, requireNoExtendedAttributes,
     allowFinalDirectoryLinkCountChange = false,
 )
 
@@ -7416,7 +9945,7 @@ internal fun readStableJobMetadataFile(
         "stable job-metadata path is invalid"
     }
     return readStableRegularFileInternal(
-        root, relative, maximumBytes, afterAuthorization, null, {},
+        root, relative, maximumBytes, afterAuthorization, null, {}, false,
         allowFinalDirectoryLinkCountChange = true,
     )
 }
@@ -7428,6 +9957,7 @@ private fun readStableRegularFileInternal(
     afterAuthorization: (() -> Unit)?,
     afterRead: (() -> Unit)?,
     cancellationCheck: () -> Unit,
+    requireNoExtendedAttributes: Boolean,
     allowFinalDirectoryLinkCountChange: Boolean,
 ): StableRegularFile {
     cancellationCheck()
@@ -7454,12 +9984,27 @@ private fun readStableRegularFileInternal(
             throw StableFileUnavailableException("stable file-read target is not a regular non-symbolic-link file: $relative")
         }
         afterAuthorization?.invoke()
-        readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
+        readable = try {
+            LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized)
+        } catch (failure: decompengine.acp.LinuxSyscallException) {
+            // Ordinary evidence reads may run under a mapped UID that does not own the source
+            // inode. Preserve the historical readable path there; metadata commitments use
+            // requireNoExtendedAttributes and must fail closed instead of changing atime.
+            if (requireNoExtendedAttributes || failure.errno != 1) throw failure
+            LinuxFilesystemSyscalls.openReadableFrom(authorized)
+        }
         requireUnchanged(readable.identity == authorized.identity) {
             "stable file-read descriptor identity differs from its authorized path: $relative"
         }
         val descriptorPath = Path.of("/proc/self/fd/${readable.fd}")
         val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+        val stateBefore = LinuxFilesystemSyscalls.fileState(readable)
+        val xattrsBefore = if (requireNoExtendedAttributes) {
+            LinuxFilesystemSyscalls.extendedAttributeNames(readable, cancellationCheck)
+        } else emptyList()
+        requireUnchanged(!requireNoExtendedAttributes || xattrsBefore.isEmpty()) {
+            "stable file-read target violates the no-extended-attributes policy: $relative"
+        }
         requireUnchanged(before.isRegularFile) { "stable file-read descriptor is not regular: $relative" }
         if (before.size() > maximumBytes) {
             throw RepairBudgetExceededException(
@@ -7478,14 +10023,32 @@ private fun readStableRegularFileInternal(
             after.isRegularFile && before.fileKey() == after.fileKey() &&
                 before.size() == after.size() && after.size() == bytes.size.toLong() &&
                 before.lastModifiedTime() == after.lastModifiedTime() &&
-                LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity,
+            LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity,
         ) { "stable file-read descriptor changed while it was read: $relative" }
+        val stateAfter = LinuxFilesystemSyscalls.fileState(readable)
+        val xattrsAfter = if (requireNoExtendedAttributes) {
+            LinuxFilesystemSyscalls.extendedAttributeNames(readable, cancellationCheck)
+        } else emptyList()
+        requireUnchanged(xattrsAfter == xattrsBefore &&
+            (!requireNoExtendedAttributes || xattrsAfter.isEmpty())) {
+            "stable file-read extended attributes changed while it was read: $relative"
+        }
+        requireUnchanged(
+            stateBefore.copy(
+                accessTimeSeconds = stateAfter.accessTimeSeconds,
+                accessTimeNanoseconds = stateAfter.accessTimeNanoseconds,
+                changeTimeSeconds = stateAfter.changeTimeSeconds,
+                changeTimeNanoseconds = stateAfter.changeTimeNanoseconds,
+            ) == stateAfter,
+        ) {
+            "stable file-read metadata changed while it was read: $relative"
+        }
         revalidateDescriptorPath(
             base, parts, pinnedDirectories.map { it.identity }, authorized.identity,
             allowFinalDirectoryLinkCountChange,
         )
         cancellationCheck()
-        return StableRegularFile(bytes, sha256(bytes), authorized.identity)
+        return StableRegularFile(bytes, sha256(bytes), authorized.identity, stateAfter)
     } finally {
         readable?.close()
         authorized?.close()
@@ -7662,6 +10225,12 @@ private fun sourceTransactionTemporaryName(targetName: String, transactionId: St
     require(transactionId.matches(Regex("revision_[A-Za-z0-9_]+"))) { "invalid repair transaction ID" }
     require(targetName.isNotBlank() && '/' !in targetName && '\u0000' !in targetName)
     return ".$targetName.$transactionId.repair"
+}
+
+private fun sourceTransactionPreimageName(relativePath: String, transactionId: String): String {
+    require(transactionId.matches(Regex("revision_[A-Za-z0-9_]+"))) { "invalid repair transaction ID" }
+    val normalized = normalizedRelative(relativePath)
+    return ".$transactionId-${sha256(normalized.toByteArray(Charsets.UTF_8))}.preimage"
 }
 
 private fun atomicWrite(path: Path, bytes: ByteArray) {

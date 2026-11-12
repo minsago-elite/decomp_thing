@@ -42,6 +42,7 @@ import decompengine.producePagedRecordedTraceHistory
 import decompengine.repair.RepairRecordedHistorySelection
 import decompengine.repair.RepairRunStatus
 import decompengine.project.sha256
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -60,6 +61,7 @@ import java.util.concurrent.Executor
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
+import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.io.path.writeBytes
 import kotlin.test.Test
@@ -155,6 +157,93 @@ class UploadServerTest {
         assertEquals(200, unavailable.status)
         assertTrue(unavailable.body.decodeToString().contains("Artifact listing is unavailable"))
         assertEquals("stored", reports.resolve("stored.txt").readBytes().decodeToString())
+    }
+
+    @Test
+    fun `page read lease refuses a paused publication and captures the next generation`() {
+        val root = createTempDirectory("web-page-read-lease-")
+        val service = WebJobService(decompengine.jobs.JobStore(root), JobAnalyzer { _, _ -> }, JobReconstructor { _, _ -> },
+            executor = Executor { command -> command.run() })
+        val writerEntered = java.util.concurrent.CountDownLatch(1)
+        val continueWriter = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val job = service.upload("page-lease.elf", elfFixture())
+            val reports = root.resolve(job.id).resolve("reports").createDirectories()
+            reports.resolve("reconstruction.json").writeText("old-generation")
+            reports.resolve("source-tree.zip").writeText("old-generation")
+            val old = service.withRunSourceReadLease(job.id, null) {
+                reports.resolve("reconstruction.json").toFile().readText() to reports.resolve("source-tree.zip").toFile().readText()
+            }
+            assertEquals("old-generation" to "old-generation", old)
+
+            val writer = executor.submit {
+                decompengine.project.ReconstructionOutputWorkspace.open(reports, job.binaryPath).use { workspace ->
+                    workspace.publish(setOf("reconstruction.json", "source-tree.zip"), { stage ->
+                        stage.resolve("reconstruction.json").writeText("new-generation")
+                        stage.resolve("source-tree.zip").writeText("new-generation")
+                        writerEntered.countDown()
+                        check(continueWriter.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    })
+                }
+            }
+            assertTrue(writerEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "writer did not pause inside publication")
+            // The writer owns the exclusive publication lease while its stage is incomplete.
+            // An HTTP page must stay responsive and omit this snapshot instead of waiting.
+            assertFailsWith<decompengine.project.ReconstructionOutputReadUnavailableException> {
+                service.withRunSourceReadLease(job.id, null) {
+                    reports.resolve("reconstruction.json").toFile().readText() to
+                        reports.resolve("source-tree.zip").toFile().readText()
+                }
+            }
+            continueWriter.countDown()
+            writer.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals("new-generation" to "new-generation", service.withRunSourceReadLease(job.id, null) {
+                reports.resolve("reconstruction.json").toFile().readText() to reports.resolve("source-tree.zip").toFile().readText()
+            })
+        } finally {
+            continueWriter.countDown()
+            executor.shutdownNow()
+            service.close()
+        }
+    }
+
+    @Test
+    fun `job page stays responsive and omits report evidence during publication`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        reports.resolve("reconstruction.json").writeText("old-generation")
+        reports.resolve("source-tree.zip").writeText("old-generation")
+        val writerEntered = java.util.concurrent.CountDownLatch(1)
+        val continueWriter = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val writer = executor.submit {
+                decompengine.project.ReconstructionOutputWorkspace.open(reports, job.binaryPath).use { workspace ->
+                    workspace.publish(setOf("reconstruction.json", "source-tree.zip"), { stage ->
+                        stage.resolve("reconstruction.json").writeText("new-generation")
+                        stage.resolve("source-tree.zip").writeText("new-generation")
+                        writerEntered.countDown()
+                        check(continueWriter.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    })
+                }
+            }
+            assertTrue(writerEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "writer did not pause inside publication")
+            val response = executor.submit<Response> { request(server, "GET", "/jobs/$id") }
+                .get(3, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(200, response.status)
+            assertTrue(response.body.decodeToString().contains("Source-tree evidence is unavailable"))
+            continueWriter.countDown()
+            writer.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            val complete = request(server, "GET", "/jobs/$id")
+            assertEquals(200, complete.status)
+            assertTrue(reports.resolve("reconstruction.json").readText() == "new-generation")
+            assertTrue(reports.resolve("source-tree.zip").readText() == "new-generation")
+        } finally {
+            continueWriter.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -1568,23 +1657,19 @@ class UploadServerTest {
 
     @Test
     fun `actual canonical rejected history survives reconnect and empty H without private payload or writes`() {
-        for (detached in listOf(false, true)) {
-            withServer { server, dataDir ->
+        withServer { server, dataDir ->
                 val id = uploadedJobId(server)
                 val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
-                produceRecordedRepairHistory(project, detached = detached)
+                produceRecordedRepairHistory(project)
                 val before = recordedProjectBytes(project)
-                val expectedRollback = if (detached)
-                    "Recorded restoration was not required; candidate source installation did not begin."
-                else "Recorded restoration completed and was verified."
+                val expectedRollback = "Recorded restoration was not required; candidate source installation did not begin."
                 repeat(2) {
                     val response = request(server, "GET", "/jobs/$id")
                     val body = response.body.decodeToString()
                     assertEquals(200, response.status)
                     assertTrue("Compile repair — rejected" in body, body)
                     assertTrue(expectedRollback in body, body)
-                    assertFalse((if (detached) "Recorded restoration completed and was verified."
-                        else "Recorded restoration was not required;") in body, body)
+                    assertFalse("Recorded restoration completed and was verified." in body, body)
                     assertTrue("Fully accepted revision: <code>none</code>" in body, body)
                     assertTrue("Test-only evidence; release completeness is not established." in body, body)
                     assertTrue("Before:</b> Build validation evidence · Retained evidence is corrupt." in body, body)
@@ -1607,12 +1692,11 @@ class UploadServerTest {
                 assertTrue("Repair history is unavailable or corrupt." in invalidGraph, invalidGraph)
                 assertFalse("Recorded restoration completed" in invalidGraph, invalidGraph)
                 assertFalse(expectedRollback in invalidGraph, invalidGraph)
-            }
         }
     }
 
     @Test
-    fun `actual restoration failure stays visible after recovery and HTTP server restart`() {
+    fun `interrupted detached candidate stays unavailable until startup recovery and HTTP restart`() {
         val parent = Path.of("build/test-tmp/recorded-history-http").toAbsolutePath().createDirectories()
         val dataDir = createTempDirectory(parent, "restart-")
         val initial = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> error("read only") },
@@ -1626,20 +1710,20 @@ class UploadServerTest {
             val profile = recordedRepairProfile()
             var armed = false
             ModuleRevisionGraph.openForTesting(project, profile, faultInjector = ModuleRevisionFaultInjector { point ->
-                if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "rollback")
+                if (armed && point == ModuleRevisionFaultPoint.AfterCandidateStatePersist)
                     throw RecordedRestoreFailure()
             }).use { graph ->
-                graph.enableRunContract()
                 val attempt = graph.beginAttempt(listOf("code.c"))
-                graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate".toByteArray()))
                 armed = true
-                assertFailsWith<RecordedRestoreFailure> { graph.reject(attempt) }
+                assertFailsWith<RecordedRestoreFailure> {
+                    graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate".toByteArray()))
+                }
             }
             val failed = request(initial, "GET", "/jobs/$id").body.decodeToString()
-            assertTrue("Recorded restoration failed and remains unresolved." in failed, failed)
-            assertEquals("PRIVATE-candidate", Files.readString(project.resolve("code.c")))
+            assertTrue("Revision attempt — pending" in failed, failed)
+            assertEquals("PRIVATE-original", readSourceWithoutAtime(project, "code.c").decodeToString())
             ModuleRevisionGraph.open(project, profile).close() // Authored recovery, never performed by the HTTP reader.
-            assertEquals("PRIVATE-original", Files.readString(project.resolve("code.c")))
+            assertEquals("PRIVATE-original", readSourceWithoutAtime(project, "code.c").decodeToString())
             initial.stop(0)
             active = null
             val restarted = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> error("read only") },
@@ -1647,11 +1731,11 @@ class UploadServerTest {
             active = restarted
             restarted.start()
             val recovered = request(restarted, "GET", "/jobs/$id").body.decodeToString()
-            assertTrue("Recorded restoration completed after failure; the earlier failure is retained." in recovered, recovered)
-            assertTrue("Recorded restoration failure records retained: 1" in recovered, recovered)
+            assertTrue("Revision attempt — rejected" in recovered, recovered)
+            assertTrue("Recorded restoration was not required; candidate source installation did not begin." in recovered, recovered)
             assertFalse("PRIVATE-" in recovered, recovered)
             val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
-            assertTrue("Recorded restoration completed after failure; the earlier failure is retained." in cli, cli)
+            assertTrue("repair iteration 1: rejected" in cli, cli)
         } finally { active?.stop(0) }
     }
 
@@ -2627,13 +2711,13 @@ class UploadServerTest {
         }
     }
 
-    private class RecordedRestoreFailure : IllegalStateException("authored rollback refusal")
+    private class RecordedRestoreFailure : IllegalStateException("authored interruption after candidate persistence")
 
     private fun recordedRepairProfile() = DeclarativeRepairIndexProfile("PRIVATE-profile", RepairIndexLayout(
         listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
 
     /** Producer and authored receipt data only; no agent process or runtime is qualified here. */
-    private fun produceRecordedRepairHistory(project: Path, receipt: Boolean = false, detached: Boolean = true,
+    private fun produceRecordedRepairHistory(project: Path, receipt: Boolean = false,
         padding: Int = 0) {
         require(padding in 0..100)
         val original = "PRIVATE-original-source".toByteArray()
@@ -2645,7 +2729,7 @@ class UploadServerTest {
         ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
             graph.enableRunContract()
             graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-case", listOf("PRIVATE-argv"), "PRIVATE-stdin".toByteArray())))
-            if (detached) {
+            if (receipt) {
                 graph.beginRun(2, 60_000)
                 graph.bindOriginalBinary(sha256("reference".toByteArray()))
                 graph.bindExpectedObservations(sha256("expected".toByteArray()))
@@ -2656,16 +2740,15 @@ class UploadServerTest {
                 corpus.sha256, publicationMode = if (receipt) RepairPublicationMode.ACP_RELEASE else RepairPublicationMode.TEST_ONLY_NON_RELEASE)
             val attempt = graph.beginAttempt(listOf("code.c"), metadata)
             graph.installCandidate(attempt, mapOf("code.c" to candidate))
-            assertContentEquals(if (detached) original else candidate, project.resolve("code.c").readBytes())
+            assertContentEquals(original, readSourceWithoutAtime(project, "code.c"))
             if (receipt) graph.persistAndBindAgentInvocation(attempt,
                 ModuleRevisionGraphTest().completeAcpReceiptDocument(project, attempt, "code.c", original, candidate))
             val rejected = graph.reject(attempt, RepairEvidence("valid", "PRIVATE-after", "reports/after.json"))
             val rollback = assertNotNull(rejected.rollbackRecord)
-            assertEquals(if (detached) RepairRollbackState.NOT_REQUIRED_VERIFIED else RepairRollbackState.RESTORED_VERIFIED,
-                rollback.state)
-            assertEquals(!detached, rollback.candidateSourceInstallStarted)
+            assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, rollback.state)
+            assertEquals(false, rollback.candidateSourceInstallStarted)
             assertEquals(rollback.expectedSourceRevisionSha256, rollback.observedSourceRevisionSha256)
-            assertContentEquals(original, project.resolve("code.c").readBytes())
+            assertContentEquals(original, readSourceWithoutAtime(project, "code.c"))
         }
         if (padding > 0) ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
             if (graph.snapshot.runs.lastOrNull()?.terminal == false)
@@ -2686,6 +2769,16 @@ class UploadServerTest {
     private fun recordedProjectBytes(root: Path): Map<String, ByteArray> = Files.walk(root).use { paths ->
         paths.filter { Files.isRegularFile(it) }.toList().associate { root.relativize(it).toString() to it.readBytes() }
     }
+
+    private fun readSourceWithoutAtime(root: Path, relative: String): ByteArray =
+        LinuxFilesystemSyscalls.openRoot(root).use { rootDescriptor ->
+            val pinned = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(rootDescriptor.fd, relative))
+            pinned.use {
+                LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(it).use { readable ->
+                    LinuxFilesystemSyscalls.readWithoutAtime(readable, 1_048_576)
+                }
+            }
+        }
 
     private fun withServer(
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },

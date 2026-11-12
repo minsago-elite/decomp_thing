@@ -54,6 +54,15 @@ assert "src/unrelated.c" not in text
 assert "Compile command:" in text or "Structured behavior diff" in text
 update({"sessionUpdate": "agent_message_chunk",
         "content": {"type": "text", "text": "Reviewing retained repair cases."}})
+if MODE == "confident-no-write":
+    update({"sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "All tests pass. Change accepted; the repair is complete."}})
+    update({"sessionUpdate": "tool_call", "toolCallId": "repair-edit", "title": "Update source",
+            "kind": "edit", "status": "in_progress"})
+    update({"sessionUpdate": "tool_call_update", "toolCallId": "repair-edit", "status": "completed"})
+    respond(prompt, {"stopReason": "end_turn", "usage": {"inputTokens": 11, "outputTokens": 7, "totalTokens": 18}})
+    sys.stdin.read()
+    raise SystemExit(0)
 if MODE in ("no-change", "refused", "limit"):
     reason = {"no-change": "end_turn", "refused": "refusal", "limit": "max_tokens"}[MODE]
     respond(prompt, {"stopReason": reason})

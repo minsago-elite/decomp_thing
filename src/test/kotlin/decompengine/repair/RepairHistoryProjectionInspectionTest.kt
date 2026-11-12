@@ -5,6 +5,7 @@ import decompengine.validation.ProcessInput
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.readBytes
+import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 import kotlin.test.*
 import kotlinx.serialization.json.*
@@ -17,7 +18,7 @@ class RepairHistoryProjectionInspectionTest {
 
     @Test
     fun actualCurrentProducerMatchesFinalizedRunAndPreservesPrivateBytesOnlyInCapture() {
-        val captured = produce(current = true, accepted = true)
+        val captured = produce(accepted = true)
         val result = compare(captured)
         assertEquals(RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION, result.status)
         assertEquals(3, result.schemaVersion)
@@ -25,7 +26,7 @@ class RepairHistoryProjectionInspectionTest {
         assertEquals(captured.history.size.toLong(), result.admittedBytes)
         assertEquals(sha256(captured.history), result.capturedSha256)
         for (bytes in listOf(byteArrayOf(), byteArrayOf(0, 0xff.toByte(), 0x80.toByte(), 10))) {
-            val binary = produce(current = true, accepted = true, candidate = bytes)
+            val binary = produce(accepted = true, candidate = bytes)
             assertEquals(RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION, compare(binary).status)
         }
         val surface = result.toString()
@@ -36,7 +37,21 @@ class RepairHistoryProjectionInspectionTest {
 
     @Test
     fun genuinePreContractSucceededWireIsComparedWithoutAcceptedAuthorityUpgrade() {
-        val captured = produce(current = false, accepted = true)
+        val captured = produce(accepted = true).let { current ->
+            val graph = authoredLegacyGraphFixture(current.graph.decodeToString(), 2).toByteArray()
+            current.root.resolve("reports/repair-revisions/graph.json").writeBytes(graph)
+            val historyPath = current.root.resolve("reports/repair_history.json")
+            val history = RepairHistory(historyPath)
+            historyPath.writeText(renderRepairHistoryProjection(
+                history.all(), history.retainedInputs(), budget.maximumProjectionBytes, schemaVersion = 2,
+            ))
+            val legacyHistory = historyPath.readBytes()
+            assertEquals(2, Json.parseToJsonElement(graph.decodeToString()).jsonObject.getValue("schemaVersion").jsonPrimitive.int)
+            assertEquals(2, Json.parseToJsonElement(legacyHistory.decodeToString()).jsonObject.getValue("schemaVersion").jsonPrimitive.int)
+            assertFalse(graph.decodeToString().contains("validationProof"))
+            assertFalse(graph.decodeToString().contains("fullyAcceptedHead"))
+            current.copy(graph = graph, history = legacyHistory)
+        }
         assertTrue(captured.history.decodeToString().contains("\"succeeded\": true"))
         assertEquals(RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION, compare(captured).status)
         assertEquals(2, compare(captured).schemaVersion)
@@ -65,7 +80,7 @@ class RepairHistoryProjectionInspectionTest {
 
     @Test
     fun emittedMetadataCorpusPatchAndRunValueMutationsCannotMatch() {
-        val captured = produce(current = true, accepted = true)
+        val captured = produce(accepted = true)
         val source = captured.history.decodeToString()
         val prompt = Json.parseToJsonElement(source).jsonObject.getValue("iterations").jsonArray.single()
             .jsonObject.getValue("prompt").jsonPrimitive.content
@@ -93,7 +108,7 @@ class RepairHistoryProjectionInspectionTest {
 
     @Test
     fun strictCompleteFieldsTypesDuplicateKeysAndEncodingNeverDefaultToSuccess() {
-        val captured = produce(current = true, accepted = false)
+        val captured = produce(accepted = false)
         val source = captured.history.decodeToString()
         val malformed = listOf(
             source.replace("\"schemaVersion\": 3", "\"schemaVersion\": \"3\""),
@@ -118,12 +133,26 @@ class RepairHistoryProjectionInspectionTest {
     fun pendingAndHistoricalRestorationFailureRemainCanonicalWhenHistoryIsCorrupt() {
         val root = root()
         var armed = false
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
-            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "rollback") throw RestoreFailure()
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionFailure()
+            if (point is ModuleRevisionFaultPoint.BeforeRollbackExchange && point.phase == "promotion") throw PromotionRollbackFailure()
+            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") throw RestoreFailure()
         }).use { graph ->
             graph.enableRunContract()
-            val attempt = graph.beginAttempt(listOf("code.c"))
+            val corpus = graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-case", emptyList(), byteArrayOf())))
+            graph.beginRun(1, 60_000)
+            graph.bindOriginalBinary(sha256("reference".toByteArray()))
+            graph.bindExpectedObservations(sha256("expected".toByteArray()))
+            val attempt = graph.beginAttempt(listOf("code.c"), RevisionRepairMetadata(1, "compile", "bounded private prompt",
+                "PRIVATE-summary", corpus.inputs.map { it.id }, null, corpus.sha256,
+                publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
             graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+            val state = graph.snapshot
+            val proof = RepairValidationProof(repairCandidateSourceSha256(graph.candidateSources(attempt)), state.profileSha256,
+                state.indexSha256, corpus.sha256, sha256("reference".toByteArray()), sha256("rebuilt".toByteArray()),
+                sha256("runtime".toByteArray()), sha256("evidence".toByteArray()), true,
+                RepairValidationAssurance.TEST_ONLY_HOST_PROCESS)
+            assertFailsWith<PromotionFailure> { graph.accept(attempt, RepairEvidence("valid", "PRIVATE-evidence"), proof) }
             armed = true
             assertFailsWith<RestoreFailure> { graph.reject(attempt) }
         }
@@ -144,7 +173,7 @@ class RepairHistoryProjectionInspectionTest {
 
     @Test
     fun byteBoundsAndBadCanonicalInputCannotProducePartialMatchingCredit() {
-        val captured = produce(current = true, accepted = false)
+        val captured = produce(accepted = false)
         val limited = budget.copy(maximumProjectionBytes = 1024)
         val boundedRoot = root()
         ModuleRevisionGraph.open(boundedRoot, profile, limited).close()
@@ -181,7 +210,7 @@ class RepairHistoryProjectionInspectionTest {
             root.resolve("reports/repair_history.json").writeText("PRIVATE-corrupt")
             graph.reject(second)
             val restored = readProjectRecordedRepairHistory(root)
-            assertEquals(RepairRollbackState.RESTORED_VERIFIED, restored.snapshot?.attempts?.last()?.rollback?.state)
+            assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, restored.snapshot?.attempts?.last()?.rollback?.state)
             assertEquals(RepairRecordedQualification.RECORDED_METADATA_ONLY, restored.snapshot?.qualification)
         }
         assertTrue(progress.isNotEmpty())
@@ -224,28 +253,27 @@ class RepairHistoryProjectionInspectionTest {
         }
     }
 
+    private class PromotionFailure : RuntimeException()
+    private class PromotionRollbackFailure : RuntimeException()
     private class RestoreFailure : RuntimeException()
     private fun root(): Path {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(parent)
         return Files.createTempDirectory(parent, "history-projection-").also { it.resolve("code.c").writeText("base") }
     }
-    private fun produce(current: Boolean, accepted: Boolean, candidate: ByteArray = "candidate".toByteArray()): Capture {
+    private fun produce(accepted: Boolean, candidate: ByteArray = "candidate".toByteArray()): Capture {
         val root = root()
         ModuleRevisionGraph.open(root, profile).use { graph ->
-            if (current) graph.enableRunContract()
+            graph.enableRunContract()
             val corpus = graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-case", listOf("PRIVATE-arg"), "PRIVATE-stdin".toByteArray())))
-            if (current) {
-                graph.beginRun(2, 60_000)
-                graph.bindOriginalBinary(sha256("reference".toByteArray()))
-                graph.bindExpectedObservations(sha256("expected".toByteArray()))
-            }
+            graph.beginRun(2, 60_000)
+            graph.bindOriginalBinary(sha256("reference".toByteArray()))
+            graph.bindExpectedObservations(sha256("expected".toByteArray()))
             val attempt = graph.beginAttempt(listOf("code.c"), RevisionRepairMetadata(1, "compile", "bounded private prompt",
                 "PRIVATE-summary", corpus.inputs.map { it.id }, null, corpus.sha256,
                 publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
             graph.installCandidate(attempt, mapOf("code.c" to candidate))
             if (!accepted) graph.reject(attempt, RepairEvidence("rejected", "PRIVATE-evidence"))
-            else if (!current) graph.accept(attempt, RepairEvidence("valid", "PRIVATE-evidence"))
             else {
                 val state = graph.snapshot
                 val proof = RepairValidationProof(repairCandidateSourceSha256(graph.candidateSources(attempt)), state.profileSha256,
@@ -255,7 +283,9 @@ class RepairHistoryProjectionInspectionTest {
             }
             graph.synchronizeRepairHistory()
         }
-        return Capture(root, root.resolve("reports/repair-revisions/graph.json").readBytes(), root.resolve("reports/repair_history.json").readBytes())
+        val graphBytes = root.resolve("reports/repair-revisions/graph.json").readBytes()
+        val historyBytes = root.resolve("reports/repair_history.json").readBytes()
+        return Capture(root, graphBytes, historyBytes)
     }
     private fun compare(captured: Capture) = compareCapturedRepairHistoryProjection(captured.graph, captured.history, budget)
     private fun privateCall(name: String, vararg arguments: Any): Any = Class.forName("decompengine.repair.ModuleRevisionGraphKt")

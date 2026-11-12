@@ -466,6 +466,7 @@ class GeneratedCEvidenceCarrierTest {
         val ordinary = original + "\n/* ordinary repair candidate */\n".toByteArray()
         val graphPath = project.resolve("reports/repair-revisions/graph.json")
         val markedBlob = project.resolve("reports/repair-revisions/blobs/${sha256(marked)}")
+        val ordinaryBlob = project.resolve("reports/repair-revisions/blobs/${sha256(ordinary)}")
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             val attempt = graph.beginAttempt(listOf(relative))
             val before = graph.snapshot
@@ -478,7 +479,10 @@ class GeneratedCEvidenceCarrierTest {
             assertFalse(markedBlob.exists())
             val changes = graph.installCandidate(attempt, mapOf(relative to ordinary))
             assertEquals(listOf(relative), changes.map { it.path })
-            assertContentEquals(ordinary, target.readBytes())
+            // Candidate bytes are retained as a detached repair blob; accepted source remains
+            // byte-identical until an authoritative acceptance decision publishes it.
+            assertContentEquals(ordinary, ordinaryBlob.readBytes())
+            assertContentEquals(original, target.readBytes())
             val rejected = graph.reject(attempt)
             assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
             assertEquals(listOf(relative), rejected.changes.map { it.path })

@@ -75,19 +75,19 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             val base = GeneratedCMakeReconstructionProfile.descriptor
             val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
                 base.budgets.copy(reconstructionMaximumContextCharacters = 600_000), base.adapterConfiguration)
-            val project = temp.resolve("project")
+            val output = temp.resolve("project")
             val harness = ArchiveEvidenceHarness(accepted = true)
             val observation = attributedObservation(stdoutHex = "78".repeat(16_384), cases = 17)
             assertTrue(observation.toByteArray().size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
-            val manifest = SourceTreeGenerator.generate(
-                model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+            val (project, manifest) = generateTransactionalAgentProject(
+                output,
+                RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
                     RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)"))),
-                projectDir = project,
-                hostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets),
-                reconstructor = BoundedLlmModuleReconstructor(harness, maximumContextCharacters = 600_000,
+                profile,
+                BoundedLlmModuleReconstructor(harness, maximumContextCharacters = 600_000,
                     harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
-                observedBehavior = observation,
-                profile = profile,
+                observation,
+                ReconstructionHostSafetyLimits(profile.budgets),
             )
             assertTrue(manifest.unresolvedImplementationIds.isEmpty())
             val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
@@ -244,13 +244,13 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = Files.createTempDirectory(scratch, "v4-fresh-wire-mismatch-")
         try {
             for (profile in ReconstructionProfiles.builtIn) {
-                val project = temp.resolve(profile.id)
+                val output = temp.resolve(profile.id)
                 val mismatchedWire = "0".repeat(64)
                 val harness = ArchiveEvidenceHarness(accepted = true, wirePromptOverride = mismatchedWire)
-                val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                val model = RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
                     RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)")))
-                val manifest = SourceTreeGenerator.generate(model, project, profile = profile,
-                    reconstructor = BoundedLlmModuleReconstructor(harness,
+                val (project, manifest) = generateTransactionalAgentProject(output, model, profile,
+                    BoundedLlmModuleReconstructor(harness,
                         harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor))
                 assertEquals(listOf("fn_0000000000401000"), manifest.unresolvedImplementationIds)
                 val source = manifest.files.single { it.path == SOURCE_PATH }
@@ -296,9 +296,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = Files.createTempDirectory(scratch, "v4-wire-prompt-replay-")
         try {
             for (profile in ReconstructionProfiles.builtIn) {
-                val project = temp.resolve(profile.id)
+                val output = temp.resolve(profile.id)
                 val harness = ArchiveEvidenceHarness(accepted = true)
-                createAgentProject(project, accepted = true, profile = profile, harness = harness)
+                val project = createAgentProject(output, accepted = true, profile = profile, harness = harness)
                 val receipt = Json.parseToJsonElement(project.resolve(EVIDENCE_PATH).readText()).jsonObject
                 val originalRequest = receipt.getValue("request").jsonObject
                 val actualWireSha256 = sha256(renderAgentPrompt(
@@ -400,9 +400,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = Files.createTempDirectory(scratch, "reconstructor-v4-policy-replay-")
         try {
             for (profile in ReconstructionProfiles.builtIn) {
-                val project = temp.resolve(profile.id)
+                val output = temp.resolve(profile.id)
                 val harness = ArchiveEvidenceHarness(accepted = true)
-                createAgentProject(project, accepted = true, profile = profile, harness = harness)
+                val project = createAgentProject(output, accepted = true, profile = profile, harness = harness)
 
                 val currentRequest = harness.executedRequest
                 val legacyRequest = AgentExecutionRequest(
@@ -549,31 +549,65 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     fun `rejected ACP revision retains its receipt and restores accepted release evidence`() {
         val temp = createTempDirectory("acp-rejected-revision-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
+        val acceptedSeed = temp.resolve("accepted-source-seed")
+        copyTree(project, acceptedSeed)
         val preservedPaths = listOf(SOURCE_PATH, CHECKPOINT_PATH, EVIDENCE_PATH)
         val before = preservedPaths.associateWith { project.resolve(it).readText() }
         val harness = ArchiveEvidenceHarness(accepted = false)
         val model = RecoveredProgramModel(
-            inputSha256 = "a".repeat(64),
+            inputSha256 = transactionalInputSha256,
             functions = listOf(RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)")),
         )
 
         assertFailsWith<ModuleReconstructionRevisionRejectedException> {
-            SourceTreeGenerator.generate(
-                model, project,
-                reconstructor = BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
-                observedBehavior = "new module evidence",
-            )
+            val output = project.parent
+            val input = output.resolveSibling("${output.fileName}.input")
+                .also { Files.write(it, byteArrayOf(8, 6, 7, 5)) }
+            ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+                var rejection: ModuleReconstructionRevisionRejectedException? = null
+                val result = workspace.publish(
+                    setOf("source-tree", ".decomp-agent-sessions"),
+                    buildStage = { stage ->
+                        val stagedProject = stage.resolve("source-tree")
+                        copyTree(acceptedSeed, stagedProject)
+                        try {
+                            SourceTreeGenerator.generateWithCompilerFeedback(
+                                model.copy(inputSha256 = workspace.inputSha256),
+                                stagedProject,
+                                hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                                reconstructor = BoundedLlmModuleReconstructor(
+                                    harness,
+                                    harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
+                                ),
+                                observedBehavior = "new module evidence",
+                                profile = GeneratedCMakeReconstructionProfile.descriptor,
+                                publicationLock = workspace.publicationLock,
+                            )
+                        } catch (failure: ModuleReconstructionRevisionRejectedException) {
+                            // Publish the restored accepted tree plus its attempt receipt, then
+                            // surface the same rejection after the transaction is durable.
+                            rejection = failure
+                        }
+                    },
+                )
+                assertEquals(PublicationResult.PUBLISHED, result)
+                throw requireNotNull(rejection) { "the revision rejection branch was not reached" }
+            }
         }
 
         preservedPaths.forEach { assertEquals(before.getValue(it), project.resolve(it).readText(), it) }
         val attemptReceipt = project.resolve("reports/modules/parse.attempt.execution.json")
         assertTrue(attemptReceipt.exists())
         assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("parse.attempt.execution.json"))
-        SourceTreeGenerator.generate(
-            model, project,
-            reconstructor = BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
+        val restoredSeed = temp.resolve("published-source-with-attempt-receipt")
+        copyTree(project, restoredSeed)
+        generateTransactionalAgentProject(
+            project.parent, model, GeneratedCMakeReconstructionProfile.descriptor,
+            BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
+            seedSourceTree = restoredSeed,
         )
         assertFalse(attemptReceipt.exists())
+        preservedPaths.forEach { assertEquals(before.getValue(it), project.resolve(it).readText(), it) }
         MakeProjectBuilder.build(project)
         ArchivalPackager.create(project, temp.resolve("preserved.zip"))
     }
@@ -691,14 +725,15 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         Files.createDirectories(scratch)
         val temp = Files.createTempDirectory(scratch, "fallback-compiler-claims-")
         try {
-            val baseline = temp.resolve("baseline")
+            val baselineOutput = temp.resolve("baseline")
             val profile = GeneratedCMakeReconstructionProfile.descriptor
-            val manifest = SourceTreeGenerator.generate(
-                RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+            val (baseline, manifest) = generateTransactionalAgentProject(
+                baselineOutput,
+                RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
                     RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
                         "int parse_input(void)", "/* ${"context".repeat(2_000)} */"))),
-                baseline,
-                reconstructor = BoundedLlmModuleReconstructor(
+                profile,
+                BoundedLlmModuleReconstructor(
                     AgentHarness { _, _ -> error("oversized prompt must not dispatch") },
                     maximumContextCharacters = 4_096,
                 ),
@@ -753,10 +788,11 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         Files.createDirectories(scratch)
         val temp = Files.createTempDirectory(scratch, "legacy-fallback-replay-")
         try {
-            val project = temp.resolve("project")
-            SourceTreeGenerator.generate(
+            val output = temp.resolve("project")
+            val (project, _) = generateTransactionalAgentProject(
+                output,
                 RecoveredProgramModel(
-                    inputSha256 = "a".repeat(64),
+                    inputSha256 = transactionalInputSha256,
                     functions = listOf(RecoveredFunction(
                         "fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)",
                         "/* ${"context".repeat(2_000)} */",
@@ -765,8 +801,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                     // Manifest entity IDs are sorted globally, not functions-before-globals.
                     globals = listOf(RecoveredGlobal("aa_global", "parse_counter", 0x402000UL, "int", "7")),
                 ),
-                project,
-                reconstructor = BoundedLlmModuleReconstructor(
+                GeneratedCMakeReconstructionProfile.descriptor,
+                BoundedLlmModuleReconstructor(
                     AgentHarness { _, _ -> error("oversized prompt must not dispatch") },
                     maximumContextCharacters = 4_096,
                 ),
@@ -796,14 +832,14 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         Files.createDirectories(scratch)
         val temp = Files.createTempDirectory(scratch, "fallback-compiler-prompt-replay-")
         try {
-            val project = temp.resolve("project")
+            val output = temp.resolve("project")
             val profile = GeneratedCMakeReconstructionProfile.descriptor
-            val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+            val model = RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
                 RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
                     "int parse_input(void)", "/* ${"context".repeat(2_000)} */"),
             ))
-            val manifest = SourceTreeGenerator.generate(model, project, profile = profile,
-                reconstructor = BoundedLlmModuleReconstructor(
+            val (project, manifest) = generateTransactionalAgentProject(output, model, profile,
+                BoundedLlmModuleReconstructor(
                     AgentHarness { _, _ -> error("oversized prompt must not dispatch") }, maximumContextCharacters = 4_096))
             val checkpointPath = project.resolve(CHECKPOINT_PATH)
             val original = Json.parseToJsonElement(checkpointPath.readText()).jsonObject
@@ -856,12 +892,13 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = Files.createTempDirectory(scratch, "fallback-confidence-")
         try {
             for (withAccepted in listOf(false, true)) {
-                val project = temp.resolve(if (withAccepted) "mixed" else "all-fallback")
+                val output = temp.resolve(if (withAccepted) "mixed" else "all-fallback")
                 val harness = ArchiveEvidenceHarness(accepted = true)
                 val oversizedEvidence = "/* ${"context".repeat(2_000)} */"
-                val manifest = SourceTreeGenerator.generate(
+                val (project, manifest) = generateTransactionalAgentProject(
+                    output,
                     RecoveredProgramModel(
-                        inputSha256 = "a".repeat(64),
+                        inputSha256 = transactionalInputSha256,
                         functions = listOf(
                             RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
                                 "int parse_input(void)", if (withAccepted) null else oversizedEvidence),
@@ -869,8 +906,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                                 "int beta_read(void)", oversizedEvidence),
                         ),
                     ),
-                    project,
-                    reconstructor = BoundedLlmModuleReconstructor(
+                    GeneratedCMakeReconstructionProfile.descriptor,
+                    BoundedLlmModuleReconstructor(
                         harness, maximumContextCharacters = 4_096,
                         harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
                     ),
@@ -948,21 +985,24 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     private fun attributedObservation(stdoutHex: String, cases: Int = 1): String =
-        ModuleObservedBehavior.envelope("a".repeat(64), (0 until cases).map { index ->
+        ModuleObservedBehavior.envelope(transactionalInputSha256, (0 until cases).map { index ->
             ModuleObservedCase("case-$index",
                 ModuleObservationAttribution(listOf("fn_0000000000401000"), "b".repeat(64)),
                 emptyList(), "", 0, stdoutHex, "")
         }).toString()
 
+    private val transactionalInputSha256 by lazy { sha256(byteArrayOf(8, 6, 7, 5)) }
+
     private fun createAgentProject(
-        project: Path,
+        output: Path,
         accepted: Boolean,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         harness: ArchiveEvidenceHarness = ArchiveEvidenceHarness(accepted),
     ): Path {
-        SourceTreeGenerator.generate(
+        val (project, _) = generateTransactionalAgentProject(
+            output,
             RecoveredProgramModel(
-                inputSha256 = "a".repeat(64),
+                inputSha256 = transactionalInputSha256,
                 functions = listOf(
                     RecoveredFunction(
                         "fn_0000000000401000",
@@ -972,15 +1012,48 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                     ),
                 ),
             ),
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(
+            profile,
+            BoundedLlmModuleReconstructor(
                 harness,
                 harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
             ),
-            profile = profile,
         )
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
         return project
+    }
+
+    /** Keep agent evidence fixtures on the production publication boundary. */
+    private fun generateTransactionalAgentProject(
+        output: Path,
+        model: RecoveredProgramModel,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        reconstructor: ModuleReconstructor,
+        observedBehavior: String? = null,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        seedSourceTree: Path? = null,
+    ): Pair<Path, SourceTreeManifest> {
+        output.toAbsolutePath().normalize().parent?.let { Files.createDirectories(it) }
+        val input = output.resolveSibling("${output.fileName}.input")
+        Files.write(input, byteArrayOf(8, 6, 7, 5))
+        return ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+            var manifest: SourceTreeManifest? = null
+            assertEquals(PublicationResult.PUBLISHED, workspace.publish(
+                setOf("source-tree", ".decomp-agent-sessions"),
+                buildStage = { stage ->
+                    seedSourceTree?.let { seed -> copyTree(seed, stage.resolve("source-tree")) }
+                    manifest = SourceTreeGenerator.generateWithCompilerFeedback(
+                        model.copy(inputSha256 = workspace.inputSha256),
+                        stage.resolve("source-tree"),
+                        hostSafetyLimits = hostSafetyLimits,
+                        reconstructor = reconstructor,
+                        observedBehavior = bindModuleObservationFixtureToInput(observedBehavior, workspace.inputSha256),
+                        profile = profile,
+                        publicationLock = workspace.publicationLock,
+                    ).manifest
+                },
+            ))
+            output.resolve("source-tree") to requireNotNull(manifest)
+        }
     }
 
     private fun rewriteEvidenceAndBindings(project: Path, transform: (String) -> String) {

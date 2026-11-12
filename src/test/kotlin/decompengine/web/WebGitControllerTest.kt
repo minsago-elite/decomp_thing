@@ -362,6 +362,43 @@ class WebGitControllerTest {
         assertFalse(Files.exists(f.root.resolve(job.id).resolve("git")), "no Git operation was admitted for the deleted job")
     }
 
+    @Test fun `Git admission reserves a job without holding service lock across publication waits`(): Unit = Fixture(withImports = true).use { f ->
+        val job = f.store.createFromUpload("git-reservation.elf", elfFixture())
+        val otherJob = f.store.createFromUpload("git-reservation-other.elf", elfFixture())
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val retentionCalls = java.util.concurrent.atomic.AtomicInteger()
+        val hold = f.service.registerRetentionHold { id ->
+            if (id == otherJob.id) retentionCalls.incrementAndGet()
+            emptyList()
+        }
+        val result = java.util.concurrent.CompletableFuture.supplyAsync {
+            f.service.withGitAdmission(job.id) {
+                entered.countDown()
+                check(release.await(10, TimeUnit.SECONDS))
+                "admitted"
+            }
+        }
+        assertTrue(entered.await(5, TimeUnit.SECONDS), "Git admission did not enter its reserved section")
+        try {
+            val preview = f.service.jobDeletionPreview(otherJob.id)
+            assertTrue(preview.protections.any { it.code == "STORAGE_BUSY" }, "another job's deletion must see the global Git reservation")
+            assertEquals(0, retentionCalls.get(), "deletion must not enter the global Git retention lock while an admission is pending")
+            assertFalse(result.isDone, "the reserved Git request should still be waiting")
+        } finally {
+            release.countDown()
+        }
+        assertEquals("admitted", result.get(5, TimeUnit.SECONDS))
+        val after = f.service.jobDeletionPreview(job.id)
+        assertFalse(after.protections.any { it.code == "STORAGE_BUSY" }, "the reservation must be released after admission")
+        assertFailsWith<IllegalStateException> {
+            f.service.withGitAdmission(job.id) { throw IllegalStateException("fixture admission failure") }
+        }
+        val afterFailure = f.service.jobDeletionPreview(job.id)
+        assertFalse(afterFailure.protections.any { it.code == "STORAGE_BUSY" }, "failed admission must also release its reservation")
+        hold.close()
+    }
+
     @Test fun `unpushed and uncommitted work hold deletion and a clean repository is deleted with its files`(): Unit = Fixture(withImports = true).use { f ->
         // A job without workflow attempts, so only Git work can protect it.
         val job = f.store.createFromUpload("imported.elf", elfFixture())

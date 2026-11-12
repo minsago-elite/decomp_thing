@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 5,
+  "fingerprint": "61297d28980c77b36f062eebc11971d03360447af7744d81d1ec2951160fd93f",
+  "sourceSha256": "0517a4df4603c8676a779c69efa20fb3c715a9363824454ce764e990a2da5511",
+  "generator": "evidence-only",
+  "reconstructorIdentity": "evidence-only:v1",
+  "promptSha256": "9e514a8c601e71e5fc4004a62d9dc22791108507e83fb3faf0b3da0e9a359f97",
+  "promptCharacters": null,
+  "promptBudgetCharacters": null,
+  "executionEvidencePath": null,
+  "executionEvidenceSha256": null,
+  "executionEvidenceSchemaVersion": null,
+  "executionRequestSha256": null,
+  "executionTerminalOutcome": null,
+  "executionReleaseComplete": null,
+  "accepted": false,
+  "compilation": null,
+  "retryable": false,
+  "entityStatuses": [
+    {"id":"fn_charlie","status":"unresolved"}
+  ],
+  "issues": [    {
+      "code": "evidence-only-placeholder",
+      "message": "evidence-only mode emits placeholders and does not accept implementations",
+      "entityIds": ["fn_charlie"]
+    },    {
+      "code": "generic-return-placeholder",
+      "message": "candidate implementation for fn_charlie is indistinguishable from the evidence-only return stub",
+      "entityIds": ["fn_charlie"]
+    }
+  ]
+}

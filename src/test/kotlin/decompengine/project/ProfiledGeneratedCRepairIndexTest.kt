@@ -6,6 +6,7 @@ import decompengine.repair.ModuleRepairIndex
 import decompengine.repair.ModuleRevisionGraph
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairResourceBudget
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -150,7 +151,7 @@ class ProfiledGeneratedCRepairIndexTest {
             profile(GeneratedCMakeReconstructionProfile.descriptor,
                 sourceRoot = "workspace/code", interfaceRoot = "headers"))
         assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(project, changed) }
-        assertContentEquals(candidate, target.readBytes())
+        assertContentEquals(accepted, target.readBytes())
         assertContentEquals(graphBefore, graphPath.readBytes())
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(descriptor)).use { recovered ->
             assertContentEquals(accepted, target.readBytes())
@@ -196,13 +197,58 @@ class ProfiledGeneratedCRepairIndexTest {
             assertFalse(changed.configurationSha256() == profile.configurationSha256())
             val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(project, changed) }
             assertTrue(failure.message.orEmpty().contains("profile fingerprint differs"))
-            assertContentEquals(candidate, target.readBytes())
+            assertContentEquals(accepted, target.readBytes())
             assertContentEquals(before, graphPath.readBytes())
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(descriptor)).use { recovered ->
                 assertContentEquals(accepted, target.readBytes())
                 assertEquals(null, recovered.snapshot.pendingAttemptId)
             }
         }
+    }
+
+    @Test
+    fun `repair index discovery does not advance source ancestor directory access times`() {
+        val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(),
+            "repair-index-directory-atime-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(inputSha256 = "c".repeat(64), functions = listOf(
+            RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)"),
+        )), project)
+
+        val witnesses = listOf(project, project.resolve("src"), project.resolve("src/modules"))
+            .associateWith { directory ->
+                val atime = java.nio.file.attribute.FileTime.from(
+                    java.time.Instant.ofEpochSecond(1_234_567_890L, 123_456_789),
+                )
+                Files.setAttribute(directory, "basic:lastAccessTime", atime, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                Files.readAttributes(directory, java.nio.file.attribute.BasicFileAttributes::class.java)
+                    .lastAccessTime().toInstant()
+            }
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        assertTrue(index.sourcePaths.isNotEmpty())
+        val editable = index.editablePaths.first()
+        val source = project.resolve(editable)
+        val sourceBefore = Files.readAttributes(source, java.nio.file.attribute.BasicFileAttributes::class.java,
+            java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        val sourceUnixBefore = Files.readAttributes(source, "unix:dev,ino,mode,uid,gid,nlink,size,ctime",
+            java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.beginAttempt(listOf(editable))
+        }
+        witnesses.forEach { (directory, expectedAtime) ->
+            val observed = Files.readAttributes(directory, java.nio.file.attribute.BasicFileAttributes::class.java)
+                .lastAccessTime().toInstant()
+            assertEquals(expectedAtime, observed, "repair profile enumeration advanced $directory")
+        }
+        val sourceAfter = Files.readAttributes(source, java.nio.file.attribute.BasicFileAttributes::class.java,
+            java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        val sourceUnixAfter = Files.readAttributes(source, "unix:dev,ino,mode,uid,gid,nlink,size,ctime",
+            java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        assertEquals(sourceBefore.fileKey(), sourceAfter.fileKey())
+        assertEquals(sourceUnixBefore, sourceUnixAfter)
+        assertEquals(sourceBefore.lastModifiedTime(), sourceAfter.lastModifiedTime())
+        assertEquals(sourceBefore.lastAccessTime(), sourceAfter.lastAccessTime())
+        assertEquals(sourceBefore.creationTime(), sourceAfter.creationTime())
     }
 
     @Test
