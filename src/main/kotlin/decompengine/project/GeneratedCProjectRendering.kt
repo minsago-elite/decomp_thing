@@ -1,5 +1,7 @@
 package decompengine.project
 
+import java.util.Locale
+
 /** Generated-C declarations and GNU Make policy; no benchmark-specific assumptions. */
 internal class GeneratedCProjectRendering(private val model: RecoveredProgramModel, plan: ModulePlan) : ProjectRendering {
     private val functions = model.functions.associateBy { it.id }
@@ -51,7 +53,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
     override fun sharedInterface(): String = buildString {
         append("#ifndef DECOMP_TYPES_H\n#define DECOMP_TYPES_H\n\n#include <stddef.h>\n#include <stdint.h>\n\n")
         model.types.sortedBy { it.id }.forEach { type ->
-            append("/* ${type.id}; status=${type.status.name.lowercase()}")
+            append("/* ${type.id}; ${extractionProvenance(type.status)}")
             type.sourceAddress?.let { append("; @ 0x${it.toString(16)}") }
             append(" */\n").append(type.declaration.trim()).append("\n\n")
         }
@@ -62,13 +64,14 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_H"
         append("#ifndef $guard\n#define $guard\n\n#include \"decomp_types.h\"\n\n")
         module.globalIds.map { id -> globals.getValue(id) }.forEach { global ->
-            append(globalDeclaration(global, external = true, context = declarationContext)).append(" /* ${global.id} @ 0x${global.address.toString(16)} */\n")
+            append(globalDeclaration(global, external = true, context = declarationContext))
+                .append(" /* ${global.id} @ 0x${global.address.toString(16)}; ${extractionProvenance(global.status)} */\n")
         }
         if (module.globalIds.isNotEmpty()) append('\n')
         module.functionIds.map { id -> functions.getValue(id) }
             .filter { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
             .forEach { function ->
-            append(normalizedPrototype(function)).append("; /* ${function.id} @ 0x${function.address.toString(16)} */\n")
+            append(normalizedPrototype(function)).append("; /* ${function.id} @ 0x${function.address.toString(16)}; ${extractionProvenance(function.status)} */\n")
         }
         append("\n#endif\n")
     }
@@ -83,7 +86,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
                 // A recovered inventory can retain functions with no callers. Keep their exact
                 // declaration and linkage while suppressing only this function's unused warning.
                 if (declaration.hasInternalLinkage) append("__attribute__((unused))\n")
-                append(declaration.prototype).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n")
+                append(declaration.prototype).append("; /* private ${function.id} @ 0x${function.address.toString(16)}; ${extractionProvenance(function.status)} */\n")
             }
         append("\n#endif\n")
     }
@@ -91,6 +94,9 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
     override fun buildDefinition(sources: List<String>, profile: ReconstructionProfile): String =
         generatedCMakeBuildDefinition(sources, profile)
 }
+
+private fun extractionProvenance(status: RecoveryStatus): String =
+    "extraction-status=${status.name.lowercase(Locale.ROOT)}; recovery-assessment=unassessed"
 
 internal fun generatedCMakeBuildDefinition(sources: List<String>, profile: ReconstructionProfile): String {
         val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ")
