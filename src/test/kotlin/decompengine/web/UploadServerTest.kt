@@ -1202,6 +1202,128 @@ class UploadServerTest {
     }
 
     @Test
+    fun `retained-byte upload refusal preserves concurrent listing and status traffic`() {
+        val reservation = WebUploadStorage.RESERVATION_BYTES
+        val maximumRetainedBytes = reservation + 1024L * 1024
+        withServer(maximumRetainedStorageBytesForTests = maximumRetainedBytes) { server, root ->
+            val jobIds = (1..8).map { index ->
+                val response = upload(server, "retained-quota-$index.elf", elfFixture(), acceptJson = true)
+                assertEquals(201, response.status, response.body.decodeToString())
+                Json.parseToJsonElement(response.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            }
+            val retainedReport = root.resolve(jobIds.last()).resolve("reports").createDirectories()
+                .resolve("retained-quota-fixture.bin")
+            Files.write(retainedReport, ByteArray(2 * 1024 * 1024) { (it % 251).toByte() })
+            val retainedBefore = decompengine.jobs.RetainedStorageUsage.measure(root, maximumRetainedBytes).logicalBytes
+            assertTrue(retainedBefore > maximumRetainedBytes - reservation,
+                "Fixture must exceed the retained-byte admission headroom: used=$retainedBefore max=$maximumRetainedBytes")
+            assertTrue(Files.getFileStore(root).usableSpace >= WebUploadStorage.FREE_HEADROOM_BYTES + reservation,
+                "Fixture should reach the retained-byte limit, not the separate free-space limit")
+            val beforeBytes = recordedProjectBytes(root).mapValues { (_, bytes) -> sha256(bytes) }
+            val beforeEntries = Files.walk(root).use { paths -> paths.map { root.relativize(it).toString() }.toList().toSet() }
+
+            val firstReadReached = java.util.concurrent.CountDownLatch(1)
+            val releaseFirstRead = java.util.concurrent.CountDownLatch(1)
+            val storageMeasureEntered = java.util.concurrent.CountDownLatch(1)
+            val releaseStorageMeasure = java.util.concurrent.CountDownLatch(1)
+            val distinctRecords = java.util.concurrent.atomic.AtomicInteger()
+            val seenRecords = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+            server.listingReadObserver = { relative ->
+                if (relative.endsWith("/job.json")) {
+                    val number = if (seenRecords.add(relative)) distinctRecords.incrementAndGet() else distinctRecords.get()
+                    if (number == 1) {
+                        firstReadReached.countDown()
+                        check(releaseFirstRead.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                    }
+                    Thread.sleep(100)
+                }
+            }
+            server.uploadStorageMeasureObserver = {
+                storageMeasureEntered.countDown()
+                check(releaseStorageMeasure.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            }
+
+            val dashboardExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val requestExecutor = java.util.concurrent.Executors.newFixedThreadPool(5)
+            try {
+                val dashboard = dashboardExecutor.submit<Response> { request(server, "GET", "/") }
+                assertTrue(firstReadReached.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Dashboard did not reach the physical job metadata read")
+                assertFalse(dashboard.isDone, "Dashboard must remain inside the held metadata read")
+
+                val rejectedUpload = requestExecutor.submit<String> { rejectUploadBeforeBody(server) }
+                assertTrue(storageMeasureEntered.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Upload did not enter retained-storage measurement")
+                assertFalse(rejectedUpload.isDone, "Upload refusal should wait for its bounded storage measurement")
+                val statusFutures = (1..4).map {
+                    requestExecutor.submit<Long> {
+                        val startedAt = System.nanoTime()
+                        val response = request(server, "GET", "/api/jobs/${jobIds.last()}")
+                        val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+                        assertEquals(200, response.status, response.body.decodeToString())
+                        assertTrue(response.body.decodeToString().contains(jobIds.last()))
+                        assertFalse(dashboard.isDone, "Status response completed after the dashboard ended")
+                        assertFalse(rejectedUpload.isDone, "Status response must finish before upload admission is released")
+                        assertEquals(1, releaseStorageMeasure.count,
+                            "Status response must complete while retained-storage measurement remains held")
+                        elapsedMs
+                    }
+                }
+                val statusLatencies = statusFutures.map { it.get(3, java.util.concurrent.TimeUnit.SECONDS) }
+                assertEquals(0, storageMeasureEntered.count, "Upload must have entered storage admission before status requests")
+                assertFalse(rejectedUpload.isDone, "Status responses must finish while upload storage measurement is held")
+                assertEquals(1, releaseStorageMeasure.count, "Storage measurement must not be released before all status responses")
+                releaseStorageMeasure.countDown()
+                val uploadResponse = rejectedUpload.get(3, java.util.concurrent.TimeUnit.SECONDS)
+                assertTrue(uploadResponse.startsWith("HTTP/1.1 503 "), "Expected storage refusal, got: $uploadResponse")
+                assertTrue(uploadResponse.contains("UPLOAD_STORAGE"), uploadResponse)
+                assertTrue(statusLatencies.all { it < 2_000 }, "HTTP status reads blocked behind listing or quota admission: $statusLatencies")
+                assertEquals(1, distinctRecords.get(), "Status and quota work must complete while listing remains held on record one")
+                assertFalse(dashboard.isDone)
+                assertEquals(beforeEntries, Files.walk(root).use { paths -> paths.map { root.relativize(it).toString() }.toList().toSet() },
+                    "Denied storage admission must not leave an upload stage")
+                assertEquals(beforeBytes, recordedProjectBytes(root).mapValues { (_, bytes) -> sha256(bytes) },
+                    "Denied storage admission must preserve every retained byte")
+                println("issue-162-retained-quota-http-v1 refusal=503/UPLOAD_STORAGE request_body_bytes_sent=0 " +
+                    "status_responses=${statusLatencies.size} status_max_ms=${statusLatencies.maxOrNull()} " +
+                    "dashboard_read_held=true storage_measure_held_through_status=true " +
+                    "distinct_records=${distinctRecords.get()} retained_bytes=$retainedBefore")
+
+                releaseFirstRead.countDown()
+                val completedDashboard = dashboard.get(10, java.util.concurrent.TimeUnit.SECONDS)
+                assertEquals(200, completedDashboard.status)
+                val dashboardBody = completedDashboard.body.decodeToString()
+                jobIds.forEach { id -> assertTrue(dashboardBody.contains(id), "Completed dashboard omitted $id") }
+                assertTrue(distinctRecords.get() >= jobIds.size,
+                    "Expected metadata reads across every job; observed ${distinctRecords.get()}")
+
+                Files.delete(retainedReport)
+                val restoredBytes = decompengine.jobs.RetainedStorageUsage.measure(root, maximumRetainedBytes).logicalBytes
+                assertTrue(restoredBytes <= maximumRetainedBytes - reservation,
+                    "Removing the retained fixture must restore reservation capacity: used=$restoredBytes max=$maximumRetainedBytes")
+                val retry = upload(server, "after-retained-quota.elf", elfFixture(), acceptJson = true)
+                assertEquals(201, retry.status, retry.body.decodeToString())
+                assertEquals(jobIds.size + 1, decompengine.jobs.JobStore(root).jobIds().size)
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+                while (server.admissionSnapshot().workers != 0 && System.nanoTime() < deadline) Thread.sleep(10)
+                assertEquals(0, server.admissionSnapshot().workers)
+                assertEquals(0, server.admissionSnapshot().queued)
+                assertEquals(0, server.admissionSnapshot().responders)
+                println("issue-162-retained-quota-http-v1 listing=complete retained_capacity_restored=true retry=201 admission=empty")
+            } finally {
+                releaseFirstRead.countDown()
+                releaseStorageMeasure.countDown()
+                server.listingReadObserver = {}
+                server.uploadStorageMeasureObserver = {}
+                dashboardExecutor.shutdownNow()
+                requestExecutor.shutdownNow()
+                assertTrue(dashboardExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+                assertTrue(requestExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+            }
+        }
+    }
+
+    @Test
     fun `rejected admission can be retried without a stale job reservation`() {
         val reject = java.util.concurrent.atomic.AtomicBoolean(true)
         var calls = 0
@@ -2827,12 +2949,14 @@ class UploadServerTest {
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
         reconstructor: JobReconstructor = JobReconstructor { _, _ -> },
         profiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
+        maximumRetainedStorageBytesForTests: Long? = null,
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
         val parent = Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories()
         val dataDir = createTempDirectory(parent, "case-")
         val directExecutor = Executor { command -> command.run() }
         val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, sourceProfiles = profiles)
+        maximumRetainedStorageBytesForTests?.let(server::configureUploadStorageLimitForTests)
         server.start()
         try {
             block(server, dataDir)
@@ -2883,6 +3007,55 @@ class UploadServerTest {
             header("Cache-Control"), header("X-Request-ID"), header("Allow"), header("Content-Length"),
             header("Content-Disposition"), header("Content-Security-Policy"), header("X-Content-Type-Options"),
             header("Referrer-Policy"))
+    }
+
+    private fun rejectUploadBeforeBody(server: UploadServer): String {
+        val origin = "http://127.0.0.1:${server.serverPort}"
+        val credentials = sessions.getOrPut(server) { legacySessionHeaders(server) }
+        val boundary = "retained-quota-header-only"
+        val socket = java.net.Socket("127.0.0.1", server.serverPort).apply { soTimeout = 5_000 }
+        return socket.use {
+            val requestHeaders = ("POST /jobs HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:${server.serverPort}\r\n" +
+                "Origin: $origin\r\n" +
+                "Cookie: ${credentials.getValue("Cookie")}\r\n" +
+                "X-CSRF-Token: ${credentials.getValue("X-CSRF-Token")}\r\n" +
+                "Accept: application/json\r\n" +
+                "Content-Type: multipart/form-data; boundary=$boundary\r\n" +
+                "Content-Length: 1000000\r\n" +
+                "Connection: close\r\n\r\n").toByteArray()
+            it.getOutputStream().write(requestHeaders)
+            it.getOutputStream().flush()
+            // Keep the request body absent and the socket open while awaiting the response. A
+            // response here proves retained-byte admission rejected from headers alone.
+            val input = java.io.BufferedInputStream(it.getInputStream())
+            fun readLine(): String {
+                val line = java.io.ByteArrayOutputStream()
+                var previous = -1
+                while (true) {
+                    val next = input.read()
+                    check(next >= 0) { "HTTP response ended before its headers were complete" }
+                    if (previous == '\r'.code && next == '\n'.code) break
+                    if (previous >= 0) line.write(previous)
+                    previous = next
+                }
+                return line.toString(Charsets.ISO_8859_1)
+            }
+            val statusLine = readLine()
+            val responseHeaders = buildMap {
+                while (true) {
+                    val line = readLine()
+                    if (line.isEmpty()) break
+                    val separator = line.indexOf(':')
+                    if (separator > 0) put(line.substring(0, separator).lowercase(), line.substring(separator + 1).trim())
+                }
+            }
+            val contentLength = responseHeaders["content-length"]?.toIntOrNull()
+                ?: error("HTTP refusal omitted Content-Length: $statusLine")
+            val body = input.readNBytes(contentLength)
+            assertEquals(contentLength, body.size, "HTTP refusal body was truncated")
+            "$statusLine\r\n${body.decodeToString()}"
+        }
     }
 
     private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null, val contentLength: String? = null, val contentDisposition: String? = null, val contentSecurityPolicy: String? = null, val contentTypeOptions: String? = null, val referrerPolicy: String? = null)

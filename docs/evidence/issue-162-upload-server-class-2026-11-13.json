@@ -1,0 +1,23 @@
+{
+  "status": "passed",
+  "issue": 162,
+  "sourceCommit": "b25d007b0f6fbf88df59dcc3bd44bdd4b0ff652f",
+  "sourceParent": "1d1f20b60754394af6e3689fef8ed3d4281c6539",
+  "sourceTree": "28cc953653c2803d547e22ed553e972710a957be",
+  "command": "./gradlew --no-daemon -x verifyFrontendToolchain test --tests 'decompengine.web.UploadServerTest'",
+  "suite": "decompengine.web.UploadServerTest",
+  "test": "class-wide regression run",
+  "junitXml": "issue-162-upload-server-class-2026-11-13.xml",
+  "junitXmlSha256": "06de5b99cae26004c5b1718b72d1df1f457529071bf53af222c738174936c233",
+  "totals": {
+    "tests": 74,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "scope": "Class-wide regression result on the same committed source; includes 74 passing UploadServerTest cases and the strengthened retained-byte quota overlap test.",
+  "limitations": [
+    "Local test evidence only; no hosted exact-head CI or packaged deployment qualification.",
+    "Does not complete #162 or qualify workflow report-growth enforcement."
+  ]
+}

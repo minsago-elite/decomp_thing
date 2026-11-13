@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.UploadServerTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-13T01:55:13.059Z" hostname="whatsername" time="2.783">
+  <properties/>
+  <testcase name="retained-byte upload refusal preserves concurrent listing and status traffic()" classname="decompengine.web.UploadServerTest" time="2.566"/>
+  <system-out><![CDATA[issue-162-retained-quota-http-v1 refusal=503/UPLOAD_STORAGE request_body_bytes_sent=0 status_responses=4 status_max_ms=36 dashboard_read_held=true storage_measure_held_through_status=true distinct_records=1 retained_bytes=2103310
+issue-162-retained-quota-http-v1 listing=complete retained_capacity_restored=true retry=201 admission=empty
+web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"retained-byte upload refusal preserves concurrent listing and status traffic()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
+]]></system-out>
+  <system-err><![CDATA[web-http-failure request_id=9e385338-689a-4682-aef7-96e2e99b04af status=503 code=UPLOAD_STORAGE
+]]></system-err>
+</testsuite>
