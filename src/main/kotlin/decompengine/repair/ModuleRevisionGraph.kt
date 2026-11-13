@@ -962,6 +962,7 @@ internal class ModuleRepairIndex private constructor(
     }
 
     private fun projectEvidenceFacts(selectedModules: List<String>, deferredModules: List<String>): RepairEvidenceFacts {
+        val selectedModuleIds = selectedModules.toHashSet()
         val selectedEntityIds = selectedModules.flatMap { modules[it]?.entityIds.orEmpty() }.toSortedSet()
         val selectedFactIds = selectedEntityIds + selectedModules.map { "module:$it" }
         val projectedEntities = evidenceFacts.entities.filter { it.id in selectedFactIds }
@@ -976,7 +977,7 @@ internal class ModuleRepairIndex private constructor(
         val projectedDefinitionIds = projectedDefinitions.asSequence().mapTo(hashSetOf()) { it.entityId }
         val projectedDeclarationIds = projectedDeclarations.asSequence().mapTo(hashSetOf()) { it.entityId }
         val uncertainty = buildList {
-            addAll(evidenceFacts.uncertainties.filter { it.subject in selectedModules || it.subject in selectedEntityIds })
+            addAll(evidenceFacts.uncertainties.filter { it.subject in selectedModuleIds || it.subject in selectedEntityIds })
             if (selectedModules.any { id -> "module:$id" !in projectedModuleFactIds }) {
                 selectedModules.filter { id -> "module:$id" !in projectedModuleFactIds }.forEach { id ->
                     add(RepairEvidenceUncertainty(id, "module-evidence", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED))
