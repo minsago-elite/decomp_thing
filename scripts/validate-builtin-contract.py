@@ -24,7 +24,7 @@ EXPECTED = {
     "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
     "decompengine.repair.RepairEvidenceIndexTest": 4,
     "decompengine.repair.ModuleRevisionGraphTest": 168,
-    "decompengine.project.ProfiledGeneratedCRepairIndexTest": 9,
+    "decompengine.project.ProfiledGeneratedCRepairIndexTest": 10,
 }
 
 
@@ -65,7 +65,7 @@ def main():
     if not source_clean:
         failures.append("Source worktree is not clean")
     verdict = {
-        "schemaVersion": 1, "corpus": "builtin-core-contract-v13",
+        "schemaVersion": 1, "corpus": "builtin-core-contract-v14",
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "requiredHost": True, "sourceClean": source_clean, "forcedTestExecution": True, "gradleExitCode": result.returncode,
         "passed": result.returncode == 0 and not failures,

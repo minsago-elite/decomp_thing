@@ -157,6 +157,41 @@ class ProfiledGeneratedCRepairIndexTest {
     }
 
     @Test
+    fun `generated repair evidence snapshot is identical across relocated equivalent projects`() {
+        val descriptor = profile(GeneratedCMakeReconstructionProfile.descriptor)
+        val repairProfile = GeneratedCRepairIndexProfile.forProfile(descriptor)
+        val model = RecoveredProgramModel(
+            inputSha256 = "d".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    "fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
+                    decompiledC = "int alpha_run(void) { return beta_read() + global_state; }",
+                    calls = setOf("fn_beta"), referencedGlobals = setOf("global_state"),
+                ),
+                RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)", decompiledC = "int beta_read(void) { return 1; }"),
+            ),
+            globals = listOf(RecoveredGlobal("global_state", "state", 0x3000UL, "int", initializer = "1")),
+            types = listOf(RecoveredType("type_state", "struct state;", 0x3000UL)),
+        )
+
+        fun contextJson(): String {
+            val project = createTempDirectory("relocated-repair-evidence-")
+            SourceTreeGenerator.generate(model, project, profile = descriptor)
+            return ModuleRevisionGraph.open(project, repairProfile).use { graph ->
+                val implementation = "src/modules/alpha.c"
+                val context = graph.selectContext("compile", "$implementation:1: compiler diagnostic")
+                graph.requireContextBinding(context)
+                context.toContextJson()
+            }
+        }
+
+        val first = contextJson()
+        val relocated = contextJson()
+
+        assertEquals(first, relocated)
+    }
+
+    @Test
     fun `repair index admits schema three bytes and historical schemas without weakening closed fields`() {
         val window = ReferencedDataByteWindow(0x2000UL, 8,
             ReferencedDataByteOrigin(0x1000UL, 0x2000UL, 0, "pcode_direct_read"), "available",
