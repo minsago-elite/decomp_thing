@@ -422,6 +422,8 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
       await ready(tab, `!!document.querySelector('ul[aria-label="Uploaded jobs"] a[href="/nested/jobs/${fixture.jobs[0].jobId}"]')`,
         `dashboard fixture job visible for retention sample ${slot + 1}`);
       const dashboardListing = await dashboardListingTracker.waitForCompletion(dashboardListingObservation);
+      await ready(tab, `(() => { const button = [...document.querySelectorAll('button')].find(item => item.textContent === 'Refresh jobs'); return !!button && !button.disabled; })()`,
+        `dashboard listing settled before retention sample ${slot + 1}`);
       const drainStarted = Date.now();
       while (openStreams.size > 0 && Date.now() - drainStarted < LIMITS.drainSeconds * 1000) await delay(100);
       const streamDrainMs = Date.now() - drainStarted;
