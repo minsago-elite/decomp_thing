@@ -145,7 +145,7 @@ test('cross-engine runner call site records actual page errors and retains the o
   created.addInitScript = async () => undefined;
   const open = body.indexOf('{', body.indexOf(')'));
   const make = runInNewContext(`(async function(options = {}) { ${body.slice(open + 1, body.lastIndexOf('}'))} })`, {
-    browser: { newContext: async () => created }, attachExceptionContext,
+    browser: { newContext: async () => created }, attachExceptionContext, exceptionContexts: [],
   });
   const { record } = await make();
   const page = new EventEmitter();
