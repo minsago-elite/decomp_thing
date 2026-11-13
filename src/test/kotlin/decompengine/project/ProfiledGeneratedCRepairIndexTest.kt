@@ -235,7 +235,7 @@ class ProfiledGeneratedCRepairIndexTest {
     }
 
     @Test
-    fun `missing renderer generated entrypoint remains expected target source with uncertainty`() {
+    fun `missing renderer target sources remain expected with availability uncertainty`() {
         val project = createTempDirectory("repair-target-missing-generated-entrypoint-")
         SourceTreeGenerator.generate(RecoveredProgramModel(
             inputSha256 = "9".repeat(64),

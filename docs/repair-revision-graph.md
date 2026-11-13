@@ -100,9 +100,10 @@ origins; this allows an authorized build-file candidate to retain the same stati
 while changing revisions. When paired plan/model evidence is unavailable, target membership remains
 explicitly uncertain. The generated entrypoint participates when the admitted model has no
 `main` function and the renderer therefore emits it, even if the expected path is missing from the
-current source snapshot; that absence is separately reported as `EVIDENCE_NOT_CAPTURED` for
-`build-target-source-availability`. This distinguishes renderer-expected target membership from
-physical presence in the indexed working tree. Module-plan and program-model document roots remain
+current source snapshot; that expected path remains in target membership and is separately reported
+as `EVIDENCE_NOT_CAPTURED` for `build-target-source-availability`. Plan-owned module source paths
+must still be present as declared discovered inputs. This distinguishes renderer-expected target
+membership from physical presence in the indexed working tree. Module-plan and program-model document roots remain
 committed even when a valid document contains no module/entity records, so empty evidence cannot be
 confused with absent evidence during target projection.
 The focused built-in contract checkpoint is retained in
