@@ -9,6 +9,20 @@
   "passed": true,
   "realProviderQualified": false,
   "workflowReleaseQualified": false,
+  "qualification": {
+    "scope": "local built-in core contract for the revision-bound evidence index",
+    "sourceTreeOid": "2fc163ca50328c5bb83ef960ee9274a08ba176d6",
+    "workingDirectory": "repository root",
+    "command": "GRADLE_OPTS='-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx4096m' PATH=\"$PWD/build/frontend-node-24.20.0-npm-11.19.0.BpJuvR/node/bin:$PATH\" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=no /usr/bin/python3.14 scripts/validate-builtin-contract.py",
+    "environment": {
+      "os": "Linux 7.2.12-gentoo-dist-hardened x86_64",
+      "java": "OpenJDK 21.0.12.1 LTS",
+      "gradle": "9.6.1",
+      "python": "3.14.9",
+      "node": "24.20.0",
+      "npm": "11.19.0"
+    }
+  },
   "suites": [
     {
       "suite": "decompengine.agent.AgentExecutionContractTest",
