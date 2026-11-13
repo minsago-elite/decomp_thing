@@ -22,6 +22,7 @@ EXPECTED = {
     "decompengine.builtin.BuiltinInvocationArchiveTest": 8,
     "decompengine.builtin.BuiltinTerminalToolsTest": 7,
     "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
+    "decompengine.repair.RepairEvidenceIndexTest": 4,
 }
 
 
@@ -34,7 +35,7 @@ def main():
     environment = dict(os.environ, DECOMP_REQUIRE_LIVE_ACP_CONTRACT="1")
     result = subprocess.run(
         [str(ROOT / "gradlew"), "--no-daemon", "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
-         "--tests", "decompengine.agent.*", "--console=plain"], cwd=ROOT, env=environment,
+         "--tests", "decompengine.agent.*", "--tests", "decompengine.repair.RepairEvidenceIndexTest", "--console=plain"], cwd=ROOT, env=environment,
     )
     suites, failures = [], []
     for name, expected in EXPECTED.items():
@@ -60,7 +61,7 @@ def main():
     if not source_clean:
         failures.append("Source worktree is not clean")
     verdict = {
-        "schemaVersion": 1, "corpus": "builtin-core-contract-v9",
+        "schemaVersion": 1, "corpus": "builtin-core-contract-v11",
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "requiredHost": True, "sourceClean": source_clean, "forcedTestExecution": True, "gradleExitCode": result.returncode,
         "passed": result.returncode == 0 and not failures,

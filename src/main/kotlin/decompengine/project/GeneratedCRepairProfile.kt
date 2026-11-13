@@ -6,6 +6,17 @@ import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairIndexLayout
 import decompengine.repair.RepairIndexProfile
 import decompengine.repair.RepairEntityEvidence
+import decompengine.repair.RepairEntityFact
+import decompengine.repair.RepairEvidenceFacts
+import decompengine.repair.RepairEvidenceOrigin
+import decompengine.repair.RepairEntityRelation
+import decompengine.repair.RepairEvidenceEntityKind
+import decompengine.repair.RepairEvidenceRelationKind
+import decompengine.repair.RepairDeclarationEvidence
+import decompengine.repair.RepairDefinitionEvidence
+import decompengine.repair.RepairBuildEvidence
+import decompengine.repair.RepairEvidenceUncertainty
+import decompengine.repair.RepairEvidenceUncertaintyReason
 import decompengine.repair.RepairFailureOwnership
 import decompengine.repair.RepairModuleEvidence
 import decompengine.repair.RepairResourceBudget
@@ -66,7 +77,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     override fun configurationSha256(): String = configurationSha256(RepairResourceBudget())
     override fun configurationSha256(budget: RepairResourceBudget): String = sha256(
-        ("generated-c-repair-index-v5\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
+        ("generated-c-repair-index-v6\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
             .toByteArray(Charsets.UTF_8),
     )
 
@@ -91,6 +102,23 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         }
         return resolveLayout(projectRoot, budget, sourcePaths, readSource).also {
             require(it.editablePaths == editablePaths)
+        }
+    }
+
+    override fun verifyEvidenceUnchanged(projectRoot: Path, budget: RepairResourceBudget, layout: RepairIndexLayout) {
+        val observed = readIndexEvidence(projectRoot, layout.sourcePaths.toSet(), budget).facts
+        val stored = layout.evidenceFacts
+        val documentRoles = setOf("module-plan", "program-model")
+        val expected = RepairEvidenceFacts(
+            origins = stored.origins.filter { it.documentRole in documentRoles },
+            entities = stored.entities.filter { it.origin.documentRole in documentRoles },
+            relations = stored.relations.filter { it.origin.documentRole in documentRoles },
+            declarations = stored.declarations.filter { it.origin.documentRole in documentRoles },
+            definitions = stored.definitions.filter { it.origin.documentRole in documentRoles },
+            uncertainties = stored.uncertainties.filter { it.category != "build-target" },
+        )
+        require(observed == expected) {
+            "generated C plan/model evidence changed while dependency evidence was indexed"
         }
     }
 
@@ -170,6 +198,23 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             behaviorRootEntityIds = evidence.functions.filter {
                 it.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
             }.map { it.id }.sorted(),
+            evidenceFacts = RepairEvidenceFacts(
+                origins = evidence.facts.origins,
+                entities = evidence.facts.entities,
+                relations = evidence.facts.relations,
+                declarations = evidence.facts.declarations,
+                definitions = evidence.facts.definitions,
+                buildEvidence = evidence.facts.buildEvidence + RepairBuildEvidence(
+                    artifactPath = buildDefinition,
+                    origin = null,
+                    explicitTargets = emptyList(),
+                ),
+                uncertainties = evidence.facts.uncertainties + RepairEvidenceUncertainty(
+                    buildDefinition,
+                    "build-target",
+                    RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED,
+                ),
+            ),
         )
     }
 
@@ -238,6 +283,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     private data class PlannedModule(
         val id: String,
+        val sourceIndex: Int,
         val sourcePath: String,
         val headerPath: String,
         val functionIds: List<String>,
@@ -247,16 +293,21 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
     private data class ProgramFunction(
         val id: String,
         val name: String,
+        val sourceIndex: Int,
+        val status: String,
+        val prototype: String,
+        val hasBody: Boolean,
         val calls: List<String>,
         val referencedGlobals: List<String>,
     )
-    private data class ProgramGlobal(val id: String, val name: String)
-    private data class ProgramType(val id: String)
+    private data class ProgramGlobal(val id: String, val name: String, val sourceIndex: Int, val status: String, val type: String, val hasInitializer: Boolean)
+    private data class ProgramType(val id: String, val sourceIndex: Int, val status: String, val declaration: String)
     private data class GeneratedCIndexEvidence(
         val modules: List<PlannedModule>,
         val functions: List<ProgramFunction>,
         val globals: List<ProgramGlobal>,
         val types: List<ProgramType>,
+        val facts: RepairEvidenceFacts,
     )
 
     private fun readIndexEvidence(
@@ -270,7 +321,13 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         require((planBytes == null) == (modelBytes == null)) {
             "generated C repair indexing requires module-plan and program-model evidence together"
         }
-        if (planBytes == null) return GeneratedCIndexEvidence(emptyList(), emptyList(), emptyList(), emptyList())
+        if (planBytes == null) return GeneratedCIndexEvidence(
+            emptyList(), emptyList(), emptyList(), emptyList(),
+            RepairEvidenceFacts(uncertainties = listOf(
+                RepairEvidenceUncertainty("program-model", "semantic-index", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED),
+                RepairEvidenceUncertainty("module-plan", "ownership", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED),
+            )),
+        )
         val planRoot = Json.parseToJsonElement(decodeGeneratedCText(planBytes, planRelative)).jsonObject
         planRoot.requireExactKeys(PLAN_ROOT_KEYS, planRelative)
         val planSchemaVersion = planRoot.requiredInt("schemaVersion", planRelative)
@@ -422,7 +479,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             type.requireExtractionStatus()
         }
 
-        val modules = moduleElements.map { element ->
+        val modules = moduleElements.mapIndexed { sourceIndex, element ->
             val module = element.jsonObject
             val functionIds = module.requiredArray("functionIds", planRelative)
                 .boundedUniqueStrings(planRelative, identifierLimit, "generated C module function IDs")
@@ -436,6 +493,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             }
             PlannedModule(
                 id = module.requiredBoundedString("id", planRelative, identifierLimit),
+                sourceIndex = sourceIndex,
                 sourcePath = normalizedProfilePath(
                     module.requiredBoundedString("sourcePath", planRelative, identifierLimit),
                 ),
@@ -472,11 +530,19 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                 "generated C dependency cycle references an unknown module"
             }
         }
-        val functions = functionElements.map { element ->
+        val functions = functionElements.mapIndexed { sourceIndex, element ->
             val function = element.jsonObject
             ProgramFunction(
                 id = function.requiredBoundedString("id", modelRelative, identifierLimit),
                 name = function.requiredBoundedString("name", modelRelative, identifierLimit),
+                sourceIndex = sourceIndex,
+                status = function.requiredBoundedString(
+                    if (modelSchemaVersion == 1) "status" else "extractionStatus",
+                    modelRelative,
+                    identifierLimit,
+                ),
+                prototype = function.requiredBoundedString("prototype", modelRelative, textLimit),
+                hasBody = function["decompiledC"] !is JsonNull,
                 calls = function.requiredArray("calls", modelRelative)
                     .boundedUniqueStrings(modelRelative, identifierLimit, "generated C function calls"),
                 referencedGlobals = function.requiredArray("referencedGlobals", modelRelative)
@@ -485,17 +551,34 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         }.also { parsed ->
             requireUniqueValues(parsed.map { it.id }, "generated C function IDs")
         }
-        val globals = globalElements.map { element ->
+        val globals = globalElements.mapIndexed { sourceIndex, element ->
             val global = element.jsonObject
             ProgramGlobal(
-                global.requiredBoundedString("id", modelRelative, identifierLimit),
-                global.requiredBoundedString("name", modelRelative, identifierLimit),
+                id = global.requiredBoundedString("id", modelRelative, identifierLimit),
+                name = global.requiredBoundedString("name", modelRelative, identifierLimit),
+                sourceIndex = sourceIndex,
+                status = global.requiredBoundedString(
+                    if (modelSchemaVersion == 1) "status" else "extractionStatus",
+                    modelRelative,
+                    identifierLimit,
+                ),
+                type = global.requiredBoundedString("type", modelRelative, textLimit),
+                hasInitializer = global["initializer"] !is JsonNull,
             )
         }.also { parsed ->
             requireUniqueValues(parsed.map { it.id }, "generated C global IDs")
         }
-        val types = typeElements.map { element ->
-            ProgramType(element.jsonObject.requiredBoundedString("id", modelRelative, identifierLimit))
+        val types = typeElements.mapIndexed { sourceIndex, element ->
+            ProgramType(
+                id = element.jsonObject.requiredBoundedString("id", modelRelative, identifierLimit),
+                sourceIndex = sourceIndex,
+                status = element.jsonObject.requiredBoundedString(
+                    if (modelSchemaVersion == 1) "status" else "extractionStatus",
+                    modelRelative,
+                    identifierLimit,
+                ),
+                declaration = element.jsonObject.requiredBoundedString("declaration", modelRelative, textLimit),
+            )
         }.also { parsed ->
             requireUniqueValues(parsed.map { it.id }, "generated C type IDs")
         }
@@ -507,12 +590,70 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                 "generated C function references an unknown global"
             }
         }
-        return GeneratedCIndexEvidence(
-            modules.sortedBy { it.id },
-            functions.sortedBy { it.id },
-            globals.sortedBy { it.id },
-            if (planSchemaVersion == PLAN_SCHEMA_VERSION) types.sortedBy { it.id } else emptyList(),
-        )
+        val sortedModules = modules.sortedBy { it.id }
+        val sortedFunctions = functions.sortedBy { it.id }
+        val sortedGlobals = globals.sortedBy { it.id }
+        val sortedTypes = if (planSchemaVersion == PLAN_SCHEMA_VERSION) types.sortedBy { it.id } else emptyList()
+        val planHash = sha256(planBytes)
+        val modelDocument = requireNotNull(modelBytes)
+        val modelHash = sha256(modelDocument)
+        val origins = mutableListOf<RepairEvidenceOrigin>()
+        val entities = mutableListOf<RepairEntityFact>()
+        val relations = mutableListOf<RepairEntityRelation>()
+        val declarations = mutableListOf<RepairDeclarationEvidence>()
+        val definitions = mutableListOf<RepairDefinitionEvidence>()
+        val uncertainty = mutableListOf<RepairEvidenceUncertainty>()
+        sortedModules.forEach { module ->
+            val origin = RepairEvidenceOrigin("module-plan", planHash, planSchemaVersion, "/modules/${module.sourceIndex}")
+            origins += origin
+            entities += RepairEntityFact("module:${module.id}", RepairEvidenceEntityKind.MODULE, null, origin)
+        }
+        sortedFunctions.forEach { function ->
+            val origin = RepairEvidenceOrigin("program-model", modelHash, modelSchemaVersion, "/functions/${function.sourceIndex}")
+            val prototypeOrigin = origin.copy(locator = "${origin.locator}/prototype")
+            val bodyOrigin = origin.copy(locator = "${origin.locator}/decompiledC")
+            val callsOrigin = origin.copy(locator = "${origin.locator}/calls")
+            val globalsOrigin = origin.copy(locator = "${origin.locator}/referencedGlobals")
+            origins += origin
+            origins += listOf(prototypeOrigin, bodyOrigin, callsOrigin, globalsOrigin)
+            val status = function.status
+            entities += RepairEntityFact(function.id, RepairEvidenceEntityKind.FUNCTION, status, origin)
+            declarations += RepairDeclarationEvidence(function.id, "recovered-prototype", prototypeOrigin)
+            if (function.hasBody) definitions += RepairDefinitionEvidence(function.id, "recovered-body", bodyOrigin)
+            else uncertainty += RepairEvidenceUncertainty(function.id, "definition", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED, bodyOrigin)
+            uncertainty += RepairEvidenceUncertainty(function.id, "source-location", RepairEvidenceUncertaintyReason.SOURCE_LOCATION_UNAVAILABLE, origin)
+            uncertainty += RepairEvidenceUncertainty(function.id, "recovery", RepairEvidenceUncertaintyReason.RECOVERY_UNASSESSED, origin)
+            function.calls.forEach { target -> relations += RepairEntityRelation(RepairEvidenceRelationKind.CALLS, function.id, target, callsOrigin) }
+            function.referencedGlobals.forEach { target -> relations += RepairEntityRelation(RepairEvidenceRelationKind.REFERENCES_GLOBAL, function.id, target, globalsOrigin) }
+        }
+        sortedGlobals.forEach { global ->
+            val origin = RepairEvidenceOrigin("program-model", modelHash, modelSchemaVersion, "/globals/${global.sourceIndex}")
+            val typeOrigin = origin.copy(locator = "${origin.locator}/type")
+            val initializerOrigin = origin.copy(locator = "${origin.locator}/initializer")
+            origins += origin
+            origins += listOf(typeOrigin, initializerOrigin)
+            entities += RepairEntityFact(global.id, RepairEvidenceEntityKind.GLOBAL, global.status, origin)
+            declarations += RepairDeclarationEvidence(global.id, "global-type", typeOrigin)
+            if (global.hasInitializer) definitions += RepairDefinitionEvidence(global.id, "recovered-initializer", initializerOrigin)
+            else uncertainty += RepairEvidenceUncertainty(global.id, "definition", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED, initializerOrigin)
+            uncertainty += RepairEvidenceUncertainty(global.id, "source-location", RepairEvidenceUncertaintyReason.SOURCE_LOCATION_UNAVAILABLE, origin)
+            uncertainty += RepairEvidenceUncertainty(global.id, "recovery", RepairEvidenceUncertaintyReason.RECOVERY_UNASSESSED, origin)
+        }
+        sortedTypes.forEach { type ->
+            val origin = RepairEvidenceOrigin("program-model", modelHash, modelSchemaVersion, "/types/${type.sourceIndex}")
+            val declarationOrigin = origin.copy(locator = "${origin.locator}/declaration")
+            val sourceAddressOrigin = origin.copy(locator = "${origin.locator}/sourceAddress")
+            origins += origin
+            origins += listOf(declarationOrigin, sourceAddressOrigin)
+            entities += RepairEntityFact(type.id, RepairEvidenceEntityKind.TYPE, type.status, origin)
+            declarations += RepairDeclarationEvidence(type.id, "type-declaration", declarationOrigin)
+            definitions += RepairDefinitionEvidence(type.id, "recovered-type-definition", declarationOrigin)
+            // A decompiler address is not an authenticated location in the current source tree.
+            uncertainty += RepairEvidenceUncertainty(type.id, "source-location", RepairEvidenceUncertaintyReason.SOURCE_LOCATION_UNAVAILABLE, sourceAddressOrigin)
+            uncertainty += RepairEvidenceUncertainty(type.id, "recovery", RepairEvidenceUncertaintyReason.RECOVERY_UNASSESSED, origin)
+        }
+        val facts = RepairEvidenceFacts(origins, entities, relations, declarations, definitions, uncertainties = uncertainty)
+        return GeneratedCIndexEvidence(sortedModules, sortedFunctions, sortedGlobals, sortedTypes, facts)
     }
 
     private fun chargeBoundedCount(current: Long, addition: Int, limit: Long, subject: String): Long {

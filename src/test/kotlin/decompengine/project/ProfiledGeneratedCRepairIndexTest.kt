@@ -5,13 +5,20 @@ import decompengine.repair.open
 import decompengine.repair.ModuleRepairIndex
 import decompengine.repair.ModuleRevisionGraph
 import decompengine.repair.RepairBudgetExceededException
+import decompengine.repair.RepairIndexLayout
+import decompengine.repair.RepairIndexProfile
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.RepairEvidenceEntityKind
+import decompengine.repair.RepairEvidenceRelationKind
+import decompengine.repair.RepairEvidenceUncertaintyReason
+import java.security.MessageDigest
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readText
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
+import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -40,6 +47,93 @@ class ProfiledGeneratedCRepairIndexTest {
                 if (it.id in setOf("shared-interface", "module-interface")) it.roles - ProjectFileRole.EDITABLE else it.roles, it.contentKind)
         }), base.budgets, base.adapterConfiguration,
     )
+
+    @Test
+    fun `plan or model evidence changing during index capture is refused`() {
+        val descriptor = profile(GeneratedCMakeReconstructionProfile.descriptor)
+        val delegate = GeneratedCRepairIndexProfile.forProfile(descriptor)
+        val project = createTempDirectory("repair-evidence-capture-race-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "f".repeat(64),
+            functions = listOf(RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)")),
+        ), project, profile = descriptor)
+        val modelPath = project.resolve("reports/inputs/model.json")
+        val profileWithMutation = object : RepairIndexProfile by delegate {
+            override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
+                val admitted = delegate.resolve(projectRoot, budget)
+                modelPath.writeBytes(modelPath.readBytes() + byteArrayOf(' '.code.toByte()))
+                return admitted
+            }
+
+            override fun verifyEvidenceUnchanged(projectRoot: Path, budget: RepairResourceBudget, layout: RepairIndexLayout) {
+                delegate.verifyEvidenceUnchanged(projectRoot, budget, layout)
+            }
+        }
+
+        val refusal = assertFailsWith<IllegalArgumentException> {
+            ModuleRepairIndex.load(project, profileWithMutation)
+        }
+
+        assertTrue(refusal.message.orEmpty().contains("plan/model evidence changed"))
+    }
+
+    @Test
+    fun `generated semantic evidence preserves origins relationships and uncertainty without source claims`() {
+        val project = createTempDirectory("repair-semantic-evidence-projection-")
+        val model = RecoveredProgramModel(
+            schemaVersion = 4,
+            inputSha256 = "e".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    "fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
+                    decompiledC = "int alpha_run(void) { return beta_read() + global_state; }",
+                    calls = setOf("fn_beta"), referencedGlobals = setOf("global_state"),
+                ),
+                RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)", decompiledC = "int beta_read(void) { return 1; }"),
+            ),
+            globals = listOf(RecoveredGlobal("global_state", "state", 0x3000UL, "int", initializer = "1")),
+            types = listOf(RecoveredType("type_state", "struct state { int value; };", 0x3000UL)),
+        )
+        SourceTreeGenerator.generate(model, project)
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val context = index.select("compile", "src/modules/alpha.c:1: compiler diagnostic")
+        val facts = context.evidenceFacts
+        val modelDigest = MessageDigest.getInstance("SHA-256")
+            .digest(project.resolve("reports/program_model.json").readBytes())
+            .joinToString("") { "%02x".format(it) }
+        val planDigest = MessageDigest.getInstance("SHA-256")
+            .digest(project.resolve("reports/module_plan.json").readBytes())
+            .joinToString("") { "%02x".format(it) }
+
+        assertTrue(facts.entities.any { it.id == "module:alpha" && it.kind == RepairEvidenceEntityKind.MODULE })
+        assertTrue(facts.entities.any { it.id == "fn_alpha" && it.kind == RepairEvidenceEntityKind.FUNCTION })
+        assertTrue(facts.entities.any { it.id == "global_state" && it.kind == RepairEvidenceEntityKind.GLOBAL })
+        assertTrue(facts.entities.any { it.id == "type_state" && it.kind == RepairEvidenceEntityKind.TYPE })
+        assertTrue(facts.relations.any {
+            it.kind == RepairEvidenceRelationKind.CALLS && it.sourceEntityId == "fn_alpha" && it.targetEntityId == "fn_beta"
+        })
+        assertTrue(facts.relations.any {
+            it.kind == RepairEvidenceRelationKind.REFERENCES_GLOBAL && it.sourceEntityId == "fn_alpha" && it.targetEntityId == "global_state"
+        })
+        assertTrue(facts.declarations.any { it.entityId == "fn_alpha" && it.form == "recovered-prototype" })
+        assertTrue(facts.declarations.any { it.entityId == "global_state" && it.form == "global-type" })
+        assertTrue(facts.declarations.any { it.entityId == "type_state" && it.form == "type-declaration" })
+        assertTrue(facts.definitions.any { it.entityId == "fn_alpha" && it.form == "recovered-body" })
+        assertTrue(facts.definitions.any { it.entityId == "global_state" && it.form == "recovered-initializer" })
+        assertTrue(facts.definitions.any { it.entityId == "type_state" && it.form == "recovered-type-definition" })
+        assertTrue(facts.origins.any { it.documentRole == "program-model" && it.contentSha256 == modelDigest })
+        assertTrue(facts.origins.any { it.documentRole == "module-plan" && it.contentSha256 == planDigest })
+        assertTrue(facts.uncertainties.any {
+            it.subject == "fn_alpha" && it.reason == RepairEvidenceUncertaintyReason.SOURCE_LOCATION_UNAVAILABLE
+        })
+        assertTrue(facts.uncertainties.any {
+            it.subject == "fn_alpha" && it.reason == RepairEvidenceUncertaintyReason.RECOVERY_UNASSESSED
+        })
+        assertTrue(facts.uncertainties.any {
+            it.subject == "Makefile" && it.reason == RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED
+        })
+        assertTrue(facts.buildEvidence.any { it.artifactPath == "Makefile" && it.explicitTargets.isEmpty() })
+    }
 
     @Test
     fun `repair index admits schema three bytes and historical schemas without weakening closed fields`() {

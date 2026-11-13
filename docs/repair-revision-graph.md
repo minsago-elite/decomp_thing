@@ -15,10 +15,11 @@ diagnostics. `RepairValidationStrategy` similarly keeps build commands and rebui
 outside the repair loop. GCC is one useful C benchmark, not an architectural dependency.
 
 The generated-C repair configuration fingerprint is SHA-256 over these UTF-8 bytes:
-`generated-c-repair-index-v3\n`, the canonical SHA-256 of
-the selected reconstruction descriptor, and a final newline. The prefix versions
-repair-policy interpretation independently of the descriptor's layout, roles, build configuration
-and budgets. Repair resource budgets retain their separate graph/recovery binding.
+`generated-c-repair-index-v6\n`, the canonical SHA-256 of the selected reconstruction descriptor,
+a newline, the canonical repair resource-budget JSON, and a final newline. The prefix versions
+repair-policy interpretation independently of the descriptor's layout, roles, and build
+configuration. The resolved plan/model semantic facts are committed separately through the layout
+and index digests, so changing report contents cannot hide behind an unchanged descriptor identity.
 
 This intentionally changes both the historical ID-only fingerprint and the v2 policy fingerprint.
 Existing graphs carrying either prior identity are rejected before pending recovery writes;
@@ -79,6 +80,34 @@ through a streaming byte-capped digest. Budget-aware profiles must apply the sam
 configuration fingerprinting. A candidate that
 changes dependency evidence is restored and rejected; dependency migrations require a separately
 reviewed graph migration.
+
+The v6 layout commitment includes a deterministic semantic evidence index. Each origin identifies a
+captured document role, its exact content digest, schema version, and field locator; it never stores
+the host path. Program-model functions, globals, and types remain recovered evidence. Their prototypes,
+bodies, initializers, and declarations are referenced by document fields, not reclassified as facts
+about the current C source. Calls and global references retain separate relation kinds. Module
+ownership is still derived from the admitted module plan and the existing graph layout, and graph
+admission checks that semantic entity IDs exactly match that ownership inventory.
+
+Context selection uses the existing ownership, dependency, readable-path, writable-path, and budget
+decisions. Its v1 evidence snapshot binds the selected evidence to the profile and reconstruction
+descriptor, structural index and source basis, working revision, graph head/status, fully accepted
+head when one exists, and retained regression corpus. Deferred context and unavailable source
+locations, definitions, build targets, recovery assessment, or authenticated diagnostic attribution
+are represented as subject-specific uncertainty, and omitted static entities, relations, declarations,
+definitions, and uncertainties are counted by category. A caller-supplied diagnostic hint is hashed as a
+hint; the snapshot records its subject source revision, selected modules, matched in-tree paths, and
+attribution basis without retaining the text or treating it as a compiler receipt. For provisional
+work, the hint subject is the provisional working revision; profile-derived ownership separately
+retains the accepted index-basis revision that authenticated that ownership. Retained behavior
+cases identify their input and corpus, but do not claim that the case ran or passed. This projection
+is descriptive and grants no read/write or acceptance authority.
+
+The profile re-reads the admitted plan/model pair before index publication and requires the semantic
+commitment to match. A later evidence change cannot reuse an old recovery binding. Context snapshots
+are likewise rechecked against the current graph and corpus before staging. The canonical JSON
+projection is subject to both the configured index/request budgets and the strict JSON layer's
+64 MiB hard byte ceiling; exceeding either fails closed without truncation.
 
 Immediately before `headId` is persisted, acceptance rebuilds the complete index from the current
 profile, source tree, generic resolved evidence, and profile-specific diagnostic evidence and requires
