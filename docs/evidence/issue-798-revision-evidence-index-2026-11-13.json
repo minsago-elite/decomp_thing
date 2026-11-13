@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "corpus": "builtin-core-contract-v16",
-  "commit": "25b9dcc59b9706834ce5fbc157f7e061d0fcab4c",
+  "corpus": "builtin-core-contract-v17",
+  "commit": "ea6c286d5d2eefda516b78afcfbceadd3bc36f4d",
   "requiredHost": true,
   "sourceClean": true,
   "forcedTestExecution": true,
@@ -16,7 +16,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "2124dd54ed5052fc39527f6c3ce35d063e1aba8e931a44116b090e371d793857"
+      "xmlSha256": "142abf7734e40292aa0d3de97b83c7a590f04142e0f3f7e68acfe44a86ad0a50"
     },
     {
       "suite": "decompengine.builtin.BuiltinAgentHarnessTest",
@@ -24,7 +24,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "7068afd0fae2e24df845feeb6b4ac18e5b714eb55f6f1357b0b5ccc0237f8498"
+      "xmlSha256": "00ff9a069017f829da4f6392fbe30381d391386ba8ab6382f4351e26c029175c"
     },
     {
       "suite": "decompengine.builtin.BuiltinFilesystemToolsTest",
@@ -32,7 +32,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "b8f2f24bee2a64022ba65c81fecde09c542b4931d9a258e22cfad33da46b526f"
+      "xmlSha256": "1925a1207907aa7cc8a534f4e8d6a58e59de172bd38fcca11b0f82fc3ffc3282"
     },
     {
       "suite": "decompengine.builtin.BuiltinCapturedContextToolsTest",
@@ -40,7 +40,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "9bba430b69ea3a9c70e39a5efd05d78636ea7be50368c860ac484c1b5293708d"
+      "xmlSha256": "6a1cf9ee45fe6dbdba4742d7f15be395ec1b0fcdee2b824027eb439fb1ceff23"
     },
     {
       "suite": "decompengine.builtin.BuiltinContextPackageTest",
@@ -48,7 +48,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "f8cd9ab2d7281f6e1ee76519331b42fe70d6563dedbb17a38d032386614e9d72"
+      "xmlSha256": "8fff2173fa0130e0d0fb119cbc1669acc189b4153d95a6955716305d63206226"
     },
     {
       "suite": "decompengine.builtin.BuiltinJournalTest",
@@ -56,7 +56,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "56bfcc7f848702e50d484d066284ff253525416c41b0fb8dc390a13df88337c7"
+      "xmlSha256": "91b20582f79b06020d9fadb1af1d09b37c70a76c9943806d133c665553c4ee60"
     },
     {
       "suite": "decompengine.builtin.BuiltinCheckpointTest",
@@ -64,7 +64,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "3b9966d7bebf4410e33df170fb91f8bd79abe9bdb12ef9c95f8f0d9abb74f1d2"
+      "xmlSha256": "84f83425d9fc229b2255c23ab64a32e56de344f16eb1ffd5a92fc9708bd30a15"
     },
     {
       "suite": "decompengine.builtin.BuiltinCapturedResumeTest",
@@ -72,7 +72,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "88007d00fd4157f2b9310077d068c27aee141db408abe8194a166ec5345018b7"
+      "xmlSha256": "08aa0b0ca3ac1a67ee561b95fbd52ca573bb0ff78d171fefc5ca2530cb9b6576"
     },
     {
       "suite": "decompengine.builtin.BuiltinSourceStoreTest",
@@ -80,7 +80,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "08bf6a5d44bab6a07a73e17793c93cb714ad8506ca0fca9cd4b590156cbfdca5"
+      "xmlSha256": "3a251918094bf5b3a141f3153faf36e77b12dd250b506dac2ca6ab6e700277eb"
     },
     {
       "suite": "decompengine.builtin.BuiltinInvocationArchiveTest",
@@ -88,7 +88,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "c21bd9c754d834dbcb14f9db0e25d69fadf32b7f1df45a23fbb9331e1bc4ff2e"
+      "xmlSha256": "05f7f12698d30070a0f8c6ed9ded2bf134c34b8bc076af00b1bfdeda9d3ddcc0"
     },
     {
       "suite": "decompengine.builtin.BuiltinTerminalToolsTest",
@@ -96,7 +96,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "3643fe6312a21992abd3f1d1096d88458698e4f987c9aecb23c1196789a046c1"
+      "xmlSha256": "dd5632fd09c1421330cc2557579ab31a1c2908d3b99a4059b0b832f45cecad14"
     },
     {
       "suite": "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest",
@@ -104,15 +104,15 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "4e4bfa9d398df999cc3b5af3727cb05745e0cda64720c7afb11b01c3e4c4d19b"
+      "xmlSha256": "0cb6abc3ce5a72eab17fac04f353c264e1c5525b70410fe4fff3a93664d9cb0d"
     },
     {
       "suite": "decompengine.repair.RepairEvidenceIndexTest",
-      "tests": 4,
+      "tests": 5,
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "1d2f10d13a805cab0319f8d18d218fa0e1093c875e19c505d8db796124ff259d"
+      "xmlSha256": "03cd6351996f9112a006ff6c6054dae98f60eb0d8575d7989dc8058fcafc1195"
     },
     {
       "suite": "decompengine.repair.ModuleRevisionGraphTest",
@@ -120,15 +120,15 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "e163f91e9feee10b3b031a5c78cf1850c869c0ba9b1a55ea307c2876dd9b703d"
+      "xmlSha256": "6817b34e794c7592150906c213d98b6e8f601e099bad60e7668d0f6daf05aa3b"
     },
     {
       "suite": "decompengine.project.ProfiledGeneratedCRepairIndexTest",
-      "tests": 11,
+      "tests": 12,
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "a1fdac4cd196dae17f3786709bcdf1767d3f7f51cdb4a42792e856e83e66012a"
+      "xmlSha256": "c0099c04cd7a7a58b0e1296d6cb29fcee2c0570087700913bdb46de5c6f748a3"
     }
   ],
   "failures": []
