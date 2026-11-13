@@ -412,12 +412,13 @@ object GitReads {
         val sections = Regex("(?m)^diff --(?:git|cc|combined) ").findAll(text).map { it.range.first }.toList().let { starts ->
             starts.mapIndexed { index, start -> text.substring(start, starts.getOrElse(index + 1) { text.length }) }
         }
-        val zero = "0".repeat(file.oldObjectId?.length ?: file.newObjectId?.length ?: 40)
         fun index(section: String) = Regex("(?m)^index ([0-9a-f]+)\\.\\.([0-9a-f]+)").find(section)?.let { it.groupValues[1] to it.groupValues[2] }
+        fun isZeroObjectId(objectId: String) = objectId.isNotEmpty() && objectId.all { it == '0' }
+        fun matchesObjectId(actual: String, expected: String?) = expected?.let { actual == it } ?: isZeroObjectId(actual)
         val header = "diff --git ${quoted("a/" + (file.originalPath?.exact ?: path))} ${quoted("b/$path")}\n"
         val matching = sections.filter { section ->
             val (old, new) = index(section) ?: return@filter false
-            section.startsWith(header) && old == (file.oldObjectId ?: zero) && (file.newObjectId == null || new == file.newObjectId)
+            section.startsWith(header) && matchesObjectId(old, file.oldObjectId) && (file.newObjectId == null || new == file.newObjectId)
         }
         // Git prints a type change (file to symlink and back) as a deletion section followed by an
         // addition section; one listing record owns both, so both are kept in order.
@@ -426,9 +427,9 @@ object GitReads {
         val own = "diff --git ${quoted("a/$path")} ${quoted("b/$path")}\n"
         val typeChange = if (file.change == GitIndexChange.TYPE_CHANGED) {
             val deletion = sections.firstOrNull { section -> section.startsWith(own) &&
-                index(section)?.let { (old, new) -> new == zero && (file.oldObjectId == null || old == file.oldObjectId) } == true }
+                index(section)?.let { (old, new) -> isZeroObjectId(new) && matchesObjectId(old, file.oldObjectId) } == true }
             val addition = sections.firstOrNull { section -> section.startsWith(own) &&
-                index(section)?.let { (old, new) -> old == zero && (file.newObjectId == null || new == file.newObjectId) } == true }
+                index(section)?.let { (old, new) -> isZeroObjectId(old) && (file.newObjectId == null || new == file.newObjectId) } == true }
             if (deletion != null && addition != null) deletion + addition else null
         } else null
         // Pure renames and mode-only changes have no index line; identify them by their exact
