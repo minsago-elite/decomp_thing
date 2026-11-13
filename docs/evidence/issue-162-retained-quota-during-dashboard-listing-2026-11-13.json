@@ -1,0 +1,36 @@
+{
+  "status": "passed",
+  "issue": 162,
+  "sourceCommit": "954407d3de3f499ffd56180006b9ad70f7673d01",
+  "sourceParent": "8f2df5006837be6c74d922203eaca3027660c46a",
+  "sourceTree": "6aface176de6dd267609d43a79ade22d9c7c25b9",
+  "command": "./gradlew --no-daemon -x verifyFrontendToolchain test --tests 'decompengine.web.UploadServerTest.retained-byte upload refusal preserves concurrent listing and status traffic'",
+  "suite": "decompengine.web.UploadServerTest",
+  "test": "retained-byte upload refusal preserves concurrent listing and status traffic",
+  "junitXml": "issue-162-retained-quota-during-dashboard-listing-2026-11-13.xml",
+  "junitXmlSha256": "0d2684e503d64b5d2a25f16c0f6c6d5182fb604ed5be1e55d487423eb48fb0b7",
+  "totals": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "observed": {
+    "statusResponses": 4,
+    "statusLatencyMaximumMillis": 33,
+    "maximumAllowedStatusLatencyMillis": 2000,
+    "dashboardHeldOnDistinctRecord": 1,
+    "retainedBytesAtRefusal": 2103318,
+    "uploadStatus": 503,
+    "uploadCode": "UPLOAD_STORAGE",
+    "requestBodyBytesSent": 0,
+    "retryAfterCapacityRestorationStatus": 201,
+    "uploadAdmissionAfterRetry": "empty"
+  },
+  "scope": "Local in-process HTTP qualification. Eight retained jobs and a report file exceed the configured test quota; a client sends multipart headers with a one-million-byte Content-Length but no body. While the dashboard is held at its first physical job.json read, the request receives 503/UPLOAD_STORAGE, four status reads complete under two seconds, and retained bytes and entries remain unchanged. Removing the fixture restores admission and a subsequent upload succeeds.",
+  "limitations": [
+    "The retained ceiling is configured through an internal test seam; this does not qualify the packaged server's default ceiling or production deployment configuration.",
+    "The listing delay and filesystem are in-process test fixtures; this does not measure physical-disk contention or deployment throughput.",
+    "Does not qualify workflow report-growth enforcement, concurrent upload-slot saturation, hosted CI, or the complete #162 acceptance matrix."
+  ]
+}

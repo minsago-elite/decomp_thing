@@ -94,7 +94,9 @@ requests complete while the scan is still held. The test verifies retained files
 and directory entries are unchanged by refusal, then removes the report fixture
 and confirms a new upload succeeds after reservation capacity is restored. The
 focused result is retained ([evidence record](evidence/issue-162-retained-quota-during-dashboard-listing-2026-11-13.json),
-[JUnit XML](evidence/issue-162-retained-quota-during-dashboard-listing-2026-11-13.xml)).
+[JUnit XML](evidence/issue-162-retained-quota-during-dashboard-listing-2026-11-13.xml)); the full
+`UploadServerTest` class also passed with 74 tests and no skips ([class evidence](evidence/issue-162-upload-server-class-2026-11-13.json),
+[JUnit XML](evidence/issue-162-upload-server-class-2026-11-13.xml)).
 This is an in-process HTTP qualification using a test-configured ceiling; it does
 not qualify physical-disk contention or hosted deployment behavior, and it does
 not complete #162.
