@@ -28,6 +28,7 @@ export async function qualifyGitInitIdentity({ repo, origin, makeTarget, cdp, ev
     const workspace = fixture('git-workspace');
     Object.assign(workspace.data, { repositoryId, worktreeId: 'worktree_packaged_git_init',
       candidateRevisionId: run.data.resultRevisionId, headRefName: 'refs/heads/packaged-init' });
+    workspace.data.refs[0].displayName = workspace.data.headRefName;
 
     const tab = await makeTarget();
     const prefix = '/nested/api/v1/jobs/' + jobId;
