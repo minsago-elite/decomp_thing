@@ -1233,6 +1233,18 @@ try {
   report.applicationError = safeDiagnostic(applicationError);
   report.browserError = safeDiagnostic(browserError);
   report.viteError = safeDiagnostic(viteError);
+  if (lastTarget) {
+    const responsesByRequest = new Map(lastTarget.responses.map(response => [response.requestId, response]));
+    report.failedBrowserRequests = lastTarget.requests.slice(-32).map(({ requestId, method, url, type }) => {
+      let route = null;
+      try {
+        route = new URL(url).pathname.replace(/\/[0-9a-f]{32}(?=\/|$)/gi, '/[job]')
+          .replace(/\/run_fixture_[^/]+(?=\/|$)/g, '/[run]')
+          .replace(/\/source_[0-9a-f]{64}(?=\/|$)/gi, '/[revision]');
+      } catch {}
+      return { method, route, type, status: responsesByRequest.get(requestId)?.status ?? null };
+    });
+  }
   console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
   if (lastTarget && cdp && lastTarget.initializationComplete) {
