@@ -18,7 +18,30 @@ const longFilename = `${'reconstructed-firmware-image-with-an-unbroken-very-long
 export const jobFilterContract = Object.freeze({ label: 'Filename or label search', value: 'audit-filter-match',
   filteredQuery: 'search=audit-filter-match&limit=50', unfilteredQuery: 'limit=50',
   filteredRendered: 'audit-filter-match.elf', unfilteredRendered: longFilename,
-  filteredJobId: 'fedcba9876543210fedcba9876543210' });
+  filteredJobId: 'fedcba9876543210fedcba9876543210', unfilteredJobId: '1234567890abcdef1234567890abcdef' });
+
+/** Require an in-viewport layout box plus non-hidden styles through the ancestor chain. */
+export function filterElementVisible(element, computedStyle) {
+  if (!element || typeof element.getClientRects !== 'function') return false;
+  const view = element.ownerDocument?.defaultView;
+  if (!view) return false;
+  const getStyle = typeof computedStyle === 'function' ? computedStyle : node => view.getComputedStyle(node);
+  const rectangles = Array.from(element.getClientRects());
+  if (!rectangles.some(rectangle => rectangle.width > 0 && rectangle.height > 0 && rectangle.right > 0
+    && rectangle.bottom > 0 && rectangle.left < view.innerWidth && rectangle.top < view.innerHeight)) return false;
+  for (let current = element; current; current = current.parentElement) {
+    const style = getStyle(current);
+    if (!style || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    const opacity = Number.parseFloat(style.opacity);
+    if (Number.isFinite(opacity) && opacity <= 0) return false;
+  }
+  return true;
+}
+export function focusFilterSubmitForTiming(document, button) {
+  if (!document || !button || typeof button.focus !== 'function') return false;
+  button.focus();
+  return document.activeElement === button;
+}
 const longLine = `static const unsigned char embedded_table_with_a_long_identifier[] = { ${Array.from({ length: 160 }, (_, index) => `0x${(index * 37 % 256).toString(16).padStart(2, '0')}`).join(', ')} };`;
 const sourceText = ['/* Synthetic audit source: long unbroken lines must stay inside the scroll region. */',
   '#include <stdint.h>', longLine, `const char *path = "${'/very/deep/source/tree'.repeat(24)}";`,
@@ -539,7 +562,8 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       const response = fixtures.respond(event.request.method, pathname, headers.accept ?? '', pathname === '/jobs' ? query : null);
       if (response.status === 404) unmapped.push(`${event.request.method} ${pathname}`);
       const evidence = { method: event.request.method, path: pathname, status: response.status };
-      if (pathname === '/jobs') evidence.query = query;
+      if (pathname === '/jobs') Object.assign(evidence, { query,
+        responseJobIds: response.document?.data?.items?.map(item => item.jobId) ?? [], fulfillmentSucceeded: false });
       if (event.request.method === 'POST') Object.assign(evidence, {
         idempotencyKey: headers['idempotency-key'] ?? null, ifMatch: headers['if-match'] ?? null,
         csrf: headers['x-csrf-token'] === fixtures.csrfToken, body: event.request.postData ?? null,
@@ -549,7 +573,9 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       const requestId = response.document?.requestId ?? 'request_audit_download';
       void cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: response.status, body: body.toString('base64'),
         responseHeaders: [{ name: 'Content-Type', value: response.contentType ?? 'application/json; charset=utf-8' }, { name: 'X-Request-ID', value: requestId },
-          { name: 'Cache-Control', value: 'no-store' }] }, tab.sessionId).catch(() => undefined);
+          { name: 'Cache-Control', value: 'no-store' }] }, tab.sessionId).then(() => {
+        if (pathname === '/jobs') evidence.fulfillmentSucceeded = true;
+      }).catch(() => undefined);
     }, tab.sessionId);
     await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/*`, requestStage: 'Request' }] }, tab.sessionId);
   }
@@ -747,6 +773,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   for (let sample = 0; sample < 50; sample += 1) {
     const filtered = sample % 2 === 0;
     const query = filtered ? fixtures.jobFilter.filteredQuery : fixtures.jobFilter.unfilteredQuery;
+    const expectedJobId = filtered ? fixtures.jobFilter.filteredJobId : fixtures.jobFilter.unfilteredJobId;
     const pageSearch = filtered ? `?search=${fixtures.jobFilter.value}` : '';
     const value = filtered ? fixtures.jobFilter.value : '';
     const rendered = filtered ? fixtures.jobFilter.filteredRendered : fixtures.jobFilter.unfilteredRendered;
@@ -764,29 +791,58 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     const measured = await evaluate(tab, `(async () => {
       const expectedPageSearch = ${JSON.stringify(pageSearch)};
       const expectedRow = ${JSON.stringify(rendered)};
+      const expectedJobId = ${JSON.stringify(expectedJobId)};
       const section = document.querySelector('main section[aria-labelledby="job-library-title"]');
       const input = [...(section?.querySelectorAll('label') ?? [])].find(element => element.textContent.trim().startsWith(${JSON.stringify(fixtures.jobFilter.label)}))?.querySelector('input');
       const button = [...(section?.querySelectorAll('button') ?? [])].find(element => element.textContent.trim() === 'Apply filters');
       const heading = section?.querySelector('h3');
       if (!input || !button || !heading) throw new Error('job filter controls are missing');
+      const focusSubmit = ${focusFilterSubmitForTiming.toString()};
+      if (!focusSubmit(document, button)) throw new Error('job filter submit control did not receive focus before timing');
       const started = performance.now();
       let feedbackMs = null; let feedbackSignal = null;
       button.click();
       return await new Promise((resolve, reject) => {
         const deadline = started + 10000;
-        const visible = element => Boolean(element && element.getClientRects().length);
-        const check = () => {
+        const visible = ${filterElementVisible.toString()};
+        let feedbackPending = false; let dataPending = false; let dataMs = null; let renderedJobId = null;
+        const observe = () => {
           const status = heading.nextElementSibling?.matches('p[role="status"]') ? heading.nextElementSibling : null;
           const statusVisible = visible(status);
           const row = section.querySelector('ul.job-list h4 a');
-          const populated = visible(row) && row.textContent.trim() === expectedRow && document.activeElement === heading
+          const rowJobId = row ? new URL(row.href, location.href).pathname.split('/').at(-1) : null;
+          const populated = visible(row) && row.textContent.trim() === expectedRow && rowJobId === expectedJobId && document.activeElement === heading
             && !section.querySelector('[role="alert"]') && statusVisible && status.textContent.includes('1 jobs on this page');
           const loading = statusVisible && status.textContent.trim() === 'Loading jobs…';
-          if (feedbackMs === null && location.search === expectedPageSearch && (loading || populated)) {
-            feedbackMs = performance.now() - started;
-            feedbackSignal = loading ? 'loading' : 'data';
+          return { populated, loading, rowJobId };
+        };
+        const check = () => {
+          const state = observe();
+          if (feedbackMs === null && !feedbackPending && location.search === expectedPageSearch && (state.loading || state.populated)) {
+            feedbackPending = true;
+            // The first rAF observation runs before paint. Confirm in the following frame so the
+            // signal was visible for at least one rendered frame rather than only in the DOM.
+            requestAnimationFrame(() => {
+              const presented = observe();
+              if (location.search === expectedPageSearch && (presented.loading || presented.populated)) {
+                feedbackMs = performance.now() - started;
+                feedbackSignal = presented.loading ? 'loading' : 'data';
+              }
+              feedbackPending = false;
+            });
           }
-          if (populated && feedbackMs !== null) resolve({ feedbackMs, dataMs: performance.now() - started, feedbackSignal });
+          if (state.populated && !dataPending && dataMs === null) {
+            dataPending = true;
+            requestAnimationFrame(() => {
+              const presented = observe();
+              if (presented.populated) {
+                dataMs = performance.now() - started;
+                renderedJobId = presented.rowJobId;
+              }
+              dataPending = false;
+            });
+          }
+          if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
           else if (performance.now() > deadline) reject(new Error('job filter timing deadline'));
           else requestAnimationFrame(check);
         };
@@ -797,8 +853,9 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       .filter(({ entry }) => entry.method === 'GET' && entry.path === '/jobs');
     const expectedQuery = query;
     filterFeedback.push(measured.feedbackMs); filterData.push(measured.dataMs);
-    filterSamples.push({ sample, direction: filtered ? 'filtered' : 'cleared', query: expectedQuery,
+    filterSamples.push({ sample, direction: filtered ? 'filtered' : 'cleared', query: expectedQuery, expectedJobId,
       pageSearch, feedbackMs: measured.feedbackMs, dataMs: measured.dataMs, feedbackSignal: measured.feedbackSignal,
+      renderedJobId: measured.renderedJobId,
       requestStartIndex: before, requestEndIndex: fulfilled.length,
       requestIndex: requests.length === 1 ? requests[0].index : null,
       request: requests.length === 1 ? requests[0].entry : null });
@@ -914,7 +971,10 @@ export function assertAudit(audit, manifest, responses, origin, budgets = {}, { 
     if (timing.median !== calculated.median || timing.p95 !== calculated.p95)
       failures.push(`${label}: timing summary does not match raw samples`);
     if (!Number.isFinite(budget) || budget < 0) failures.push(`${label}: invalid timing budget ${JSON.stringify(budget)}`);
-    else if (timing.p95 > budget) failures.push(`${label} p95 ${timing.p95}ms exceeds ${budget}ms`);
+    else {
+      const exactP95 = percentile(raw, 0.95);
+      if (exactP95 > budget) failures.push(`${label} p95 ${exactP95}ms exceeds ${budget}ms`);
+    }
   }
   if (jobFilter !== false) failures.push(...jobFilterFailures(audit.jobFilter, audit.timing?.raw, audit.fulfilled));
   return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)), budgets: budgetLimits };
@@ -924,7 +984,8 @@ export function assertAudit(audit, manifest, responses, origin, budgets = {}, { 
 export function jobFilterFailures(evidence, raw, fulfilled) {
   const failures = []; const fail = message => failures.push(`job filter: ${message}`);
   if (!evidence || typeof evidence !== 'object') { fail('missing workload evidence'); return failures; }
-  for (const key of ['label', 'value', 'filteredQuery', 'unfilteredQuery', 'filteredRendered', 'unfilteredRendered', 'filteredJobId'])
+  for (const key of ['label', 'value', 'filteredQuery', 'unfilteredQuery', 'filteredRendered', 'unfilteredRendered',
+    'filteredJobId', 'unfilteredJobId'])
     if (evidence[key] !== jobFilterContract[key]) fail(`unexpected ${key} ${JSON.stringify(evidence[key])}`);
   const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
   if (samples.length !== 50) fail(`requires 50 samples, found ${samples.length}`);
@@ -934,8 +995,11 @@ export function jobFilterFailures(evidence, raw, fulfilled) {
     const filtered = index % 2 === 0;
     const direction = filtered ? 'filtered' : 'cleared';
     const query = filtered ? jobFilterContract.filteredQuery : jobFilterContract.unfilteredQuery;
+    const expectedJobId = filtered ? jobFilterContract.filteredJobId : jobFilterContract.unfilteredJobId;
     if (!sample || sample.sample !== index || sample.direction !== direction || sample.query !== query)
       fail(`sample ${index}: unexpected direction/query binding`);
+    if (sample?.expectedJobId !== expectedJobId || sample?.renderedJobId !== expectedJobId)
+      fail(`sample ${index}: rendered row does not match the expected job identity`);
     if (!validMs(sample?.feedbackMs) || !validMs(sample?.dataMs) || sample.feedbackMs > sample.dataMs)
       fail(`sample ${index}: invalid feedback/data timing`);
     if (sample?.feedbackSignal !== 'loading' && sample?.feedbackSignal !== 'data') fail(`sample ${index}: invalid feedback signal`);
@@ -951,14 +1015,17 @@ export function jobFilterFailures(evidence, raw, fulfilled) {
     previousEnd = sample.requestEndIndex;
     seenRequests.add(sample.requestIndex);
     const request = fulfilled?.[sample.requestIndex];
-    const expectedRequest = { method: 'GET', path: '/jobs', status: 200, query };
+    const expectedRequest = { method: 'GET', path: '/jobs', status: 200, query, fulfillmentSucceeded: true };
     const pageSearch = filtered ? `?search=${jobFilterContract.value}` : '';
     if (sample?.pageSearch !== pageSearch) fail(`sample ${index}: unexpected page-search binding`);
     const requestsInWindow = Array.isArray(fulfilled) ? fulfilled.slice(sample.requestStartIndex, sample.requestEndIndex)
       .filter(entry => entry?.method === 'GET' && entry?.path === '/jobs') : [];
     if (!request || Object.keys(expectedRequest).some(key => request[key] !== expectedRequest[key])
+      || !Array.isArray(request.responseJobIds) || request.responseJobIds.length !== 1 || request.responseJobIds[0] !== expectedJobId
       || requestsInWindow.length !== 1 || requestsInWindow[0] !== request
-      || !sample.request || Object.keys(expectedRequest).some(key => sample.request[key] !== expectedRequest[key]))
+      || !sample.request || Object.keys(expectedRequest).some(key => sample.request[key] !== expectedRequest[key])
+      || !Array.isArray(sample.request.responseJobIds) || sample.request.responseJobIds.length !== 1
+      || sample.request.responseJobIds[0] !== expectedJobId)
       fail(`sample ${index}: not bound to its fulfilled ${query} request`);
   });
   for (const [name, values, label] of [['filterFeedback', raw?.filterFeedback, 'feedback'], ['filterData', raw?.filterData, 'first data']]) {

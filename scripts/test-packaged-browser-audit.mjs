@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, filterElementVisible, focusFilterSubmitForTiming, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -25,10 +25,12 @@ function jobFilterEvidence() {
   return { ...jobFilterContract, samples: Array.from({ length: 50 }, (_, sample) => {
     const filtered = sample % 2 === 0;
     const query = filtered ? jobFilterContract.filteredQuery : jobFilterContract.unfilteredQuery;
+    const expectedJobId = filtered ? jobFilterContract.filteredJobId : jobFilterContract.unfilteredJobId;
     const pageSearch = filtered ? `?search=${jobFilterContract.value}` : '';
-    const request = { method: 'GET', path: '/jobs', status: 200, query };
+    const request = { method: 'GET', path: '/jobs', status: 200, query, responseJobIds: [expectedJobId], fulfillmentSucceeded: true };
     return { sample, direction: filtered ? 'filtered' : 'cleared', query, pageSearch, feedbackMs: 35, dataMs: 80,
-      feedbackSignal: 'loading', requestStartIndex: sample, requestEndIndex: sample + 1, requestIndex: sample, request };
+      expectedJobId, renderedJobId: expectedJobId, feedbackSignal: 'loading', requestStartIndex: sample,
+      requestEndIndex: sample + 1, requestIndex: sample, request };
   }) };
 }
 function clean() {
@@ -188,6 +190,14 @@ test('enforces the documented loopback timing budgets', () => {
   audit.timing.raw.filterData.fill(501);
   audit.jobFilter.samples.forEach(sample => { sample.feedbackMs = 101; sample.dataMs = 501; });
   assert.equal(verdict(audit).length, 5);
+  const fractionalOver = clean();
+  fractionalOver.timing.raw.filterFeedback.fill(100.04);
+  fractionalOver.timing.filterFeedback = { samples: 50, median: 100, p95: 100 };
+  fractionalOver.timing.raw.filterData.fill(100.05);
+  fractionalOver.timing.filterData = { samples: 50, median: 100.1, p95: 100.1 };
+  fractionalOver.jobFilter.samples.forEach(sample => { sample.feedbackMs = 100.04; sample.dataMs = 100.05; });
+  assert.match(verdict(fractionalOver).join('\n'), /job filter feedback p95 100\.04ms exceeds 100ms/,
+    'rounded summaries must not hide raw samples just over the budget');
 });
 
 test('job filter evidence binds 50 alternating actions to fulfilled requests and raw summaries', () => {
@@ -205,11 +215,15 @@ test('job filter evidence binds 50 alternating actions to fulfilled requests and
     audit => { audit.jobFilter.samples[0].dataMs = 20; },
     audit => { audit.jobFilter.samples[0].feedbackSignal = 'unknown'; },
     audit => { audit.jobFilter.samples[0].feedbackSignal = 'data'; },
+    audit => { audit.jobFilter.samples[0].renderedJobId = jobFilterContract.unfilteredJobId; },
+    audit => { audit.jobFilter.samples[0].expectedJobId = jobFilterContract.unfilteredJobId; },
     audit => { audit.jobFilter.samples[0].requestIndex = 1; },
     audit => { audit.jobFilter.samples[0].requestStartIndex = -1; },
     audit => { audit.jobFilter.samples[0].requestEndIndex = 0; },
     audit => { audit.fulfilled[0].status = 404; },
     audit => { audit.fulfilled[0].query = jobFilterContract.unfilteredQuery; },
+    audit => { audit.fulfilled[0].responseJobIds = [jobFilterContract.unfilteredJobId]; },
+    audit => { audit.fulfilled[0].fulfillmentSucceeded = false; },
     audit => { audit.timing.raw.filterFeedback[0] = 99; },
     audit => { audit.jobFilter.filteredQuery = 'search=forged&limit=50'; },
   ]) {
@@ -230,6 +244,45 @@ test('job filter evidence binds 50 alternating actions to fulfilled requests and
   assert.deepEqual(verdict(coincidentDataFeedback), [], 'rendered data can serve as feedback when it arrives in the first observed frame');
   const invalidBudget = assertAudit(clean(), manifest, responses, origin, { filterFeedbackP95: null }).failures.join('\n');
   assert.match(invalidBudget, /job filter feedback: invalid timing budget/);
+});
+
+test('filter timing requires a fresh submit focus and a visible rendered box', () => {
+  const heading = {};
+  const button = { focus() { document.activeElement = button; } };
+  const document = { activeElement: heading };
+  assert.equal(focusFilterSubmitForTiming(document, button), true);
+  assert.equal(document.activeElement, button);
+  assert.equal(focusFilterSubmitForTiming(document, { focus() {} }), false,
+    'a stale heading focus must not satisfy the next sample');
+  assert.equal(focusFilterSubmitForTiming(document, {}), false);
+
+  const parent = {};
+  const view = { innerWidth: 100, innerHeight: 100 };
+  const ownerDocument = { defaultView: view };
+  const element = { ownerDocument, parentElement: parent, getClientRects: () => [{ left: 4, right: 16, top: 5, bottom: 13, width: 12, height: 8 }] };
+  const styles = new Map([
+    [element, { display: 'block', visibility: 'visible', opacity: '1' }],
+    [parent, { display: 'block', visibility: 'visible', opacity: '1' }],
+  ]);
+  const style = node => styles.get(node);
+  assert.equal(filterElementVisible(element, style), true);
+  for (const [node, change] of [
+    [element, { visibility: 'hidden' }],
+    [element, { opacity: '0' }],
+    [parent, { display: 'none' }],
+    [parent, { opacity: '0' }],
+  ]) {
+    const original = styles.get(node);
+    styles.set(node, { ...original, ...change });
+    assert.equal(filterElementVisible(element, style), false, JSON.stringify(change));
+    styles.set(node, original);
+  }
+  assert.equal(filterElementVisible({ ...element, getClientRects: () => [] }, style), false);
+  assert.equal(filterElementVisible({ ...element, getClientRects: () => [{ width: 0, height: 8 }] }, style), false);
+  assert.equal(filterElementVisible({ ...element, getClientRects: () => [{ left: 110, right: 122, top: 5, bottom: 13, width: 12, height: 8 }] }, style), false,
+    'an element outside the viewport is not visible feedback');
+  assert.equal(filterElementVisible({ getClientRects: element.getClientRects }, style), false,
+    'visibility cannot be inferred without an owning viewport');
 });
 
 test('reports API reads the fixture set does not cover', () => {

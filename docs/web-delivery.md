@@ -135,11 +135,17 @@ each layout/contrast/focus pass, the audit activates the activity/exploration/hi
 controls and requires populated content and successful reads. The source-search form and
 populated results each have independent route coverage, and visible input values and placeholders
 are included in contrast measurements. The audit also submits the job-library filename filter 50
-times, alternating between `audit-filter-match` and clearing that filter. It measures local
-feedback when the applied query and visible status first update, then measures first data when the
-distinctive job row is rendered and focus reaches the results heading. Each sample is bound to its
-exact fulfilled `/jobs` query and response. The gate requires p95 ≤100 ms filter feedback and
-≤500 ms first data, using the documented loopback interaction budgets. These filter samples are
+times, alternating between `audit-filter-match` and clearing that filter. Each timed action starts
+with focus on the submit button, so a previous sample's focus cannot satisfy the next one. It
+measures local feedback when the applied query and visible status survive a later animation-frame
+observation, then measures first data when the distinctive, in-viewport job row is visible and
+focus reaches the results heading on a later frame. Visibility requires a nonzero viewport box and
+no `display:none`, hidden/collapsed visibility, or zero-opacity ancestor. These are browser
+DOM/layout readiness timings, not a measurement of compositor presentation or pixel scanout. Each
+sample is bound to its exact successfully fulfilled `/jobs` query, the sole job ID in that response,
+and the job ID in the rendered link. The gate compares the raw p95
+against ≤100 ms filter feedback and ≤500 ms first data, using the documented loopback interaction
+budgets. These filter samples are
 reported independently from route timing in `report.json`; other explicit actions remain recorded
 in `interactions` without qualified latency budgets. The report retains raw samples and recomputed
 median/p95 values.
