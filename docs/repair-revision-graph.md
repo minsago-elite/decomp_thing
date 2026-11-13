@@ -93,6 +93,9 @@ The index records the build-definition artifact path and leaves target relations
 unknown unless captured evidence supplies them. Editable build-definition bytes are bound by the
 working/source-revision digest, not duplicated as static semantic-index origins; this allows an
 authorized build-file candidate to retain the same static index identity while changing revisions.
+The focused built-in contract checkpoint is retained in
+`docs/evidence/issue-798-revision-evidence-index-2026-11-13.json`; it is local fixture evidence,
+not production-provider or workflow-release qualification.
 
 Context selection uses the existing ownership, dependency, readable-path, writable-path, and budget
 decisions. Its v1 evidence snapshot binds the selected evidence to the profile and reconstruction
