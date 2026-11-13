@@ -61,7 +61,8 @@ export async function qualifyGitInitIdentity({ repo, origin, makeTarget, cdp, ev
       const pathname = new URL(event.request.url).pathname;
       const method = event.request.method;
       const headers = Object.fromEntries(Object.entries(event.request.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]));
-      requests.push({ method, pathname, headers, body: event.request.postData ?? null });
+      const requestRecord = { method, pathname, headers, body: event.request.postData ?? null };
+      requests.push(requestRecord);
       let document = null;
       let status = 200;
       if (method === 'GET' && pathname === prefix) document = job;
@@ -82,9 +83,13 @@ export async function qualifyGitInitIdentity({ repo, origin, makeTarget, cdp, ev
         document = workspace;
       } else unexpected.push(method + ' ' + pathname);
       if (!document) {
+        requestRecord.fixture = 'continued';
         void cdp.call('Fetch.continueRequest', { requestId: event.requestId }, tab.sessionId).catch((error) => errors.push(String(error)));
         return;
       }
+      requestRecord.fixture = document.kind;
+      requestRecord.responseStatus = status;
+      if (typeof document.data?.state === 'string') requestRecord.operationState = document.data.state;
       void cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: status,
         responseHeaders: [{ name: 'Content-Type', value: 'application/json; charset=utf-8' },
           { name: 'X-Request-ID', value: document.requestId }],
@@ -97,12 +102,22 @@ export async function qualifyGitInitIdentity({ repo, origin, makeTarget, cdp, ev
     const button = "[...document.querySelectorAll('.git-repository button')].find(button => button.textContent.trim() === 'Initialize repository from the latest candidate')";
     await ready(tab, '!!' + button, 'packaged Git initialization control');
     await evaluate(tab, button + '.click()');
-    if (mismatch) {
-      await ready(tab, "document.body.innerText.includes('The initialization could not be confirmed.') && [...document.querySelectorAll('.git-repository button')].every(button => !button.disabled)",
-        'refused mismatched acknowledgement and settled command');
-    } else {
-      await ready(tab, "document.body.innerText.includes('Branch packaged-init') && [...document.querySelectorAll('.git-repository button')].every(button => !button.disabled)",
-        'successful packaged initialization readback');
+    try {
+      if (mismatch) {
+        await ready(tab, "document.body.innerText.includes('The initialization could not be confirmed.') && [...document.querySelectorAll('.git-repository button')].every(button => !button.disabled)",
+          'refused mismatched acknowledgement and settled command');
+      } else {
+        await ready(tab, "document.body.innerText.includes('Branch packaged-init') && [...document.querySelectorAll('.git-repository button')].every(button => !button.disabled)",
+          'successful packaged initialization readback');
+      }
+    } catch (failure) {
+      const page = await evaluate(tab, `({ text: document.body.innerText.slice(-1200), buttons: [...document.querySelectorAll('.git-repository button')].map(button => ({ text: button.textContent.trim(), disabled: button.disabled })) })`).catch(() => null);
+      const trace = requests.map(({ method: requestMethod, pathname: requestPath, fixture: responseFixture, responseStatus, operationState }) => ({
+        method: requestMethod, path: requestPath, ...(responseFixture ? { fixture: responseFixture } : {}),
+        ...(responseStatus === undefined ? {} : { status: responseStatus }), ...(operationState ? { state: operationState } : {}),
+      }));
+      const detail = JSON.stringify({ mismatch, requests: trace, unexpected, cdpErrors: errors.length, page });
+      throw new Error(`${failure instanceof Error ? failure.message : 'Packaged Git initialization failed'}; bounded trace=${detail}`, { cause: failure });
     }
     const post = requests.filter((request) => request.method === 'POST');
     assert.equal(post.length, 1, 'One explicit click must issue exactly one initialization POST');
