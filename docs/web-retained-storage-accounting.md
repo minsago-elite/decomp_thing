@@ -90,8 +90,9 @@ quota matrix or hosted qualification.
 dashboard scan is held on its first metadata read. Eight retained jobs plus a
 report fixture exhaust the configured test ceiling; a header-only multipart
 request receives `503 UPLOAD_STORAGE` without sending its body, and four status
-requests complete while the scan is still held. The test verifies retained files
-and directory entries are unchanged by refusal, then removes the report fixture
+requests complete while the scan is still held and the upload thread remains blocked
+inside retained-storage measurement. The test verifies retained files and directory
+entries are unchanged by refusal, then removes the report fixture
 and confirms a new upload succeeds after reservation capacity is restored. The
 focused result is retained ([evidence record](evidence/issue-162-retained-quota-during-dashboard-listing-2026-11-13.json),
 [JUnit XML](evidence/issue-162-retained-quota-during-dashboard-listing-2026-11-13.xml)); the full

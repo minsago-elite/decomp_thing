@@ -1,80 +1,80 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.web.UploadServerTest" tests="74" skipped="0" failures="0" errors="0" timestamp="2026-11-13T00:50:20.127Z" hostname="whatsername" time="228.708">
+<testsuite name="decompengine.web.UploadServerTest" tests="74" skipped="0" failures="0" errors="0" timestamp="2026-11-13T01:14:53.179Z" hostname="whatsername" time="260.998">
   <properties/>
-  <testcase name="repair history distinguishes empty projections from missing and malformed structure()" classname="decompengine.web.UploadServerTest" time="1.097"/>
-  <testcase name="queued publication racing the stop signal is rejected and repaired()" classname="decompengine.web.UploadServerTest" time="0.06"/>
-  <testcase name="legacy report presentation treats every retained string as inert text()" classname="decompengine.web.UploadServerTest" time="0.046"/>
-  <testcase name="job event endpoint and refresh render the persisted bounded stream()" classname="decompengine.web.UploadServerTest" time="0.179"/>
-  <testcase name="source view reads confidence from the admitted profile declaration()" classname="decompengine.web.UploadServerTest" time="0.202"/>
-  <testcase name="dashboard keeps an unreadable published job visible without leaking its contents()" classname="decompengine.web.UploadServerTest" time="0.146"/>
-  <testcase name="repair and reconstruction HTML use bounded supplied reports without renderer IO()" classname="decompengine.web.UploadServerTest" time="0.393"/>
-  <testcase name="shutdown discards caller-queued work and late delivery cannot alter a new owner state()" classname="decompengine.web.UploadServerTest" time="0.063"/>
-  <testcase name="web UI uploads ELF and returns job JSON()" classname="decompengine.web.UploadServerTest" time="0.032"/>
-  <testcase name="corrupt bound ACP receipt is labelled without overriding canonical acceptance or exposing bytes()" classname="decompengine.web.UploadServerTest" time="0.098"/>
-  <testcase name="every iteration can inspect retained evidence after the full page read allowance is consumed()" classname="decompengine.web.UploadServerTest" time="30.522"/>
-  <testcase name="canonical authored receipt is checked separately and later corruption cannot become release acceptance()" classname="decompengine.web.UploadServerTest" time="0.495"/>
-  <testcase name="legacy JSON errors have fixed public messages and request identities()" classname="decompengine.web.UploadServerTest" time="0.329"/>
-  <testcase name="legacy upload and job JSON omit private storage fields without changing persistence()" classname="decompengine.web.UploadServerTest" time="0.174"/>
-  <testcase name="GUI launches analysis renders evidence and downloads artifacts()" classname="decompengine.web.UploadServerTest" time="0.191"/>
-  <testcase name="selected canonical receipt and ordinary links survive a full unselected receipt directory without extra workflows()" classname="decompengine.web.UploadServerTest" time="1.513"/>
-  <testcase name="HTML progress renders only the supplied snapshot rather than reopening the journal()" classname="decompengine.web.UploadServerTest" time="0.032"/>
-  <testcase name="early stop signal prevents successful completion publication before cleanup()" classname="decompengine.web.UploadServerTest" time="0.088"/>
-  <testcase name="source rendering never reads linked or oversized provenance metadata()" classname="decompengine.web.UploadServerTest" time="0.154"/>
-  <testcase name="retained-byte upload refusal preserves concurrent listing and status traffic()" classname="decompengine.web.UploadServerTest" time="2.182"/>
-  <testcase name="legacy event reads reject unknown attempt identities and extra query parameters()" classname="decompengine.web.UploadServerTest" time="0.121"/>
-  <testcase name="job state page shows status metadata and repair iteration history()" classname="decompengine.web.UploadServerTest" time="0.079"/>
-  <testcase name="HTML exploration uses supplied data and bounded unavailable report reads()" classname="decompengine.web.UploadServerTest" time="0.329"/>
-  <testcase name="dashboard shows retained recovery data without exposing private files()" classname="decompengine.web.UploadServerTest" time="0.026"/>
-  <testcase name="completion publication racing the stop signal is repaired to failed()" classname="decompengine.web.UploadServerTest" time="0.039"/>
-  <testcase name="missing job workflow admissions return typed safe not found responses()" classname="decompengine.web.UploadServerTest" time="0.066"/>
-  <testcase name="actual trace guided rejection survives server restart with matching CLI and private safe HTTP history()" classname="decompengine.web.UploadServerTest" time="0.407"/>
-  <testcase name="older canonical receipt is verified only on its selected page and corruption preserves rejection()" classname="decompengine.web.UploadServerTest" time="55.834"/>
-  <testcase name="source and archive response reads reject oversized sparse files()" classname="decompengine.web.UploadServerTest" time="0.14"/>
-  <testcase name="shutdown timeout retains store ownership until the worker exits and cleanup is retried()" classname="decompengine.web.UploadServerTest" time="5.176"/>
-  <testcase name="artifact display uses supplied metadata and service listing stays bounded()" classname="decompengine.web.UploadServerTest" time="0.129"/>
+  <testcase name="repair history distinguishes empty projections from missing and malformed structure()" classname="decompengine.web.UploadServerTest" time="1.527"/>
+  <testcase name="queued publication racing the stop signal is rejected and repaired()" classname="decompengine.web.UploadServerTest" time="0.065"/>
+  <testcase name="legacy report presentation treats every retained string as inert text()" classname="decompengine.web.UploadServerTest" time="0.032"/>
+  <testcase name="job event endpoint and refresh render the persisted bounded stream()" classname="decompengine.web.UploadServerTest" time="0.163"/>
+  <testcase name="source view reads confidence from the admitted profile declaration()" classname="decompengine.web.UploadServerTest" time="0.287"/>
+  <testcase name="dashboard keeps an unreadable published job visible without leaking its contents()" classname="decompengine.web.UploadServerTest" time="0.202"/>
+  <testcase name="repair and reconstruction HTML use bounded supplied reports without renderer IO()" classname="decompengine.web.UploadServerTest" time="0.599"/>
+  <testcase name="shutdown discards caller-queued work and late delivery cannot alter a new owner state()" classname="decompengine.web.UploadServerTest" time="0.162"/>
+  <testcase name="web UI uploads ELF and returns job JSON()" classname="decompengine.web.UploadServerTest" time="0.053"/>
+  <testcase name="corrupt bound ACP receipt is labelled without overriding canonical acceptance or exposing bytes()" classname="decompengine.web.UploadServerTest" time="0.14"/>
+  <testcase name="every iteration can inspect retained evidence after the full page read allowance is consumed()" classname="decompengine.web.UploadServerTest" time="41.778"/>
+  <testcase name="canonical authored receipt is checked separately and later corruption cannot become release acceptance()" classname="decompengine.web.UploadServerTest" time="0.656"/>
+  <testcase name="legacy JSON errors have fixed public messages and request identities()" classname="decompengine.web.UploadServerTest" time="0.304"/>
+  <testcase name="legacy upload and job JSON omit private storage fields without changing persistence()" classname="decompengine.web.UploadServerTest" time="0.19"/>
+  <testcase name="GUI launches analysis renders evidence and downloads artifacts()" classname="decompengine.web.UploadServerTest" time="0.192"/>
+  <testcase name="selected canonical receipt and ordinary links survive a full unselected receipt directory without extra workflows()" classname="decompengine.web.UploadServerTest" time="1.127"/>
+  <testcase name="HTML progress renders only the supplied snapshot rather than reopening the journal()" classname="decompengine.web.UploadServerTest" time="0.025"/>
+  <testcase name="early stop signal prevents successful completion publication before cleanup()" classname="decompengine.web.UploadServerTest" time="0.041"/>
+  <testcase name="source rendering never reads linked or oversized provenance metadata()" classname="decompengine.web.UploadServerTest" time="0.124"/>
+  <testcase name="retained-byte upload refusal preserves concurrent listing and status traffic()" classname="decompengine.web.UploadServerTest" time="2.147"/>
+  <testcase name="legacy event reads reject unknown attempt identities and extra query parameters()" classname="decompengine.web.UploadServerTest" time="0.124"/>
+  <testcase name="job state page shows status metadata and repair iteration history()" classname="decompengine.web.UploadServerTest" time="0.112"/>
+  <testcase name="HTML exploration uses supplied data and bounded unavailable report reads()" classname="decompengine.web.UploadServerTest" time="0.397"/>
+  <testcase name="dashboard shows retained recovery data without exposing private files()" classname="decompengine.web.UploadServerTest" time="0.049"/>
+  <testcase name="completion publication racing the stop signal is repaired to failed()" classname="decompengine.web.UploadServerTest" time="0.077"/>
+  <testcase name="missing job workflow admissions return typed safe not found responses()" classname="decompengine.web.UploadServerTest" time="0.082"/>
+  <testcase name="actual trace guided rejection survives server restart with matching CLI and private safe HTTP history()" classname="decompengine.web.UploadServerTest" time="0.507"/>
+  <testcase name="older canonical receipt is verified only on its selected page and corruption preserves rejection()" classname="decompengine.web.UploadServerTest" time="63.854"/>
+  <testcase name="source and archive response reads reject oversized sparse files()" classname="decompengine.web.UploadServerTest" time="0.208"/>
+  <testcase name="shutdown timeout retains store ownership until the worker exits and cleanup is retried()" classname="decompengine.web.UploadServerTest" time="5.121"/>
+  <testcase name="artifact display uses supplied metadata and service listing stays bounded()" classname="decompengine.web.UploadServerTest" time="0.174"/>
   <testcase name="legacy nonloopback binding is unavailable without a qualified access profile()" classname="decompengine.web.UploadServerTest" time="0.003"/>
-  <testcase name="verified archive links pin bytes and reject stale source build and archive identities()" classname="decompengine.web.UploadServerTest" time="2.002"/>
-  <testcase name="source roles and text kinds come from an admitted alternate profile not suffixes()" classname="decompengine.web.UploadServerTest" time="0.346"/>
-  <testcase name="attachment metadata cannot inject headers and uses RFC 5987 encoding()" classname="decompengine.web.UploadServerTest" time="0.001"/>
-  <testcase name="legacy JSON and HTML reject private persisted ELF categories without rewriting the record()" classname="decompengine.web.UploadServerTest" time="0.735"/>
-  <testcase name="GUI launches reconstruction browses escaped source and rejects an unverified archive()" classname="decompengine.web.UploadServerTest" time="0.292"/>
-  <testcase name="source responses reject malformed UTF8 without replacement decoding()" classname="decompengine.web.UploadServerTest" time="0.142"/>
-  <testcase name="legacy artifact downloads sandbox active content and sanitize header filenames()" classname="decompengine.web.UploadServerTest" time="0.274"/>
-  <testcase name="legacy recovery reads pause during an admitted streamed upload and resume after publication()" classname="decompengine.web.UploadServerTest" time="0.303"/>
-  <testcase name="actual canonical rejected history survives reconnect and empty H without private payload or writes()" classname="decompengine.web.UploadServerTest" time="0.77"/>
-  <testcase name="recovery endpoint returns a read-only summary without private names or contents()" classname="decompengine.web.UploadServerTest" time="0.025"/>
-  <testcase name="older trace history and case pages retain authorized evidence across restart and reject stale or corrupt captures()" classname="decompengine.web.UploadServerTest" time="98.943"/>
-  <testcase name="legacy progress withholds uncertified prose and unknown fields in JSON and HTML()" classname="decompengine.web.UploadServerTest" time="0.133"/>
-  <testcase name="ordinary report GET and HEAD reject file parent and nonregular indirection without outside bytes()" classname="decompengine.web.UploadServerTest" time="0.21"/>
-  <testcase name="ordinary report GET and HEAD require a session and enforce the complete download ceiling()" classname="decompengine.web.UploadServerTest" time="0.166"/>
-  <testcase name="rejected admission can be retried without a stale job reservation()" classname="decompengine.web.UploadServerTest" time="0.11"/>
-  <testcase name="early stop signal discards delivered queued work before cleanup takes the lifecycle lock()" classname="decompengine.web.UploadServerTest" time="0.05"/>
-  <testcase name="stop signals the job service before waiting on the lifecycle lock()" classname="decompengine.web.UploadServerTest" time="0.026"/>
-  <testcase name="background diagnostics are redacted in storage and withheld from public rendering()" classname="decompengine.web.UploadServerTest" time="0.195"/>
-  <testcase name="claim that precedes the stop signal cannot invoke the operation()" classname="decompengine.web.UploadServerTest" time="0.043"/>
-  <testcase name="upload rejects non-ELF content()" classname="decompengine.web.UploadServerTest" time="0.02"/>
-  <testcase name="canonical empty and run only HTTP histories expose every cancelled run without another workflow()" classname="decompengine.web.UploadServerTest" time="3.95"/>
-  <testcase name="legacy progress distinguishes unavailable journals from a persisted empty journal()" classname="decompengine.web.UploadServerTest" time="0.415"/>
-  <testcase name="late caller-owned worker completion releases ownership without a second stop()" classname="decompengine.web.UploadServerTest" time="5.081"/>
-  <testcase name="owned workers bound pending jobs reject overflow and discard queued work at shutdown()" classname="decompengine.web.UploadServerTest" time="2.591"/>
-  <testcase name="HTTP job status remains responsive throughout a slow multi-record dashboard listing()" classname="decompengine.web.UploadServerTest" time="4.923"/>
-  <testcase name="legacy JSON read routes negotiate methods and Accept before storage access()" classname="decompengine.web.UploadServerTest" time="1.666"/>
-  <testcase name="repair history presentation rejects a linked report and does not expose its target()" classname="decompengine.web.UploadServerTest" time="0.176"/>
-  <testcase name="routes reject a substituted job directory instead of following its reports()" classname="decompengine.web.UploadServerTest" time="0.165"/>
-  <testcase name="actual restoration failure stays visible after recovery and HTTP server restart()" classname="decompengine.web.UploadServerTest" time="0.333"/>
-  <testcase name="upload page has ELF form()" classname="decompengine.web.UploadServerTest" time="0.014"/>
-  <testcase name="dashboard shows incomplete recovery inspection even with zero counted candidates()" classname="decompengine.web.UploadServerTest" time="0.014"/>
-  <testcase name="genuine repair receipt is verified only for its complete server binding()" classname="decompengine.web.UploadServerTest" time="0.08"/>
-  <testcase name="legacy transport rejects foreign origins and forwarded authority before operations()" classname="decompengine.web.UploadServerTest" time="1.329"/>
-  <testcase name="configured credential indicators cannot expose background diagnostic values in storage()" classname="decompengine.web.UploadServerTest" time="0.249"/>
-  <testcase name="default web profiles display declared sources and verified archive bytes()" classname="decompengine.web.UploadServerTest" time="1.066"/>
-  <testcase name="artifact routes reject noncanonical paths and nonregular targets()" classname="decompengine.web.UploadServerTest" time="0.242"/>
-  <testcase name="progress refresh distinguishes hidden rows lost history and unreadable snapshots()" classname="decompengine.web.UploadServerTest" time="0.138"/>
-  <testcase name="background diagnostics cannot persist sensitive omission markers()" classname="decompengine.web.UploadServerTest" time="0.249"/>
-  <testcase name="artifact and source routes reject final file and parent directory indirection()" classname="decompengine.web.UploadServerTest" time="0.16"/>
-  <testcase name="changed source input and same-byte source indirection cannot reuse manifest evidence()" classname="decompengine.web.UploadServerTest" time="0.272"/>
-  <testcase name="dashboard lists uploaded jobs()" classname="decompengine.web.UploadServerTest" time="0.112"/>
-  <testcase name="dashboard keeps malformed jobs visible and detail returns a safe storage diagnostic()" classname="decompengine.web.UploadServerTest" time="0.112"/>
+  <testcase name="verified archive links pin bytes and reject stale source build and archive identities()" classname="decompengine.web.UploadServerTest" time="2.701"/>
+  <testcase name="source roles and text kinds come from an admitted alternate profile not suffixes()" classname="decompengine.web.UploadServerTest" time="0.405"/>
+  <testcase name="attachment metadata cannot inject headers and uses RFC 5987 encoding()" classname="decompengine.web.UploadServerTest" time="0.002"/>
+  <testcase name="legacy JSON and HTML reject private persisted ELF categories without rewriting the record()" classname="decompengine.web.UploadServerTest" time="0.796"/>
+  <testcase name="GUI launches reconstruction browses escaped source and rejects an unverified archive()" classname="decompengine.web.UploadServerTest" time="0.442"/>
+  <testcase name="source responses reject malformed UTF8 without replacement decoding()" classname="decompengine.web.UploadServerTest" time="0.096"/>
+  <testcase name="legacy artifact downloads sandbox active content and sanitize header filenames()" classname="decompengine.web.UploadServerTest" time="0.202"/>
+  <testcase name="legacy recovery reads pause during an admitted streamed upload and resume after publication()" classname="decompengine.web.UploadServerTest" time="0.297"/>
+  <testcase name="actual canonical rejected history survives reconnect and empty H without private payload or writes()" classname="decompengine.web.UploadServerTest" time="0.948"/>
+  <testcase name="recovery endpoint returns a read-only summary without private names or contents()" classname="decompengine.web.UploadServerTest" time="0.043"/>
+  <testcase name="older trace history and case pages retain authorized evidence across restart and reject stale or corrupt captures()" classname="decompengine.web.UploadServerTest" time="106.124"/>
+  <testcase name="legacy progress withholds uncertified prose and unknown fields in JSON and HTML()" classname="decompengine.web.UploadServerTest" time="0.14"/>
+  <testcase name="ordinary report GET and HEAD reject file parent and nonregular indirection without outside bytes()" classname="decompengine.web.UploadServerTest" time="0.305"/>
+  <testcase name="ordinary report GET and HEAD require a session and enforce the complete download ceiling()" classname="decompengine.web.UploadServerTest" time="0.223"/>
+  <testcase name="rejected admission can be retried without a stale job reservation()" classname="decompengine.web.UploadServerTest" time="0.112"/>
+  <testcase name="early stop signal discards delivered queued work before cleanup takes the lifecycle lock()" classname="decompengine.web.UploadServerTest" time="0.071"/>
+  <testcase name="stop signals the job service before waiting on the lifecycle lock()" classname="decompengine.web.UploadServerTest" time="0.042"/>
+  <testcase name="background diagnostics are redacted in storage and withheld from public rendering()" classname="decompengine.web.UploadServerTest" time="0.271"/>
+  <testcase name="claim that precedes the stop signal cannot invoke the operation()" classname="decompengine.web.UploadServerTest" time="0.096"/>
+  <testcase name="upload rejects non-ELF content()" classname="decompengine.web.UploadServerTest" time="0.043"/>
+  <testcase name="canonical empty and run only HTTP histories expose every cancelled run without another workflow()" classname="decompengine.web.UploadServerTest" time="5.605"/>
+  <testcase name="legacy progress distinguishes unavailable journals from a persisted empty journal()" classname="decompengine.web.UploadServerTest" time="0.427"/>
+  <testcase name="late caller-owned worker completion releases ownership without a second stop()" classname="decompengine.web.UploadServerTest" time="5.108"/>
+  <testcase name="owned workers bound pending jobs reject overflow and discard queued work at shutdown()" classname="decompengine.web.UploadServerTest" time="3.595"/>
+  <testcase name="HTTP job status remains responsive throughout a slow multi-record dashboard listing()" classname="decompengine.web.UploadServerTest" time="5.463"/>
+  <testcase name="legacy JSON read routes negotiate methods and Accept before storage access()" classname="decompengine.web.UploadServerTest" time="1.75"/>
+  <testcase name="repair history presentation rejects a linked report and does not expose its target()" classname="decompengine.web.UploadServerTest" time="0.206"/>
+  <testcase name="routes reject a substituted job directory instead of following its reports()" classname="decompengine.web.UploadServerTest" time="0.199"/>
+  <testcase name="actual restoration failure stays visible after recovery and HTTP server restart()" classname="decompengine.web.UploadServerTest" time="0.257"/>
+  <testcase name="upload page has ELF form()" classname="decompengine.web.UploadServerTest" time="0.012"/>
+  <testcase name="dashboard shows incomplete recovery inspection even with zero counted candidates()" classname="decompengine.web.UploadServerTest" time="0.012"/>
+  <testcase name="genuine repair receipt is verified only for its complete server binding()" classname="decompengine.web.UploadServerTest" time="0.076"/>
+  <testcase name="legacy transport rejects foreign origins and forwarded authority before operations()" classname="decompengine.web.UploadServerTest" time="1.332"/>
+  <testcase name="configured credential indicators cannot expose background diagnostic values in storage()" classname="decompengine.web.UploadServerTest" time="0.283"/>
+  <testcase name="default web profiles display declared sources and verified archive bytes()" classname="decompengine.web.UploadServerTest" time="1.232"/>
+  <testcase name="artifact routes reject noncanonical paths and nonregular targets()" classname="decompengine.web.UploadServerTest" time="0.222"/>
+  <testcase name="progress refresh distinguishes hidden rows lost history and unreadable snapshots()" classname="decompengine.web.UploadServerTest" time="0.142"/>
+  <testcase name="background diagnostics cannot persist sensitive omission markers()" classname="decompengine.web.UploadServerTest" time="0.243"/>
+  <testcase name="artifact and source routes reject final file and parent directory indirection()" classname="decompengine.web.UploadServerTest" time="0.185"/>
+  <testcase name="changed source input and same-byte source indirection cannot reuse manifest evidence()" classname="decompengine.web.UploadServerTest" time="0.316"/>
+  <testcase name="dashboard lists uploaded jobs()" classname="decompengine.web.UploadServerTest" time="0.085"/>
+  <testcase name="dashboard keeps malformed jobs visible and detail returns a safe storage diagnostic()" classname="decompengine.web.UploadServerTest" time="0.121"/>
   <system-out><![CDATA[web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"repair history distinguishes empty projections from missing and malformed structure()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"queued publication racing the stop signal is rejected and repaired()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"legacy report presentation treats every retained string as inert text()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
@@ -94,7 +94,7 @@ web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"HTML progress renders only the supplied snapshot rather than reopening the journal()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"early stop signal prevents successful completion publication before cleanup()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"source rendering never reads linked or oversized provenance metadata()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
-issue-162-retained-quota-http-v1 refusal=503/UPLOAD_STORAGE request_body_bytes_sent=0 status_responses=4 status_max_ms=4 dashboard_active=true distinct_records=1 retained_bytes=2103318
+issue-162-retained-quota-http-v1 refusal=503/UPLOAD_STORAGE request_body_bytes_sent=0 status_responses=4 status_max_ms=5 dashboard_read_held=true storage_measure_held_through_status=true distinct_records=1 retained_bytes=2103310
 issue-162-retained-quota-http-v1 listing=complete retained_capacity_restored=true retry=201 admission=empty
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"retained-byte upload refusal preserves concurrent listing and status traffic()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"legacy event reads reject unknown attempt identities and extra query parameters()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
@@ -133,7 +133,7 @@ web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"legacy progress distinguishes unavailable journals from a persisted empty journal()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"late caller-owned worker completion releases ownership without a second stop()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"owned workers bound pending jobs reject overflow and discard queued work at shutdown()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
-issue-162-status-responsiveness-v1 responses=164 overlapping=163 p95_ms=46 max_ms=56 distinct_records=8 physical_reads=16 samples=2:1:1:true,3:1:1:true,42:1:1:true,45:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,46:1:1:true,43:1:1:true,46:1:1:true,43:1:1:true,46:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,46:1:1:true,43:1:1:true,46:1:1:true,43:1:1:true,43:1:1:true,46:1:1:true,43:1:1:true,43:1:2:true,43:2:2:true,43:2:2:true,43:2:2:true,43:2:2:true,46:2:2:true,42:2:2:true,43:2:2:true,46:2:2:true,43:2:2:true,46:2:2:true,46:2:2:true,46:2:2:true,43:2:2:true,43:2:2:true,43:2:2:true,46:2:2:true,43:2:2:true,43:2:3:true,43:2:3:true,46:3:3:true,46:3:3:true,43:3:3:true,43:3:3:true,43:3:3:true,43:3:3:true,46:3:3:true,43:3:3:true,43:3:3:true,43:3:3:true,46:3:3:true,46:3:3:true,43:3:3:true,43:3:3:true,44:3:3:true,44:3:3:true,44:3:3:true,44:3:3:true,42:3:3:true,43:3:3:true,43:3:3:true,46:3:3:true,43:3:4:true,43:4:4:true,43:4:4:true,56:4:4:true,46:4:4:true,44:4:4:true,44:4:4:true,50:4:4:true,47:4:4:true,44:4:4:true,43:4:4:true,43:4:4:true,43:4:4:true,43:4:4:true,43:4:4:true,43:4:4:true,43:4:4:true,43:4:4:true,43:4:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,47:5:5:true,43:5:5:true,44:5:5:true,46:5:5:true,44:5:5:true,43:5:5:true,45:5:5:true,46:5:5:true,46:5:5:true,46:5:5:true,46:5:6:true,43:5:6:true,42:6:6:true,45:6:6:true,43:6:6:true,43:6:6:true,43:6:6:true,43:6:6:true,43:6:6:true,43:6:6:true,46:6:6:true,46:6:6:true,46:6:6:true,46:6:6:true,43:6:6:true,46:6:6:true,43:6:6:true,43:6:6:true,43:6:6:true,43:6:6:true,43:6:6:true,46:6:6:true,43:6:6:true,43:6:6:true,43:6:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:7:true,43:7:8:true,43:7:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:false
+issue-162-status-responsiveness-v1 responses=161 overlapping=159 p95_ms=49 max_ms=50 distinct_records=8 physical_reads=16 samples=2:1:1:true,2:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,43:1:1:true,46:1:1:true,43:1:1:true,46:1:1:true,43:1:1:true,49:1:1:true,43:1:1:true,43:1:1:true,46:1:1:true,46:1:1:true,43:1:1:true,46:1:1:true,43:2:2:true,49:1:2:true,46:2:2:true,49:2:2:true,46:2:2:true,46:2:2:true,43:2:2:true,46:2:2:true,46:2:2:true,46:2:2:true,46:2:2:true,46:2:2:true,46:2:2:true,46:2:2:true,46:2:2:true,43:2:2:true,43:2:2:true,46:2:2:true,46:3:3:true,49:3:3:true,46:3:3:true,46:3:3:true,43:3:3:true,46:3:3:true,46:3:3:true,43:3:3:true,46:3:3:true,46:3:3:true,46:3:3:true,46:3:3:true,46:3:3:true,46:3:3:true,46:3:3:true,43:3:3:true,46:3:3:true,49:3:3:true,43:3:3:true,46:3:3:true,43:3:3:true,49:3:4:true,46:3:4:true,46:4:4:true,43:4:4:true,46:4:4:true,46:4:4:true,46:4:4:true,43:4:4:true,46:4:4:true,46:4:4:true,46:4:4:true,43:4:4:true,49:4:4:true,46:4:4:true,46:4:4:true,43:4:4:true,46:4:4:true,49:4:4:true,46:4:5:true,49:4:5:true,46:5:5:true,43:5:5:true,49:5:5:true,49:5:5:true,46:5:5:true,46:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,43:5:5:true,46:5:6:true,49:5:6:true,49:6:6:true,50:6:6:true,46:6:6:true,49:6:6:true,45:6:6:true,42:6:6:true,46:6:6:true,46:6:6:true,43:6:6:true,46:6:6:true,46:6:6:true,43:6:6:true,43:6:6:true,43:6:6:true,49:6:6:true,46:6:6:true,46:6:6:true,46:6:6:true,46:6:6:true,46:6:6:true,49:6:6:true,49:6:7:true,46:6:7:true,46:7:7:true,46:7:7:true,43:7:7:true,46:7:7:true,46:7:7:true,46:7:7:true,46:7:7:true,50:7:7:true,43:7:7:true,46:7:7:true,42:7:7:true,46:7:7:true,43:7:7:true,42:7:7:true,42:7:7:true,43:7:7:true,43:7:7:true,43:7:8:true,43:7:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,43:8:8:true,46:8:8:true,46:8:8:true,43:8:8:true,46:8:8:true,46:8:8:true,46:8:8:true,46:8:8:true,46:8:8:true,42:8:8:true,49:8:8:true,46:8:8:true,43:8:8:true,46:8:8:true,43:8:8:false,46:8:8:false
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"HTTP job status remains responsive throughout a slow multi-record dashboard listing()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"legacy JSON read routes negotiate methods and Accept before storage access()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"repair history presentation rejects a linked report and does not expose its target()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
@@ -153,52 +153,52 @@ web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"dashboard lists uploaded jobs()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 web-job-recovery-context-v1 {"schemaVersion":1,"scope":"benign-recovery-fixture-runtime","caseClass":"decompengine.web.UploadServerTest","caseMethod":"dashboard keeps malformed jobs visible and detail returns a safe storage diagnostic()","runtime":{"javaRuntimeVersion":"21.0.12.1+1-LTS","javaVendor":"Eclipse Adoptium","javaVmName":"OpenJDK 64-Bit Server VM","osName":"Linux","osVersion":"7.2.12-gentoo-dist-hardened","osArch":"amd64"},"fixtureRoots":[{"ordinal":1,"provider":"sun.nio.fs.LinuxFileSystemProvider","scheme":"file","type":"btrfs","blockSizeBytes":4096,"blockSizeStatus":"CAPTURED","readOnly":false,"supportsPosix":true,"supportsUnix":true}],"filesystemDisposition":"OBSERVED"}
 ]]></system-out>
-  <system-err><![CDATA[web-http-failure request_id=fbcbaa7c-2d23-4377-aeb7-9e6f65b2baba status=404 code=NOT_FOUND
-web-http-failure request_id=691baf3f-0770-4872-8a6a-ca918ab9ecc5 status=404 code=JOB_NOT_FOUND
-web-http-failure request_id=41f66461-7a53-4039-9f26-bdcfd05fc0f2 status=400 code=INVALID_REQUEST
-web-http-failure request_id=dfa98641-8317-4a18-b2cf-7a9e68add556 status=400 code=INVALID_UPLOAD
-web-http-failure request_id=8c46376d-48b5-43b1-a889-b580b018ae84 status=503 code=JOB_STORAGE_UNAVAILABLE
-web-http-failure request_id=e27fff4b-b2e8-466e-a692-a22d4fab6c5b status=503 code=UPLOAD_STORAGE
-web-http-failure request_id=52ea8f6d-4d78-4baa-8a68-202b2fd96f38 status=404 code=RUN_NOT_FOUND
-web-http-failure request_id=2126a190-d2ac-4c27-9339-9df5a76adc72 status=400 code=INVALID_REQUEST
-web-http-failure request_id=2f26b805-b4d2-48b2-b380-e0d799a1444f status=503 code=JOB_RECORD_UNAVAILABLE
-web-http-failure request_id=90223e30-a81d-4d70-9523-bae58bd784c1 status=503 code=JOB_RECORD_UNAVAILABLE
-web-http-failure request_id=62e64757-045b-4440-b3ca-7623133b804a status=503 code=JOB_RECORD_UNAVAILABLE
-web-http-failure request_id=b992c99b-1e43-4c3d-a51b-0ca6535fcbf5 status=503 code=JOB_RECORD_UNAVAILABLE
-web-http-failure request_id=395c6a9f-1993-4e92-940a-0c76f66d128c status=503 code=JOB_RECORD_UNAVAILABLE
-web-http-failure request_id=829f0f44-621c-4f62-bfe0-c6d121d0ceb9 status=503 code=RECOVERY_INSPECTION_BUSY
-web-http-failure request_id=0c0436f0-0a21-4973-aa52-5e8ef3f4f2f1 status=503 code=PROGRESS_UNAVAILABLE
-web-http-failure request_id=245b9e08-391d-4178-b44b-33ea201a3554 status=503 code=PROGRESS_UNAVAILABLE
-web-http-failure request_id=44b14296-b96e-4716-b405-719865ee6a8e status=503 code=PROGRESS_UNAVAILABLE
-web-http-failure request_id=c9da35fb-c342-4fae-94c6-177c16624e64 status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=d1edb2f2-56fa-4e72-919b-cd7e5fe7468f status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=7bb60c84-53e3-4b3e-8a2b-6d25563d125a status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=df9e5423-3738-4ac9-8986-939b8b15331c status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=1affe099-34c0-43bc-8164-438fad6a4df6 status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=d47e6d14-def5-4fac-8905-bb82d695596a status=400 code=INVALID_HEADER
-web-http-failure request_id=96b7c862-e18b-4938-ae3b-6c2bc2f9788c status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=7cbac558-b8d3-4a8b-8ac6-7e37687df31e status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=2fae0525-e9e7-4303-9c04-b2beab86e22f status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=4245cd93-da78-40b2-986c-79382c41b996 status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=fd166388-c266-4ddd-9cbb-c00f60f6d8b4 status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=dc2ac3fa-a65b-43d0-a5cc-218596a141f5 status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=6f4c6464-5c82-43b2-83e5-7df89e7f19e6 status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=34e07f60-430b-44da-89d1-43cda24e947f status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=1de5ffa5-e13c-4ca6-ad63-8af88b75b292 status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=67be2f52-c2f9-49bc-84a2-df57a1dd7dfc status=400 code=INVALID_HEADER
-web-http-failure request_id=da1dc290-62e7-4f50-9cc9-e67ed059f67a status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=97cb820e-8374-4828-8b59-dbc42a5efd8f status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=7c9749bd-49b4-43ab-93b6-ab9d4b5eac21 status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=a06aa5ba-bde0-414d-8c80-65a52c018d2c status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=28c4ed00-442c-4692-84bd-16dec397786c status=404 code=NOT_FOUND
-web-http-failure request_id=7d8bd2ea-bfe5-473f-9bcd-9e8c378afa24 status=405 code=METHOD_NOT_ALLOWED
-web-http-failure request_id=23826b52-c09d-45f5-a6f0-ee3bcd082796 status=406 code=NOT_ACCEPTABLE
-web-http-failure request_id=16c70864-0206-4e3f-b99e-12c87531aa07 status=403 code=ORIGIN_DENIED
-web-http-failure request_id=19d6cf58-c63b-4eab-89e9-858e2325a552 status=403 code=ORIGIN_DENIED
-web-http-failure request_id=d2f62820-e3d4-472f-a7b0-d184b12948ab status=403 code=ORIGIN_DENIED
-web-http-failure request_id=2091d1d5-5b29-48c0-8cef-93cb79e0f137 status=403 code=ORIGIN_DENIED
-web-http-failure request_id=705732c3-d8c7-46c4-946f-d8ac2d43c4f4 status=403 code=FORWARDED_HEADERS_DENIED
-web-http-failure request_id=f299de8d-cb55-4db5-939b-c50de8fa5f68 status=403 code=FORWARDED_HEADERS_DENIED
-web-http-failure request_id=2a371aaf-c7ea-42f4-a9fa-572d9c09cd97 status=401 code=SESSION_REQUIRED
+  <system-err><![CDATA[web-http-failure request_id=80975c43-5489-490e-9c16-1d40fb0fbfa5 status=404 code=NOT_FOUND
+web-http-failure request_id=021b837c-d3f4-4ca7-b61e-9a23fbf4d461 status=404 code=JOB_NOT_FOUND
+web-http-failure request_id=62e5cf08-88c3-4185-bb09-15e230992cdd status=400 code=INVALID_REQUEST
+web-http-failure request_id=cf099f08-e1e8-4d13-941a-2f0ef7c74c59 status=400 code=INVALID_UPLOAD
+web-http-failure request_id=0ed8d098-0f41-4ccd-9960-d2325b1b2ae4 status=503 code=JOB_STORAGE_UNAVAILABLE
+web-http-failure request_id=fefdad21-0b17-4a3e-8394-9e9b6b8de445 status=503 code=UPLOAD_STORAGE
+web-http-failure request_id=f9fc3c90-48e9-4866-83c7-50393e28575e status=404 code=RUN_NOT_FOUND
+web-http-failure request_id=f87e7af9-ef2f-4920-9973-4d2a2f83358a status=400 code=INVALID_REQUEST
+web-http-failure request_id=526de95e-239e-4d01-a605-9fdfa4928afc status=503 code=JOB_RECORD_UNAVAILABLE
+web-http-failure request_id=08563a2c-7bf2-4406-b60f-35daba3fdefb status=503 code=JOB_RECORD_UNAVAILABLE
+web-http-failure request_id=784ba766-778c-433e-a33c-0941a30e6c3a status=503 code=JOB_RECORD_UNAVAILABLE
+web-http-failure request_id=febacf15-8edb-4907-a3d0-1ca8726a4901 status=503 code=JOB_RECORD_UNAVAILABLE
+web-http-failure request_id=a006f4e1-95d6-486b-a45a-3c02d2200ba8 status=503 code=JOB_RECORD_UNAVAILABLE
+web-http-failure request_id=a71919da-fa0e-4d86-8a9d-3d5ff2b7e59f status=503 code=RECOVERY_INSPECTION_BUSY
+web-http-failure request_id=85277820-a1a5-40b3-9f59-dd62e34de9eb status=503 code=PROGRESS_UNAVAILABLE
+web-http-failure request_id=f320f01f-3f8c-4faa-a4eb-801d03c0b56d status=503 code=PROGRESS_UNAVAILABLE
+web-http-failure request_id=f8754737-9b17-485a-bbb6-d3dd487d17a5 status=503 code=PROGRESS_UNAVAILABLE
+web-http-failure request_id=cbbb67cf-97c7-4333-8e93-56c1b5e2840e status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=3f374057-97d4-4f7c-9f5e-df54124c6092 status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=67c65573-26ad-48e2-8f3d-518ed89929ab status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=a884e793-0a4d-4d96-87a7-caf714c3052d status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=22c9e7d2-acf1-4282-96e6-7e344a3b7cb6 status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=e00f1dff-0322-4481-be2f-55497972b9db status=400 code=INVALID_HEADER
+web-http-failure request_id=04f91990-07e9-4c04-950d-81333c938d4c status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=d030f846-cf4a-4484-9ccb-64cec829a1b0 status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=acb64e08-60be-4585-8ace-fe57500d1b06 status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=96554730-2f8e-4a89-8f89-299b3b7afdc6 status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=a7d8a30b-9da9-4de3-9846-14ed7b8a334c status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=4ff4ef10-d7ad-44bf-aeb6-dfb99ba802b1 status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=34339712-b3b3-487f-9a03-448fbd293ad7 status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=44fd5901-26e5-4a90-85f9-a109718fe976 status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=82663363-f7c2-4fc6-bb08-2b75247f142d status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=4338e4a9-ac4d-4417-836a-23b30efc3ac2 status=400 code=INVALID_HEADER
+web-http-failure request_id=0f119578-a0e1-4bba-ba1a-6ad82ffbb344 status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=545453f8-2386-405e-b047-f33a4f618078 status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=fab93eba-2527-420d-bb23-694d7b819d4a status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=6311d04b-afba-4004-b96f-142dce4cf8c8 status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=2b9aec22-d886-405b-97a0-e1e35886c178 status=404 code=NOT_FOUND
+web-http-failure request_id=7a54bcb9-870d-407b-8946-41233a9e850e status=405 code=METHOD_NOT_ALLOWED
+web-http-failure request_id=751fda0b-e274-4d0d-b2d8-1c6a5068300e status=406 code=NOT_ACCEPTABLE
+web-http-failure request_id=c7977068-5341-45f7-ad66-83332f293626 status=403 code=ORIGIN_DENIED
+web-http-failure request_id=b09e336d-45ed-4a61-ab69-562d409a2d63 status=403 code=ORIGIN_DENIED
+web-http-failure request_id=d718e0f9-dc4f-48bd-ba37-c58398c92fb7 status=403 code=ORIGIN_DENIED
+web-http-failure request_id=88826166-127a-4786-a4b5-d649c64eaac9 status=403 code=ORIGIN_DENIED
+web-http-failure request_id=e54373e4-5620-47f8-8cff-96032e2d09ef status=403 code=FORWARDED_HEADERS_DENIED
+web-http-failure request_id=05701062-7ffe-4d40-9e96-01b0011859c3 status=403 code=FORWARDED_HEADERS_DENIED
+web-http-failure request_id=b676d281-dc88-4e57-99c0-0786f5319168 status=401 code=SESSION_REQUIRED
 ]]></system-err>
 </testsuite>

@@ -1,21 +1,21 @@
 {
   "status": "passed",
   "issue": 162,
-  "sourceCommit": "954407d3de3f499ffd56180006b9ad70f7673d01",
-  "sourceParent": "8f2df5006837be6c74d922203eaca3027660c46a",
-  "sourceTree": "6aface176de6dd267609d43a79ade22d9c7c25b9",
+  "sourceCommit": "4e09598d9b977422801f4f872c33dad9939240b2",
+  "sourceParent": "40f2f69774724201948e3f8431eee444e42b9dac",
+  "sourceTree": "73d094056d291742e64626d7e848793213a9660d",
   "command": "./gradlew --no-daemon -x verifyFrontendToolchain test --tests 'decompengine.web.UploadServerTest'",
   "suite": "decompengine.web.UploadServerTest",
   "test": "class-wide regression run",
   "junitXml": "issue-162-upload-server-class-2026-11-13.xml",
-  "junitXmlSha256": "250f2cb77f6715e36a3c7c57aabf60394ef83bbff7788bcc0098e1b976ff690d",
+  "junitXmlSha256": "bcc2980018eca2e934f4a4acd2001c94a9ca1f5626f9c4383d23533ec5b38ef9",
   "totals": {
     "tests": 74,
     "failures": 0,
     "errors": 0,
     "skipped": 0
   },
-  "scope": "Local class-wide regression check at the same committed source as the focused retained-byte quota qualification. Includes the retained-byte refusal and all existing UploadServerTest cases.",
+  "scope": "Class-wide regression result on the same committed source; includes 74 passing UploadServerTest cases and the strengthened retained-byte quota overlap test.",
   "limitations": [
     "Local test evidence only; no hosted exact-head CI or packaged deployment qualification.",
     "Does not complete #162 or qualify workflow report-growth enforcement."
