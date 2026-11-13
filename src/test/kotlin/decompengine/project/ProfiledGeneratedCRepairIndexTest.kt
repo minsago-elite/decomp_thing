@@ -157,6 +157,30 @@ class ProfiledGeneratedCRepairIndexTest {
     }
 
     @Test
+    fun `module fact and program entity may share the same textual ID`() {
+        val project = createTempDirectory("repair-module-entity-id-collision-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "f".repeat(64),
+            functions = listOf(RecoveredFunction(
+                "module:alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
+                decompiledC = "int alpha_run(void) { return 1; }",
+            )),
+        ), project)
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/alpha.c: compiler diagnostic")
+        val facts = selection.evidenceFacts
+
+        assertTrue(facts.entities.any { it.id == "module:alpha" && it.kind == RepairEvidenceEntityKind.MODULE })
+        assertTrue(facts.entities.any { it.id == "module:alpha" && it.kind == RepairEvidenceEntityKind.FUNCTION })
+        assertTrue(facts.relations.any {
+            it.kind == RepairEvidenceRelationKind.MODULE_OWNS &&
+                it.sourceEntityId == "module:alpha" && it.targetEntityId == "module:alpha"
+        })
+        assertEquals(2, facts.entities.count { it.id == "module:alpha" })
+    }
+
+    @Test
     fun `blank recovered bodies and initializers remain unavailable definitions`() {
         val project = createTempDirectory("repair-semantic-blank-definitions-")
         SourceTreeGenerator.generate(RecoveredProgramModel(

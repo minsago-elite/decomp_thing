@@ -6001,6 +6001,25 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `context evidence retains regression IDs admitted by the corpus budget`() {
+        val project = generatedProject()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val caseId = "case-" + "x".repeat(508)
+            graph.retainRegressionInputs(listOf(ProcessInput(caseId)))
+
+            val context = graph.selectContext("compile", "src/modules/alpha.c: compiler diagnostic")
+            val evidence = requireNotNull(context.evidenceSnapshot)
+
+            assertEquals(caseId, evidence.behaviorCases.single().caseId)
+            assertTrue(evidence.uncertainties.any {
+                it.subject == caseId && it.category == "observed-outcome" &&
+                    it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+            })
+            graph.requireContextBinding(context)
+        }
+    }
+
+    @Test
     fun `repair context refuses changed admitted model evidence before staging`() {
         val project = generatedProject()
         val model = project.resolve("reports/program_model.json")

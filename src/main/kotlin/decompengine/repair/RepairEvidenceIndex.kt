@@ -136,7 +136,11 @@ data class RepairBehaviorCaseEvidence(
     val corpusSha256: String,
 ) {
     init {
-        require(caseId.isNotBlank() && caseId.length <= 512 && inputSha256.matches(Regex("[0-9a-f]{64}")) &&
+        // Retained input IDs are already bounded by the regression-corpus and
+        // canonical snapshot byte budgets. Do not impose a smaller identifier
+        // ceiling while projecting that admitted corpus into evidence.
+        require(caseId.isNotBlank() && caseId.toByteArray(Charsets.UTF_8).size <= MAXIMUM_EVIDENCE_JSON_BYTES &&
+            inputSha256.matches(Regex("[0-9a-f]{64}")) &&
             corpusSha256.matches(Regex("[0-9a-f]{64}")))
     }
 }
@@ -239,25 +243,31 @@ class RepairEvidenceFacts(
             this.declarations.map { it.origin } + this.definitions.map { it.origin } +
             this.buildEvidence.mapNotNull { it.origin } + this.uncertainties.mapNotNull { it.origin })
             .all { it in originSet }) { "repair evidence references an undeclared origin" }
-        require(this.entities.map { it.id }.distinct().size == this.entities.size) {
-            "repair evidence entity IDs must be unique"
+        require(this.entities.map { it.kind to it.id }.distinct().size == this.entities.size) {
+            "repair evidence entity identities must be unique within their kind"
         }
-        val entityById = this.entities.associateBy { it.id }
-        val entityIds = entityById.keys
-        require(this.relations.all { it.sourceEntityId in entityIds && it.targetEntityId in entityIds }) {
-            "repair evidence relation references an unknown entity"
+        val programEntityIds = this.entities.asSequence()
+            .filter { it.kind != RepairEvidenceEntityKind.MODULE }.map { it.id }.toList()
+        require(programEntityIds.distinct().size == programEntityIds.size) {
+            "repair program entity IDs must be unique"
         }
+        val entityIdentities = this.entities.mapTo(hashSetOf()) { it.kind to it.id }
+        val programEntityIdSet = programEntityIds.toHashSet()
         require(this.relations.all { relation ->
-            val source = entityById.getValue(relation.sourceEntityId).kind
-            val target = entityById.getValue(relation.targetEntityId).kind
+            fun exists(id: String, kind: RepairEvidenceEntityKind) = kind to id in entityIdentities
             when (relation.kind) {
-                RepairEvidenceRelationKind.MODULE_OWNS -> source == RepairEvidenceEntityKind.MODULE &&
-                    target in setOf(RepairEvidenceEntityKind.FUNCTION, RepairEvidenceEntityKind.GLOBAL, RepairEvidenceEntityKind.TYPE)
-                RepairEvidenceRelationKind.CALLS -> source == RepairEvidenceEntityKind.FUNCTION && target == RepairEvidenceEntityKind.FUNCTION
-                RepairEvidenceRelationKind.REFERENCES_GLOBAL -> source == RepairEvidenceEntityKind.FUNCTION && target == RepairEvidenceEntityKind.GLOBAL
+                RepairEvidenceRelationKind.MODULE_OWNS -> exists(relation.sourceEntityId, RepairEvidenceEntityKind.MODULE) &&
+                    setOf(RepairEvidenceEntityKind.FUNCTION, RepairEvidenceEntityKind.GLOBAL, RepairEvidenceEntityKind.TYPE)
+                        .any { exists(relation.targetEntityId, it) }
+                RepairEvidenceRelationKind.CALLS -> exists(relation.sourceEntityId, RepairEvidenceEntityKind.FUNCTION) &&
+                    exists(relation.targetEntityId, RepairEvidenceEntityKind.FUNCTION)
+                RepairEvidenceRelationKind.REFERENCES_GLOBAL -> exists(relation.sourceEntityId, RepairEvidenceEntityKind.FUNCTION) &&
+                    exists(relation.targetEntityId, RepairEvidenceEntityKind.GLOBAL)
             }
         }) { "repair evidence relation has incompatible entity kinds" }
-        require((this.declarations.map { it.entityId } + this.definitions.map { it.entityId }).all { it in entityIds }) {
+        require((this.declarations.map { it.entityId } + this.definitions.map { it.entityId }).all { id ->
+            id in programEntityIdSet
+        }) {
             "repair declaration or definition references an unknown entity"
         }
         require(this.relations.distinct().size == this.relations.size) { "repair evidence relations must be unique" }

@@ -964,10 +964,18 @@ internal class ModuleRepairIndex private constructor(
     private fun projectEvidenceFacts(selectedModules: List<String>, deferredModules: List<String>): RepairEvidenceFacts {
         val selectedModuleIds = selectedModules.toHashSet()
         val selectedEntityIds = selectedModules.flatMap { modules[it]?.entityIds.orEmpty() }.toSortedSet()
-        val selectedFactIds = selectedEntityIds + selectedModules.map { "module:$it" }
-        val projectedEntities = evidenceFacts.entities.filter { it.id in selectedFactIds }
+        val selectedModuleFactIds = selectedModules.mapTo(hashSetOf()) { "module:$it" }
+        val projectedEntities = evidenceFacts.entities.filter { fact ->
+            if (fact.kind == RepairEvidenceEntityKind.MODULE) fact.id in selectedModuleFactIds
+            else fact.id in selectedEntityIds
+        }
         val projectedRelations = evidenceFacts.relations.filter {
-            it.sourceEntityId in selectedFactIds && it.targetEntityId in selectedFactIds
+            when (it.kind) {
+                RepairEvidenceRelationKind.MODULE_OWNS ->
+                    it.sourceEntityId in selectedModuleFactIds && it.targetEntityId in selectedEntityIds
+                RepairEvidenceRelationKind.CALLS, RepairEvidenceRelationKind.REFERENCES_GLOBAL ->
+                    it.sourceEntityId in selectedEntityIds && it.targetEntityId in selectedEntityIds
+            }
         }
         val projectedDeclarations = evidenceFacts.declarations.filter { it.entityId in selectedEntityIds }
         val projectedDefinitions = evidenceFacts.definitions.filter { it.entityId in selectedEntityIds }

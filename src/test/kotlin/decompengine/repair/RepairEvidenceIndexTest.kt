@@ -66,6 +66,13 @@ class RepairEvidenceIndexTest {
     }
 
     @Test
+    fun `behavior case evidence does not narrow admitted regression identifiers`() {
+        val caseId = "case-" + "x".repeat(508)
+        val evidence = RepairBehaviorCaseEvidence(caseId, "a".repeat(64), "b".repeat(64))
+        assertEquals(caseId, evidence.caseId)
+    }
+
+    @Test
     fun `canonical evidence is deterministic immutable and preserves typed relationship kinds`() {
         val inputEntities = facts().entities.toMutableList()
         val inputTargets = mutableListOf("all")
