@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinTerminalToolsTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:36:50.107Z" hostname="whatsername" time="5.16">
+<testsuite name="decompengine.builtin.BuiltinTerminalToolsTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-11-13T11:01:08.898Z" hostname="whatsername" time="3.572">
   <properties/>
-  <testcase name="nonzero command exits are feedback and truncated success cannot pass validation()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="2.182"/>
-  <testcase name="workflow execution denial is the same broker decision()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.268"/>
-  <testcase name="loop receives structured process feedback and still requires workflow validation()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.486"/>
+  <testcase name="nonzero command exits are feedback and truncated success cannot pass validation()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="1.28"/>
+  <testcase name="workflow execution denial is the same broker decision()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.208"/>
+  <testcase name="loop receives structured process feedback and still requires workflow validation()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.509"/>
   <testcase name="operation metadata rejects invalid ids without creating a process()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.001"/>
-  <testcase name="typed and direct ACP operations agree on output policy and complete terminal release()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="1.215"/>
-  <testcase name="unknown operation and argument injection cannot reach the launcher()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.357"/>
-  <testcase name="original cancellation reaches running terminal and leaves no unreleased process()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.646"/>
+  <testcase name="typed and direct ACP operations agree on output policy and complete terminal release()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.756"/>
+  <testcase name="unknown operation and argument injection cannot reach the launcher()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.328"/>
+  <testcase name="original cancellation reaches running terminal and leaves no unreleased process()" classname="decompengine.builtin.BuiltinTerminalToolsTest" time="0.486"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

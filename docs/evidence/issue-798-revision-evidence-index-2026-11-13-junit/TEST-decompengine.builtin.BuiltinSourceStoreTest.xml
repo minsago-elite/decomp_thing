@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinSourceStoreTest" tests="9" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:36:50.049Z" hostname="whatsername" time="0.058">
+<testsuite name="decompengine.builtin.BuiltinSourceStoreTest" tests="9" skipped="0" failures="0" errors="0" timestamp="2026-11-13T11:01:08.821Z" hostname="whatsername" time="0.076">
   <properties/>
-  <testcase name="captured continuation uses only its durable reference to restore candidates into a fresh bounded stage()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.02"/>
-  <testcase name="private store rejects links loose permissions active writers and workspace placement()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.002"/>
-  <testcase name="cancellation inside source capture stays cancelled and publishes no checkpoint()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.002"/>
-  <testcase name="blob and manifest corruption truncation and absence cannot be adopted or repaired silently()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.004"/>
-  <testcase name="declared secrets in source paths or escaped contents are rejected before persistence()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.002"/>
+  <testcase name="captured continuation uses only its durable reference to restore candidates into a fresh bounded stage()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.028"/>
+  <testcase name="private store rejects links loose permissions active writers and workspace placement()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.004"/>
+  <testcase name="cancellation inside source capture stays cancelled and publishes no checkpoint()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.005"/>
+  <testcase name="blob and manifest corruption truncation and absence cannot be adopted or repaired silently()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.008"/>
+  <testcase name="declared secrets in source paths or escaped contents are rejected before persistence()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.003"/>
   <testcase name="new store instance rehydrates canonical snapshots with deduplicated immutable blobs()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.004"/>
-  <testcase name="failed source publication prevents a checkpoint and damaged recovery leaves the prior commitment usable()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.017"/>
-  <testcase name="unreferenced partial blobs count against physical capacity()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.001"/>
-  <testcase name="all source storage ceilings reject before publishing any project bytes()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.002"/>
+  <testcase name="failed source publication prevents a checkpoint and damaged recovery leaves the prior commitment usable()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.015"/>
+  <testcase name="unreferenced partial blobs count against physical capacity()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.0"/>
+  <testcase name="all source storage ceilings reject before publishing any project bytes()" classname="decompengine.builtin.BuiltinSourceStoreTest" time="0.003"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

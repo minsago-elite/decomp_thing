@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinCapturedResumeTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:36:49.325Z" hostname="whatsername" time="0.296">
+<testsuite name="decompengine.builtin.BuiltinCapturedResumeTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-11-13T11:01:08.107Z" hostname="whatsername" time="0.355">
   <properties/>
-  <testcase name="effective sink write authority cannot expand behind unchanged request rules()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.073"/>
-  <testcase name="repair budget is bound across resume and prior patches still consume the shared quota()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.026"/>
-  <testcase name="invalid candidate inventory content and baseline fail before restoration and leave checkpoint usable()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.09"/>
-  <testcase name="resume input snapshots detach caller buffers and reject noncanonical names()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.013"/>
+  <testcase name="effective sink write authority cannot expand behind unchanged request rules()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.059"/>
+  <testcase name="repair budget is bound across resume and prior patches still consume the shared quota()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.025"/>
+  <testcase name="invalid candidate inventory content and baseline fail before restoration and leave checkpoint usable()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.132"/>
+  <testcase name="resume input snapshots detach caller buffers and reject noncanonical names()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.016"/>
   <testcase name="fresh captured stage restores through shared callbacks and preserves the accepted baseline()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.028"/>
   <testcase name="resumed reversion removes prior patches against the original accepted bytes()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.015"/>
-  <testcase name="restoration shrinks before growing so a valid stage never exceeds its aggregate quota()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.013"/>
-  <testcase name="refusal provider failure and cancellation after continuation retain all candidate hashes()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.035"/>
+  <testcase name="restoration shrinks before growing so a valid stage never exceeds its aggregate quota()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.016"/>
+  <testcase name="refusal provider failure and cancellation after continuation retain all candidate hashes()" classname="decompengine.builtin.BuiltinCapturedResumeTest" time="0.063"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

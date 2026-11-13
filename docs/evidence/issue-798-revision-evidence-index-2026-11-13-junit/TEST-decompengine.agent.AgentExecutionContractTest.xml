@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.agent.AgentExecutionContractTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:36:46.117Z" hostname="whatsername" time="0.115">
+<testsuite name="decompengine.agent.AgentExecutionContractTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-13T11:01:05.267Z" hostname="whatsername" time="0.117">
   <properties/>
-  <testcase name="write-only session inventory reconciles mutations without provider read authority()" classname="decompengine.agent.AgentExecutionContractTest" time="0.054"/>
-  <testcase name="deterministic fake distinguishes limit exhaustion from typed execution failure()" classname="decompengine.agent.AgentExecutionContractTest" time="0.007"/>
-  <testcase name="deterministic fake observes cancellation before executing a script()" classname="decompengine.agent.AgentExecutionContractTest" time="0.002"/>
+  <testcase name="write-only session inventory reconciles mutations without provider read authority()" classname="decompengine.agent.AgentExecutionContractTest" time="0.043"/>
+  <testcase name="deterministic fake distinguishes limit exhaustion from typed execution failure()" classname="decompengine.agent.AgentExecutionContractTest" time="0.009"/>
+  <testcase name="deterministic fake observes cancellation before executing a script()" classname="decompengine.agent.AgentExecutionContractTest" time="0.001"/>
   <testcase name="deterministic fake streams every event shape and reports workspace changes as results()" classname="decompengine.agent.AgentExecutionContractTest" time="0.006"/>
-  <testcase name="semantic uncertainty in context cannot widen the separately bound access policy()" classname="decompengine.agent.AgentExecutionContractTest" time="0.016"/>
-  <testcase name="receipt compatibility binds returned and failed outcomes to the exact request()" classname="decompengine.agent.AgentExecutionContractTest" time="0.009"/>
-  <testcase name="request binding preserves the schema one archive digest vector()" classname="decompengine.agent.AgentExecutionContractTest" time="0.001"/>
+  <testcase name="semantic uncertainty in context cannot widen the separately bound access policy()" classname="decompengine.agent.AgentExecutionContractTest" time="0.014"/>
+  <testcase name="receipt compatibility binds returned and failed outcomes to the exact request()" classname="decompengine.agent.AgentExecutionContractTest" time="0.011"/>
+  <testcase name="request binding preserves the schema one archive digest vector()" classname="decompengine.agent.AgentExecutionContractTest" time="0.002"/>
   <testcase name="deterministic fake covers no-change and refusal stops without fabricating changes()" classname="decompengine.agent.AgentExecutionContractTest" time="0.001"/>
   <testcase name="prompt renderer includes exact immutable context framing()" classname="decompengine.agent.AgentExecutionContractTest" time="0.0"/>
-  <testcase name="request snapshots absolute workspaces immutable context access and execution limits()" classname="decompengine.agent.AgentExecutionContractTest" time="0.001"/>
-  <testcase name="request binding is deterministic and total for every constructible request value()" classname="decompengine.agent.AgentExecutionContractTest" time="0.006"/>
+  <testcase name="request snapshots absolute workspaces immutable context access and execution limits()" classname="decompengine.agent.AgentExecutionContractTest" time="0.002"/>
+  <testcase name="request binding is deterministic and total for every constructible request value()" classname="decompengine.agent.AgentExecutionContractTest" time="0.008"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

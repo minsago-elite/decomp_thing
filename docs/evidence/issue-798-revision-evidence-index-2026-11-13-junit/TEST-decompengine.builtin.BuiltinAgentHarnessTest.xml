@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinAgentHarnessTest" tests="16" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:36:48.096Z" hostname="whatsername" time="0.215">
+<testsuite name="decompengine.builtin.BuiltinAgentHarnessTest" tests="16" skipped="0" failures="0" errors="0" timestamp="2026-11-13T11:01:07.112Z" hostname="whatsername" time="0.15">
   <properties/>
-  <testcase name="cancellation during streamed model output stops later events and closes the session()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.074"/>
-  <testcase name="multi-step execution uses the unchanged shared contract and receipt binding()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.006"/>
-  <testcase name="model and tool call admission happen before excess work()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.003"/>
-  <testcase name="reported usage over budget cannot authorize actions()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.001"/>
+  <testcase name="cancellation during streamed model output stops later events and closes the session()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.056"/>
+  <testcase name="multi-step execution uses the unchanged shared contract and receipt binding()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.007"/>
+  <testcase name="model and tool call admission happen before excess work()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.004"/>
+  <testcase name="reported usage over budget cannot authorize actions()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.002"/>
   <testcase name="unknown malformed and duplicate tool batches fail before the first side effect()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.005"/>
   <testcase name="tool provider and cleanup failures cannot become successful model completions()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.006"/>
   <testcase name="context order and receipt trace are deterministic and cannot be mutated()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.008"/>
   <testcase name="validated no change refusal and output exhaustion remain distinct()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.003"/>
-  <testcase name="elapsed deadline survives tool and validation boundaries()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.043"/>
-  <testcase name="model prose never edits files or asserts independent acceptance()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.004"/>
-  <testcase name="cancellation before model and during tool work closes the session()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.007"/>
-  <testcase name="failed plain invocations retain final candidate evidence()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.01"/>
-  <testcase name="input output context and receipt limits terminate explicitly()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.018"/>
-  <testcase name="identical actions use canonical arguments rather than model selected call ids()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.006"/>
-  <testcase name="tool results become correlated context and source remains candidate until validation()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.005"/>
-  <testcase name="policy denial is audited and never runs the tool()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.005"/>
+  <testcase name="elapsed deadline survives tool and validation boundaries()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.042"/>
+  <testcase name="model prose never edits files or asserts independent acceptance()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.001"/>
+  <testcase name="cancellation before model and during tool work closes the session()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.002"/>
+  <testcase name="failed plain invocations retain final candidate evidence()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.002"/>
+  <testcase name="input output context and receipt limits terminate explicitly()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.004"/>
+  <testcase name="identical actions use canonical arguments rather than model selected call ids()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.001"/>
+  <testcase name="tool results become correlated context and source remains candidate until validation()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.002"/>
+  <testcase name="policy denial is audited and never runs the tool()" classname="decompengine.builtin.BuiltinAgentHarnessTest" time="0.002"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>
