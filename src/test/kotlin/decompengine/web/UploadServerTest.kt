@@ -1251,6 +1251,10 @@ class UploadServerTest {
                     "Dashboard did not reach the physical job metadata read")
                 assertFalse(dashboard.isDone, "Dashboard must remain inside the held metadata read")
 
+                val rejectedUpload = requestExecutor.submit<String> { rejectUploadBeforeBody(server) }
+                assertTrue(storageMeasureEntered.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Upload did not enter retained-storage measurement")
+                assertFalse(rejectedUpload.isDone, "Upload refusal should wait for its bounded storage measurement")
                 val statusFutures = (1..4).map {
                     requestExecutor.submit<Long> {
                         val startedAt = System.nanoTime()
@@ -1259,16 +1263,16 @@ class UploadServerTest {
                         assertEquals(200, response.status, response.body.decodeToString())
                         assertTrue(response.body.decodeToString().contains(jobIds.last()))
                         assertFalse(dashboard.isDone, "Status response completed after the dashboard ended")
+                        assertFalse(rejectedUpload.isDone, "Status response must finish before upload admission is released")
+                        assertEquals(1, releaseStorageMeasure.count,
+                            "Status response must complete while retained-storage measurement remains held")
                         elapsedMs
                     }
                 }
-                val rejectedUpload = requestExecutor.submit<String> { rejectUploadBeforeBody(server) }
-                assertTrue(storageMeasureEntered.await(5, java.util.concurrent.TimeUnit.SECONDS),
-                    "Upload did not enter retained-storage measurement")
-                assertFalse(rejectedUpload.isDone, "Upload refusal should wait for its bounded storage measurement")
                 val statusLatencies = statusFutures.map { it.get(3, java.util.concurrent.TimeUnit.SECONDS) }
-                assertEquals(0, storageMeasureEntered.count, "Storage admission must remain held through status responses")
+                assertEquals(0, storageMeasureEntered.count, "Upload must have entered storage admission before status requests")
                 assertFalse(rejectedUpload.isDone, "Status responses must finish while upload storage measurement is held")
+                assertEquals(1, releaseStorageMeasure.count, "Storage measurement must not be released before all status responses")
                 releaseStorageMeasure.countDown()
                 val uploadResponse = rejectedUpload.get(3, java.util.concurrent.TimeUnit.SECONDS)
                 assertTrue(uploadResponse.startsWith("HTTP/1.1 503 "), "Expected storage refusal, got: $uploadResponse")
