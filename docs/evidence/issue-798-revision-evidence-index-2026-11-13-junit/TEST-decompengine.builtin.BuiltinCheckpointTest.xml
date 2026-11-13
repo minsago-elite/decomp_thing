@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinCheckpointTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:09:32.353Z" hostname="whatsername" time="0.227">
+<testsuite name="decompengine.builtin.BuiltinCheckpointTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:23:29.963Z" hostname="whatsername" time="0.245">
   <properties/>
   <testcase name="checkpoint context entries retain bounded descriptions across resume()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.017"/>
-  <testcase name="checkpoint store must be private separate and outside tool authority before any model call()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.012"/>
-  <testcase name="redacted checkpoint cannot silently replace original model context()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.009"/>
+  <testcase name="checkpoint store must be private separate and outside tool authority before any model call()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.01"/>
+  <testcase name="redacted checkpoint cannot silently replace original model context()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.015"/>
   <testcase name="crash after durable checkpoint publication leaves a recoverable prefix and releases its lock()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.01"/>
-  <testcase name="expired checkpoint and wrong initial snapshot cannot acquire provider execution()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.027"/>
-  <testcase name="resume preserves turn tool token repetition and call-id budgets()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.055"/>
-  <testcase name="reopened source tool schemas request and loop limits must match the checkpoint()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.052"/>
-  <testcase name="fresh invocation resumes completed tool history from verified staged bytes without repeating the edit()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.01"/>
+  <testcase name="expired checkpoint and wrong initial snapshot cannot acquire provider execution()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.024"/>
+  <testcase name="resume preserves turn tool token repetition and call-id budgets()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.049"/>
+  <testcase name="reopened source tool schemas request and loop limits must match the checkpoint()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.057"/>
+  <testcase name="fresh invocation resumes completed tool history from verified staged bytes without repeating the edit()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.015"/>
   <testcase name="snapshot hashes are canonical bounded and distinguish path contents and root identity()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.001"/>
-  <testcase name="torn journal appended intent and modified commitment prevent continuation()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.021"/>
-  <testcase name="consumed checkpoint cannot launch a second continuation()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.008"/>
+  <testcase name="torn journal appended intent and modified commitment prevent continuation()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.025"/>
+  <testcase name="consumed checkpoint cannot launch a second continuation()" classname="decompengine.builtin.BuiltinCheckpointTest" time="0.013"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>
