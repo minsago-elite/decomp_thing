@@ -24,6 +24,34 @@ const safeRoute = pathname => {
   if (/^\/nested\/api\/v1\/jobs\/[^/]+\/attempts\/[^/]+(?:\/.*)?$/.test(path)) return 'attempt';
   return 'otherApi';
 };
+const safePageRoute = (pathname, searchParams) => {
+  const path = pathname.replace(/\/+$/, '') || '/';
+  if (path === '/nested') return 'dashboard';
+  if (path === '/nested/runtime') return 'runtime';
+  if (path === '/nested/exploration') return 'exploration';
+  if (/^\/nested\/jobs\/[^/]+\/runs$/.test(path)) return 'attemptHistory';
+  if (/^\/nested\/jobs\/[^/]+\/runs\/[^/]+\/activity$/.test(path)) return 'attemptActivity';
+  if (/^\/nested\/jobs\/[^/]+\/runs\/[^/]+\/evidence$/.test(path)) return 'attemptEvidence';
+  if (/^\/nested\/jobs\/[^/]+\/runs\/[^/]+$/.test(path)) return 'attemptOverview';
+  if (/^\/nested\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/sources(?:\/.*)?$/.test(path)) return 'sourceDirectory';
+  if (/^\/nested\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/source-search$/.test(path)) {
+    return searchParams.has('q') ? 'sourceSearchResults' : 'sourceSearchForm';
+  }
+  if (/^\/nested\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/source-files\/[^/]+$/.test(path)) return 'sourceFile';
+  if (/^\/nested\/jobs\/[^/]+$/.test(path)) return 'jobDetail';
+  return 'otherPage';
+};
+const containsCompletePath = (message, pathname) => {
+  let offset = 0;
+  while (offset <= message.length - pathname.length) {
+    const index = message.indexOf(pathname, offset);
+    if (index < 0) return false;
+    const next = message[index + pathname.length];
+    if (next === undefined || (next !== '/' && !/[A-Za-z0-9._~%_-]/.test(next))) return true;
+    offset = index + 1;
+  }
+  return false;
+};
 const safeFailure = value => {
   if (/access control|cors/i.test(value)) return 'accessControl';
   if (/cancel|abort/i.test(value)) return 'cancelled';
@@ -73,7 +101,7 @@ export function attachExceptionContext(context) {
   };
   const correlate = (message, page) => {
     if (typeof message !== 'string' || !page) return { kind: 'unmatched', requestSequences: [] };
-    const matches = requests.filter(item => item.page === page && item.rawPath && message.includes(item.rawPath));
+    const matches = requests.filter(item => item.page === page && item.rawPath && containsCompletePath(message, item.rawPath));
     if (matches.length) return { kind: 'requestPath', requestSequences: matches.slice(-exceptionContextLimits.matches).map(item => item.sequence) };
     return { kind: 'unmatched', requestSequences: [] };
   };
@@ -90,12 +118,8 @@ export function attachExceptionContext(context) {
         if (frame !== page.mainFrame()) return;
         if (state.navigations < counterLimit) state.navigations += 1;
         else countsIncomplete = true;
-        const raw = page.url();
-        const pathname = new URL(raw).pathname;
-        state.route = pathname === '/nested/' || pathname === '/nested' ? 'dashboard'
-          : pathname === '/nested/runtime' ? 'runtime'
-            : pathname === '/nested/runs' ? 'runHistory'
-              : pathname === '/nested/exploration' ? 'exploration' : 'otherPage';
+        const pageUrl = new URL(page.url());
+        state.route = safePageRoute(pageUrl.pathname, pageUrl.searchParams);
       } catch { state.route = 'unlabelled'; countsIncomplete = true; }
     });
     listen(page, 'pageerror', error => {
