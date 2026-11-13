@@ -486,7 +486,6 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           {' '}<button type="button" onClick={() => { void showCommit(entry.objectId); }}>{textMessage(copy.inspect, { object: short(entry.objectId) })}</button>
           </li>)}</ol></> : <p>{copy.noHistory}</p>}
         {loaded.history && (historyWindowStart + MAX_HISTORY_RENDERED_ROWS < loaded.history.entries.length || loaded.history.nextCursor) && <button ref={historyContinuation} type="button" disabled={busy}
-          onBlur={event => { if (event.currentTarget.isConnected) focusHistoryAfterContinuationRemoved.current = false; }}
           onClick={olderHistoryWindow}>{copy.olderHistory}</button>}
         {commit && <section aria-labelledby="git-commit-title">
           <h4 id="git-commit-title">{textMessage(copy.commitDetail, { object: short(commit.objectId) })}</h4>
