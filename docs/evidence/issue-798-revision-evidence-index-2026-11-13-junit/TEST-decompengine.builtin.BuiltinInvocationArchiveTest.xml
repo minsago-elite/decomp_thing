@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinInvocationArchiveTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-11-13T09:22:49.510Z" hostname="whatsername" time="0.169">
+<testsuite name="decompengine.builtin.BuiltinInvocationArchiveTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:09:32.655Z" hostname="whatsername" time="0.14">
   <properties/>
-  <testcase name="task prompt model source and committed journal substitutions are rejected()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.023"/>
-  <testcase name="missing reordered duplicate and edited journal records fail exact commitment verification()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.033"/>
-  <testcase name="receipt counts changes outcome and cleanup cannot disagree with the terminal journal()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.027"/>
-  <testcase name="failed archive binds failure classification to terminal evidence()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.01"/>
-  <testcase name="even rehashed journals reject cross-paired tool results and executable schema extensions()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.014"/>
+  <testcase name="task prompt model source and committed journal substitutions are rejected()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.021"/>
+  <testcase name="missing reordered duplicate and edited journal records fail exact commitment verification()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.013"/>
+  <testcase name="receipt counts changes outcome and cleanup cannot disagree with the terminal journal()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.025"/>
+  <testcase name="failed archive binds failure classification to terminal evidence()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.013"/>
+  <testcase name="even rehashed journals reject cross-paired tool results and executable schema extensions()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.013"/>
   <testcase name="portable captured artifact verifies without runtime journal paths and never claims release qualification()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.017"/>
-  <testcase name="failed and refused turns retain final candidate hashes independently of their result change sets()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.023"/>
-  <testcase name="archive and journal caps plus duplicate or unknown JSON fields fail closed()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.017"/>
+  <testcase name="failed and refused turns retain final candidate hashes independently of their result change sets()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.018"/>
+  <testcase name="archive and journal caps plus duplicate or unknown JSON fields fail closed()" classname="decompengine.builtin.BuiltinInvocationArchiveTest" time="0.015"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

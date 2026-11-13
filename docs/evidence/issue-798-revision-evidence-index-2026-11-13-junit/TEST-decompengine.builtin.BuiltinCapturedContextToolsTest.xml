@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinCapturedContextToolsTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-11-13T09:22:47.310Z" hostname="whatsername" time="1.198">
+<testsuite name="decompengine.builtin.BuiltinCapturedContextToolsTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:09:30.711Z" hostname="whatsername" time="1.121">
   <properties/>
   <testcase name="invalid paths offsets and unknown evidence fail without host lookup()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.004"/>
-  <testcase name="repair evidence snapshot hash and uncertainty survive immutable evidence pagination()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.564"/>
-  <testcase name="evidence text pages preserve surrogate pairs and the complete input digest()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.557"/>
-  <testcase name="serialized output and audit bounds are enforced before success()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.022"/>
-  <testcase name="directory inventory is sorted virtual and restricted by shared read policy()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.006"/>
+  <testcase name="repair evidence snapshot hash and uncertainty survive immutable evidence pagination()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.578"/>
+  <testcase name="evidence text pages preserve surrogate pairs and the complete input digest()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.463"/>
+  <testcase name="serialized output and audit bounds are enforced before success()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.019"/>
+  <testcase name="directory inventory is sorted virtual and restricted by shared read policy()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.003"/>
   <testcase name="evidence inventory pages bind immutable input hashes without losing entries()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.007"/>
-  <testcase name="captured harness routes directory and evidence tools into receipt audits()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.032"/>
+  <testcase name="captured harness routes directory and evidence tools into receipt audits()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.042"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

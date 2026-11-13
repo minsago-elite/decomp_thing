@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.repair.RepairEvidenceIndexTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-11-13T09:24:35.630Z" hostname="whatsername" time="0.014">
+<testsuite name="decompengine.repair.RepairEvidenceIndexTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:11:22.506Z" hostname="whatsername" time="0.014">
   <properties/>
-  <testcase name="evidence records retain the generated profile identifier bound including module prefix()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.002"/>
+  <testcase name="evidence records retain the generated profile identifier bound including module prefix()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.003"/>
   <testcase name="evidence facts reject dangling origins entities and duplicate identities()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.001"/>
   <testcase name="canonical evidence is deterministic immutable and preserves typed relationship kinds()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.004"/>
-  <testcase name="canonical evidence tie breakers include complete origin identity()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.002"/>
+  <testcase name="canonical evidence tie breakers include complete origin identity()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.001"/>
   <testcase name="behavior case evidence does not narrow admitted regression identifiers()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.001"/>
   <testcase name="snapshot digest binds provisional and accepted identities without conflating them()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.003"/>
   <system-out><![CDATA[]]></system-out>

@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinContextPackageTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-11-13T09:22:49.397Z" hostname="whatsername" time="0.034">
+<testsuite name="decompengine.builtin.BuiltinContextPackageTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:09:32.581Z" hostname="whatsername" time="0.015">
   <properties/>
-  <testcase name="escaping is charged and whole inputs are selected without hidden truncation()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.003"/>
-  <testcase name="unsupported omission mandatory metadata and total evidence limits fail before a model request()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.005"/>
-  <testcase name="selection is deterministic and explicitly binds included and omitted input hashes()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.008"/>
-  <testcase name="captured loop retrieves omitted evidence within its reserved history capacity()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.011"/>
-  <testcase name="authority uses sorted transport-neutral paths rather than host roots()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.002"/>
+  <testcase name="escaping is charged and whole inputs are selected without hidden truncation()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.001"/>
+  <testcase name="unsupported omission mandatory metadata and total evidence limits fail before a model request()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.002"/>
+  <testcase name="selection is deterministic and explicitly binds included and omitted input hashes()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.003"/>
+  <testcase name="captured loop retrieves omitted evidence within its reserved history capacity()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.006"/>
+  <testcase name="authority uses sorted transport-neutral paths rather than host roots()" classname="decompengine.builtin.BuiltinContextPackageTest" time="0.0"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

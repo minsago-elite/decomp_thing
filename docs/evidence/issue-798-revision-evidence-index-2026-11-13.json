@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "corpus": "builtin-core-contract-v18",
-  "commit": "71483edc5c7541cdd6775392fb2cc91631c46bdd",
+  "commit": "2fa3b8b385dadc879b04b3bcb7fc2a319725b7cc",
   "requiredHost": true,
   "sourceClean": true,
   "forcedTestExecution": true,
@@ -10,8 +10,8 @@
   "realProviderQualified": false,
   "workflowReleaseQualified": false,
   "qualification": {
-    "scope": "local built-in core contract for the revision-bound evidence index",
-    "sourceTreeOid": "7661b072ffe5ca298a677e1c4f9b5ee5675ff341",
+    "scope": "local built-in core contract for the revision-bound evidence index, including long retained regression IDs and generated-C target/source membership",
+    "sourceTreeOid": "3c3fbb15e3a4f433f4cd485a8d9df433d24ee01d",
     "workingDirectory": "repository root",
     "command": "GRADLE_OPTS='-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx4096m' PATH=\"$PWD/build/frontend-node-24.20.0-npm-11.19.0.BpJuvR/node/bin:$PATH\" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=no /usr/bin/python3.14 scripts/validate-builtin-contract.py",
     "environment": {
@@ -25,8 +25,9 @@
     "untrackedInputsPresent": true,
     "sourceCleanMeaning": "tracked source worktree was clean; status output suppressed pre-existing untracked artifacts",
     "reviewFixCoverage": [
-      "module evidence facts remain distinct from program entity facts when their textual IDs collide",
-      "retained regression IDs admitted by corpus budgets survive behavior-case and uncertainty projection"
+      "module fact IDs and program entity IDs remain distinct when their text collides",
+      "retained regression IDs over 4,112 characters, admitted by the corpus budget, survive behavior-case and uncertainty projection through context selection",
+      "generated-C target identities map only renderer-owned module and entrypoint sources; build-definition/artifact paths are separate and target dependency edges remain explicitly unknown"
     ]
   },
   "suites": [
@@ -36,7 +37,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "dbf9fb1361a352e5aab10bb4ecd5c9d5f01607e9df4344b89da5e5837133a1ed",
+      "xmlSha256": "d17cbe05219019a39d751b2ec047cb3061f1f7407c697657ade6bbbff127d315",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.agent.AgentExecutionContractTest.xml"
     },
     {
@@ -45,7 +46,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "8c85d4bb5c01fba127fc3a9681e1bdd68a15c69639974c18d64302fc2103d66a",
+      "xmlSha256": "32b6a8947993b604cda3f510956413ad344d563f32f14e0e74ddffbacfbe3160",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinAgentHarnessTest.xml"
     },
     {
@@ -54,7 +55,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "1bcd8c3ed98909b345b0a0c90d48818af8897e0baed92323d8dba82ea59a6380",
+      "xmlSha256": "8c32f20838eb7612815a3ea5a4a744ab8fcb5c9581ba2fc8e2e6fef0f6502694",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinFilesystemToolsTest.xml"
     },
     {
@@ -63,7 +64,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "216dad4ddda1fa09e348fc0ec37884428b578a119d5022207a6c1199add7c05a",
+      "xmlSha256": "bf573c85884198039a0b056cdaef0f882ddeb7dc809aa8e1435005ce87139e16",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCapturedContextToolsTest.xml"
     },
     {
@@ -72,7 +73,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "35b7125fa10942834114cf4a56ed027bf5b91d5c26cd34e2d3d4a18ee8de2a34",
+      "xmlSha256": "14ec29c81cb361e75f2e9dff90eacc35faad9f135d4e5d094462b85ad5a2b4ca",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinContextPackageTest.xml"
     },
     {
@@ -81,7 +82,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "ff9f9f54abd53c35a9b8f514d1c60fa18ef7fd433faf6393ab1c5ddad51e350e",
+      "xmlSha256": "41bce6c5b14aee46ddb88592975b5720ad40faaa828d4a47411ca1b8ff8ca4f9",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinJournalTest.xml"
     },
     {
@@ -90,7 +91,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "a768f18f5c2e2e34f1befc752980272169afce739b064df1c760750bc2576a2a",
+      "xmlSha256": "ad3d4ea31f519e15589dc5c76235b583fa428b68f049a5b2e44f27e4c5d5a619",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCheckpointTest.xml"
     },
     {
@@ -99,7 +100,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "e32ac06b90d341ac78725a06cafdeb046a2ca16d2970f837e9897589e072da10",
+      "xmlSha256": "ebb6dbc53b8b3e329509231cc5216fca7e75e46e9419f1dab4302c78e9367de7",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCapturedResumeTest.xml"
     },
     {
@@ -108,7 +109,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "23a752bfac34256403252c72bbd61bd5ade109e97820509994bd2a91674d0d34",
+      "xmlSha256": "00edd6a1b3fe373a0debba4aa3845b722e5480fc4a24ab8b618762cc7eee5c87",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinSourceStoreTest.xml"
     },
     {
@@ -117,7 +118,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "751b8bed03f857e677235d2174a95961db46392a89986272194f5425d6bfe698",
+      "xmlSha256": "bcf8fb1fa1175d53f1b093daf14176da9fd9c76e4c91b0477f22d9d6376c6368",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinInvocationArchiveTest.xml"
     },
     {
@@ -126,7 +127,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "f787d8b1c6ca981d8ed5ffe892d5271a8825a19aa1a3765f13941d4f9699ef7e",
+      "xmlSha256": "b4bfeb39f72e29dd3c6ddd43d1460a9a43aacf2eb4b2633b8d7c9f875ef82fc5",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinTerminalToolsTest.xml"
     },
     {
@@ -135,7 +136,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "351041c50f4db8a0cac4bf4606aa71e34855dcc8a901aae9b331c832f741509d",
+      "xmlSha256": "d9c6e61cf5e1079214f803e2097e98e276badccb4eadcddf85eede6d44174cce",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.provider.OpenAiCompatibleModelProviderTest.xml"
     },
     {
@@ -144,7 +145,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "345628f0b6da26af7e8ea3726fdb33205ddffc34d5a98064ec7848729622aaab",
+      "xmlSha256": "2b4e08382558ad85fd94978fb52dacf0953f34f70e63fbc0bbace267e60ee176",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.repair.RepairEvidenceIndexTest.xml"
     },
     {
@@ -153,7 +154,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "0df0b895ac30e82fbe373b46427aa879584fe93f1ab9be4b022658be4fd27143",
+      "xmlSha256": "91cb44b9cc2ddf0c5de3de6e96519110ffa842a18909ed31c69fcd00e75266ca",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.repair.ModuleRevisionGraphTest.xml"
     },
     {
@@ -162,7 +163,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "9d9a4c70758ab00ebc888d9e8213c895c13d441b305c710ec8cb352f73c453f0",
+      "xmlSha256": "0c9ea98e6e27087abfd3b4f0eae2b0599a04650f565264507791075db53eb8ec",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.project.ProfiledGeneratedCRepairIndexTest.xml"
     }
   ],
