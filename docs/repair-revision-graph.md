@@ -89,19 +89,25 @@ about the current C source. Calls, global references, and module ownership retai
 kinds. Module ownership is derived from the admitted module plan and the existing graph layout, and
 graph admission checks that semantic entity IDs exactly match that ownership inventory. A recovered
 type declaration is not called a definition when no separate definition evidence exists.
-The index records the build-definition artifact path and leaves target relationships explicitly
-unknown unless captured evidence supplies them. Editable build-definition bytes are bound by the
-working/source-revision digest, not duplicated as static semantic-index origins; this allows an
-authorized build-file candidate to retain the same static index identity while changing revisions.
+The index records the build-definition path separately from generated target identities. For the
+generated-C Make profile it maps `all` and `build/reconstructed` to the plan-owned module sources
+and generated entrypoint; for Ninja it maps `build/reconstructed`. Membership comes from the
+profile's renderer contract and admitted source/ownership inventory, never from parsing Make/Ninja
+text or treating the produced artifact as a target. Target-to-target dependency edges remain
+explicitly unknown. Unlisted C files are not treated as target members. Editable build-definition
+bytes are bound by the working/source-revision digest, not duplicated as static semantic-index
+origins; this allows an authorized build-file candidate to retain the same static index identity
+while changing revisions. When admitted plan evidence is unavailable, target membership also
+remains explicitly uncertain.
 The focused built-in contract checkpoint is retained in
 `docs/evidence/issue-798-revision-evidence-index-2026-11-13.json`; it is local fixture evidence,
 not production-provider or workflow-release qualification.
 
 Context selection uses the existing ownership, dependency, readable-path, writable-path, and budget
-decisions. Its v1 evidence snapshot binds the selected evidence to the profile and reconstruction
+decisions. Its v2 evidence snapshot binds the selected evidence to the profile and reconstruction
 descriptor, structural index and source basis, working revision, graph head/status, fully accepted
 head when one exists, and retained regression corpus. Deferred context and unavailable source
-locations, definitions, build targets, recovery assessment, or authenticated diagnostic attribution
+locations, definitions, target membership/dependency edges, recovery assessment, or authenticated diagnostic attribution
 are represented as subject-specific uncertainty, and omitted projected entities, relations,
 declarations, definitions, build evidence, and uncertainties are counted by comparing the complete
 projection with the retained one. A caller-supplied diagnostic hint is hashed as a hint; the snapshot

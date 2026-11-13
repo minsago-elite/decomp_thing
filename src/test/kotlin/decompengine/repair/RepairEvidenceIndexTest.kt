@@ -67,19 +67,27 @@ class RepairEvidenceIndexTest {
 
     @Test
     fun `behavior case evidence does not narrow admitted regression identifiers`() {
-        val caseId = "case-" + "x".repeat(508)
+        val caseId = "case-" + "x".repeat(4_108)
         val evidence = RepairBehaviorCaseEvidence(caseId, "a".repeat(64), "b".repeat(64))
+        val uncertainty = RepairEvidenceUncertainty(
+            caseId, "observed-outcome", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED,
+        )
         assertEquals(caseId, evidence.caseId)
+        assertEquals(caseId, uncertainty.subject)
     }
 
     @Test
     fun `canonical evidence is deterministic immutable and preserves typed relationship kinds`() {
         val inputEntities = facts().entities.toMutableList()
         val inputTargets = mutableListOf("all")
-        val build = RepairBuildEvidence("Makefile", null, inputTargets)
+        val inputSources = mutableListOf("src/a.c")
+        val inputSourcesByTarget = mutableMapOf("all" to inputSources)
+        val build = RepairBuildEvidence("Makefile", null, inputTargets, inputSourcesByTarget)
         val built = RepairEvidenceFacts(buildEvidence = listOf(build))
         val buildDigest = built.sha256(64 * 1024)
         inputTargets.clear()
+        inputSources.clear()
+        inputSourcesByTarget.clear()
         val original = facts()
         val permuted = RepairEvidenceFacts(
             origins = original.origins.reversed(), entities = inputEntities.reversed(),
@@ -96,10 +104,15 @@ class RepairEvidenceIndexTest {
             (original.entities as MutableList<RepairEntityFact>).clear()
         }
         assertEquals(listOf("all"), build.explicitTargets)
+        assertEquals(mapOf("all" to listOf("src/a.c")), build.sourcePathsByTarget)
         assertEquals(buildDigest, built.sha256(64 * 1024))
         assertFailsWith<UnsupportedOperationException> {
             @Suppress("UNCHECKED_CAST")
             (build.explicitTargets as MutableList<String>).clear()
+        }
+        assertFailsWith<UnsupportedOperationException> {
+            @Suppress("UNCHECKED_CAST")
+            (build.sourcePathsByTarget as MutableMap<String, List<String>>).clear()
         }
         val encoded = original.canonicalBytes(64 * 1024)
         assertContentEquals(encoded, original.canonicalBytes(encoded.size.toLong()))

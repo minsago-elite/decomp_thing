@@ -6004,7 +6004,7 @@ class ModuleRevisionGraphTest {
     fun `context evidence retains regression IDs admitted by the corpus budget`() {
         val project = generatedProject()
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
-            val caseId = "case-" + "x".repeat(508)
+            val caseId = "case-" + "x".repeat(4_108)
             graph.retainRegressionInputs(listOf(ProcessInput(caseId)))
 
             val context = graph.selectContext("compile", "src/modules/alpha.c: compiler diagnostic")

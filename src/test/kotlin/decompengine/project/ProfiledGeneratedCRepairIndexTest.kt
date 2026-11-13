@@ -137,9 +137,19 @@ class ProfiledGeneratedCRepairIndexTest {
             it.subject == "fn_alpha" && it.reason == RepairEvidenceUncertaintyReason.RECOVERY_UNASSESSED
         })
         assertTrue(facts.uncertainties.any {
-            it.subject == "Makefile" && it.reason == RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED
+            it.subject == "Makefile" && it.category == "build-target-dependencies" &&
+                it.reason == RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED
         })
-        assertTrue(facts.buildEvidence.any { it.artifactPath == "Makefile" && it.explicitTargets.isEmpty() })
+        val build = facts.buildEvidence.single { it.buildDefinitionPath == "Makefile" }
+        assertEquals(listOf("all", "build/reconstructed"), build.explicitTargets)
+        assertEquals(
+            mapOf(
+                "all" to listOf("src/main.c", "src/modules/alpha.c", "src/modules/beta.c"),
+                "build/reconstructed" to listOf("src/main.c", "src/modules/alpha.c", "src/modules/beta.c"),
+            ),
+            build.sourcePathsByTarget,
+        )
+        assertTrue(build.buildDefinitionPath !in build.explicitTargets)
         val completeProject = createTempDirectory("repair-semantic-evidence-complete-")
         SourceTreeGenerator.generate(RecoveredProgramModel(
             inputSha256 = "c".repeat(64),
@@ -402,6 +412,26 @@ class ProfiledGeneratedCRepairIndexTest {
             assertFalse("include/decomp_types.h" in selection.writablePaths)
             assertTrue("include/modules/alpha.h" in selection.readablePaths)
             assertFalse("include/modules/alpha.h" in selection.writablePaths)
+            val buildEvidence = selection.evidenceFacts.buildEvidence.single()
+            assertEquals(
+                if (base.adapterConfiguration.getValue("build-system").single() == "gnu-make")
+                    listOf("all", "build/reconstructed") else listOf("build/reconstructed"),
+                buildEvidence.explicitTargets,
+            )
+            assertEquals(
+                listOf("src/main.c", "src/modules/alpha.c", "src/modules/beta.c"),
+                buildEvidence.sourcePathsByTarget.values.first(),
+            )
+            assertFalse(buildEvidence.sourcePathsByTarget.values.flatten().contains("src/unlisted.c"))
+            val layout = profile.resolve(project, RepairResourceBudget())
+            val moduleByOwnedPath = buildMap {
+                layout.modules.forEach { module -> module.ownedPaths.forEach { put(it, module.id) } }
+                layout.fallbackModuleIdsByPath.forEach { (path, moduleId) -> putIfAbsent(path, moduleId) }
+            }
+            assertEquals(
+                listOf("alpha", "beta", "entrypoint"),
+                buildEvidence.sourcePathsByTarget.values.first().map { moduleByOwnedPath.getValue(it) }.distinct().sorted(),
+            )
             assertTrue(profile.authorizesRecoveryLayout(index.sourcePaths, index.editablePaths.sorted(), RepairResourceBudget()))
             val target = project.resolve("src/modules/alpha.c")
             val accepted = target.readBytes()

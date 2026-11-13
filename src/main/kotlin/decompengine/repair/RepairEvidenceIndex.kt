@@ -108,23 +108,33 @@ data class RepairDefinitionEvidence(
     }
 }
 
+/** Generated target identities are distinct from the build-definition and produced artifact paths. */
 class RepairBuildEvidence(
-    val artifactPath: String,
+    val buildDefinitionPath: String,
     val origin: RepairEvidenceOrigin?,
     explicitTargets: List<String> = emptyList(),
+    sourcePathsByTarget: Map<String, List<String>> = emptyMap(),
 ) {
     val explicitTargets: List<String> = frozenEvidenceList(explicitTargets)
+    val sourcePathsByTarget: Map<String, List<String>> = Collections.unmodifiableMap(
+        TreeMap(sourcePathsByTarget.mapValues { (_, paths) -> frozenEvidenceList(paths) }),
+    )
 
     init {
-        require(isPortableEvidencePath(artifactPath))
+        require(isPortableEvidencePath(buildDefinitionPath))
         require(explicitTargets == explicitTargets.distinct().sorted() &&
             explicitTargets.all { it.isNotBlank() && it.length <= 512 })
+        require(this.sourcePathsByTarget.keys.all { it in this.explicitTargets })
+        require(this.sourcePathsByTarget.values.all { paths ->
+            paths == paths.distinct().sorted() && paths.all(::isPortableEvidencePath)
+        })
     }
 
     override fun equals(other: Any?): Boolean = other is RepairBuildEvidence &&
-        artifactPath == other.artifactPath && origin == other.origin && explicitTargets == other.explicitTargets
+        buildDefinitionPath == other.buildDefinitionPath && origin == other.origin && explicitTargets == other.explicitTargets &&
+        sourcePathsByTarget == other.sourcePathsByTarget
 
-    override fun hashCode(): Int = listOf(artifactPath, origin, explicitTargets).hashCode()
+    override fun hashCode(): Int = listOf(buildDefinitionPath, origin, explicitTargets, sourcePathsByTarget).hashCode()
 }
 
 private fun isPortableEvidencePath(path: String): Boolean = path.isNotBlank() && path.length <= 1024 &&
@@ -204,7 +214,10 @@ data class RepairEvidenceUncertainty(
     val origin: RepairEvidenceOrigin? = null,
 ) {
     init {
-        require(subject.isNotBlank() && subject.length <= MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS)
+        // Uncertainty may be keyed by a retained regression ID. Its authoritative
+        // limit is the regression-corpus and serialized-snapshot byte budget, not
+        // the narrower generated model-identifier ceiling.
+        require(subject.isNotBlank() && subject.toByteArray(Charsets.UTF_8).size <= MAXIMUM_EVIDENCE_JSON_BYTES)
         require(category.matches(Regex("[a-z][a-z0-9_-]{0,63}")))
     }
 }
@@ -233,7 +246,7 @@ class RepairEvidenceFacts(
         { it.entityId }, { it.form }, { it.origin.documentRole }, { it.origin.locator },
         { it.origin.contentSha256 }, { it.origin.schemaVersion ?: 0 },
     )))
-    val buildEvidence: List<RepairBuildEvidence> = frozenEvidenceList(buildEvidence.sortedBy { it.artifactPath })
+    val buildEvidence: List<RepairBuildEvidence> = frozenEvidenceList(buildEvidence.sortedBy { it.buildDefinitionPath })
     val uncertainties: List<RepairEvidenceUncertainty> = frozenEvidenceList(uncertainties.distinct().sortedWith(evidenceUncertaintyOrder))
 
     init {
@@ -273,7 +286,7 @@ class RepairEvidenceFacts(
         require(this.relations.distinct().size == this.relations.size) { "repair evidence relations must be unique" }
         require(this.declarations.distinct().size == this.declarations.size) { "repair declarations must be unique" }
         require(this.definitions.distinct().size == this.definitions.size) { "repair definitions must be unique" }
-        require(this.buildEvidence.map { it.artifactPath }.distinct().size == this.buildEvidence.size) {
+        require(this.buildEvidence.map { it.buildDefinitionPath }.distinct().size == this.buildEvidence.size) {
             "repair build evidence paths must be unique"
         }
     }
@@ -310,7 +323,7 @@ class RepairEvidenceFacts(
         }
         fun arr(values: List<JsonObject>) = JsonArray(values)
         return buildJsonObject {
-            put("schemaVersion", 1)
+            put("schemaVersion", 2)
             put("origins", arr(origins.map(::origin)))
             put("entities", arr(entities.map { value -> buildJsonObject {
                 put("id", value.id); put("kind", value.kind.name); put("extractionStatus", value.extractionStatus?.let(::JsonPrimitive) ?: JsonNull)
@@ -326,8 +339,13 @@ class RepairEvidenceFacts(
                 put("entityId", value.entityId); put("form", value.form); put("origin", origin(value.origin))
             } }))
             put("buildEvidence", arr(buildEvidence.map { value -> buildJsonObject {
-                put("artifactPath", value.artifactPath); put("origin", value.origin?.let(::origin) ?: JsonNull)
+                put("buildDefinitionPath", value.buildDefinitionPath); put("origin", value.origin?.let(::origin) ?: JsonNull)
                 put("explicitTargets", JsonArray(value.explicitTargets.map(::JsonPrimitive)))
+                put("sourcePathsByTarget", buildJsonObject {
+                    value.sourcePathsByTarget.forEach { (target, paths) ->
+                        put(target, JsonArray(paths.map(::JsonPrimitive)))
+                    }
+                })
             } }))
             put("uncertainties", arr(uncertainties.map { value -> buildJsonObject {
                 put("subject", value.subject); put("category", value.category); put("reason", value.reason.name)
@@ -402,7 +420,7 @@ class RepairEvidenceSnapshot(
         require(maximumBytes in 1..Int.MAX_VALUE.toLong())
         val max = minOf(maximumBytes, MAXIMUM_EVIDENCE_JSON_BYTES.toLong()).toInt()
         val payload = buildJsonObject {
-            put("schemaVersion", 1); put("profileId", profileId); put("profileSha256", profileSha256)
+            put("schemaVersion", 2); put("profileId", profileId); put("profileSha256", profileSha256)
             put("reconstructionDescriptorSha256", reconstructionDescriptorSha256?.let(::JsonPrimitive) ?: JsonNull)
             put("indexSha256", indexSha256); put("indexBasisSourceRevisionSha256", indexBasisSourceRevisionSha256)
             put("workingRevisionSha256", workingRevisionSha256); put("graphHeadId", graphHeadId)

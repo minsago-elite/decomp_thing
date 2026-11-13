@@ -77,7 +77,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     override fun configurationSha256(): String = configurationSha256(RepairResourceBudget())
     override fun configurationSha256(budget: RepairResourceBudget): String = sha256(
-        ("generated-c-repair-index-v6\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
+        ("generated-c-repair-index-v7\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
             .toByteArray(Charsets.UTF_8),
     )
 
@@ -115,7 +115,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             relations = stored.relations.filter { it.origin.documentRole in documentRoles },
             declarations = stored.declarations.filter { it.origin.documentRole in documentRoles },
             definitions = stored.definitions.filter { it.origin.documentRole in documentRoles },
-            uncertainties = stored.uncertainties.filter { it.category != "build-target" },
+            uncertainties = stored.uncertainties.filterNot { it.category.startsWith("build-target") },
         )
         require(observed == expected) {
             "generated C plan/model evidence changed while dependency evidence was indexed"
@@ -185,6 +185,19 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         sourcePaths.filter { it !in explicitlyOwnedPaths && it !in sharedSet }.forEach { path ->
             fallbackModules[path] = generatedCUnplannedModuleId(path)
         }
+        // These target identities and source memberships come from the generated-C profile's
+        // renderer contract and the already-admitted source/module inventory. Do not infer them
+        // from Make/Ninja text or confuse the produced artifact with a target. Target dependency
+        // edges remain unknown unless a future admitted contract records them explicitly.
+        val entrypointPath = profile.layout.declaration("entrypoint-implementation").materialize()
+        val buildSources = (evidence.modules.map { it.sourcePath } + listOf(entrypointPath).filter { it in sourcePaths })
+            .distinct().sorted()
+        val buildTargets = when (profile.adapterConfiguration.getValue("build-system").single()) {
+            "gnu-make" -> listOf("all", "build/reconstructed")
+            "ninja" -> listOf("build/reconstructed")
+            else -> emptyList()
+        }
+        val sourcePathsByTarget = buildTargets.associateWith { buildSources }
         return RepairIndexLayout(
             sourcePaths = sourcePaths,
             editablePaths = editable.toList(),
@@ -209,13 +222,14 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                 declarations = evidence.facts.declarations,
                 definitions = evidence.facts.definitions,
                 buildEvidence = evidence.facts.buildEvidence + RepairBuildEvidence(
-                    artifactPath = buildDefinition,
+                    buildDefinitionPath = buildDefinition,
                     origin = buildDefinitionOrigin,
-                    explicitTargets = emptyList(),
+                    explicitTargets = buildTargets,
+                    sourcePathsByTarget = sourcePathsByTarget,
                 ),
                 uncertainties = evidence.facts.uncertainties + RepairEvidenceUncertainty(
                     buildDefinition,
-                    "build-target",
+                    "build-target-dependencies",
                     RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED,
                     buildDefinitionOrigin,
                 ),

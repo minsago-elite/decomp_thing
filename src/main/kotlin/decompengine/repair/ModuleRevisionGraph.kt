@@ -985,7 +985,9 @@ internal class ModuleRepairIndex private constructor(
         val projectedDefinitionIds = projectedDefinitions.asSequence().mapTo(hashSetOf()) { it.entityId }
         val projectedDeclarationIds = projectedDeclarations.asSequence().mapTo(hashSetOf()) { it.entityId }
         val uncertainty = buildList {
-            addAll(evidenceFacts.uncertainties.filter { it.subject in selectedModuleIds || it.subject in selectedEntityIds })
+            addAll(evidenceFacts.uncertainties.filter {
+                it.subject in selectedModuleIds || it.subject in selectedEntityIds || it.category.startsWith("build-target")
+            })
             if (selectedModules.any { id -> "module:$id" !in projectedModuleFactIds }) {
                 selectedModules.filter { id -> "module:$id" !in projectedModuleFactIds }.forEach { id ->
                     add(RepairEvidenceUncertainty(id, "module-evidence", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED))
@@ -1000,8 +1002,8 @@ internal class ModuleRepairIndex private constructor(
             deferredModules.distinct().forEach { id ->
                 add(RepairEvidenceUncertainty(id, "context", RepairEvidenceUncertaintyReason.CONTEXT_BUDGET_DEFERRED))
             }
-            evidenceFacts.buildEvidence.filter { it.explicitTargets.isEmpty() }.forEach { build ->
-                add(RepairEvidenceUncertainty(build.artifactPath, "build-target", RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED, build.origin))
+            evidenceFacts.buildEvidence.filter { it.sourcePathsByTarget.isEmpty() }.forEach { build ->
+                add(RepairEvidenceUncertainty(build.buildDefinitionPath, "build-target-membership", RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED, build.origin))
             }
         }
         val origins = (projectedEntities.map { it.origin } + projectedRelations.map { it.origin } +
