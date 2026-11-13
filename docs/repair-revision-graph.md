@@ -98,8 +98,11 @@ explicitly unknown. Unlisted C files are not treated as target members. Editable
 bytes are bound by the working/source-revision digest, not duplicated as static semantic-index
 origins; this allows an authorized build-file candidate to retain the same static index identity
 while changing revisions. When paired plan/model evidence is unavailable, target membership remains
-explicitly uncertain. The generated entrypoint participates only when the admitted model has no
-`main` function and the renderer therefore emits that entrypoint.
+explicitly uncertain. The generated entrypoint participates when the admitted model has no
+`main` function and the renderer therefore emits it, even if the expected path is missing from the
+current source snapshot; that absence is separately reported as `EVIDENCE_NOT_CAPTURED` for
+`build-target-source-availability`. This distinguishes renderer-expected target membership from
+physical presence in the indexed working tree.
 The focused built-in contract checkpoint is retained in
 `docs/evidence/issue-798-revision-evidence-index-2026-11-13.json`; it is local fixture evidence,
 not production-provider or workflow-release qualification.

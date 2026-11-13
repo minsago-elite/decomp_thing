@@ -77,7 +77,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     override fun configurationSha256(): String = configurationSha256(RepairResourceBudget())
     override fun configurationSha256(budget: RepairResourceBudget): String = sha256(
-        ("generated-c-repair-index-v8\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
+        ("generated-c-repair-index-v9\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
             .toByteArray(Charsets.UTF_8),
     )
 
@@ -193,7 +193,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         val hasPairedPlanAndModel = evidence.facts.origins.any { it.documentRole == "module-plan" } &&
             evidence.facts.origins.any { it.documentRole == "program-model" }
         val generatedEntrypointParticipates = hasPairedPlanAndModel &&
-            evidence.functions.none { safeCName(it.name) == "main" } && entrypointPath in sourcePaths
+            evidence.functions.none { safeCName(it.name) == "main" }
         val buildSources = if (hasPairedPlanAndModel) {
             (evidence.modules.map { it.sourcePath } + listOf(entrypointPath).filter { generatedEntrypointParticipates })
                 .distinct().sorted()
@@ -206,6 +206,19 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             else -> emptyList()
         }
         val sourcePathsByTarget = if (buildSources.isEmpty()) emptyMap() else buildTargets.associateWith { buildSources }
+        val missingGeneratedEntrypointUncertainty = if (
+            generatedEntrypointParticipates && entrypointPath !in sourcePaths
+        ) {
+            listOf(
+                RepairEvidenceUncertainty(
+                    entrypointPath,
+                    "build-target-source-availability",
+                    RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED,
+                ),
+            )
+        } else {
+            emptyList()
+        }
         return RepairIndexLayout(
             sourcePaths = sourcePaths,
             editablePaths = editable.toList(),
@@ -235,12 +248,13 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                     explicitTargets = buildTargets,
                     sourcePathsByTarget = sourcePathsByTarget,
                 ),
-                uncertainties = evidence.facts.uncertainties + RepairEvidenceUncertainty(
-                    buildDefinition,
-                    "build-target-dependencies",
-                    RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED,
-                    buildDefinitionOrigin,
-                ),
+                uncertainties = evidence.facts.uncertainties + missingGeneratedEntrypointUncertainty +
+                    RepairEvidenceUncertainty(
+                        buildDefinition,
+                        "build-target-dependencies",
+                        RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED,
+                        buildDefinitionOrigin,
+                    ),
             ),
         )
     }

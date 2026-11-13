@@ -235,6 +235,33 @@ class ProfiledGeneratedCRepairIndexTest {
     }
 
     @Test
+    fun `missing renderer generated entrypoint remains expected target source with uncertainty`() {
+        val project = createTempDirectory("repair-target-missing-generated-entrypoint-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "9".repeat(64),
+            functions = listOf(RecoveredFunction(
+                "fn_entry", "entry", 0x1000UL, "int entry(void)",
+                decompiledC = "int entry(void) { return 0; }",
+            )),
+        ), project)
+        val entrypoint = project.resolve("src/main.c")
+        assertTrue(Files.deleteIfExists(entrypoint))
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/entry.c:1: compiler diagnostic")
+        val build = selection.evidenceFacts.buildEvidence.single()
+        val targetSources = build.sourcePathsByTarget.values.flatten().toSet()
+
+        assertTrue("src/main.c" !in index.sourcePaths)
+        assertTrue("src/main.c" in targetSources)
+        assertTrue("src/modules/entry.c" in targetSources)
+        assertTrue(selection.evidenceFacts.uncertainties.any {
+            it.subject == "src/main.c" && it.category == "build-target-source-availability" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+    }
+
+    @Test
     fun `blank recovered bodies and initializers remain unavailable definitions`() {
         val project = createTempDirectory("repair-semantic-blank-definitions-")
         SourceTreeGenerator.generate(RecoveredProgramModel(
