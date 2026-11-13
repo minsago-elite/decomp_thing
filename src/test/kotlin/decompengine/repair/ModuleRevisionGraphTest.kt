@@ -5871,7 +5871,7 @@ class ModuleRevisionGraphTest {
             it.kind == RepairEvidenceRelationKind.CALLS && it.sourceEntityId == "fn_alpha" && it.targetEntityId == "fn_beta"
         })
         assertTrue(evidence.uncertainties.any { it.reason == RepairEvidenceUncertaintyReason.AMBIGUOUS_ATTRIBUTION })
-        assertEquals(setOf("entities", "relations", "declarations", "definitions", "uncertainties"), evidence.omittedRecordCounts.keys)
+        assertEquals(setOf("entities", "relations", "declarations", "definitions", "buildEvidence", "uncertainties"), evidence.omittedRecordCounts.keys)
         assertEquals(context.diagnosticHintSha256, evidence.diagnosticEvidence.hintSha256)
         assertEquals(context.seedModules, evidence.diagnosticEvidence.selectedModuleIds)
         assertEquals(context.sourceRevisionSha256, evidence.diagnosticEvidence.subjectSourceRevisionSha256)
@@ -5928,6 +5928,30 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `repair context refuses changed admitted model evidence before staging`() {
+        val project = generatedProject()
+        val model = project.resolve("reports/program_model.json")
+        val originalModel = model.readBytes()
+        val source = project.resolve("src/modules/alpha.c").readBytes()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val context = graph.selectContext("compile", "src/modules/alpha.c: error: stale evidence")
+            graph.requireContextBinding(context)
+
+            val changedModel = originalModel.toString(Charsets.UTF_8)
+                .replace("int alpha_run(void)", "long alpha_run(void)")
+            assertTrue(changedModel != originalModel.toString(Charsets.UTF_8))
+            model.writeText(changedModel)
+
+            val refusal = assertFailsWith<IllegalArgumentException> {
+                graph.preflightStagingContext(context)
+            }
+            assertTrue(refusal.message.orEmpty().contains("plan/model evidence changed"))
+            assertContentEquals(source, project.resolve("src/modules/alpha.c").readBytes())
+            assertEquals(null, graph.snapshot.pendingAttemptId)
+        }
+    }
+
+    @Test
     fun `provisional context binds diagnostic subject to working revision and ownership to index basis`() {
         val project = generatedProject()
         val path = "src/modules/alpha.c"
@@ -5935,11 +5959,11 @@ class ModuleRevisionGraphTest {
             .single { path in it.ownedPaths }.id
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             val indexBasisRevision = graph.snapshot.nodes.single().sourceRevisionSha256
-            project.resolve("reports/build_contract.json").writeText(
+            val contractText =
                 "{\"schemaVersion\":3,\"sourceStableDuringBuild\":true," +
                     "\"sourceRevisionSha256\":\"$indexBasisRevision\",\"modules\":[{\"id\":\"$moduleId\"}]," +
-                    "\"failedOwners\":[\"$moduleId\"]}",
-            )
+                    "\"failedOwners\":[\"$moduleId\"]}"
+            project.resolve("reports/build_contract.json").writeText(contractText)
             val corpus = graph.retainRegressionInputs(listOf(ProcessInput("provisional-context", emptyList(), byteArrayOf())))
             graph.beginRun(1, 60_000)
             val before = project.resolve(path).readBytes()
@@ -5975,7 +5999,12 @@ class ModuleRevisionGraphTest {
                 snapshot.diagnosticEvidence.attributionBasis)
             assertEquals(snapshot.indexBasisSourceRevisionSha256,
                 snapshot.diagnosticEvidence.ownershipEvidenceSourceRevisionSha256)
+            assertEquals("build-contract", snapshot.diagnosticEvidence.ownershipEvidenceOrigin?.documentRole)
+            assertEquals(decompengine.project.sha256(contractText.toByteArray(Charsets.UTF_8)),
+                snapshot.diagnosticEvidence.ownershipEvidenceOrigin?.contentSha256)
             graph.requireContextBinding(selection)
+            project.resolve("reports/build_contract.json").writeText(contractText + " ")
+            assertFailsWith<IllegalArgumentException> { graph.requireContextBinding(selection) }
         }
     }
 

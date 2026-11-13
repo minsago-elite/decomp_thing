@@ -92,7 +92,7 @@ class ProfiledGeneratedCRepairIndexTest {
                 RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)", decompiledC = "int beta_read(void) { return 1; }"),
             ),
             globals = listOf(RecoveredGlobal("global_state", "state", 0x3000UL, "int", initializer = "1")),
-            types = listOf(RecoveredType("type_state", "struct state { int value; };", 0x3000UL)),
+            types = listOf(RecoveredType("type_state", "struct state;", 0x3000UL)),
         )
         SourceTreeGenerator.generate(model, project)
         val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
@@ -115,12 +115,19 @@ class ProfiledGeneratedCRepairIndexTest {
         assertTrue(facts.relations.any {
             it.kind == RepairEvidenceRelationKind.REFERENCES_GLOBAL && it.sourceEntityId == "fn_alpha" && it.targetEntityId == "global_state"
         })
+        assertTrue(facts.relations.any {
+            it.kind == RepairEvidenceRelationKind.MODULE_OWNS && it.sourceEntityId == "module:alpha" && it.targetEntityId == "fn_alpha"
+        })
         assertTrue(facts.declarations.any { it.entityId == "fn_alpha" && it.form == "recovered-prototype" })
         assertTrue(facts.declarations.any { it.entityId == "global_state" && it.form == "global-type" })
         assertTrue(facts.declarations.any { it.entityId == "type_state" && it.form == "type-declaration" })
         assertTrue(facts.definitions.any { it.entityId == "fn_alpha" && it.form == "recovered-body" })
         assertTrue(facts.definitions.any { it.entityId == "global_state" && it.form == "recovered-initializer" })
-        assertTrue(facts.definitions.any { it.entityId == "type_state" && it.form == "recovered-type-definition" })
+        assertFalse(facts.definitions.any { it.entityId == "type_state" })
+        assertTrue(facts.uncertainties.any {
+            it.subject == "type_state" && it.category == "definition" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
         assertTrue(facts.origins.any { it.documentRole == "program-model" && it.contentSha256 == modelDigest })
         assertTrue(facts.origins.any { it.documentRole == "module-plan" && it.contentSha256 == planDigest })
         assertTrue(facts.uncertainties.any {
@@ -133,6 +140,20 @@ class ProfiledGeneratedCRepairIndexTest {
             it.subject == "Makefile" && it.reason == RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED
         })
         assertTrue(facts.buildEvidence.any { it.artifactPath == "Makefile" && it.explicitTargets.isEmpty() })
+        val completeProject = createTempDirectory("repair-semantic-evidence-complete-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "c".repeat(64),
+            functions = listOf(RecoveredFunction("fn_only", "only", 0x1000UL, "int only(void)")),
+        ), completeProject)
+        val completeIndex = ModuleRepairIndex.load(completeProject, GeneratedCRepairIndexProfile)
+        val completeSelection = completeIndex.select(
+            "compile", completeIndex.sourcePaths.joinToString("\n") { "$it: error: selected" },
+        )
+        assertEquals(
+            mapOf("entities" to 0, "relations" to 0, "declarations" to 0, "definitions" to 0,
+                "buildEvidence" to 0, "uncertainties" to 0),
+            completeIndex.omittedEvidenceRecordCounts(completeSelection),
+        )
     }
 
     @Test

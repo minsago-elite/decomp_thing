@@ -176,6 +176,11 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         }
         val explicitlyOwnedPaths = modules.flatMapTo(hashSetOf()) { it.ownedPaths }
         val shared = listOf(buildDefinition, sharedInterface).filter { it in sourcePaths }.sorted()
+        val buildDefinitionOrigin = if (buildDefinition in sourcePaths) {
+            val bytes = readSource?.invoke(buildDefinition)
+                ?: readStableRegularFile(projectRoot, buildDefinition, budget.maximumSourceFileBytes).bytes
+            RepairEvidenceOrigin("build-definition", sha256(bytes), null, "/")
+        } else null
         val sharedSet = shared.toHashSet()
         val fallbackModules = TreeMap<String, String>()
         sourcePaths.filter { it !in explicitlyOwnedPaths && it !in sharedSet }.forEach { path ->
@@ -199,20 +204,21 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                 it.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
             }.map { it.id }.sorted(),
             evidenceFacts = RepairEvidenceFacts(
-                origins = evidence.facts.origins,
+                origins = evidence.facts.origins + listOfNotNull(buildDefinitionOrigin),
                 entities = evidence.facts.entities,
                 relations = evidence.facts.relations,
                 declarations = evidence.facts.declarations,
                 definitions = evidence.facts.definitions,
                 buildEvidence = evidence.facts.buildEvidence + RepairBuildEvidence(
                     artifactPath = buildDefinition,
-                    origin = null,
+                    origin = buildDefinitionOrigin,
                     explicitTargets = emptyList(),
                 ),
                 uncertainties = evidence.facts.uncertainties + RepairEvidenceUncertainty(
                     buildDefinition,
                     "build-target",
                     RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED,
+                    buildDefinitionOrigin,
                 ),
             ),
         )
@@ -226,6 +232,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         val relative = "reports/build_contract.json"
         if (!Files.exists(projectRoot.resolve(relative), LinkOption.NOFOLLOW_LINKS)) return RepairFailureOwnership()
         val payload = readStableRegularFile(projectRoot, relative, budget.maximumIndexEvidenceBytes).bytes
+        val contractOrigin = RepairEvidenceOrigin("build-contract", sha256(payload), BUILD_CONTRACT_SCHEMA_VERSION, "/failedOwners")
         val root = Json.parseToJsonElement(decodeGeneratedCText(payload, relative)).jsonObject
         require(root.requiredInt("schemaVersion", relative) == BUILD_CONTRACT_SCHEMA_VERSION) {
             "unsupported generated C build-contract schemaVersion"
@@ -273,6 +280,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         return RepairFailureOwnership(
             moduleIds = owners.filterNot { it in SHARED_BUILD_OWNERS },
             includesSharedContext = owners.any { it in SHARED_BUILD_OWNERS },
+            evidenceOrigin = contractOrigin,
         )
     }
 
@@ -607,6 +615,9 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             val origin = RepairEvidenceOrigin("module-plan", planHash, planSchemaVersion, "/modules/${module.sourceIndex}")
             origins += origin
             entities += RepairEntityFact("module:${module.id}", RepairEvidenceEntityKind.MODULE, null, origin)
+            (module.functionIds + module.globalIds + module.typeIds).forEach { entityId ->
+                relations += RepairEntityRelation(RepairEvidenceRelationKind.MODULE_OWNS, "module:${module.id}", entityId, origin)
+            }
         }
         sortedFunctions.forEach { function ->
             val origin = RepairEvidenceOrigin("program-model", modelHash, modelSchemaVersion, "/functions/${function.sourceIndex}")
@@ -647,7 +658,9 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             origins += listOf(declarationOrigin, sourceAddressOrigin)
             entities += RepairEntityFact(type.id, RepairEvidenceEntityKind.TYPE, type.status, origin)
             declarations += RepairDeclarationEvidence(type.id, "type-declaration", declarationOrigin)
-            definitions += RepairDefinitionEvidence(type.id, "recovered-type-definition", declarationOrigin)
+            uncertainty += RepairEvidenceUncertainty(
+                type.id, "definition", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED, declarationOrigin,
+            )
             // A decompiler address is not an authenticated location in the current source tree.
             uncertainty += RepairEvidenceUncertainty(type.id, "source-location", RepairEvidenceUncertaintyReason.SOURCE_LOCATION_UNAVAILABLE, sourceAddressOrigin)
             uncertainty += RepairEvidenceUncertainty(type.id, "recovery", RepairEvidenceUncertaintyReason.RECOVERY_UNASSESSED, origin)

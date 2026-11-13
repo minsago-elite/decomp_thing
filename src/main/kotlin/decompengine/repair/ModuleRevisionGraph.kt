@@ -171,6 +171,7 @@ class RepairGraphLockTimeoutException(message: String) : IllegalStateException(m
 class RepairFailureOwnership(
     moduleIds: List<String> = emptyList(),
     val includesSharedContext: Boolean = false,
+    val evidenceOrigin: RepairEvidenceOrigin? = null,
 ) {
     val moduleIds: List<String> = immutableList(moduleIds)
 
@@ -746,6 +747,7 @@ internal class ModuleRepairIndex private constructor(
     sharedContextPathsCandidate: Set<String>?,
     sharedInvalidationPathsCandidate: Set<String>?,
     evidenceFactsCandidate: RepairEvidenceFacts?,
+    layoutCandidate: RepairIndexLayout?,
     indexSha256Candidate: String?,
     sourceRevisionSha256Candidate: String?,
 ) {
@@ -765,6 +767,7 @@ internal class ModuleRepairIndex private constructor(
     private val sharedContextPaths: Set<String>
     private val sharedInvalidationPaths: Set<String>
     private val evidenceFacts: RepairEvidenceFacts
+    private val admittedLayout: RepairIndexLayout
     val indexSha256: String
     val sourceRevisionSha256: String
 
@@ -792,6 +795,7 @@ internal class ModuleRepairIndex private constructor(
         sharedContextPaths = Collections.unmodifiableSet(TreeSet(requireNotNull(sharedContextPathsCandidate)))
         sharedInvalidationPaths = Collections.unmodifiableSet(TreeSet(requireNotNull(sharedInvalidationPathsCandidate)))
         evidenceFacts = requireNotNull(evidenceFactsCandidate)
+        admittedLayout = requireNotNull(layoutCandidate)
         indexSha256 = requireNotNull(indexSha256Candidate)
         sourceRevisionSha256 = requireNotNull(sourceRevisionSha256Candidate)
     }
@@ -925,6 +929,7 @@ internal class ModuleRepairIndex private constructor(
                     attributionBasis == RepairDiagnosticAttributionBasis.PROFILE_BOUND_MODULES
                 },
                 attributionBasis = attributionBasis,
+                ownershipEvidenceOrigin = boundOwnership.evidenceOrigin,
                 selectedModuleIds = seeds,
                 matchedSourcePaths = explicitlyMentionedPaths.filter { it in sources }.sorted(),
                 includesSharedContext = boundOwnership.includesSharedContext || sharedWritable.isNotEmpty(),
@@ -938,19 +943,15 @@ internal class ModuleRepairIndex private constructor(
         projectEvidenceFacts(selection.seedModules + selection.dependencyModules, selection.deferredModules)
 
     internal fun omittedEvidenceRecordCounts(selection: RepairContextSelection): Map<String, Int> {
-        val selectedModules = (selection.seedModules + selection.dependencyModules).toSet()
-        val selectedEntities = selectedModules.flatMap { modules[it]?.entityIds.orEmpty() }.toSet()
-        val selectedFactIds = selectedEntities + selectedModules.map { "module:$it" }
+        val complete = projectEvidenceFacts(modules.keys.toList(), emptyList())
+        val retained = projectEvidenceFacts(selection.seedModules + selection.dependencyModules, selection.deferredModules)
         return mapOf(
-            "entities" to evidenceFacts.entities.count { it.id !in selectedFactIds },
-            "relations" to evidenceFacts.relations.count {
-                it.sourceEntityId !in selectedEntities || it.targetEntityId !in selectedEntities
-            },
-            "declarations" to evidenceFacts.declarations.count { it.entityId !in selectedEntities },
-            "definitions" to evidenceFacts.definitions.count { it.entityId !in selectedEntities },
-            "uncertainties" to evidenceFacts.uncertainties.count {
-                it.subject !in selectedModules && it.subject !in selectedEntities
-            },
+            "entities" to complete.entities.count { it !in retained.entities },
+            "relations" to complete.relations.count { it !in retained.relations },
+            "declarations" to complete.declarations.count { it !in retained.declarations },
+            "definitions" to complete.definitions.count { it !in retained.definitions },
+            "buildEvidence" to complete.buildEvidence.count { it !in retained.buildEvidence },
+            "uncertainties" to complete.uncertainties.count { it !in retained.uncertainties },
         )
     }
 
@@ -959,7 +960,7 @@ internal class ModuleRepairIndex private constructor(
         val selectedFactIds = selectedEntityIds + selectedModules.map { "module:$it" }
         val projectedEntities = evidenceFacts.entities.filter { it.id in selectedFactIds }
         val projectedRelations = evidenceFacts.relations.filter {
-            it.sourceEntityId in selectedEntityIds && it.targetEntityId in selectedEntityIds
+            it.sourceEntityId in selectedFactIds && it.targetEntityId in selectedFactIds
         }
         val projectedDeclarations = evidenceFacts.declarations.filter { it.entityId in selectedEntityIds }
         val projectedDefinitions = evidenceFacts.definitions.filter { it.entityId in selectedEntityIds }
@@ -1022,6 +1023,20 @@ internal class ModuleRepairIndex private constructor(
             "repair source input set changed after the dependency index was created"
         }
         return captureSourceSnapshot(projectRoot, observedPaths, budget, profile)
+    }
+
+    internal fun verifyEvidenceUnchanged() {
+        profile.verifyEvidenceUnchanged(projectRoot, budget, admittedLayout)
+    }
+
+    internal fun verifyFailureOwnership(evidence: RepairDiagnosticEvidence) {
+        if (evidence.attributionBasis != RepairDiagnosticAttributionBasis.PROFILE_BOUND_MODULES) return
+        val observed = boundFailureOwnership()
+        require(observed.moduleIds == evidence.selectedModuleIds &&
+            observed.evidenceOrigin == evidence.ownershipEvidenceOrigin &&
+            observed.includesSharedContext == evidence.includesSharedContext) {
+            "repair profile-bound diagnostic evidence changed after context selection"
+        }
     }
 
     internal fun belongsTo(root: Path): Boolean = projectRoot == root.toAbsolutePath().normalize()
@@ -1155,6 +1170,7 @@ internal class ModuleRepairIndex private constructor(
         return RepairFailureOwnership(
             moduleIds = evidence.moduleIds,
             includesSharedContext = evidence.includesSharedContext,
+            evidenceOrigin = evidence.evidenceOrigin,
         )
     }
 
@@ -1417,6 +1433,7 @@ internal class ModuleRepairIndex private constructor(
                     sharedContextPathsCandidate = layout.sharedContextPaths.toSet(),
                     sharedInvalidationPathsCandidate = layout.sharedInvalidationPaths.toSet(),
                     evidenceFactsCandidate = layout.evidenceFacts,
+                    layoutCandidate = layout,
                     indexSha256Candidate = canonicalIndexSha256,
                     sourceRevisionSha256Candidate = revisionSha256(snapshot),
                 )
@@ -2796,6 +2813,8 @@ internal class ModuleRevisionGraph private constructor(
         require(context.indexSha256 == index.indexSha256) {
             "repair dependency evidence changed after context selection"
         }
+        index.verifyEvidenceUnchanged()
+        index.verifyFailureOwnership(requireNotNull(context.diagnosticEvidence))
         val evidence = requireNotNull(context.evidenceSnapshot) { "repair evidence snapshot is missing" }
         requireCurrentHead()
         val observedRevision = revisionSha256(sourcesAt(workingHeadId()).values)
@@ -2891,6 +2910,8 @@ internal class ModuleRevisionGraph private constructor(
         require(revisionSha256(sourcesAt(workingHeadId()).values) == context.sourceRevisionSha256) {
             "repair sources changed while the staging context was captured"
         }
+        index.verifyEvidenceUnchanged()
+        index.verifyFailureOwnership(requireNotNull(context.diagnosticEvidence))
         Collections.unmodifiableMap(
             captured.mapValuesTo(TreeMap<String, ByteArray>()) { (_, bytes) -> bytes.copyOf() },
         )

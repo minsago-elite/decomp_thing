@@ -85,27 +85,32 @@ The v6 layout commitment includes a deterministic semantic evidence index. Each 
 captured document role, its exact content digest, schema version, and field locator; it never stores
 the host path. Program-model functions, globals, and types remain recovered evidence. Their prototypes,
 bodies, initializers, and declarations are referenced by document fields, not reclassified as facts
-about the current C source. Calls and global references retain separate relation kinds. Module
-ownership is still derived from the admitted module plan and the existing graph layout, and graph
-admission checks that semantic entity IDs exactly match that ownership inventory.
+about the current C source. Calls, global references, and module ownership retain separate relation
+kinds. Module ownership is derived from the admitted module plan and the existing graph layout, and
+graph admission checks that semantic entity IDs exactly match that ownership inventory. A recovered
+type declaration is not called a definition when no separate definition evidence exists.
 
 Context selection uses the existing ownership, dependency, readable-path, writable-path, and budget
 decisions. Its v1 evidence snapshot binds the selected evidence to the profile and reconstruction
 descriptor, structural index and source basis, working revision, graph head/status, fully accepted
 head when one exists, and retained regression corpus. Deferred context and unavailable source
 locations, definitions, build targets, recovery assessment, or authenticated diagnostic attribution
-are represented as subject-specific uncertainty, and omitted static entities, relations, declarations,
-definitions, and uncertainties are counted by category. A caller-supplied diagnostic hint is hashed as a
-hint; the snapshot records its subject source revision, selected modules, matched in-tree paths, and
+are represented as subject-specific uncertainty, and omitted projected entities, relations,
+declarations, definitions, build evidence, and uncertainties are counted by comparing the complete
+projection with the retained one. A caller-supplied diagnostic hint is hashed as a hint; the snapshot
+records its subject source revision, selected modules, matched in-tree paths, and
 attribution basis without retaining the text or treating it as a compiler receipt. For provisional
 work, the hint subject is the provisional working revision; profile-derived ownership separately
 retains the accepted index-basis revision that authenticated that ownership. Retained behavior
-cases identify their input and corpus, but do not claim that the case ran or passed. This projection
-is descriptive and grants no read/write or acceptance authority.
+cases identify their input and corpus, but do not claim that the case ran or passed. When
+profile-bound failure ownership uses a build contract, its exact document hash and field locator are
+included with the accepted index-basis revision. This projection is descriptive and grants no
+read/write or acceptance authority.
 
 The profile re-reads the admitted plan/model pair before index publication and requires the semantic
 commitment to match. A later evidence change cannot reuse an old recovery binding. Context snapshots
-are likewise rechecked against the current graph and corpus before staging. The canonical JSON
+are likewise rechecked against current plan/model and profile-bound build-contract evidence, as well
+as the graph and corpus, before and after staging capture. The canonical JSON
 projection is subject to both the configured index/request budgets and the strict JSON layer's
 64 MiB hard byte ceiling; exceeding either fails closed without truncation.
 

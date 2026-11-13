@@ -157,10 +157,11 @@ class RepairEvidenceIndexTest {
                 graphHeadStatus = "ROOT", fullyAcceptedHeadId = null, fullyAcceptedHeadSha256 = null,
                 regressionCorpusSha256 = "4".repeat(64), staticFacts = facts(), selectedEntityIds = listOf("fn_alpha", "fn_alpha"),
                 diagnosticEvidence = RepairDiagnosticEvidence(
-                    null, "c".repeat(64), null, RepairDiagnosticAttributionBasis.NONE, emptyList(), emptyList(), false,
+                    null, "c".repeat(64), null, RepairDiagnosticAttributionBasis.NONE, null, emptyList(), emptyList(), false,
                 ),
                 behaviorCases = emptyList(), omittedEntityCount = 0,
-                omittedRecordCounts = mapOf("entities" to 0, "relations" to 0, "declarations" to 0, "definitions" to 0, "uncertainties" to 0),
+                omittedRecordCounts = mapOf("entities" to 0, "relations" to 0, "declarations" to 0, "definitions" to 0,
+                    "buildEvidence" to 0, "uncertainties" to 0),
                 diagnosticHintSha256 = null,
                 maximumCanonicalBytes = 64 * 1024, uncertainties = emptyList(),
             )
@@ -207,7 +208,8 @@ class RepairEvidenceIndexTest {
             includesSharedContext = false,
         ),
         omittedEntityCount = 0,
-        omittedRecordCounts = mapOf("entities" to 0, "relations" to 0, "declarations" to 0, "definitions" to 0, "uncertainties" to 0),
+        omittedRecordCounts = mapOf("entities" to 0, "relations" to 0, "declarations" to 0, "definitions" to 0,
+            "buildEvidence" to 0, "uncertainties" to 0),
         diagnosticHintSha256 = "6".repeat(64),
         maximumCanonicalBytes = 64 * 1024,
         uncertainties = listOf(RepairEvidenceUncertainty("case", "outcome", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED)),

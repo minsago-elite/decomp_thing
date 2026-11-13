@@ -41,7 +41,7 @@ data class RepairEvidenceOrigin(
 }
 
 enum class RepairEvidenceEntityKind { MODULE, FUNCTION, GLOBAL, TYPE }
-enum class RepairEvidenceRelationKind { CALLS, REFERENCES_GLOBAL }
+enum class RepairEvidenceRelationKind { MODULE_OWNS, CALLS, REFERENCES_GLOBAL }
 enum class RepairDiagnosticAttributionBasis {
     PROFILE_BOUND_MODULES,
     CALLER_HINT_EXACT_PATHS,
@@ -139,6 +139,7 @@ class RepairDiagnosticEvidence(
     /** Source revision whose authenticated profile facts support profile-derived ownership. */
     val ownershipEvidenceSourceRevisionSha256: String?,
     val attributionBasis: RepairDiagnosticAttributionBasis,
+    val ownershipEvidenceOrigin: RepairEvidenceOrigin? = null,
     selectedModuleIds: List<String>,
     matchedSourcePaths: List<String>,
     val includesSharedContext: Boolean,
@@ -161,11 +162,13 @@ class RepairDiagnosticEvidence(
     override fun equals(other: Any?): Boolean = other is RepairDiagnosticEvidence &&
         hintSha256 == other.hintSha256 && subjectSourceRevisionSha256 == other.subjectSourceRevisionSha256 &&
         ownershipEvidenceSourceRevisionSha256 == other.ownershipEvidenceSourceRevisionSha256 &&
-        attributionBasis == other.attributionBasis && selectedModuleIds == other.selectedModuleIds &&
+        attributionBasis == other.attributionBasis && ownershipEvidenceOrigin == other.ownershipEvidenceOrigin &&
+        selectedModuleIds == other.selectedModuleIds &&
         matchedSourcePaths == other.matchedSourcePaths && includesSharedContext == other.includesSharedContext
 
     override fun hashCode(): Int = listOf(
-        hintSha256, subjectSourceRevisionSha256, ownershipEvidenceSourceRevisionSha256, attributionBasis, selectedModuleIds,
+        hintSha256, subjectSourceRevisionSha256, ownershipEvidenceSourceRevisionSha256, attributionBasis,
+        ownershipEvidenceOrigin, selectedModuleIds,
         matchedSourcePaths, includesSharedContext,
     ).hashCode()
 
@@ -174,6 +177,7 @@ class RepairDiagnosticEvidence(
         subjectSourceRevisionSha256 = revisionSha256,
         ownershipEvidenceSourceRevisionSha256 = ownershipEvidenceSourceRevisionSha256,
         attributionBasis = attributionBasis,
+        ownershipEvidenceOrigin = ownershipEvidenceOrigin,
         selectedModuleIds = selectedModuleIds,
         matchedSourcePaths = matchedSourcePaths,
         includesSharedContext = includesSharedContext,
@@ -238,6 +242,8 @@ class RepairEvidenceFacts(
             val source = entityById.getValue(relation.sourceEntityId).kind
             val target = entityById.getValue(relation.targetEntityId).kind
             when (relation.kind) {
+                RepairEvidenceRelationKind.MODULE_OWNS -> source == RepairEvidenceEntityKind.MODULE &&
+                    target in setOf(RepairEvidenceEntityKind.FUNCTION, RepairEvidenceEntityKind.GLOBAL, RepairEvidenceEntityKind.TYPE)
                 RepairEvidenceRelationKind.CALLS -> source == RepairEvidenceEntityKind.FUNCTION && target == RepairEvidenceEntityKind.FUNCTION
                 RepairEvidenceRelationKind.REFERENCES_GLOBAL -> source == RepairEvidenceEntityKind.FUNCTION && target == RepairEvidenceEntityKind.GLOBAL
             }
@@ -363,7 +369,9 @@ class RepairEvidenceSnapshot(
                 diagnosticEvidence.ownershipEvidenceSourceRevisionSha256 == indexBasisSourceRevisionSha256))
         require(graphHeadStatus in setOf("ROOT", "PROVISIONAL", "REJECTED", "ACCEPTED", "LEGACY_UNVERIFIED"))
         require(omittedEntityCount >= 0)
-        require(this.omittedRecordCounts.keys == setOf("entities", "relations", "declarations", "definitions", "uncertainties"))
+        require(this.omittedRecordCounts.keys == setOf(
+            "entities", "relations", "declarations", "definitions", "buildEvidence", "uncertainties",
+        ))
         require(this.omittedRecordCounts.values.all { it >= 0 })
         require(this.selectedEntityIds.none(String::isBlank) && this.selectedEntityIds.size == this.selectedEntityIds.distinct().size)
         require(this.behaviorCases.map { it.caseId }.distinct().size == this.behaviorCases.size)
@@ -392,6 +400,10 @@ class RepairEvidenceSnapshot(
                 put("hintSha256", diagnosticEvidence.hintSha256?.let(::JsonPrimitive) ?: JsonNull)
                 put("subjectSourceRevisionSha256", diagnosticEvidence.subjectSourceRevisionSha256)
                 put("ownershipEvidenceSourceRevisionSha256", diagnosticEvidence.ownershipEvidenceSourceRevisionSha256?.let(::JsonPrimitive) ?: JsonNull)
+                put("ownershipEvidenceOrigin", diagnosticEvidence.ownershipEvidenceOrigin?.let { origin -> buildJsonObject {
+                    put("documentRole", origin.documentRole); put("contentSha256", origin.contentSha256)
+                    put("schemaVersion", origin.schemaVersion?.let(::JsonPrimitive) ?: JsonNull); put("locator", origin.locator)
+                } } ?: JsonNull)
                 put("attributionBasis", diagnosticEvidence.attributionBasis.name)
                 put("selectedModuleIds", JsonArray(diagnosticEvidence.selectedModuleIds.map(::JsonPrimitive)))
                 put("matchedSourcePaths", JsonArray(diagnosticEvidence.matchedSourcePaths.map(::JsonPrimitive)))
