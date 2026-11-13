@@ -240,7 +240,8 @@ async function readHistory({ evaluate, tab, basePath, jobId, repositoryId, manif
   return { pages: 50, entries: received.length, maximumElapsedMs: Math.max(...times), longSubjectTruncated: true };
 }
 
-async function readDiffPages({ evaluate, tab, basePath, jobId, repositoryId, commit, expectedTotal, expectedComplete, expectedPaths, label }) {
+async function readDiffPages({ evaluate, tab, basePath, jobId, repositoryId, commit, expectedTotal, expectedComplete, expectedPaths,
+  retainFiles = false, label }) {
   let cursor = null;
   const files = [];
   const elapsed = [];
@@ -262,7 +263,7 @@ async function readDiffPages({ evaluate, tab, basePath, jobId, repositoryId, com
   assert.equal(files.length, expectedTotal, `${label} returned an unexpected retained file count`);
   assert.equal(last.nextCursor, null, `${label} did not terminate its bounded page walk`);
   assertDiffPaths(files, expectedPaths, label);
-  return { ...summarizeDiffPaths(files), pages: Math.ceil(expectedTotal / 200),
+  return { ...summarizeDiffPaths(files), ...(retainFiles ? { files } : {}), pages: Math.ceil(expectedTotal / 200),
     maximumElapsedMs: Math.max(...elapsed), complete: expectedComplete };
 }
 
@@ -304,7 +305,8 @@ export async function qualifyGitScale({ evaluate, tab, basePath = '/nested/', fi
     commit: fixture.manifest.commitIds[199], expectedTotal: 2000, expectedComplete: false,
     expectedPaths: fixture.manifest.pathSets['200'].slice(0, 2000), label: '2,001-file diff' });
   const root = await readDiffPages({ evaluate, tab, basePath, jobId, repositoryId: attach.repositoryId,
-    commit: fixture.manifest.firstCommit, expectedTotal: 3, expectedComplete: true, label: 'large-file root diff' });
+    commit: fixture.manifest.firstCommit, expectedTotal: 3, expectedComplete: true, retainFiles: true,
+    expectedPaths: ['README.txt', 'large/patch.txt', 'large/payload.bin'], label: 'large-file root diff' });
   const text = root.files.find(file => file.path === 'large/patch.txt');
   const binary = root.files.find(file => file.path === 'large/payload.bin');
   assert.ok(text && binary, 'root diff did not identify the fixture large text and binary files');
