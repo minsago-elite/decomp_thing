@@ -27,6 +27,7 @@ const safeRoute = pathname => {
 const safePageRoute = (pathname, searchParams) => {
   const path = pathname.replace(/\/+$/, '') || '/';
   if (path === '/nested') return 'dashboard';
+  if (path === '/nested/upload') return 'upload';
   if (path === '/nested/runtime') return 'runtime';
   if (path === '/nested/exploration') return 'exploration';
   if (/^\/nested\/jobs\/[^/]+\/runs$/.test(path)) return 'attemptHistory';
