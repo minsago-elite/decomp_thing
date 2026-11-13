@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "corpus": "builtin-core-contract-v18",
-  "commit": "59158fc10f9ffb21ca1208d1d244d394e0bed601",
+  "commit": "ff9660e64cd8fc25889571026badaee704a4decc",
   "requiredHost": true,
   "sourceClean": true,
   "forcedTestExecution": true,
@@ -10,8 +10,8 @@
   "realProviderQualified": false,
   "workflowReleaseQualified": false,
   "qualification": {
-    "scope": "local built-in core contract for the revision-bound evidence index, including long retained regression IDs and generated-C target/source membership uncertainty",
-    "sourceTreeOid": "5785b087b8abd22050524ab8ce453878350cfbaf",
+    "scope": "local built-in core contract for the revision-bound evidence index, including admitted long regression IDs, generated-C target/source membership, and missing-entrypoint uncertainty",
+    "sourceTreeOid": "6625a52ff93dc5cd38b63e4d837058542ab8d02e",
     "workingDirectory": "repository root",
     "command": "GRADLE_OPTS='-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx4096m' PATH=\"$PWD/build/frontend-node-24.20.0-npm-11.19.0.BpJuvR/node/bin:$PATH\" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=no /usr/bin/python3.14 scripts/validate-builtin-contract.py",
     "environment": {
@@ -27,7 +27,8 @@
     "reviewFixCoverage": [
       "module fact IDs and program entity IDs remain distinct when their text collides",
       "retained regression IDs over 4,112 characters, admitted by the corpus budget, survive behavior-case and uncertainty projection through context selection",
-      "generated-C target identities map only renderer-owned module and entrypoint sources; build-definition/artifact paths are separate and target dependency edges remain explicitly unknown"
+      "generated-C target identities map only renderer-owned module and entrypoint sources; build-definition/artifact paths are separate and target dependency edges remain explicitly unknown",
+      "when paired plan/model evidence implies a generated entrypoint but the expected file is absent, target membership retains the expected path and emits source-availability uncertainty; an unlisted path is excluded when the model has main"
     ]
   },
   "suites": [
@@ -37,7 +38,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "1815aec383f94591f3a224b0fbf34195ed0b4f3f65a3b17b33f2621bfff686b1",
+      "xmlSha256": "a47176e0b6d76225888eb4a73b42dbaaf6b4cd04ca7693d0334e269d562800d5",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.agent.AgentExecutionContractTest.xml"
     },
     {
@@ -46,7 +47,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "3d4163bbb8d1b6984fb07e03b2e4ccd5a6789413a770fce623b60eae818d8cb5",
+      "xmlSha256": "1b1a1bec95df52781796ac7a14c5fc93c6cd0f68e8d53863219a8c466764435a",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinAgentHarnessTest.xml"
     },
     {
@@ -55,7 +56,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "b81b5f111f99c257e0c3a30368026ae9419ce4cac920c338ccbe906947c3cb43",
+      "xmlSha256": "9a7274d8569ddd8c9b75dd7fed97943015088779bbceade21f3fbdb6aa743799",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinFilesystemToolsTest.xml"
     },
     {
@@ -64,7 +65,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "bc16f7b8915408963ebbbb98c57e43ece5cf8e8d0ea53f64829ea3951b824ed0",
+      "xmlSha256": "1c735cef2fc7d65dd69ec63c02d4c49ba865aa2aad8b458235ee78179bae00ae",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCapturedContextToolsTest.xml"
     },
     {
@@ -73,7 +74,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "25b95fd2798ab6388e4f125cf243f11a2e44e0db88cccc49e2bc9e9ea8b4e2af",
+      "xmlSha256": "12b96fe907ece5edf180925c8a47ea0cd2dc6fdd5ffdc57cd3702bc5fb295d4b",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinContextPackageTest.xml"
     },
     {
@@ -82,7 +83,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "cbd52ac7e16bfb549fa94596df9aed308ade7741f3757a3f330a2809f6871e12",
+      "xmlSha256": "9b766da263a5ebc411e4d78fface800bb1b43353434b77e1d4b10e1fe214e54f",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinJournalTest.xml"
     },
     {
@@ -91,7 +92,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "0ea81c464bc761648ca18ecef0fed3e744a3b701d67b1a3508559879798cb059",
+      "xmlSha256": "b6a71a910e3ea5ffc260d13db0b76b93104122067d753cc52dfd0fbed896c82e",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCheckpointTest.xml"
     },
     {
@@ -100,7 +101,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "845147c7f68916833b28a8b846fab216e5dbdec6413c79a93317a58783456534",
+      "xmlSha256": "d063b7b51f9a2891b6eec967783fc34a6bb2d00da49c65f66a4777e1f0c7cfa2",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCapturedResumeTest.xml"
     },
     {
@@ -109,7 +110,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "66fdfb78d22aacb2b8af3776beed273528fd1d01661b2fa65bb5d11e7b55703f",
+      "xmlSha256": "ea0e9758b986e8463c09a4765f22e65c4ca41e415d3f8d4704f7e11b99249bf6",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinSourceStoreTest.xml"
     },
     {
@@ -118,7 +119,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "da27816da2092b18e84b937c474c58f4bad7aa7d5926f784913082698d147a78",
+      "xmlSha256": "fcab00324a9c053d472cb2a1db5a1b9f9ccdda5358a2ed9425f6871ac4dbc0d9",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinInvocationArchiveTest.xml"
     },
     {
@@ -127,7 +128,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "28d4ea17f8a42557e986903cc9d582d957f0d9d223def9a4f2402533b37c7a8e",
+      "xmlSha256": "5430ed34e43b5ee939d1ce986a9b4c7b8116f9023cbaebd84a5b34450dbcc17f",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinTerminalToolsTest.xml"
     },
     {
@@ -136,7 +137,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "7ed3371854a3022f248450d97a87c5f9dc51e87c26924a9af2701115dae884dd",
+      "xmlSha256": "9fa0d2c413816ca3be924bd9594a9852d247b821f69137f15dde6aa46a29758e",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.provider.OpenAiCompatibleModelProviderTest.xml"
     },
     {
@@ -145,7 +146,7 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "4c3126e896b0c120167de8a8305a2fa177086292f5f68299c996644941d5ef64",
+      "xmlSha256": "71410e06361cd00d00503ee2027a0ed0f408dfebb1fd405014e65675e4a5223a",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.repair.RepairEvidenceIndexTest.xml"
     },
     {
@@ -154,16 +155,16 @@
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "c66f23ef0f2fbc6cac101e2007304403280f20a8f2375c7e7416f04785d5488a",
+      "xmlSha256": "6c00e12be25f1f441b918d905fa87366599241068ace572e9705fae7944cc527",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.repair.ModuleRevisionGraphTest.xml"
     },
     {
       "suite": "decompengine.project.ProfiledGeneratedCRepairIndexTest",
-      "tests": 15,
+      "tests": 16,
       "failures": 0,
       "errors": 0,
       "skipped": 0,
-      "xmlSha256": "8306a7a8ba3f86d282011b70ccd06db40d65b4c0a41614c9495dd963ca6d3e2e",
+      "xmlSha256": "34f53db5317cab5349507e6279a14b87be3c45a331be813029c61d4d4154c2ba",
       "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.project.ProfiledGeneratedCRepairIndexTest.xml"
     }
   ],

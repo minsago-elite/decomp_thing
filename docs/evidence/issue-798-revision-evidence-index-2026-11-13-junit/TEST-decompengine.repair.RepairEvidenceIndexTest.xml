@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.repair.RepairEvidenceIndexTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:25:16.749Z" hostname="whatsername" time="0.009">
+<testsuite name="decompengine.repair.RepairEvidenceIndexTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-11-13T10:38:15.079Z" hostname="whatsername" time="0.009">
   <properties/>
   <testcase name="evidence records retain the generated profile identifier bound including module prefix()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.002"/>
   <testcase name="evidence facts reject dangling origins entities and duplicate identities()" classname="decompengine.repair.RepairEvidenceIndexTest" time="0.001"/>
