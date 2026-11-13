@@ -454,7 +454,7 @@ async function prepareArchive(archivePath) {
     const executable = execFileSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
     await fs.symlink(executable, join(bins, name));
   }
-  if (values.mode === 'history') {
+  if (values.mode === 'history' || values.mode === 'session') {
     const gitExecutable = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
     assert.ok(isAbsolute(gitExecutable), 'Packaged Git initialization qualification requires an installed Git executable');
     await fs.symlink(gitExecutable, join(bins, 'git'));
@@ -932,6 +932,9 @@ try {
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'reset job library');
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
     report.dashboard = { emptyLibrary: !populated, populatedLibrary: populated, noMatches: true, filtersSurviveReload: true, resetFilters: true };
+    if (values.mode === 'session') {
+      report.gitInitializationIdentity = await qualifyGitInitIdentity({ repo, origin: browserOrigin, makeTarget, cdp, evaluate, ready });
+    }
     if (historyFixture) {
       const row = await evaluate(authenticated, `(() => {
         const row = document.querySelector('ul[aria-label="Uploaded jobs"] li');
@@ -1026,7 +1029,6 @@ try {
     }
     if (historyFixture) {
       report.populatedHistory = await qualifyHistory({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
-      report.gitInitializationIdentity = await qualifyGitInitIdentity({ repo, origin: browserOrigin, makeTarget, cdp, evaluate, ready });
       report.jobDataCreated = true;
     }
     if (values.mode === 'metadata') {
