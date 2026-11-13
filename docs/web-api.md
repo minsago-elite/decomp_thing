@@ -986,7 +986,13 @@ linked sources are checked as well. `WebGitControllerTest` covers the HTTP contr
 capability states, guards, strict bodies, path-free responses and the unavailable answers. The
 job page's minimal Git panel (`GitRepositoryPanel`) shows availability, the observed HEAD and a
 single initialization action from the latest attempt's candidate. The full Git UI belongs to
-#583.
+#583. Its initialization command is bound to the acknowledged job, repository and operation
+identity before polling or reading back the repository. The packaged browser check exercises a
+schema-valid mismatched acknowledgement and a matching queued-to-completed control through the
+built job page with fixture API responses. It verifies client command handling, not a real Git
+mutation; backend initialization remains covered separately by the managed-Git service and HTTP
+controller tests. This focused command boundary is separate from #629's broader command policy
+and workflow acceptance.
 
 ## Legacy compatibility
 

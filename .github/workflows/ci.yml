@@ -180,6 +180,7 @@ jobs:
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
+          node --check scripts/packaged-browser-git-init.mjs
           node --test scripts/packaged-browser-upload.test.mjs
           node --check scripts/packaged-browser-restart.mjs
           node --test scripts/packaged-browser-restart.test.mjs
