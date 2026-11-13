@@ -12,6 +12,7 @@ import decompengine.repair.RepairEvidenceEntityKind
 import decompengine.repair.RepairEvidenceRelationKind
 import decompengine.repair.RepairEvidenceUncertaintyReason
 import java.security.MessageDigest
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -188,6 +189,49 @@ class ProfiledGeneratedCRepairIndexTest {
                 it.sourceEntityId == "module:alpha" && it.targetEntityId == "module:alpha"
         })
         assertEquals(2, facts.entities.count { it.id == "module:alpha" })
+    }
+
+    @Test
+    fun `target membership stays uncertain without paired plan and model evidence`() {
+        val project = createTempDirectory("repair-target-membership-without-plan-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "d".repeat(64),
+            functions = listOf(RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)")),
+        ), project)
+        Files.delete(project.resolve("reports/module_plan.json"))
+        Files.delete(project.resolve("reports/program_model.json"))
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("behavior")
+        val build = selection.evidenceFacts.buildEvidence.single()
+
+        assertEquals(listOf("all", "build/reconstructed"), build.explicitTargets)
+        assertTrue(build.sourcePathsByTarget.isEmpty())
+        assertTrue(selection.evidenceFacts.uncertainties.any {
+            it.category == "build-target-membership" &&
+                it.reason == RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED
+        })
+    }
+
+    @Test
+    fun `unlisted entrypoint path is not assigned to generated targets when model has main`() {
+        val project = createTempDirectory("repair-target-no-generated-entrypoint-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "e".repeat(64),
+            functions = listOf(RecoveredFunction(
+                "fn_main", "main", 0x1000UL, "int main(void)",
+                decompiledC = "int main(void) { return 0; }",
+            )),
+        ), project)
+        val unlistedEntrypoint = project.resolve("src/main.c")
+        unlistedEntrypoint.writeText("int main(void) { return 1; }\n")
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/main.c: compiler diagnostic")
+        val targetSources = selection.evidenceFacts.buildEvidence.single().sourcePathsByTarget.values.flatten().toSet()
+
+        assertTrue("src/modules/main.c" in targetSources)
+        assertFalse("src/main.c" in targetSources)
     }
 
     @Test

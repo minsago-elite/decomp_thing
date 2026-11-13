@@ -77,7 +77,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     override fun configurationSha256(): String = configurationSha256(RepairResourceBudget())
     override fun configurationSha256(budget: RepairResourceBudget): String = sha256(
-        ("generated-c-repair-index-v7\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
+        ("generated-c-repair-index-v8\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
             .toByteArray(Charsets.UTF_8),
     )
 
@@ -190,14 +190,22 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         // from Make/Ninja text or confuse the produced artifact with a target. Target dependency
         // edges remain unknown unless a future admitted contract records them explicitly.
         val entrypointPath = profile.layout.declaration("entrypoint-implementation").materialize()
-        val buildSources = (evidence.modules.map { it.sourcePath } + listOf(entrypointPath).filter { it in sourcePaths })
-            .distinct().sorted()
+        val hasPairedPlanAndModel = evidence.facts.origins.any { it.documentRole == "module-plan" } &&
+            evidence.facts.origins.any { it.documentRole == "program-model" }
+        val generatedEntrypointParticipates = hasPairedPlanAndModel &&
+            evidence.functions.none { safeCName(it.name) == "main" } && entrypointPath in sourcePaths
+        val buildSources = if (hasPairedPlanAndModel) {
+            (evidence.modules.map { it.sourcePath } + listOf(entrypointPath).filter { generatedEntrypointParticipates })
+                .distinct().sorted()
+        } else {
+            emptyList()
+        }
         val buildTargets = when (profile.adapterConfiguration.getValue("build-system").single()) {
             "gnu-make" -> listOf("all", "build/reconstructed")
             "ninja" -> listOf("build/reconstructed")
             else -> emptyList()
         }
-        val sourcePathsByTarget = buildTargets.associateWith { buildSources }
+        val sourcePathsByTarget = if (buildSources.isEmpty()) emptyMap() else buildTargets.associateWith { buildSources }
         return RepairIndexLayout(
             sourcePaths = sourcePaths,
             editablePaths = editable.toList(),
