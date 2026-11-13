@@ -23,6 +23,7 @@ export const appCopy = {
   "attemptActivity": "Attempt activity",
   "attemptEvidence": "Attempt evidence",
   "attemptHistory": "Attempt history",
+  "sourceRepository": "Source repository",
   "pageUnavailable": "Page unavailable",
   "openingView": "Opening view…",
   "connectionStatus": "Connection status",

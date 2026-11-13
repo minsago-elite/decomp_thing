@@ -313,6 +313,12 @@ These routes implement the currently available attempt views. The full workspace
 Revisions, Artifacts and Git routes, URL-bound continuation/comparison state and physical
 scroll/selection restoration still require their original implementation and qualification.
 
+The Git workspace is implemented as one combined route, `/jobs/{jobId}/git` (#583). It holds the
+overview, changes, commit review, history, branch and work-tree parts of the `G/*` rows above, and
+it is described in [the Web API Git workspace section](web-api.md#git-workspace-view-and-packaged-journey).
+The selected work tree, file and commit are view state only. The separate `G/*` URLs, their URL
+state and the `G/remotes` and `G/conflicts` views are not implemented yet.
+
 
 ## Job snapshot page history
 

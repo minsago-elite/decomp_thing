@@ -129,6 +129,13 @@ class WebRevisionFileMetadataTest {
             for (suffix in listOf("unknown", "Activity", "%61ctivity", "evidence/extra", "activity/../private", "evidence//")) {
                 assertNull(canonicalSpaDocumentPath(prefix, "$selected/$suffix"))
             }
+            // The job's repository workspace (#583) is one document route; its parts are view state.
+            val workspace = "${prefix}jobs/$jobId/git"
+            assertEquals(workspace, canonicalSpaDocumentPath(prefix, workspace))
+            assertEquals(workspace, canonicalSpaDocumentPath(prefix, "$workspace/"))
+            for (suffix in listOf("GIT", "git/status", "git/../runs", "%67it", "git//")) {
+                assertNull(canonicalSpaDocumentPath(prefix, "${prefix}jobs/$jobId/$suffix"))
+            }
         }
     }
 }

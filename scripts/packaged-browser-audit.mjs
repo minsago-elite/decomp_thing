@@ -9,7 +9,7 @@ import { join } from 'node:path';
 // contract fixtures, because inert seeding cannot persist source revisions; every
 // response is a schema fixture the SPA validates exactly as it would a server response.
 
-export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
+export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'git workspace', 'attempt history',
   'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
 
@@ -29,6 +29,8 @@ export function auditFixtures(repo, buildId) {
   };
   const job = load('job-lossless');
   const jobId = job.data.jobId;
+  const repositories = load('git-repositories');
+  Object.assign(repositories.data, { jobId, repositories: [], operations: [] });
   job.data.displayFilename = longFilename;
   const jobs = load('jobs-page');
   for (const item of jobs.data.items) if (item.jobId === jobId) item.displayFilename = longFilename;
@@ -83,6 +85,7 @@ export function auditFixtures(repo, buildId) {
     [/^\/recovery$/, () => ok(load('recovery-empty'))],
     [/^\/jobs$/, () => ok(jobs)],
     [new RegExp(`^/jobs/${jobId}$`), () => ok(job)],
+    [new RegExp(`^/jobs/${jobId}/repositories$`), () => ok(repositories)],
     [new RegExp(`^/jobs/${jobId}/runs$`), () => ok(load('runs-page'))],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}$`), () => ok(run)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/snapshot$`), () => ok(load('snapshot'))],
@@ -124,6 +127,7 @@ export function auditFixtures(repo, buildId) {
     { name: 'upload', path: '/nested/upload', rendered: 'Binary file' },
     { name: 'runtime', path: '/nested/runtime', rendered: 'Page build identity' },
     { name: 'job detail', path: `/nested/jobs/${jobId}`, rendered: 'Binary metadata' },
+    { name: 'git workspace', path: `/nested/jobs/${jobId}/git`, rendered: 'Source repository' },
     { name: 'attempt history', path: `/nested/jobs/${jobId}/runs`, rendered: runId },
     { name: 'attempt overview', path: base, rendered: 'Attempt identity', preparation: [...activity, ...evidence] },
     { name: 'attempt activity', path: `${base}/activity`, rendered: 'Attempt identity', preparation: activity },

@@ -3,6 +3,26 @@ import { lstat } from 'node:fs/promises';
 import test from 'node:test';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
 import { createFakeGitHubFixture } from './web-github-fixture.mjs';
+import { countGitHistoryReads } from './packaged-browser-git.mjs';
+
+test('packaged history counts all 50 continuation reads using query-redacted browser evidence', () => {
+  const prefix = 'http://127.0.0.1:8080/nested/api/v1/jobs/job/repositories/repository';
+  const firstPage = { method: 'GET', url: `${prefix}/history` };
+  const requests = [firstPage];
+  const historyStart = requests.length;
+  for (let page = 1; page <= 50; page++) {
+    // Mirrors makeTarget: neither the anchored cursor nor any other query is retained.
+    requests.push({ method: 'GET', url: `${prefix}/history?limit=20&cursor=page${page}`.split('?')[0] });
+  }
+  requests.push({ method: 'GET', url: `${prefix}/status` }, { method: 'POST', url: `${prefix}/operations` });
+  const continuations = requests.slice(historyStart);
+  assert.equal(countGitHistoryReads(continuations), 50);
+  assert.equal(countGitHistoryReads(continuations.slice(1)), 49, 'Missing reads must still fail the journey count');
+  assert.equal(countGitHistoryReads([...continuations, firstPage]), 51, 'Duplicate reads must still fail the journey count');
+  assert.equal(countGitHistoryReads([
+    { method: 'POST', url: `${prefix}/history` }, { method: 'GET', url: `${prefix}/history-extra` },
+  ]), 0);
+});
 
 test('independent roots produce the same isolated diverged history and disposable remote', async () => {
   const first = await createWebGitFixture();
@@ -50,6 +70,30 @@ test('independent roots produce the same isolated diverged history and disposabl
   }
   await assert.rejects(lstat(first.paths.root), { code: 'ENOENT' });
   await assert.rejects(lstat(second.paths.root), { code: 'ENOENT' });
+});
+
+test('bounded multi-page histories have deterministic exact identities without changing their source tree', async () => {
+  const first = await createWebGitFixture({ historyLength: 43, poisonHooks: true });
+  const second = await createWebGitFixture({ historyLength: 43 });
+  const control = await createWebGitFixture();
+  try {
+    const ids = first.git('local', ['rev-list', 'main']).stdout.trim().split('\n');
+    assert.equal(ids.length, 43);
+    assert.equal(new Set(ids).size, 43);
+    assert.equal(ids[0], first.commits.local);
+    assert.equal(ids.at(-1), first.commits.base);
+    assert.deepEqual(first.commits, second.commits);
+    assert.equal(first.historyLength, 43);
+    for (const path of ['README.md', 'shared.txt', 'local.txt']) {
+      assert.equal(first.git('local', ['show', `main:${path}`]).stdout, control.git('local', ['show', `main:${path}`]).stdout);
+    }
+    assert.equal(first.git('local', ['status', '--porcelain']).stdout, '');
+    for (const historyLength of [0, 1, 1002, 3.5, '43']) {
+      await assert.rejects(createWebGitFixture({ historyLength }), /Unknown Git fixture state/);
+    }
+  } finally {
+    await first.dispose(); await second.dispose(); await control.dispose();
+  }
 });
 
 test('a fixture-owned executable hook cannot run during deterministic construction', async () => {

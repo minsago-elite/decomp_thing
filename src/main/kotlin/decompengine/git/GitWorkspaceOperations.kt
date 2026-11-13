@@ -331,6 +331,7 @@ internal object GitWorkspaceMutations {
         format: GitObjectFormat, commonDir: Path = gitDir, block: () -> T): T = withCommitLocks(gitDir, staging, operationId) {
         val ref = GitRepositoryInspector.head(runner, gitDir, format).refName
         if (ref == null) block() else {
+            // Linked HEAD/index are private, but their symbolic branch belongs to the common directory.
             GitStorage.directories(commonDir, *ref.split('/').dropLast(1).toTypedArray())
             Files.writeString(staging.resolve("ref-name"), ref)
             val witness = Files.createFile(staging.resolve("ref-lock"))

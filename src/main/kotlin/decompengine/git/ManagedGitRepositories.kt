@@ -193,6 +193,9 @@ class ManagedGitRepositories(
     }
     private val lock = Any()
     private val reconciled = HashSet<String>()
+    // A completed sweep can leave an operator-owned worktree recovery conflict. Reads may inspect
+    // that outcome without retrying it; mutation admission still consults/retries reconciled.
+    private val readReady = HashSet<String>()
     private val active = HashSet<String>()
     private val random = SecureRandom()
     private var closed = false
@@ -284,7 +287,7 @@ class ManagedGitRepositories(
             ?: throw ManagedGitException("NOT_FOUND", "The repository operation is unavailable.")
     }
 
-    /** Fresh bounded observation of one work tree (the primary one by default). */
+    /** Fresh bounded read-only observation of one work tree; omitted ID selects the primary. */
     fun workspace(jobId: String, repositoryId: String, worktreeId: String? = null): GitWorkspaceView {
         val located = locate(jobId, repositoryId, worktreeId)
         val runner = located.runner
@@ -298,8 +301,9 @@ class ManagedGitRepositories(
             throw ManagedGitException("REPOSITORY_CORRUPT", "The repository object format changed after registration.")
         }
         // A repository .gitignore can re-include a policy exclusion; report those files as ignored too.
-        val excluded = try { GitTrackingPolicy.excluded(runner, observation.status.entries.filter { it.untracked }.mapNotNull { it.path.exact }) }
+        val excluded = try { GitTrackingPolicy.excluded(runner, observation.status.entries.filter { it.untracked }.mapNotNull { it.path.exact }, prepare = false) }
             catch (_: GitCommandException) { emptySet() }
+            catch (failure: GitRepositoryException) { throw ManagedGitException(failure.code, failure.message ?: "The tracking policy is unavailable.") }
         val shown = if (excluded.isEmpty()) observation else observation.copy(status = observation.status.copy(
             entries = observation.status.entries.map { if (it.untracked && it.path.exact in excluded) it.copy(untracked = false, ignored = true) else it }))
         return GitWorkspaceView(record, shown, observation.head.objectId?.let { mappingView(jobId, record, it) },
@@ -318,7 +322,10 @@ class ManagedGitRepositories(
         operations(jobId).any { !it.state.terminal }
     }
 
-    /** Resolved storage of one registered work tree; reads never create storage or recover. */
+    /**
+     * Prepared runtime and existing storage of one registered work tree. Linked work trees share the primary repository
+     * as their common directory and have a private administrative directory beneath it; reads never create storage or recover.
+     */
     private data class Located(val runner: GitCommandRunner, val record: GitRepositoryRecord, val gitDir: Path, val workTree: Path,
         val commonDir: Path, val worktreeId: String, val ownerRunId: String?) {
         val primary: Boolean get() = gitDir == commonDir
@@ -728,12 +735,19 @@ class ManagedGitRepositories(
     /**
      * A work tree is leased to active workflow attempts: the primary one to any active attempt of
      * the job, and a linked one to the attempt that owns it. Checkout or removal never replaces
-     * files under a running worker.
+     * files under a running worker. This read is advisory for the UI; mutation admission still
+     * checks the lease again under its guards.
      */
-    private fun requireNoLease(located: Located) {
+    fun activeWorker(jobId: String, repositoryId: String, worktreeId: String? = null): Boolean =
+        hasActiveWorker(locate(jobId, repositoryId, worktreeId))
+
+    private fun hasActiveWorker(located: Located): Boolean {
         val runs = activity.runs(located.record.jobId)
-        val held = if (located.primary) runs.any { it.value } else located.ownerRunId?.let { runs[it] } == true
-        if (held) GitRefOperations.refuse("ACTIVE_RUN", "A workflow attempt is running against this work tree. Wait for it to finish; nothing was changed.")
+        return if (located.primary) runs.any { it.value } else located.ownerRunId?.let { runs[it] } == true
+    }
+
+    private fun requireNoLease(located: Located) {
+        if (hasActiveWorker(located)) GitRefOperations.refuse("ACTIVE_RUN", "A workflow attempt is running against this work tree. Wait for it to finish; nothing was changed.")
     }
 
     private fun relevant(observation: GitWorkspaceObservation) = observation.status.entries.filter { !it.ignored }
@@ -888,8 +902,8 @@ class ManagedGitRepositories(
                     GitStorage.directories(directory, "staging", queued.operationId)
                     GitStorage.forceDirectory(staging.parent)
                     GitStorage.forceDirectory(directory)
-                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, queued.operationId, located.record.objectFormat,
-                        located.commonDir) {
+                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, queued.operationId,
+                        located.record.objectFormat, located.commonDir) {
                         // External Git writers obey index.lock, not our JVM lease. Validation,
                         // private mutation and atomic publication all live inside that lock.
                         val reviewed = synchronized(lock) { validate(runner, located, request) }
@@ -1129,8 +1143,7 @@ class ManagedGitRepositories(
             val record = repositories(jobId).singleOrNull { it.repositoryId == operation.repositoryId }
             if (record != null) {
                 val commonDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
-                val gitDir = if (operation.worktreeId == record.worktreeId) commonDir
-                    else commonDir.resolve("worktrees").resolve(operation.worktreeId)
+                val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
                 GitWorkspaceMutations.reclaimCommitLocks(gitDir,
                     root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId, commonDir)
             }
@@ -1338,6 +1351,7 @@ class ManagedGitRepositories(
             }
         }
         if (operations(jobId).none { it.action == GitOperationAction.WORKTREE_ADD && it.recoveryRequired }) reconciled += jobId
+        readReady += jobId
     }
 
     // ---- Records --------------------------------------------------------------------------
@@ -1349,7 +1363,7 @@ class ManagedGitRepositories(
         if (!jobId.matches(JOB_ID) || !Files.isDirectory(root.resolve(jobId), NOFOLLOW_LINKS)) {
             throw ManagedGitException("NOT_FOUND", "The requested job is unavailable.")
         }
-        if (jobId !in reconciled && Files.exists(root.resolve(jobId).resolve("git"), NOFOLLOW_LINKS)) {
+        if (jobId !in readReady && Files.exists(root.resolve(jobId).resolve("git"), NOFOLLOW_LINKS)) {
             throw ManagedGitException("STORAGE_UNAVAILABLE",
                 "Repository startup recovery has not completed. Preserve storage and inspect the server before retrying recovery.")
         }

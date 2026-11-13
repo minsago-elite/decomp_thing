@@ -32,7 +32,10 @@ class GitWorkspaceMutationsTest {
             GitRuntime.detect(), { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), commitments) },
             policy = policy, crash = { hook(it) },
             acceptance = { _, revision, _ -> if (accepted && revision == "revision_1") "accepted" to "artifact_1" else "not-evaluated" to null },
-        ).also(opened::add)
+        ).also { service ->
+            opened.add(service)
+            service.recover(listOf("0123456789abcdef0123456789abcdef")) // Mirror production startup authority.
+        }
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
