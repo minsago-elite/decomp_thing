@@ -983,6 +983,79 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `profile owned module may also select an explicitly mentioned shared build path`() {
+        val project = genericProject(
+            "repair-profile-owned-shared-path-",
+            mapOf("src/unit.src" to "unit\n", "config/shared.cfg" to "shared\n"),
+        )
+        val profile = object : RepairIndexProfile {
+            private val layout = RepairIndexLayout(
+                sourcePaths = listOf("config/shared.cfg", "src/unit.src"),
+                editablePaths = listOf("config/shared.cfg", "src/unit.src"),
+                modules = listOf(RepairModuleEvidence("unit", listOf("src/unit.src"))),
+                sharedContextPaths = listOf("config/shared.cfg"),
+                sharedInvalidationPaths = listOf("config/shared.cfg"),
+            )
+
+            override fun profileId() = "profile-owned-shared-diagnostic-v1"
+            override fun resolve(projectRoot: Path, budget: RepairResourceBudget) = layout
+            override fun failureOwnership(
+                projectRoot: Path,
+                sourceRevisionSha256: String,
+                budget: RepairResourceBudget,
+            ) = RepairFailureOwnership(moduleIds = listOf("unit"), includesSharedContext = false)
+        }
+
+        ModuleRevisionGraph.open(project, profile).use { graph ->
+            val context = graph.selectContext("compile", "config/shared.cfg:1: shared build failure")
+
+            assertEquals(listOf("unit"), context.seedModules)
+            assertEquals(listOf("config/shared.cfg", "src/unit.src"), context.writablePaths)
+            assertTrue(context.diagnosticEvidence?.includesSharedContext == true)
+            graph.requireContextBinding(context)
+            assertEquals(setOf("config/shared.cfg", "src/unit.src"), graph.preflightStagingContext(context).keys)
+        }
+    }
+
+    @Test
+    fun `generated build definition candidate does not alter static semantic index identity`() {
+        val project = generatedProject()
+        val profile = GeneratedCRepairIndexProfile
+        val initialIndex = ModuleRepairIndex.load(project, profile)
+        val indexSha256 = initialIndex.indexSha256
+        val makefile = project.resolve("Makefile")
+        val candidate = makefile.readBytes() + "\n# authorized candidate edit\n".toByteArray()
+
+        ModuleRevisionGraph.open(project, profile).use { graph ->
+            assertEquals(indexSha256, graph.snapshot.indexSha256)
+            val attempt = graph.beginAttempt(listOf("Makefile"))
+            val changes = graph.installCandidate(attempt, mapOf("Makefile" to candidate))
+
+            assertEquals(indexSha256, graph.snapshot.indexSha256)
+            assertEquals(listOf("Makefile"), changes.map { it.path })
+            assertContentEquals(candidate, makefile.readBytes())
+        }
+    }
+
+    @Test
+    fun `maximum retained behavior case id fits outcome uncertainty subject`() {
+        val project = generatedProject()
+        val caseId = "c".repeat(512)
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.retainRegressionInputs(listOf(ProcessInput(caseId, listOf("arg"), byteArrayOf(1))))
+            val context = graph.selectContext("compile", "src/modules/alpha.c:1: diagnostic")
+            val evidence = requireNotNull(context.evidenceSnapshot)
+            val uncertainty = evidence.uncertainties.single {
+                it.category == "observed-outcome" && it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+            }
+
+            assertEquals(caseId, uncertainty.subject)
+            graph.requireContextBinding(context)
+        }
+    }
+
+    @Test
     fun `fallback IDs and declared behavior roots must resolve exactly`() {
         val sources = listOf("code/a.src", "code/b.src")
         assertFailsWith<IllegalArgumentException> {

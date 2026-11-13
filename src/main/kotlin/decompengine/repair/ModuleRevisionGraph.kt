@@ -945,13 +945,19 @@ internal class ModuleRepairIndex private constructor(
     internal fun omittedEvidenceRecordCounts(selection: RepairContextSelection): Map<String, Int> {
         val complete = projectEvidenceFacts(modules.keys.toList(), emptyList())
         val retained = projectEvidenceFacts(selection.seedModules + selection.dependencyModules, selection.deferredModules)
+        val retainedEntities = retained.entities.toHashSet()
+        val retainedRelations = retained.relations.toHashSet()
+        val retainedDeclarations = retained.declarations.toHashSet()
+        val retainedDefinitions = retained.definitions.toHashSet()
+        val retainedBuildEvidence = retained.buildEvidence.toHashSet()
+        val retainedUncertainties = retained.uncertainties.toHashSet()
         return mapOf(
-            "entities" to complete.entities.count { it !in retained.entities },
-            "relations" to complete.relations.count { it !in retained.relations },
-            "declarations" to complete.declarations.count { it !in retained.declarations },
-            "definitions" to complete.definitions.count { it !in retained.definitions },
-            "buildEvidence" to complete.buildEvidence.count { it !in retained.buildEvidence },
-            "uncertainties" to complete.uncertainties.count { it !in retained.uncertainties },
+            "entities" to complete.entities.count { it !in retainedEntities },
+            "relations" to complete.relations.count { it !in retainedRelations },
+            "declarations" to complete.declarations.count { it !in retainedDeclarations },
+            "definitions" to complete.definitions.count { it !in retainedDefinitions },
+            "buildEvidence" to complete.buildEvidence.count { it !in retainedBuildEvidence },
+            "uncertainties" to complete.uncertainties.count { it !in retainedUncertainties },
         )
     }
 
@@ -964,17 +970,22 @@ internal class ModuleRepairIndex private constructor(
         }
         val projectedDeclarations = evidenceFacts.declarations.filter { it.entityId in selectedEntityIds }
         val projectedDefinitions = evidenceFacts.definitions.filter { it.entityId in selectedEntityIds }
+        val projectedModuleFactIds = projectedEntities.asSequence()
+            .filter { it.kind == RepairEvidenceEntityKind.MODULE }
+            .mapTo(hashSetOf()) { it.id }
+        val projectedDefinitionIds = projectedDefinitions.asSequence().mapTo(hashSetOf()) { it.entityId }
+        val projectedDeclarationIds = projectedDeclarations.asSequence().mapTo(hashSetOf()) { it.entityId }
         val uncertainty = buildList {
             addAll(evidenceFacts.uncertainties.filter { it.subject in selectedModules || it.subject in selectedEntityIds })
-            if (selectedModules.any { id -> projectedEntities.none { it.id == "module:$id" } }) {
-                selectedModules.filter { id -> projectedEntities.none { it.id == "module:$id" } }.forEach { id ->
+            if (selectedModules.any { id -> "module:$id" !in projectedModuleFactIds }) {
+                selectedModules.filter { id -> "module:$id" !in projectedModuleFactIds }.forEach { id ->
                     add(RepairEvidenceUncertainty(id, "module-evidence", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED))
                 }
             }
-            selectedEntityIds.filter { id -> projectedDefinitions.none { it.entityId == id } }.forEach { id ->
+            selectedEntityIds.filter { it !in projectedDefinitionIds }.forEach { id ->
                 add(RepairEvidenceUncertainty(id, "definition", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED))
             }
-            selectedEntityIds.filter { id -> projectedDeclarations.none { it.entityId == id } }.forEach { id ->
+            selectedEntityIds.filter { it !in projectedDeclarationIds }.forEach { id ->
                 add(RepairEvidenceUncertainty(id, "declaration", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED))
             }
             deferredModules.distinct().forEach { id ->
@@ -1034,7 +1045,8 @@ internal class ModuleRepairIndex private constructor(
         val observed = boundFailureOwnership()
         require(observed.moduleIds == evidence.selectedModuleIds &&
             observed.evidenceOrigin == evidence.ownershipEvidenceOrigin &&
-            observed.includesSharedContext == evidence.includesSharedContext) {
+            (observed.includesSharedContext || evidence.matchedSourcePaths.any { it in sharedInvalidationPaths }) ==
+                evidence.includesSharedContext) {
             "repair profile-bound diagnostic evidence changed after context selection"
         }
     }
@@ -2871,7 +2883,7 @@ internal class ModuleRevisionGraph private constructor(
         }
         state.retainedRegressionInputs.forEach { input ->
             add(RepairEvidenceUncertainty(
-                "behavior-case:${input.id}", "observed-outcome", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED,
+                input.id, "observed-outcome", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED,
             ))
         }
     }.distinct().sortedWith(compareBy({ it.subject }, { it.category }, { it.reason.name }))

@@ -89,6 +89,10 @@ about the current C source. Calls, global references, and module ownership retai
 kinds. Module ownership is derived from the admitted module plan and the existing graph layout, and
 graph admission checks that semantic entity IDs exactly match that ownership inventory. A recovered
 type declaration is not called a definition when no separate definition evidence exists.
+The index records the build-definition artifact path and leaves target relationships explicitly
+unknown unless captured evidence supplies them. Editable build-definition bytes are bound by the
+working/source-revision digest, not duplicated as static semantic-index origins; this allows an
+authorized build-file candidate to retain the same static index identity while changing revisions.
 
 Context selection uses the existing ownership, dependency, readable-path, writable-path, and budget
 decisions. Its v1 evidence snapshot binds the selected evidence to the profile and reconstruction

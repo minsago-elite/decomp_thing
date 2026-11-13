@@ -157,6 +157,32 @@ class ProfiledGeneratedCRepairIndexTest {
     }
 
     @Test
+    fun `blank recovered bodies and initializers remain unavailable definitions`() {
+        val project = createTempDirectory("repair-semantic-blank-definitions-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "b".repeat(64),
+            functions = listOf(RecoveredFunction(
+                "fn_blank", "blank", 0x1000UL, "int blank(void)", decompiledC = "  \n",
+            )),
+            globals = listOf(RecoveredGlobal("global_blank", "blank_global", 0x2000UL, "int", initializer = "")),
+        ), project)
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/blank.c:1: diagnostic")
+
+        assertFalse(selection.evidenceFacts.definitions.any { it.entityId == "fn_blank" })
+        assertFalse(selection.evidenceFacts.definitions.any { it.entityId == "global_blank" })
+        assertTrue(selection.evidenceFacts.uncertainties.any {
+            it.subject == "fn_blank" && it.category == "definition" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+        assertTrue(selection.evidenceFacts.uncertainties.any {
+            it.subject == "global_blank" && it.category == "definition" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+    }
+
+    @Test
     fun `generated repair evidence snapshot is identical across relocated equivalent projects`() {
         val descriptor = profile(GeneratedCMakeReconstructionProfile.descriptor)
         val repairProfile = GeneratedCRepairIndexProfile.forProfile(descriptor)

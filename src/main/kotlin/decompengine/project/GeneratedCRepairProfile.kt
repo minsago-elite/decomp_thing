@@ -176,11 +176,10 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         }
         val explicitlyOwnedPaths = modules.flatMapTo(hashSetOf()) { it.ownedPaths }
         val shared = listOf(buildDefinition, sharedInterface).filter { it in sourcePaths }.sorted()
-        val buildDefinitionOrigin = if (buildDefinition in sourcePaths) {
-            val bytes = readSource?.invoke(buildDefinition)
-                ?: readStableRegularFile(projectRoot, buildDefinition, budget.maximumSourceFileBytes).bytes
-            RepairEvidenceOrigin("build-definition", sha256(bytes), null, "/")
-        } else null
+        // The build definition is already committed by the complete source-revision digest.
+        // Keep the semantic index content-independent so an authorized build-file candidate
+        // does not look like a change to static model/plan evidence during installation.
+        val buildDefinitionOrigin = null
         val sharedSet = shared.toHashSet()
         val fallbackModules = TreeMap<String, String>()
         sourcePaths.filter { it !in explicitlyOwnedPaths && it !in sharedSet }.forEach { path ->
@@ -550,7 +549,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                     identifierLimit,
                 ),
                 prototype = function.requiredBoundedString("prototype", modelRelative, textLimit),
-                hasBody = function["decompiledC"] !is JsonNull,
+                hasBody = function["decompiledC"]?.let { it !is JsonNull && it.jsonPrimitive.content.isNotBlank() } == true,
                 calls = function.requiredArray("calls", modelRelative)
                     .boundedUniqueStrings(modelRelative, identifierLimit, "generated C function calls"),
                 referencedGlobals = function.requiredArray("referencedGlobals", modelRelative)
@@ -571,7 +570,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                     identifierLimit,
                 ),
                 type = global.requiredBoundedString("type", modelRelative, textLimit),
-                hasInitializer = global["initializer"] !is JsonNull,
+                hasInitializer = global["initializer"]?.let { it !is JsonNull && it.jsonPrimitive.content.isNotBlank() } == true,
             )
         }.also { parsed ->
             requireUniqueValues(parsed.map { it.id }, "generated C global IDs")
