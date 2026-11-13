@@ -1224,6 +1224,8 @@ class UploadServerTest {
 
             val firstReadReached = java.util.concurrent.CountDownLatch(1)
             val releaseFirstRead = java.util.concurrent.CountDownLatch(1)
+            val storageMeasureEntered = java.util.concurrent.CountDownLatch(1)
+            val releaseStorageMeasure = java.util.concurrent.CountDownLatch(1)
             val distinctRecords = java.util.concurrent.atomic.AtomicInteger()
             val seenRecords = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
             server.listingReadObserver = { relative ->
@@ -1235,6 +1237,10 @@ class UploadServerTest {
                     }
                     Thread.sleep(100)
                 }
+            }
+            server.uploadStorageMeasureObserver = {
+                storageMeasureEntered.countDown()
+                check(releaseStorageMeasure.await(10, java.util.concurrent.TimeUnit.SECONDS))
             }
 
             val dashboardExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -1257,7 +1263,13 @@ class UploadServerTest {
                     }
                 }
                 val rejectedUpload = requestExecutor.submit<String> { rejectUploadBeforeBody(server) }
+                assertTrue(storageMeasureEntered.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Upload did not enter retained-storage measurement")
+                assertFalse(rejectedUpload.isDone, "Upload refusal should wait for its bounded storage measurement")
                 val statusLatencies = statusFutures.map { it.get(3, java.util.concurrent.TimeUnit.SECONDS) }
+                assertEquals(0, storageMeasureEntered.count, "Storage admission must remain held through status responses")
+                assertFalse(rejectedUpload.isDone, "Status responses must finish while upload storage measurement is held")
+                releaseStorageMeasure.countDown()
                 val uploadResponse = rejectedUpload.get(3, java.util.concurrent.TimeUnit.SECONDS)
                 assertTrue(uploadResponse.startsWith("HTTP/1.1 503 "), "Expected storage refusal, got: $uploadResponse")
                 assertTrue(uploadResponse.contains("UPLOAD_STORAGE"), uploadResponse)
@@ -1270,7 +1282,8 @@ class UploadServerTest {
                     "Denied storage admission must preserve every retained byte")
                 println("issue-162-retained-quota-http-v1 refusal=503/UPLOAD_STORAGE request_body_bytes_sent=0 " +
                     "status_responses=${statusLatencies.size} status_max_ms=${statusLatencies.maxOrNull()} " +
-                    "dashboard_active=true distinct_records=${distinctRecords.get()} retained_bytes=$retainedBefore")
+                    "dashboard_read_held=true storage_measure_held_through_status=true " +
+                    "distinct_records=${distinctRecords.get()} retained_bytes=$retainedBefore")
 
                 releaseFirstRead.countDown()
                 val completedDashboard = dashboard.get(10, java.util.concurrent.TimeUnit.SECONDS)
@@ -1295,7 +1308,9 @@ class UploadServerTest {
                 println("issue-162-retained-quota-http-v1 listing=complete retained_capacity_restored=true retry=201 admission=empty")
             } finally {
                 releaseFirstRead.countDown()
+                releaseStorageMeasure.countDown()
                 server.listingReadObserver = {}
+                server.uploadStorageMeasureObserver = {}
                 dashboardExecutor.shutdownNow()
                 requestExecutor.shutdownNow()
                 assertTrue(dashboardExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))

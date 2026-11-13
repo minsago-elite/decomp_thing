@@ -308,6 +308,9 @@ class WebJobService(
         check(!closed && !stopping && uploads.isEmpty()) { "Upload storage limit can only change while upload admission is idle." }
         uploadStorage = WebUploadStorage(store.storageRoot, maximumBytes)
     }
+    internal var uploadStorageMeasureObserver: () -> Unit
+        get() = uploadStorage.beforeMeasureObserver
+        set(value) { uploadStorage.beforeMeasureObserver = value }
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)

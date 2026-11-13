@@ -280,6 +280,10 @@ class UploadServer(
             field = value
             jobs.listingReadObserver = value
         }
+    /** Test seam for synchronizing an active quota scan with status and listing requests. */
+    internal var uploadStorageMeasureObserver: () -> Unit
+        get() = jobs.uploadStorageMeasureObserver
+        set(value) { jobs.uploadStorageMeasureObserver = value }
     private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
