@@ -77,7 +77,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     override fun configurationSha256(): String = configurationSha256(RepairResourceBudget())
     override fun configurationSha256(budget: RepairResourceBudget): String = sha256(
-        ("generated-c-repair-index-v9\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
+        ("generated-c-repair-index-v10\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
             .toByteArray(Charsets.UTF_8),
     )
 
@@ -190,8 +190,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         // from Make/Ninja text or confuse the produced artifact with a target. Target dependency
         // edges remain unknown unless a future admitted contract records them explicitly.
         val entrypointPath = profile.layout.declaration("entrypoint-implementation").materialize()
-        val hasPairedPlanAndModel = evidence.facts.origins.any { it.documentRole == "module-plan" } &&
-            evidence.facts.origins.any { it.documentRole == "program-model" }
+        val hasPairedPlanAndModel = evidence.hasPairedPlanAndModel
         val generatedEntrypointParticipates = hasPairedPlanAndModel &&
             evidence.functions.none { safeCName(it.name) == "main" }
         val buildSources = if (hasPairedPlanAndModel) {
@@ -350,6 +349,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         val functions: List<ProgramFunction>,
         val globals: List<ProgramGlobal>,
         val types: List<ProgramType>,
+        val hasPairedPlanAndModel: Boolean,
         val facts: RepairEvidenceFacts,
     )
 
@@ -365,7 +365,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             "generated C repair indexing requires module-plan and program-model evidence together"
         }
         if (planBytes == null) return GeneratedCIndexEvidence(
-            emptyList(), emptyList(), emptyList(), emptyList(),
+            emptyList(), emptyList(), emptyList(), emptyList(), false,
             RepairEvidenceFacts(uncertainties = listOf(
                 RepairEvidenceUncertainty("program-model", "semantic-index", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED),
                 RepairEvidenceUncertainty("module-plan", "ownership", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED),
@@ -640,7 +640,10 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         val planHash = sha256(planBytes)
         val modelDocument = requireNotNull(modelBytes)
         val modelHash = sha256(modelDocument)
-        val origins = mutableListOf<RepairEvidenceOrigin>()
+        val origins = mutableListOf(
+            RepairEvidenceOrigin("module-plan", planHash, planSchemaVersion, "/"),
+            RepairEvidenceOrigin("program-model", modelHash, modelSchemaVersion, "/"),
+        )
         val entities = mutableListOf<RepairEntityFact>()
         val relations = mutableListOf<RepairEntityRelation>()
         val declarations = mutableListOf<RepairDeclarationEvidence>()
@@ -701,7 +704,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             uncertainty += RepairEvidenceUncertainty(type.id, "recovery", RepairEvidenceUncertaintyReason.RECOVERY_UNASSESSED, origin)
         }
         val facts = RepairEvidenceFacts(origins, entities, relations, declarations, definitions, uncertainties = uncertainty)
-        return GeneratedCIndexEvidence(sortedModules, sortedFunctions, sortedGlobals, sortedTypes, facts)
+        return GeneratedCIndexEvidence(sortedModules, sortedFunctions, sortedGlobals, sortedTypes, true, facts)
     }
 
     private fun chargeBoundedCount(current: Long, addition: Int, limit: Long, subject: String): Long {

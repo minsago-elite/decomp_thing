@@ -1006,7 +1006,8 @@ internal class ModuleRepairIndex private constructor(
                 add(RepairEvidenceUncertainty(build.buildDefinitionPath, "build-target-membership", RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED, build.origin))
             }
         }
-        val origins = (projectedEntities.map { it.origin } + projectedRelations.map { it.origin } +
+        val origins = (evidenceFacts.origins.filter { it.locator == "/" } +
+            projectedEntities.map { it.origin } + projectedRelations.map { it.origin } +
             projectedDeclarations.map { it.origin } + projectedDefinitions.map { it.origin } +
             evidenceFacts.buildEvidence.mapNotNull { it.origin } + uncertainty.mapNotNull { it.origin }).toSet()
         return RepairEvidenceFacts(

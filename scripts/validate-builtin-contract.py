@@ -24,7 +24,7 @@ EXPECTED = {
     "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
     "decompengine.repair.RepairEvidenceIndexTest": 6,
     "decompengine.repair.ModuleRevisionGraphTest": 172,
-    "decompengine.project.ProfiledGeneratedCRepairIndexTest": 16,
+    "decompengine.project.ProfiledGeneratedCRepairIndexTest": 17,
 }
 
 

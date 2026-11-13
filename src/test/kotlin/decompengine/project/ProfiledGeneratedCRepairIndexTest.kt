@@ -262,6 +262,31 @@ class ProfiledGeneratedCRepairIndexTest {
     }
 
     @Test
+    fun `empty admitted program model retains document identity and generated target membership`() {
+        val project = createTempDirectory("repair-target-empty-program-model-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "8".repeat(64),
+            functions = emptyList(),
+        ), project)
+        val entrypoint = project.resolve("src/main.c")
+        assertTrue(Files.deleteIfExists(entrypoint))
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/core.c: compiler diagnostic")
+        val facts = selection.evidenceFacts
+        val build = facts.buildEvidence.single()
+
+        assertTrue(facts.origins.any { it.documentRole == "module-plan" && it.locator == "/" })
+        assertTrue(facts.origins.any { it.documentRole == "program-model" && it.locator == "/" })
+        assertTrue(build.sourcePathsByTarget.values.flatten().contains("src/main.c"))
+        assertTrue(build.sourcePathsByTarget.values.flatten().contains("src/modules/core.c"))
+        assertTrue(facts.uncertainties.any {
+            it.subject == "src/main.c" && it.category == "build-target-source-availability" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+    }
+
+    @Test
     fun `blank recovered bodies and initializers remain unavailable definitions`() {
         val project = createTempDirectory("repair-semantic-blank-definitions-")
         SourceTreeGenerator.generate(RecoveredProgramModel(

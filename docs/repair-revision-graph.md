@@ -102,7 +102,9 @@ explicitly uncertain. The generated entrypoint participates when the admitted mo
 `main` function and the renderer therefore emits it, even if the expected path is missing from the
 current source snapshot; that absence is separately reported as `EVIDENCE_NOT_CAPTURED` for
 `build-target-source-availability`. This distinguishes renderer-expected target membership from
-physical presence in the indexed working tree.
+physical presence in the indexed working tree. Module-plan and program-model document roots remain
+committed even when a valid document contains no module/entity records, so empty evidence cannot be
+confused with absent evidence during target projection.
 The focused built-in contract checkpoint is retained in
 `docs/evidence/issue-798-revision-evidence-index-2026-11-13.json`; it is local fixture evidence,
 not production-provider or workflow-release qualification.
