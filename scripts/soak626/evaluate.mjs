@@ -1,6 +1,9 @@
 // Heap/RSS limits are inherited from D0. FD ceilings and drain allowance are proposed #626 values,
 // not an existing delivery-contract commitment; keep that distinction in every retained report.
-export const LIMITS = Object.freeze({ initialHeapMiB: 128, finalHeapMiB: 192, retainedMiB: 16, jvmGrowthMiB: 256, fdPeak: 64, fdQuiescent: 8, drainSeconds: 35 });
+export const LIMITS = Object.freeze({ initialHeapMiB: 128, finalHeapMiB: 192, retainedMiB: 16,
+  retainedBackingStorageGrowthBytes: 1024 * 1024, jvmGrowthMiB: 256, fdPeak: 64, fdQuiescent: 8, drainSeconds: 35 });
+const RETENTION_EVENT_TYPES = new Set(['abort', 'blur', 'change', 'click', 'error', 'focus', 'input', 'keydown', 'keyup',
+  'load', 'message', 'offline', 'online', 'pointerdown', 'pointerup', 'submit', 'visibilitychange', 'other']);
 
 const fail = (message) => { throw new Error(message); };
 const percentile95 = (values) => {
@@ -23,6 +26,62 @@ export function evaluate(report, baseline = {}) {
       !Number.isSafeInteger(report.coverage.streamLimitResponses) || report.coverage.streamLimitResponses < 0) fail('workload coverage incomplete');
   if (report.coverage.activityRows < report.coverage.slots * 200 || report.coverage.sourceReads < report.coverage.slots * 2 ||
       report.jobSwitches !== 119 || report.sameDocument !== true) fail('workload volume or document continuity is incomplete');
+  const retention = report.retention;
+  if (retention?.version !== 1 || retention.complete !== true || retention.sampleEverySlots !== 5 ||
+      !Array.isArray(retention.samples) || retention.samples.length !== 24 || report.coverage.listenerRetentionSamples !== 24 ||
+      report.coverage.retentionNavigations !== 24) {
+    fail('listener-retention sampling coverage incomplete');
+  }
+  const firstRetention = retention.samples[0];
+  let previousRetention = null;
+  for (const [index, sample] of retention.samples.entries()) {
+    if (sample.index !== (index + 1) * 5 || sample.settledRoute !== '/nested/' || sample.openStreamCount !== 0 ||
+        ![sample.activeListeners, sample.activeListenerTargets, sample.registrations, sample.explicitRemovals,
+          sample.automaticRemovals, sample.collectedTargets, sample.collectedListeners, sample.gcPrunedTargets,
+          sample.gcPrunedListeners, sample.rendererHeapBytesAfterGc, sample.rendererBackingStorageBytesAfterGc,
+          sample.dashboardNavigationMs, sample.streamDrainMs, sample.dashboardListing?.requestCount,
+          sample.dashboardListing?.completedCount, sample.dashboardListing?.durationMs].every(Number.isSafeInteger) ||
+        sample.activeListeners < 0 || sample.activeListenerTargets < 0 || sample.rendererHeapBytesAfterGc < 0 ||
+        sample.activeListenerTargets > sample.activeListeners || sample.rendererBackingStorageBytesAfterGc < 0 ||
+        [sample.registrations, sample.explicitRemovals, sample.automaticRemovals, sample.collectedTargets,
+          sample.collectedListeners, sample.gcPrunedTargets, sample.gcPrunedListeners].some(value => value < 0) ||
+        sample.dashboardNavigationMs < 0 || sample.streamDrainMs < 0 || sample.streamDrainMs > LIMITS.drainSeconds * 1000 ||
+        sample.dashboardListing.requestCount < 1 || sample.dashboardListing.requestCount > 16 ||
+        sample.dashboardListing.completedCount !== sample.dashboardListing.requestCount || sample.dashboardListing.durationMs < 0 ||
+        !Array.isArray(sample.dashboardListing.responseStatuses) ||
+        sample.dashboardListing.responseStatuses.length !== sample.dashboardListing.requestCount ||
+        sample.dashboardListing.responseStatuses.some(status => status !== 200) ||
+        sample.trackingOverflow !== false || !sample.activeListenersByType || typeof sample.activeListenersByType !== 'object' ||
+        Array.isArray(sample.activeListenersByType)) {
+      fail('malformed or non-quiescent listener-retention sample');
+    }
+    const typeEntries = Object.entries(sample.activeListenersByType);
+    if (typeEntries.some(([type, count]) => !RETENTION_EVENT_TYPES.has(type) || !Number.isSafeInteger(count) || count <= 0)) {
+      fail('listener-retention event-type counts are malformed or unbounded');
+    }
+    const typeCount = typeEntries.reduce((sum, [, count]) => sum + count, 0);
+    if (!Number.isSafeInteger(typeCount) || typeCount !== sample.activeListeners ||
+        sample.registrations - sample.explicitRemovals - sample.automaticRemovals - sample.collectedListeners !== sample.activeListeners) {
+      fail('listener-retention counts do not reconcile');
+    }
+    if (previousRetention && ['registrations', 'explicitRemovals', 'automaticRemovals', 'collectedTargets', 'collectedListeners']
+      .some(field => sample[field] < previousRetention[field])) {
+      fail('listener-retention cumulative counts decreased');
+    }
+    const previousCollectedTargets = previousRetention?.collectedTargets ?? 0;
+    const previousCollectedListeners = previousRetention?.collectedListeners ?? 0;
+    if (sample.collectedTargets - previousCollectedTargets !== sample.gcPrunedTargets ||
+        sample.collectedListeners - previousCollectedListeners !== sample.gcPrunedListeners) {
+      fail('listener-retention GC samples do not match cumulative collected counts');
+    }
+    if (sample.activeListeners > firstRetention.activeListeners) fail('active listener registrations accumulated after warm-up');
+    if (sample.rendererBackingStorageBytesAfterGc - firstRetention.rendererBackingStorageBytesAfterGc > LIMITS.retainedMiB * 1024 * 1024) {
+      fail('retained renderer backing-storage growth exceeded the inherited 16 MiB ceiling');
+    }
+    previousRetention = sample;
+  }
+  if (retention.samples.at(-1).rendererBackingStorageBytesAfterGc - firstRetention.rendererBackingStorageBytesAfterGc >
+      LIMITS.retainedBackingStorageGrowthBytes) fail('renderer backing storage did not return to its stable post-warm-up range');
   if (report.identityViolation) fail('cross-job stale result');
   if (report.cleanupHeldLease && report.cleanupCharged !== true) fail('cleanup-held stream lease was not charged');
   const checkpoints = report.checkpoints;

@@ -19,6 +19,7 @@ import { seedSoak, qualifySoak } from './packaged-browser-soak.mjs';
 import { evaluate as evaluateSoak } from './soak626/evaluate.mjs';
 import { sampleProcessTree } from './soak626/resources.mjs';
 import { closeCompanionTargets } from './soak626/target-cleanup.mjs';
+import { listenerRetentionProbeSource } from './soak626/listener-retention.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -275,8 +276,9 @@ function recordBrowserObservation(state, destination, value) {
   destination.push(value);
 }
 
-async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = false } = {}) {
+async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = false, listenerRetentionProbe = false } = {}) {
   assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
+  assert.equal(typeof listenerRetentionProbe, 'boolean', 'Listener-retention instrumentation policy must be explicit');
   const initialization = cdpDiagnostics.beginTarget();
   const { targetId } = await cdpDiagnostics.command(initialization, 'Target.createTarget', () =>
     cdp.call('Target.createTarget', { url: 'about:blank', ...(newWindow ? { newWindow: true } : {}) }));
@@ -284,7 +286,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
   const { sessionId } = await cdpDiagnostics.command(initialization, 'Target.attachToTarget', () =>
     cdp.call('Target.attachToTarget', { targetId, flatten: true }));
   cdpDiagnostics.setTargetIds(initialization, targetId, sessionId);
-  const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+  const state = { targetId, sessionId, cspProbe, cacheEnabled, listenerRetentionProbe, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
     instrumentationTruncated: false,
     initializationComplete: false,
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
@@ -351,6 +353,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
     () => cdp.call(method, params, sessionId));
   await initialize('Page.enable');
   await initialize('Runtime.enable');
+  if (listenerRetentionProbe) await initialize('Page.addScriptToEvaluateOnNewDocument', { source: listenerRetentionProbeSource });
   await initialize('Network.enable');
   await initialize('Log.enable');
   await initialize('Audits.enable');
@@ -928,7 +931,7 @@ try {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
-    const authenticated = await makeTarget();
+    const authenticated = await makeTarget({ listenerRetentionProbe: values.mode === 'soak' });
     let hmrConnected = false;
     cdp.on('Network.webSocketFrameReceived', (event) => {
       if (event.response.payloadData.includes('"type":"connected"')) hmrConnected = true;
@@ -1230,6 +1233,18 @@ try {
   report.applicationError = safeDiagnostic(applicationError);
   report.browserError = safeDiagnostic(browserError);
   report.viteError = safeDiagnostic(viteError);
+  if (lastTarget) {
+    const responsesByRequest = new Map(lastTarget.responses.map(response => [response.requestId, response]));
+    report.failedBrowserRequests = lastTarget.requests.slice(-32).map(({ requestId, method, url, type }) => {
+      let route = null;
+      try {
+        route = new URL(url).pathname.replace(/\/[0-9a-f]{32}(?=\/|$)/gi, '/[job]')
+          .replace(/\/run_fixture_[^/]+(?=\/|$)/g, '/[run]')
+          .replace(/\/source_[0-9a-f]{64}(?=\/|$)/gi, '/[revision]');
+      } catch {}
+      return { method, route, type, status: responsesByRequest.get(requestId)?.status ?? null };
+    });
+  }
   console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
   if (lastTarget && cdp && lastTarget.initializationComplete) {

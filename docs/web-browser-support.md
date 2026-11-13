@@ -90,10 +90,28 @@ documenting the fallback does not qualify that capability.
 `frontend/tests/retention-leaks.test.tsx` exercises repeated navigation and 60 stream
 subscriptions on a still-live signal. It checks listener/timer/channel baselines, response-body
 cancellation and released reader locks. This is structural jsdom evidence, not a measurement of
-retained JavaScript heap or detached buffers. The production-bundle heap traces on the agreed
-browser/machine profile required by #219 have not been collected here. #624 remains open pending
-that qualification and coverage of the dependent graph/source features; this harness alone does
-not establish its full acceptance criterion.
+retained JavaScript heap or detached buffers. The authenticated 20-minute packaged soak now also
+records 24 post-unsubscribe samples from its production bundle: the main-world `EventTarget`
+registration probe reports active listener counts after forced garbage collection, and CDP
+`Runtime.getHeapUsage` reports JavaScript backing storage. Each sample is taken on the same
+dashboard route only after the Activity stream request has closed. Every fifth ten-second slot
+adds one in-app dashboard navigation and waits up to the existing 35-second drain allowance for
+that request to close. The report records the added navigation and drain duration, so this
+instrumented workload is distinct from earlier soak measurements. Request closure is not direct
+proof that the framework unsubscribed. Its evaluator requires no active
+listener growth after the five-slot warm-up, at most 16 MiB peak backing-storage growth, and at
+most 1 MiB residual growth at the final sample. The 16 MiB ceiling reuses the retained-browser
+budget; the 1 MiB stable-range limit is a new #624 qualification bound.
+
+These observations cover `addEventListener`/`removeEventListener` registrations in the page's
+main JavaScript realm and renderer backing storage. The observer leaves registrations untouched
+when its 50,000-target tracking bound is reached, reports that overflow, and the evaluator fails
+closed. It does not count `on*` property handlers, browser-internal listeners, or listeners inside
+workers. The packaged run for this instrumentation
+and these exact thresholds is pending, so the source and evaluator are not yet runtime evidence.
+Existing jsdom tests still cover response-body cancellation and released reader locks. #624
+remains open pending exact-head packaged evidence and coverage of the dependent graph/source
+features; this harness alone does not establish its full acceptance criterion.
 
 ## Offline and sensitive-data policy (#632)
 

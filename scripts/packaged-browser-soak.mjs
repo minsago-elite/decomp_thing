@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import { sampleProcessTree } from './soak626/resources.mjs';
 import { waitForSuccessfulStreamOpen } from './soak626/stream-renewal.mjs';
 import { routeFeedbackExpression } from './soak626/route-feedback.mjs';
+import { LIMITS } from './soak626/evaluate.mjs';
+import { sampleRetention } from './soak626/listener-retention.mjs';
+import { createDashboardListingTracker } from './soak626/dashboard-listing.mjs';
 
 const RUN_PREFIX = 'run_fixture_soak_';
 const JOB_PREFIX = 'c';
@@ -138,8 +141,10 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
   let stage = 'startup';
   const samples = [];
   const checkpoints = [];
+  const retentionSamples = [];
   const openStreams = new Set();
   const pendingEventStreams = new Set();
+  const dashboardListingTracker = createDashboardListingTracker({ cdp, sessionId: tab.sessionId, origin });
   let streamLimitResponses = 0;
   let successfulStreamOpens = 0;
   const leaseRenewals = [];
@@ -170,6 +175,8 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
   await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
   await ready(tab, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'soak dashboard');
   await ready(tab, `!!document.querySelector('ul[aria-label="Uploaded jobs"] a[href="/nested/jobs/${fixture.jobs[0].jobId}"]')`, 'seeded jobs visible on dashboard');
+  const listenerProbeVersion = await evaluate(tab, 'window.__workbenchListenerRetention?.snapshot()?.version ?? null');
+  assert.equal(listenerProbeVersion, 1, 'Listener-retention instrumentation must run before the packaged frontend');
   const initialDocumentCount = tab.documentRequests.length;
   await cdp.call('HeapProfiler.enable', {}, tab.sessionId);
   await cdp.call('HeapProfiler.collectGarbage', {}, tab.sessionId);
@@ -189,10 +196,13 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     activityPageLatencyMs: activityPageSamples, firstDataLatencyMs: firstDataSamples.length ? Math.max(...firstDataSamples) : null,
     jobSwitches: Math.max(0, selectedJobs.length - 1), sameDocument: true, identityViolation, sourceReads,
     initialBrowserHeapMiB, finalBrowserHeapMiB: null, baseline, samples, checkpoints, leaseRenewals,
+    retention: { version: 1, sampleEverySlots: 5, samples: retentionSamples, complete: false },
     fdPeak: Math.max(...samples.map(sample => sample.fdCount), baseline.fdCount), fdQuiescent: null, drainSeconds,
     coverage: { activityRows: activityRowsDelivered, fourJobs: delivered.size === 4, slots: selectedJobs.length,
       reconnects, reconnectDeliveries, visibilityTransitions, naturalLeaseRenewals: leaseRenewals.length,
-      retentionGapRecovered, sourceReads, streamLimitResponses, successfulStreamOpens, finalCleanup: openStreams.size === 0 } });
+      retentionGapRecovered, sourceReads, streamLimitResponses, successfulStreamOpens,
+      listenerRetentionSamples: retentionSamples.length, retentionNavigations: retentionSamples.length,
+      finalCleanup: openStreams.size === 0 } });
   const sampleTask = (async () => {
     const observedIdentities = new Map(Object.entries(baseline.pids).map(([pid, start]) => [Number(pid), start]));
     while (sampling) {
@@ -219,7 +229,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     await clickHref(tab, evaluate, '/nested/runtime');
     await ready(tab, `location.pathname === '/nested/runtime' && document.querySelector('#server-runtime-title')`, `Runtime checkpoint ${label}`);
     const start = Date.now();
-    while (openStreams.size > 0 && Date.now() - start < 35_000) await delay(100);
+    while (openStreams.size > 0 && Date.now() - start < LIMITS.drainSeconds * 1000) await delay(100);
     const elapsed = (Date.now() - start) / 1000;
     drainSeconds = Math.max(drainSeconds, elapsed);
     assert.equal(openStreams.size, 0, `Activity stream did not drain within the 35-second budget at ${label}`);
@@ -402,6 +412,31 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     if (remaining < 0) throw new Error(`Soak slot ${slot} exceeded its ten-second schedule by ${-remaining}ms`);
     if (remaining > 0) await delay(remaining);
     activeScheduleMs += slotMs;
+    if ((slot + 1) % 5 === 0) {
+      stage = `retention-sample-${slot + 1}-dashboard`;
+      const dashboardNavigationStartedAt = Date.now();
+      const dashboardListingObservation = dashboardListingTracker.begin();
+      await clickHref(tab, evaluate, '/nested/');
+      await ready(tab, `location.pathname === '/nested/'`, `dashboard for retention sample ${slot + 1}`);
+      const dashboardNavigationMs = Date.now() - dashboardNavigationStartedAt;
+      await ready(tab, `!!document.querySelector('ul[aria-label="Uploaded jobs"] a[href="/nested/jobs/${fixture.jobs[0].jobId}"]')`,
+        `dashboard fixture job visible for retention sample ${slot + 1}`);
+      const dashboardListing = await dashboardListingTracker.waitForCompletion(dashboardListingObservation);
+      await ready(tab, `(() => { const button = [...document.querySelectorAll('button')].find(item => item.textContent === 'Refresh jobs'); return !!button && !button.disabled; })()`,
+        `dashboard listing settled before retention sample ${slot + 1}`);
+      const drainStarted = Date.now();
+      while (openStreams.size > 0 && Date.now() - drainStarted < LIMITS.drainSeconds * 1000) await delay(100);
+      const streamDrainMs = Date.now() - drainStarted;
+      assert.equal(openStreams.size, 0, `Activity stream request did not close within ${LIMITS.drainSeconds} seconds before retention sample ${slot + 1}`);
+      const retention = await sampleRetention({ cdp, tab, evaluate, index: slot + 1, settledRoute: '/nested/' });
+      retention.openStreamCount = openStreams.size;
+      retention.dashboardNavigationMs = dashboardNavigationMs;
+      retention.dashboardListing = dashboardListing;
+      retention.streamDrainMs = streamDrainMs;
+      retentionSamples.push(retention);
+      assert.ok(retentionSamples.length <= Math.ceil(slots / 5), 'Listener-retention observations exceeded the bounded sample envelope');
+      publishPartial();
+    }
     if ((slot + 1) % 30 === 0) {
       const minute = (slot + 1) / 6;
       await drainAtCheckpoint(minute);
@@ -505,9 +540,11 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     initialBrowserHeapMiB, finalBrowserHeapMiB, baseline, samples, checkpoints, leaseRenewals,
     fdPeak: Math.max(...samples.map(s => s.fdCount), baseline.fdCount),
     fdQuiescent: finalProcess.fdCount - baseline.fdCount, drainSeconds,
+    retention: { version: 1, sampleEverySlots: 5, samples: retentionSamples, complete: true },
     coverage: { activityRows: activityRowsDelivered, fourJobs: delivered.size === 4, slots, reconnects, visibilityTransitions,
       reconnectDeliveries, naturalLeaseRenewals: leaseRenewals.length, retentionGapRecovered, sourceReads,
-      streamLimitResponses, successfulStreamOpens,
+      streamLimitResponses, successfulStreamOpens, listenerRetentionSamples: retentionSamples.length,
+      retentionNavigations: retentionSamples.length,
       finalCleanup: openStreams.size === 0 },
-    note: 'Each slot reads the bounded 200-row activity page. The initial slot and every reconnect slot continue to the tail; other rapid job switches avoid creating unnecessary leased streams. Source complexity is one inert Makefile per job.' };
+    note: 'Each slot reads the bounded 200-row activity page. The initial slot and every reconnect slot continue to the tail; other rapid job switches avoid creating unnecessary leased streams. Every fifth slot adds one in-app dashboard navigation and waits for the Activity stream request to close before its post-GC retention sample; this instrumented workload is distinct from earlier soak measurements. Source complexity is one inert Makefile per job.' };
 }
