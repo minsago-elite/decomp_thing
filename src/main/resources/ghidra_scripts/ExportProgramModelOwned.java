@@ -26,6 +26,7 @@ import java.nio.file.StandardOpenOption;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -50,6 +51,7 @@ import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.Composite;
 import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataOrganization;
 import ghidra.program.model.data.Enum;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.listing.Data;
@@ -61,6 +63,10 @@ import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.pcode.FunctionPrototype;
+import ghidra.program.model.lang.PrototypeModel;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.Symbol;
@@ -715,7 +721,7 @@ public class ExportProgramModelOwned extends GhidraScript {
         catch (Throwable diagnosticFailure) { /* Never replace the primary outcome. */ }
     }
 
-    private static final int EXPORTER_VERSION = 18;
+    private static final int EXPORTER_VERSION = 19;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
     private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
@@ -1493,11 +1499,20 @@ public class ExportProgramModelOwned extends GhidraScript {
 
     private static final class NativeOutcome {
         final String source, failure;
+        final TypedPrototype typedPrototype;
 
-        NativeOutcome(String source, String failure) {
+        NativeOutcome(String source, String failure, TypedPrototype typedPrototype) {
             this.source = source;
             this.failure = failure;
+            this.typedPrototype = typedPrototype;
         }
+    }
+
+    private static final class TypedPrototype {
+        final String declaration, refusal;
+        TypedPrototype(String declaration, String refusal) { this.declaration = declaration; this.refusal = refusal; }
+        static TypedPrototype success(String declaration) { return new TypedPrototype(declaration, null); }
+        static TypedPrototype refusal(String reason) { return new TypedPrototype(null, reason); }
     }
 
     private FunctionMetadata collectFunctionMetadata(
@@ -1576,7 +1591,7 @@ public class ExportProgramModelOwned extends GhidraScript {
         prefix.append("      \"id\": ").append(json(functionId(function))).append(",\n");
         prefix.append("      \"name\": ").append(json(function.getName())).append(",\n");
         prefix.append("      \"address\": ").append(json(String.format("0x%x", function.getEntryPoint().getOffset()))).append(",\n");
-        prefix.append("      \"prototype\": ").append(json(function.getPrototypeString(false, false))).append(",\n");
+        prefix.append("      \"prototype\": ");
         StringBuilder evidence = new StringBuilder();
         evidence.append("      \"recoveryAssessment\": \"unassessed\",\n");
         evidence.append("      \"calls\": ["); appendStrings(evidence, callIds); evidence.append("],\n");
@@ -1598,6 +1613,7 @@ public class ExportProgramModelOwned extends GhidraScript {
     ) throws Exception {
         String source = null;
         String failure = null;
+        TypedPrototype typedPrototype = TypedPrototype.refusal("typed prototype unavailable");
         try {
             if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
                 throw new InterruptedException("program-model native decompilation was cancelled");
@@ -1607,6 +1623,9 @@ public class ExportProgramModelOwned extends GhidraScript {
                 throw new InterruptedException("program-model native decompilation was cancelled");
             }
             DecompiledFunction rendered = result.decompileCompleted() ? result.getDecompiledFunction() : null;
+            if (result.decompileCompleted() && result.getHighFunction() != null) {
+                typedPrototype = copyTypedPrototype(result.getHighFunction(), function, taskMonitor);
+            } else if (failure == null) typedPrototype = TypedPrototype.refusal("HighFunction unavailable");
             if (rendered != null) {
                 source = rendered.getC();
                 if (source != null && (source.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
@@ -1624,16 +1643,141 @@ public class ExportProgramModelOwned extends GhidraScript {
                 problem instanceof PlanningIntegrityException) throw problem;
             failure = appendFailure(null, exceptionMessage("decompilation", problem));
         }
-        return new NativeOutcome(source, failure);
+        return new NativeOutcome(source, failure, typedPrototype);
+    }
+
+    private static String canonicalCType(DataType type, DataOrganization layout, boolean allowVoid) {
+        if (type == null || layout == null || type.isNotYetDefined() ||
+            type instanceof TypeDef || type instanceof Composite || type instanceof Enum) return null;
+        String name = type.getName();
+        if ("void".equals(name)) return allowVoid && type.getLength() == 0 ? "void" : null;
+        if (type.getLength() <= 0) return null;
+        int size = type.getLength();
+        if ("_Bool".equals(name) && size == layout.getCharSize()) return "_Bool";
+        if ("bool".equals(name) && size == layout.getCharSize()) return "_Bool";
+        if ("char".equals(name) && size == layout.getCharSize()) return "char";
+        if ("signed char".equals(name) && size == layout.getCharSize()) return "signed char";
+        if ("unsigned char".equals(name) && size == layout.getCharSize()) return "unsigned char";
+        if ("short".equals(name) && size == layout.getShortSize()) return "short";
+        if ("unsigned short".equals(name) && size == layout.getShortSize()) return "unsigned short";
+        if ("int".equals(name) && size == layout.getIntegerSize()) return "int";
+        if ("unsigned int".equals(name) && size == layout.getIntegerSize()) return "unsigned int";
+        if ("long".equals(name) && size == layout.getLongSize()) return "long";
+        if ("unsigned long".equals(name) && size == layout.getLongSize()) return "unsigned long";
+        if ("long long".equals(name) && size == layout.getLongLongSize()) return "long long";
+        if ("unsigned long long".equals(name) && size == layout.getLongLongSize()) return "unsigned long long";
+        if ("float".equals(name) && size == layout.getFloatSize()) return "float";
+        if ("double".equals(name) && size == layout.getDoubleSize()) return "double";
+        return null;
+    }
+
+    private static String renderTypedCType(DataType type, DataOrganization layout, boolean allowVoid) {
+        return renderTypedCType(type, layout, allowVoid, 0);
+    }
+
+    private static String renderTypedCType(DataType type, DataOrganization layout, boolean allowVoid, int pointerDepth) {
+        if (pointerDepth > 4) return null;
+        if (type instanceof ghidra.program.model.data.Pointer) {
+            ghidra.program.model.data.Pointer pointer = (ghidra.program.model.data.Pointer) type;
+            if (layout == null || pointer.getLength() != layout.getPointerSize()) return null;
+            DataType target = pointer.getDataType();
+            if (target == null) return null;
+            String targetName = renderTypedCType(target, layout, true, pointerDepth + 1);
+            return targetName == null ? null : targetName + "*";
+        }
+        return canonicalCType(type, layout, allowVoid);
+    }
+
+    private static TypedPrototype copyTypedPrototype(HighFunction high, Function expected, TaskMonitor monitor) throws Exception {
+        try {
+            if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) throw new InterruptedException("typed prototype extraction cancelled");
+            FunctionPrototype proto = high.getFunctionPrototype();
+            if (proto == null) return TypedPrototype.refusal("function prototype unavailable");
+            if (high.getFunction() == null || expected == null ||
+                !high.getFunction().getEntryPoint().equals(expected.getEntryPoint()) ||
+                !high.getFunction().getName().equals(expected.getName()))
+                return TypedPrototype.refusal("function identity mismatch");
+            // A familiar model name does not establish that the observed variables use
+            // that model's ABI. Ghidra tracks custom variable storage independently.
+            if (expected.hasCustomVariableStorage())
+                return TypedPrototype.refusal("custom variable storage is unsupported");
+            PrototypeModel defaultConvention = high.getCompilerSpec() == null ? null : high.getCompilerSpec().getDefaultCallingConvention();
+            String modelName = proto.getModelName();
+            if (defaultConvention == null || modelName == null || !defaultConvention.getName().equals(modelName))
+                return TypedPrototype.refusal("non-default calling convention");
+            if (proto.isVarArg() || proto.hasThisPointer() || proto.isConstructor() || proto.isDestructor())
+                return TypedPrototype.refusal("unsupported prototype role");
+            int count = proto.getNumParams();
+            if (count < 0 || count > 64) return TypedPrototype.refusal("parameter count exceeds bound");
+            DataOrganization layout = high.getFunction().getProgram().getDataTypeManager().getDataOrganization();
+            DataType returnType = proto.getReturnType();
+            ghidra.program.model.listing.VariableStorage returnStorage = proto.getReturnStorage();
+            if (returnType == null || returnStorage == null || !returnStorage.isValid() ||
+                returnStorage.isBadStorage() || returnStorage.isUnassignedStorage() ||
+                returnStorage.isCompoundStorage() || returnStorage.isForcedIndirect())
+                return TypedPrototype.refusal("unsupported return storage");
+            if (returnType.getLength() == 0) {
+                if (!returnStorage.isVoidStorage()) return TypedPrototype.refusal("void return has non-void storage");
+            } else if (returnStorage.isVoidStorage() || returnStorage.size() != returnType.getLength()) {
+                return TypedPrototype.refusal("return storage size differs from its typed size");
+            }
+            String ret = renderTypedCType(returnType, layout, true);
+            if (ret == null)
+                return TypedPrototype.refusal("unsupported return type");
+            String functionName = high.getFunction().getName();
+            if (functionName == null || !functionName.matches("[A-Za-z_][A-Za-z0-9_]{0,127}") || isCKeyword(functionName))
+                return TypedPrototype.refusal("unsafe function name");
+            StringBuilder out = new StringBuilder(ret).append(" ").append(functionName).append("(");
+            Set<String> names = new TreeSet<>();
+            for (int i = 0; i < count; i++) {
+                if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) throw new InterruptedException("typed prototype extraction cancelled");
+                HighSymbol param = proto.getParam(i);
+                if (param == null || !param.isParameter() || param.isThisPointer() || param.isHiddenReturn())
+                    return TypedPrototype.refusal("missing or unsupported typed parameter role");
+                ghidra.program.model.listing.VariableStorage storage = param.getStorage();
+                if (storage == null || !storage.isValid() || storage.isBadStorage() || storage.isUnassignedStorage() ||
+                    storage.isCompoundStorage() || storage.isForcedIndirect())
+                    return TypedPrototype.refusal("unsupported parameter storage");
+                DataType parameterType = param.getDataType();
+                if (parameterType == null || parameterType.getLength() <= 0 || storage.size() != parameterType.getLength())
+                    return TypedPrototype.refusal("parameter storage size differs from its typed size");
+                String name = param.getName();
+                if (name == null || !name.matches("[A-Za-z_][A-Za-z0-9_]{0,63}") || isCKeyword(name) || !names.add(name))
+                    return TypedPrototype.refusal("unsafe or duplicate parameter name");
+                String type = renderTypedCType(parameterType, layout, false);
+                if (type == null) return TypedPrototype.refusal("unsupported parameter type");
+                if (i > 0) out.append(", "); out.append(type).append(" ").append(name);
+            }
+            if (count == 0) out.append("void");
+            out.append(")");
+            if (out.toString().getBytes(StandardCharsets.UTF_8).length > 4096) return TypedPrototype.refusal("prototype exceeds bound");
+            if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) throw new InterruptedException("typed prototype extraction cancelled");
+            return TypedPrototype.success(out.toString());
+        } catch (IllegalArgumentException | UnsupportedOperationException refusal) {
+            return TypedPrototype.refusal("typed prototype extraction refused");
+        }
+    }
+
+    private static boolean isCKeyword(String value) {
+        return Arrays.asList("auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+            "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict",
+            "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned",
+            "void", "volatile", "while", "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
+            "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local").contains(value);
     }
 
     private static FunctionExport renderFunction(FunctionMetadata metadata, NativeOutcome nativeOutcome, boolean full) {
         String source = nativeOutcome == null ? null : nativeOutcome.source;
         String failure = nativeOutcome == null ? metadata.failure : appendFailure(metadata.failure, nativeOutcome.failure);
+        boolean typedComplete = nativeOutcome != null && nativeOutcome.typedPrototype != null && nativeOutcome.typedPrototype.declaration != null;
         String status = full
-            ? (source == null ? "failed" : (metadata.evidenceComplete ? "recovered" : "partial"))
+            ? (source == null ? "failed" : (metadata.evidenceComplete && typedComplete ? "recovered" : "partial"))
             : (metadata.evidenceComplete ? "partial" : "failed");
-        String record = metadata.prefix + "      \"extractionStatus\": " + json(status) + ",\n" +
+        String prototype = nativeOutcome != null && nativeOutcome.typedPrototype != null && nativeOutcome.typedPrototype.declaration != null
+            ? nativeOutcome.typedPrototype.declaration : metadata.function.getPrototypeString(false, false);
+        String typedFailure = nativeOutcome == null || nativeOutcome.typedPrototype == null ? null : nativeOutcome.typedPrototype.refusal;
+        failure = appendFailure(failure, typedFailure);
+        String record = metadata.prefix + json(prototype) + ",\n      \"extractionStatus\": " + json(status) + ",\n" +
             metadata.evidence + "      \"decompiledC\": " + json(source) + "\n    }";
         if (record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
             throw new PlanningIntegrityException("function record exceeds its byte bound");
@@ -1669,7 +1813,9 @@ public class ExportProgramModelOwned extends GhidraScript {
                 DecompileOptions decompileOptions = new DecompileOptions();
                 decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
                 decompiler.setOptions(decompileOptions);
-                decompiler.toggleSyntaxTree(false);
+                if (!decompiler.toggleSyntaxTree(true) || !decompiler.toggleCCode(true)) {
+                    throw new IllegalStateException("Ghidra decompiler output configuration rejected");
+                }
                 if (!decompiler.openProgram(currentProgram)) {
                     throw new IllegalStateException("Ghidra decompiler could not open the current program");
                 }

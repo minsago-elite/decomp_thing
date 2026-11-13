@@ -40,6 +40,8 @@ class GeneratedCDeclarationsTest {
             "struct result convert(int (*callback)(int left, int right), const int values[static 4])",
             "int (*convert(int count))(const char *text)",
             "named_result (convert)(named_argument value)",
+            "int* convert(int* pointer)",
+            "void* convert(void* pointer)",
         )) {
             assertEquals(prototype, normalizedPrototype(function("convert", prototype)))
         }
