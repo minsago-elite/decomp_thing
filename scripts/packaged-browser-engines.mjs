@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
+import { attachExceptionContext, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
 // is Chromium-only; this runner drives Firefox, WebKit or Chromium through Playwright against the
@@ -46,6 +47,7 @@ function parseUrl(value, label) {
 const report = { status: 'running', engine: values.engine, playwright: readJson(join(values.playwright, 'package.json'), 'Playwright package metadata').version,
   driverNode: process.versions.node, evidenceDirectory: root };
 const secrets = [];
+const exceptionContexts = [];
 const safe = (text) => secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), String(text)).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
 let work; let application; let browser; let output = ''; let errors = '';
 
@@ -98,7 +100,9 @@ async function stop(child) {
 /** One context per viewport; CSP violations, responses and workers are recorded per context. */
 async function context(options = {}) {
   const created = await browser.newContext({ acceptDownloads: true, ...options });
-  const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [] };
+  const exceptionContext = attachExceptionContext(created);
+  exceptionContexts.push(exceptionContext);
+  const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [], exceptionContext };
   await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => {
     try { record.csp.push(JSON.parse(payload)); }
     catch (cause) { throw new Error('CSP instrumentation returned invalid JSON', { cause }); }
@@ -719,6 +723,8 @@ try {
     violations: applicationCspViolations, playwrightScreenshotViolations: playwrightScreenshotEvents,
     exceptions: records.flatMap((record) => record.exceptions),
   };
+  // This event-only, privacy-filtered context is additive diagnostics. The original exception
+  // list and the failing verdict below remain unchanged, including true browser/CSP failures.
   const failures = [...report.auditVerdict.failures];
   if (report.contentSecurityPolicy.violations.length) failures.push(`CSP violations: ${JSON.stringify(report.contentSecurityPolicy.violations)}`);
   if (report.contentSecurityPolicy.missingPolicyDocuments.length) failures.push('A packaged document omitted CSP');
@@ -737,6 +743,7 @@ try {
     try { execFileSync(values.python, [installHelper, 'cleanup', '--work', work, '--owner-token', ownerToken]); report.workCleanupConfirmed = true; }
     catch (error) { report.workCleanupError = String(error); process.exitCode = 1; }
   }
+  report.pageExceptionContexts = summarizeExceptionContexts(exceptionContexts.map((exceptionContext) => exceptionContext.snapshot()));
   await fs.writeFile(join(root, 'report.json'), safe(JSON.stringify(report, null, 2)) + '\n');
   console.log(`${values.engine}: ${report.status}. Report: ${join(root, 'report.json')}`);
 }
