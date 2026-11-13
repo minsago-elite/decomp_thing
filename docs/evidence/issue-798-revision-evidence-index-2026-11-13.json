@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "corpus": "builtin-core-contract-v12",
+  "commit": "caef39262f808b03c00516b62623f17cfe83fedb",
+  "requiredHost": true,
+  "sourceClean": true,
+  "forcedTestExecution": true,
+  "gradleExitCode": 0,
+  "passed": true,
+  "realProviderQualified": false,
+  "workflowReleaseQualified": false,
+  "suites": [
+    {
+      "suite": "decompengine.agent.AgentExecutionContractTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "a7bf02c61df000daf031c4d5f692abedb2d0dce5a1be7d4f6d138e8ba7ab430b"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinAgentHarnessTest",
+      "tests": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "40e9655c2a6f813f934081101eefd4bdbd7480d24fc71af87fd923a319868dbd"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinFilesystemToolsTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "d7722b3a866431a99696f22ddedec1a06adf192b700ee1eb024432f4352e7f98"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinCapturedContextToolsTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "cdf1c7851837bec90f70527086eb91394c588323cb7d6587943d0fcc5ad74e24"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinContextPackageTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "d7b56efd2d702d3d170f7a7598976f5fb13d6dd0e888ccbfa5a8814efa3d6e6c"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinJournalTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "7c4e72a8154021372a74bca2d896f83ccd26134cc0397b4bb1802a20537956c5"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinCheckpointTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "13efbe0341e4330eb896be44e5f971ce6c4a75f37075173442834b8fea942e93"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinCapturedResumeTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "8a940730e2427c8931fe69c3adcbd55c83067d7c8c6f1a5fe9fb4128a224d665"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinSourceStoreTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "af437f0d619be6ff8e41bb6ab7d119747e4db6425a9528bdacff0b417b2aa6e2"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinInvocationArchiveTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "1e7650864a72efe908ab3e594934a72ac887b33a1afdee2ba9194a56dc7bd7b2"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinTerminalToolsTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "70450f7a3e5ffa3a81c81512c8a84905328bd05f48d7b811521ebb6d38834f4f"
+    },
+    {
+      "suite": "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest",
+      "tests": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "2a0c28492818d38dcc44b4727b731a1a100b49aeb0ef9e772b10e94ae8fc6746"
+    },
+    {
+      "suite": "decompengine.repair.RepairEvidenceIndexTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "d09d888bf47387492800f61fdcc2603551082f91e453cf615b4dcc8a0ccdbb0f"
+    },
+    {
+      "suite": "decompengine.repair.ModuleRevisionGraphTest",
+      "tests": 168,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "c549a8874171d2b32924f9d2184252d93909252adad108add4913b17eddeea89"
+    },
+    {
+      "suite": "decompengine.project.ProfiledGeneratedCRepairIndexTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "5a3ad840d40a6f2b56c69b7d7d69a7ab3f6a37313e7efd7983ce1541bc18fe3c"
+    }
+  ],
+  "failures": []
+}
