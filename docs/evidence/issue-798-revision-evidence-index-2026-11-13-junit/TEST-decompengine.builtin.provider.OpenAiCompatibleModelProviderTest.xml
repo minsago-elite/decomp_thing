@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" tests="23" skipped="0" failures="0" errors="0" timestamp="2026-11-13T08:43:48.937Z" hostname="whatsername" time="1.737">
+  <properties/>
+  <testcase name="unsupported tool capability fails before transport()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.032"/>
+  <testcase name="redirects cannot forward authorization to another route()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.581"/>
+  <testcase name="stream idle and whole request deadlines stop stalled bodies()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.448"/>
+  <testcase name="malformed streams and indeterminate partial responses are never retried()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.068"/>
+  <testcase name="text callback occurs while server is still generating()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.01"/>
+  <testcase name="escaping and tool schemas are charged during bounded serialization()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.004"/>
+  <testcase name="duplicate keys deep nesting and invalid UTF8 cannot become actions()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.036"/>
+  <testcase name="retry exhaustion and excessive guidance fail without extra requests()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.021"/>
+  <testcase name="headers timeout and cancellation abandon the owned HTTP subscription()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.24"/>
+  <testcase name="tool history is encoded without provider wire types in the request()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.012"/>
+  <testcase name="streams text before completion and maps measured usage()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.011"/>
+  <testcase name="cancellation before request has no traffic()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.002"/>
+  <testcase name="assembles interleaved typed tool calls before dispatch()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.01"/>
+  <testcase name="unregistered incomplete duplicate and secret bearing tool calls cannot escape()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.051"/>
+  <testcase name="redacts credentials and request secrets across every chunk split()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.011"/>
+  <testcase name="cancellation during streaming closes promptly and has no tool dispatch()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.024"/>
+  <testcase name="invalid configuration is sanitized and insecure endpoints require explicit loopback opt in()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.014"/>
+  <testcase name="classifies terminal HTTP errors and never echoes response or configuration secrets()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.047"/>
+  <testcase name="bounded transient retries honor retry guidance()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.022"/>
+  <testcase name="retry wait is cancellable and shares the overall deadline()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.025"/>
+  <testcase name="request response and event ceilings fail explicitly()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.02"/>
+  <testcase name="consumer cancellation is preserved rather than classified as malformed provider data()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.008"/>
+  <testcase name="length refusal and missing usage remain distinguishable()" classname="decompengine.builtin.provider.OpenAiCompatibleModelProviderTest" time="0.026"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
