@@ -43,7 +43,8 @@ class HistoricalModulePromptReplayTest {
         val prefix = "agent:authored:context-4096:factory-${"a".repeat(64)}"
         assertEquals("module-reconstruction-input-v2", archivedModuleInputFingerprintProvider("$prefix:v3"))
         assertEquals("module-reconstruction-input-v3", archivedModuleInputFingerprintProvider("$prefix:v4"))
-        for (identity in listOf("evidence-v4", "agent:authored:v4", "$prefix:v4:extra", "$prefix:v5")) {
+        assertEquals("module-reconstruction-input-v3", archivedModuleInputFingerprintProvider("$prefix:v5"))
+        for (identity in listOf("evidence-v4", "agent:authored:v4", "$prefix:v4:extra", "$prefix:v5:extra")) {
             assertEquals("module-reconstruction-input-v2", archivedModuleInputFingerprintProvider(identity))
         }
     }
@@ -76,7 +77,7 @@ class HistoricalModulePromptReplayTest {
                 val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
                 val checkpoint = readObject(project.resolve(checkpointPath))
                 val legacyIdentity = checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content
-                    .replace(Regex(":v[34]$"), ":v3")
+                    .replace(Regex(":v[345]$"), ":v3")
 
                 fun retainVersion(identity: String, provider: String) {
                     val revisedCheckpoint = JsonObject(LinkedHashMap(checkpoint).apply {
