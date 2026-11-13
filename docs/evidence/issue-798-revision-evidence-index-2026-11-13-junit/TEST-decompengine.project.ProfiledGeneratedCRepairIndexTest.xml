@@ -1,18 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.project.ProfiledGeneratedCRepairIndexTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-11-13T08:43:50.675Z" hostname="whatsername" time="3.266">
+<testsuite name="decompengine.project.ProfiledGeneratedCRepairIndexTest" tests="13" skipped="0" failures="0" errors="0" timestamp="2026-11-13T09:22:56.231Z" hostname="whatsername" time="1.957">
   <properties/>
-  <testcase name="plan or model evidence changing during index capture is refused()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.101"/>
-  <testcase name="repair index admits schema three bytes and historical schemas without weakening closed fields()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.326"/>
-  <testcase name="repair index model four retains nullable evidence and supplied omission pairing()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.356"/>
-  <testcase name="blank recovered bodies and initializers remain unavailable definitions()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.098"/>
-  <testcase name="generated model entity IDs retain the full admitted identifier length()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.129"/>
-  <testcase name="nested build discovery charges ancestors to traversal budgets()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.002"/>
+  <testcase name="plan or model evidence changing during index capture is refused()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.103"/>
+  <testcase name="repair index admits schema three bytes and historical schemas without weakening closed fields()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.229"/>
+  <testcase name="repair index model four retains nullable evidence and supplied omission pairing()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.284"/>
+  <testcase name="blank recovered bodies and initializers remain unavailable definitions()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.054"/>
+  <testcase name="generated model entity IDs retain the full admitted identifier length()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.073"/>
+  <testcase name="nested build discovery charges ancestors to traversal budgets()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.004"/>
   <testcase name="build definition within a source root consumes one source file slot()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.002"/>
-  <testcase name="relocated declared roots retain dependency context and recover under the same descriptor()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.356"/>
-  <testcase name="Make and Ninja index declared evidence and recover the same graph()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="1.53"/>
+  <testcase name="relocated declared roots retain dependency context and recover under the same descriptor()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.247"/>
+  <testcase name="module fact and program entity may share the same textual ID()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.045"/>
+  <testcase name="Make and Ninja index declared evidence and recover the same graph()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.584"/>
   <testcase name="unregistered repair descriptors are rejected at construction()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.001"/>
-  <testcase name="generated semantic evidence preserves origins relationships and uncertainty without source claims()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.179"/>
-  <testcase name="generated repair evidence snapshot is identical across relocated equivalent projects()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.179"/>
+  <testcase name="generated semantic evidence preserves origins relationships and uncertainty without source claims()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.111"/>
+  <testcase name="generated repair evidence snapshot is identical across relocated equivalent projects()" classname="decompengine.project.ProfiledGeneratedCRepairIndexTest" time="0.218"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

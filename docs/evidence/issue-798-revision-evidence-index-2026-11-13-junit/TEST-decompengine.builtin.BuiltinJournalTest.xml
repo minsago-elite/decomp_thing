@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="decompengine.builtin.BuiltinJournalTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-13T08:43:33.381Z" hostname="whatsername" time="0.123">
+<testsuite name="decompengine.builtin.BuiltinJournalTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-13T09:22:49.680Z" hostname="whatsername" time="0.071">
   <properties/>
-  <testcase name="record byte total byte and event ceilings fail without extending the committed prefix()" classname="decompengine.builtin.BuiltinJournalTest" time="0.004"/>
-  <testcase name="durable canonical chain binds trusted identities and replays deterministically()" classname="decompengine.builtin.BuiltinJournalTest" time="0.002"/>
-  <testcase name="partial provider streams and interrupted completion validation remain unresolved()" classname="decompengine.builtin.BuiltinJournalTest" time="0.008"/>
-  <testcase name="active writers existing files links unsafe permissions and workspace containment are rejected()" classname="decompengine.builtin.BuiltinJournalTest" time="0.003"/>
-  <testcase name="tampered truncated appended and substituted request journals are rejected()" classname="decompengine.builtin.BuiltinJournalTest" time="0.012"/>
-  <testcase name="redacted identity and colliding redacted keys fail closed()" classname="decompengine.builtin.BuiltinJournalTest" time="0.009"/>
-  <testcase name="loop records full model policy tool validation and terminal evidence with cross-delta redaction()" classname="decompengine.builtin.BuiltinJournalTest" time="0.035"/>
-  <testcase name="redaction covers nested keys escaping overlapping secrets and bounded full payloads()" classname="decompengine.builtin.BuiltinJournalTest" time="0.013"/>
-  <testcase name="interrupted tool remains indeterminate and inspection never reexecutes it()" classname="decompengine.builtin.BuiltinJournalTest" time="0.01"/>
-  <testcase name="unresolved model tool and validation operations survive terminal failure and forbid checkpoint()" classname="decompengine.builtin.BuiltinJournalTest" time="0.008"/>
-  <testcase name="journal capacity prevents provider invocation and failure after an effect cannot become success()" classname="decompengine.builtin.BuiltinJournalTest" time="0.01"/>
+  <testcase name="record byte total byte and event ceilings fail without extending the committed prefix()" classname="decompengine.builtin.BuiltinJournalTest" time="0.005"/>
+  <testcase name="durable canonical chain binds trusted identities and replays deterministically()" classname="decompengine.builtin.BuiltinJournalTest" time="0.003"/>
+  <testcase name="partial provider streams and interrupted completion validation remain unresolved()" classname="decompengine.builtin.BuiltinJournalTest" time="0.011"/>
+  <testcase name="active writers existing files links unsafe permissions and workspace containment are rejected()" classname="decompengine.builtin.BuiltinJournalTest" time="0.004"/>
+  <testcase name="tampered truncated appended and substituted request journals are rejected()" classname="decompengine.builtin.BuiltinJournalTest" time="0.005"/>
+  <testcase name="redacted identity and colliding redacted keys fail closed()" classname="decompengine.builtin.BuiltinJournalTest" time="0.003"/>
+  <testcase name="loop records full model policy tool validation and terminal evidence with cross-delta redaction()" classname="decompengine.builtin.BuiltinJournalTest" time="0.013"/>
+  <testcase name="redaction covers nested keys escaping overlapping secrets and bounded full payloads()" classname="decompengine.builtin.BuiltinJournalTest" time="0.005"/>
+  <testcase name="interrupted tool remains indeterminate and inspection never reexecutes it()" classname="decompengine.builtin.BuiltinJournalTest" time="0.006"/>
+  <testcase name="unresolved model tool and validation operations survive terminal failure and forbid checkpoint()" classname="decompengine.builtin.BuiltinJournalTest" time="0.003"/>
+  <testcase name="journal capacity prevents provider invocation and failure after an effect cannot become success()" classname="decompengine.builtin.BuiltinJournalTest" time="0.005"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>
