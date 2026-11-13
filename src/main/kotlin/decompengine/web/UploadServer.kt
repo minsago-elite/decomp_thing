@@ -350,6 +350,13 @@ class UploadServer(
     /** Approximate admission occupancy; test evidence helper for overload and release qualification. */
     internal data class AdmissionSnapshot(val workers: Int, val queued: Int, val responders: Int)
     internal fun admissionSnapshot() = AdmissionSnapshot(requestExecutor.activeCount, requestExecutor.queue.size, overloadResponders.activeCount)
+    /** Test-only quota seam, available before listener startup and upload admission. */
+    internal fun configureUploadStorageLimitForTests(maximumBytes: Long) {
+        synchronized(lifecycleLock) {
+            check(!started && !stopping) { "Upload storage limit must be configured before listener startup." }
+            jobs.configureUploadStorageLimitForTests(maximumBytes)
+        }
+    }
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
@@ -766,10 +773,11 @@ class UploadServer(
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
+            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "UPLOAD_STORAGE", "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
             legacyError(exchange, status, code, when (code) {
                 "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
                 "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
+                "UPLOAD_STORAGE" -> publicWebDiagnosticMessage(code)
                 "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY" -> publicWebDiagnosticMessage(code)
                 "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
                 else -> "The requested job or attempt is unavailable."

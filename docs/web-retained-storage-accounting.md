@@ -86,6 +86,19 @@ in-process metadata scan. It does not measure physical-disk contention or
 deployment throughput, and it does not complete the broader #162 upload/listing
 quota matrix or hosted qualification.
 
+`UploadServerTest` also exercises retained-byte refusal over HTTP while that
+dashboard scan is held on its first metadata read. Eight retained jobs plus a
+report fixture exhaust the configured test ceiling; a header-only multipart
+request receives `503 UPLOAD_STORAGE` without sending its body, and four status
+requests complete while the scan is still held. The test verifies retained files
+and directory entries are unchanged by refusal, then removes the report fixture
+and confirms a new upload succeeds after reservation capacity is restored. The
+focused result is retained ([evidence record](evidence/issue-162-retained-quota-during-dashboard-listing-2026-11-13.json),
+[JUnit XML](evidence/issue-162-retained-quota-during-dashboard-listing-2026-11-13.xml)).
+This is an in-process HTTP qualification using a test-configured ceiling; it does
+not qualify physical-disk contention or hosted deployment behavior, and it does
+not complete #162.
+
 The packaged upload browser qualification passed against `51ff358`, using the
 pinned Chrome driver with test-only `--no-sandbox`. It covered session restoration,
 lost-response reload/retry, invalid and oversized request rejection, and a real
