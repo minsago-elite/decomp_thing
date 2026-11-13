@@ -121,6 +121,21 @@ cold load; warm data is measured separately. Do not hide failing runs as outlier
 | Git transfer | Reserved growth ≤512 MiB; over-limit/timeout/cancel produces terminal bounded operation evidence, ≤5 s process-tree cleanup after cancel | Isolated 64/256/512 MiB remote with delay/disconnect injection; #209 #215 |
 | Accessible use | WCAG 2.2 AA target, zero serious/critical automated violations, all documented keyboard/dialog/status cases pass; manual NVDA/Firefox and VoiceOver/Safari smoke | Four navigation walkthroughs plus conflict/push review; #147 #217 #226 |
 
+The packaged `web-packaged` job's `--mode git-scale` profile imports a deterministic 10,000-commit
+repository, verifies all 50 bounded 200-entry API history pages and keyboard-traverses all 500
+20-entry SPA history pages, including continuation and terminal focus. It gates first history and
+diff responses at the local Git limits above, verifies the exact 2,000/2,001-file API boundaries,
+and checks that the UI renders a deterministic 100-file commit-detail window with an incomplete-list notice.
+Git result rows use fixed windows across changed-file groups (70), the staged commit preview (30), history (200),
+commit detail (100), refs (45), linked work trees (50), and repository notices (5), for at most 500 mounted
+result rows in combination. Each truncated list has a visible continuation or an incomplete-list notice; history,
+refs, work trees, status groups, and staged commit previews remain navigable across their loaded bounded windows.
+The browser assertion counts every list item in the Git workspace, not only history and commit detail.
+It also verifies bounded text and withheld binary patches through authenticated APIs. Its request-size
+field is explicitly a declared estimate (path, JSON headers,
+and body); it is not a browser wire-byte measurement. Response limits are measured from bytes
+consumed from the actual response stream. This profile is focused evidence for #627.
+
 ### Packaged navigation and interaction timing
 
 `node scripts/check-packaged-web-browser.mjs --mode audit` (CI `web-packaged`) measures the

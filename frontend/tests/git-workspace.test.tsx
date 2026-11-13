@@ -347,9 +347,22 @@ it('offers bounded anchored continuation beyond 2,000 refs without duplicate adm
   expect(transport.get.mock.calls.filter(call => call[1].includes('cursor=2000'))).toHaveLength(1);
   gate.resolve();
   await waitFor(() => expect(button('Older branches and tags')).toBeTruthy());
+  button('Older branches and tags')!.focus();
   fireEvent.click(button('Older branches and tags')!);
   await waitFor(() => expect(button('Switch to topic2000')).toBeTruthy());
+  expect(button('Older branches and tags')).toBeUndefined();
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Branches and tags' })));
   expect(button('More branches and tags')).toBeUndefined();
+  const newerRefs = button('Newer branches and tags') as HTMLButtonElement;
+  expect(newerRefs.disabled).toBe(false);
+  while (!newerRefs.disabled) {
+    newerRefs.focus();
+    fireEvent.click(newerRefs);
+  }
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Branches and tags' })));
+  expect(button('Switch to topic0')).toBeTruthy();
+  expect(button('Switch to topic2000')).toBeUndefined();
+  while (!button('Switch to topic2000')) fireEvent.click(button('Older branches and tags')!);
   fireEvent.click(button('Switch to topic2000')!);
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ refId: 'ref_2000', objectId: other });
@@ -403,11 +416,19 @@ it('traverses a 1,001-commit history without omissions, duplicates or mutations'
   expect(newer).toHaveProperty('disabled', false);
   fireEvent.click(newer);
   await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(601, 801).map(item => item.objectId)));
-  const older = screen.getByRole('button', { name: 'Older commits' });
-  older.focus();
-  fireEvent.click(older);
+  const oldestWindow = screen.getByRole('button', { name: 'Older commits' });
+  oldestWindow.focus();
+  fireEvent.click(oldestWindow);
   await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(801, 1001).map(item => item.objectId)));
+  expect(screen.queryByRole('button', { name: 'Older commits' })).toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'History' })));
+  const newerAgain = screen.getByRole<HTMLButtonElement>('button', { name: 'Newer commits' });
+  while (!newerAgain.disabled) {
+    newerAgain.focus();
+    fireEvent.click(newerAgain);
+  }
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'History' })));
+  await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(0, 200).map(item => item.objectId)));
   expect(transport.post).not.toHaveBeenCalled();
 }, 20_000);
 
@@ -694,6 +715,53 @@ it('bounds an inspected commit diff and drops an older-history page that arrives
   open();
   await new Promise(resolve => setTimeout(resolve, 50));
   expect(screen.queryByText('Record candidate')).toBeNull();
+});
+
+it('resets the history window when a refreshed snapshot arrives after paging the old snapshot', async () => {
+  const all = Array.from({ length: 220 }, (_, index) =>
+    commitSummary(index.toString(16).padStart(40, '0'), `History ${index}`, false));
+  historyPages = {};
+  for (let start = 0; start < all.length; start += 20) {
+    historyPages[start === 0 ? 'first' : `page_${start}`] = {
+      entries: all.slice(start, start + 20),
+      nextCursor: start + 20 < all.length ? `page_${start + 20}` : null,
+    };
+  }
+
+  const refreshGate = deferred();
+  let repositoryReads = 0;
+  let holdRefresh = false;
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitRepositories') {
+      repositoryReads++;
+      if (holdRefresh && repositoryReads === 2) await refreshGate.promise;
+    }
+    return serve(kind, path);
+  });
+
+  mount();
+  for (let last = 39; last <= 219; last += 20) {
+    fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
+    await screen.findByText(`History ${last}`);
+  }
+  const history = () => screen.getByRole('list', { name: 'History' });
+  expect(history().querySelectorAll('li')).toHaveLength(200);
+  expect(history().querySelector('li')?.textContent).toContain('History 20');
+  expect(history().querySelector('li:last-child')?.textContent).toContain('History 219');
+
+  holdRefresh = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh repository' }));
+  await waitFor(() => expect(repositoryReads).toBe(2));
+  // The old snapshot remains visible while refresh is pending. Move away from its first window;
+  // installing the new 20-row snapshot must reset this offset before rendering it.
+  fireEvent.click(screen.getByRole('button', { name: 'Older commits' }));
+  expect(history().querySelector('li')?.textContent).toContain('History 20');
+  refreshGate.resolve();
+
+  await waitFor(() => {
+    expect(history().querySelectorAll('li')).toHaveLength(20);
+    expect(history().querySelector('li')?.textContent).toContain('History 0');
+  });
 });
 
 it('requests each older history page once and keeps changed files visible when provenance is unavailable', async () => {

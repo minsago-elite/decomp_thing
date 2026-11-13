@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
+import { assertUiHistoryWindow, MAX_VISIBLE_HISTORY_ROWS, nextUiHistoryAction } from './packaged-browser-git-ui-scale.mjs';
 
 const SUBJECT = 'Packaged journey: add notes';
 
@@ -106,56 +107,89 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   const historyRows = `document.querySelectorAll('ol[aria-label="History"] li')`;
   const maximumRenderedHistoryRows = 200;
   const expectedHistoryIds = fixture.repository.git('local', ['rev-list', 'main']).stdout.trim().split('\n');
-  assert.equal(expectedHistoryIds.length, fixture.repository.historyLength, 'The fixture history length must match its Git source');
+  assert.equal(expectedHistoryIds.length, fixture.repository.historyLength, 'Git fixture history identities are incomplete');
   assert.equal(await evaluate(tab, `${historyRows}.length`), 20, 'History must start with one bounded page');
-  const observedHistoryIds = new Set();
-  const verifyHistoryWindow = async loadedCount => {
-    const renderedIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code').title)`);
-    const expectedStart = Math.max(0, loadedCount - maximumRenderedHistoryRows);
-    assert.deepEqual(renderedIds, expectedHistoryIds.slice(expectedStart, loadedCount),
-      `The rendered history window must match source commits ${expectedStart} through ${loadedCount - 1}`);
-    for (const id of renderedIds) observedHistoryIds.add(id);
-    assert.equal(observedHistoryIds.size, loadedCount, 'History paging must expose every loaded commit without gaps or duplicates');
-  };
-  await verifyHistoryWindow(20);
   const historyStart = tab.requests.length;
   let historyPages = 1;
+  let loadedCount = Math.min(20, expectedHistoryIds.length);
+  let historyWindowStart = 0;
+  let historyWindowTransitions = 0;
+  let historyActions = 1;
   let historyFocusChecks = 0;
-  for (let count = 20; count < fixture.repository.historyLength; count += 20) {
+  const initialRows = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
+  assertUiHistoryWindow(initialRows, expectedHistoryIds, loadedCount, historyActions, historyWindowStart);
+  const observedHistoryIds = [...initialRows];
+  while (true) {
+    const nextHistoryAction = nextUiHistoryAction(loadedCount, expectedHistoryIds.length, historyWindowStart);
+    if (nextHistoryAction === null) break;
+    const advanceWindow = nextHistoryAction.kind !== 'page';
+    const { loadedCount: nextLoadedCount, windowStart: nextWindowStart } = nextHistoryAction;
+    const expectedWindow = expectedHistoryIds.slice(nextWindowStart,
+      Math.min(nextLoadedCount, nextWindowStart + MAX_VISIBLE_HISTORY_ROWS));
+    const terminalWindow = nextHistoryAction.kind !== 'newer-window'
+      && nextLoadedCount === expectedHistoryIds.length
+      && nextWindowStart + MAX_VISIBLE_HISTORY_ROWS >= nextLoadedCount;
+    const newestWindow = nextHistoryAction.kind === 'newer-window' && nextWindowStart === 0;
+    const actionButton = button(nextHistoryAction.kind === 'newer-window' ? 'Newer commits' : 'Older commits');
     assert.equal(await evaluate(tab, `(() => {
-      const continuation = ${button('Older commits')};
+      const continuation = ${actionButton};
       continuation?.focus();
       return !!continuation && document.activeElement === continuation;
-    })()`), true, 'Keyboard pagination must start with focus on Older commits');
+    })()`), true, 'Keyboard history navigation must start with focus on its continuation');
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-    const loadedCount = Math.min(count + 20, fixture.repository.historyLength);
-    const expectedStart = Math.max(0, loadedCount - maximumRenderedHistoryRows);
-    const expectedWindow = expectedHistoryIds.slice(expectedStart, loadedCount);
-    const focusAfterPage = loadedCount < fixture.repository.historyLength
-      ? `document.activeElement === ${button('Older commits')}`
-      : `document.activeElement === document.querySelector('#git-history-title')`;
-    await ready(tab, `(() => {
-      const rows = [...${historyRows}];
-      return rows.length === ${expectedWindow.length} &&
-        rows[0]?.querySelector('code')?.title === ${JSON.stringify(expectedWindow[0])} &&
-        rows.at(-1)?.querySelector('code')?.title === ${JSON.stringify(expectedWindow.at(-1))} &&
-        ${focusAfterPage};
-    })()`, 'next anchored history page');
-    await verifyHistoryWindow(loadedCount);
+    const focus = terminalWindow || newestWindow
+      ? `document.activeElement === document.querySelector('#git-history-title')`
+      : `document.activeElement === ${actionButton}`;
+    try {
+      await ready(tab, `${historyRows}.length === ${expectedWindow.length} && JSON.stringify([...${historyRows}].map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindow))} && ${focus}`,
+        'next anchored history window');
+    } catch (failure) {
+      const observed = await evaluate(tab, `JSON.stringify((() => {
+        const rows = [...${historyRows}];
+        const buttons = [...document.querySelectorAll('button')].map(item => item.textContent);
+        const active = document.activeElement;
+        return { rows: rows.length, first: rows[0]?.querySelector('code')?.title ?? null,
+          last: rows.at(-1)?.querySelector('code')?.title ?? null, older: buttons.includes('Older commits'),
+          newer: buttons.includes('Newer commits'), active: active?.textContent?.slice(0, 80) ?? null,
+          activeId: active?.id ?? null, historyHeadingFocused: active === document.querySelector('#git-history-title') };
+      })())`);
+      throw new Error(`${failure.message}; expected history window ${nextWindowStart}..${Math.min(nextLoadedCount, nextWindowStart + MAX_VISIBLE_HISTORY_ROWS)} `
+        + `after ${nextHistoryAction.kind} with focus=${terminalWindow || newestWindow ? 'history-heading' : 'continuation'}; observed=${observed}`);
+    }
     historyFocusChecks++;
-    historyPages++;
+    if (terminalWindow) {
+      assert.ok(await evaluate(tab, `[...${historyRows}].some(row =>
+        row.querySelector('code')?.title === ${JSON.stringify(fixture.repository.commits.base)}
+          && row.textContent.includes('fixture: baseline')
+          && row.textContent.includes('Not mapped to a reconstruction revision'))`),
+      'The oldest baseline entry and its unmapped state must be visible in the terminal history window');
+    }
+    const visibleIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
+    assertUiHistoryWindow(visibleIds, expectedHistoryIds, nextLoadedCount, historyActions + 1, nextWindowStart);
+    const previousWindowEnd = Math.min(loadedCount, historyWindowStart + MAX_VISIBLE_HISTORY_ROWS);
+    const nextWindowEnd = Math.min(nextLoadedCount, nextWindowStart + MAX_VISIBLE_HISTORY_ROWS);
+    const firstNewVisibleIndex = Math.max(previousWindowEnd, nextWindowStart);
+    if (firstNewVisibleIndex < nextWindowEnd) {
+      observedHistoryIds.push(...expectedHistoryIds.slice(firstNewVisibleIndex, nextWindowEnd));
+    }
+    loadedCount = nextLoadedCount;
+    historyWindowStart = nextWindowStart;
+    if (advanceWindow) historyWindowTransitions++;
+    else historyPages++;
+    historyActions++;
   }
-  const historyIds = [...observedHistoryIds];
-  assert.equal(historyIds.length, fixture.repository.historyLength, 'Every history commit must be observed across bounded windows');
-  assert.deepEqual(historyIds, expectedHistoryIds, 'Every displayed history window must match the admitted repository, in order');
-  assert.equal(historyIds[0], fixture.repository.commits.local);
-  assert.equal(historyIds.at(-1), fixture.repository.commits.base);
-  assert.equal(historyFocusChecks, historyPages - 1, 'Every history continuation must assert its post-navigation focus target');
-  assert.equal(await evaluate(tab, `!!${button('Older commits')}`), false, 'Exhausted history must not offer another page');
+  assert.equal(new Set(observedHistoryIds).size, fixture.repository.historyLength, 'History repeats a commit');
+  assert.deepEqual(observedHistoryIds, expectedHistoryIds, 'Every displayed history window must match the admitted repository, in order');
+  assert.equal(observedHistoryIds[0], fixture.repository.commits.local);
+  assert.equal(observedHistoryIds.at(-1), fixture.repository.commits.base);
+  const finalHistoryWindow = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
+  assertUiHistoryWindow(finalHistoryWindow, expectedHistoryIds, loadedCount, historyActions, historyWindowStart);
+  assert.equal(historyFocusChecks, historyActions - 1, 'Every history continuation must assert its post-navigation focus target');
+  assert.equal(await evaluate(tab, `!!${button('Older commits')} || !!${button('Newer commits')}`), false,
+    'Exhausted history must not offer another page or window');
   assert.ok(tab.requests.slice(historyStart).every(request => ['GET', 'HEAD'].includes(request.method)), 'History pagination sent a mutation');
   assert.equal(countGitHistoryReads(tab.requests.slice(historyStart)), historyPages - 1,
     'Each keyboard continuation must issue exactly one history read (recorded URLs omit query strings)');
-  assert.ok(await evaluate(tab, `document.body.innerText.includes('fixture: baseline') && document.body.innerText.includes('Not mapped to a reconstruction revision')`));
   assert.equal(fixture.repository.git('local', ['rev-parse', 'main']).stdout.trim(), fixture.repository.commits.local, 'Import changed the admitted repository');
 
   const worktree = await managedWorktree(data, fixture.jobId);
@@ -210,7 +244,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   const mutations = tab.requests.slice(beforeView).filter(request => !['GET', 'HEAD'].includes(request.method));
   assert.equal(mutations.length, 3, 'Expected exactly the import, stage and commit requests');
   return { path, objectId, exportSha256: shown, exportEntries: names, viewReadRequests: viewRequests.length, mutationRequests: mutations.length,
-    historyCommits: historyIds.length, historyPages, historyKeyboardPagination: true,
+    historyCommits: observedHistoryIds.length, historyPages, historyWindowTransitions, historyKeyboardPagination: true,
     historyFocus: { checks: historyFocusChecks, continuationRetainedOnNonterminalPages: true, movedToHeadingOnExhaustion: true },
     keyboardSelection: true, keyboardActivation: true, hooksInert: true, sourceRepositoryUnchanged: true, policyExcludedCounted: 1 };
 }
