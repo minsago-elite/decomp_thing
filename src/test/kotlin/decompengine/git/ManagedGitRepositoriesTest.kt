@@ -58,10 +58,13 @@ class ManagedGitRepositoriesTest {
         }
 
         fun open(policy: GitRepositoryPolicy = GitRepositoryPolicy(defaultBranch = "trunk"),
-            availability: GitAvailability = GitRuntime.detect(), limits: GitCheckoutLimits = GitCheckoutLimits()): ManagedGitRepositories =
+            availability: GitAvailability = GitRuntime.detect(), limits: GitCheckoutLimits = GitCheckoutLimits(),
+            runnerFactory: (GitAvailability.Available, GitEnvironment) -> GitCommandRunner = { available, environment ->
+                available.runner(environment)
+            }): ManagedGitRepositories =
             ManagedGitRepositories(store, availability, resolver, importRoot, policy, crash = { point ->
                 if (point in crashes) throw SimulatedGitCrash()
-            }, importLimits = limits).also(opened::add)
+            }, importLimits = limits, runnerFactory = runnerFactory).also(opened::add)
 
         fun tree(root: Path): Map<String, List<Byte>> = Files.walk(root).use { paths ->
             paths.filter { Files.isRegularFile(it, NOFOLLOW_LINKS) }.toList()
@@ -92,6 +95,13 @@ class ManagedGitRepositoriesTest {
         assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> {
             service.operation(jobId, "repository_missing", "operation_missing")
         }.code)
+        assertFalse(service.busy(jobId))
+        for (read in listOf<() -> Any>(
+            { service.repository(jobId, "repository_missing") },
+            { service.history(jobId, "repository_missing", null, 0, 1) },
+            { service.diff(jobId, "repository_missing", GitDiffScope.UNSTAGED, null, null) },
+            { service.refs(jobId, "repository_missing", 0, 1) },
+        )) assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> { read() }.code)
         assertEquals(before, f.storageTree())
         assertFalse(f.store.resolve(".git-runtime").exists())
     }
@@ -114,6 +124,11 @@ class ManagedGitRepositoriesTest {
                 { restarted.listing(jobId) },
                 { restarted.operation(jobId, operation.repositoryId, operation.operationId) },
                 { restarted.workspace(jobId, operation.repositoryId) },
+                { restarted.busy(jobId) },
+                { restarted.repository(jobId, operation.repositoryId) },
+                { restarted.history(jobId, operation.repositoryId, null, 0, 1) },
+                { restarted.diff(jobId, operation.repositoryId, GitDiffScope.UNSTAGED, null, null) },
+                { restarted.refs(jobId, operation.repositoryId, 0, 1) },
             )) assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> { read() }.code)
             assertEquals(before, f.storageTree())
             assertTrue(f.store.resolve("$jobId/git/staging/${operation.operationId}").exists())
@@ -139,6 +154,11 @@ class ManagedGitRepositoriesTest {
             assertEquals(1, restarted.listing(jobId).repositories.size)
             assertEquals(completed, restarted.operation(jobId, completed.repositoryId, completed.operationId))
             assertEquals(GitHeadState.UNBORN, restarted.workspace(jobId, completed.repositoryId).observation.head.state)
+            assertFalse(restarted.busy(jobId))
+            assertEquals(completed.repositoryId, restarted.repository(jobId, completed.repositoryId).repositoryId)
+            assertNull(restarted.history(jobId, completed.repositoryId, null, 0, 1).first)
+            assertTrue(restarted.diff(jobId, completed.repositoryId, GitDiffScope.UNSTAGED, null, null).listing.files.isEmpty())
+            assertTrue(restarted.refs(jobId, completed.repositoryId, 0, 1).second.entries.isEmpty())
         }
         assertEquals(before, f.storageTree())
     }
@@ -1209,5 +1229,71 @@ class ManagedGitRepositoriesTest {
             } finally { Thread.interrupted() }
             assertTrue(Files.exists(f.snapshot.resolve("CMakeLists.txt")))
         }
+    }
+
+    // Preserved head-only Git read regressions.
+    @Test fun `restart migrates only exact legacy attributes before publishing repository reads`(): Unit = Fixture().use { f ->
+        val first = f.open()
+        val completed = first.settle(first.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "legacy_restart_01"))
+        val gitDir = f.repositoryDirectory(completed.repositoryId).resolve("repository.git")
+        first.close()
+        val attributes = gitDir.resolve("info/attributes")
+        Files.writeString(attributes, GitManagedLayout.LEGACY_ATTRIBUTES)
+
+        val restarted = f.open()
+        restarted.recover(listOf(jobId))
+        assertEquals(GitManagedLayout.ATTRIBUTES, Files.readString(attributes),
+            "Explicit startup recovery owns the one exact compatibility migration")
+        val ready = f.storageTree()
+        repeat(2) {
+            assertEquals(GitHeadState.UNBORN, restarted.workspace(jobId, completed.repositoryId).observation.head.state)
+            assertNull(restarted.history(jobId, completed.repositoryId, null, 0, 1).first)
+            assertTrue(restarted.diff(jobId, completed.repositoryId, GitDiffScope.UNSTAGED, null, null).listing.files.isEmpty())
+            assertTrue(restarted.refs(jobId, completed.repositoryId, 0, 1).second.entries.isEmpty())
+        }
+        assertEquals(ready, f.storageTree(), "Reads after recovery must preserve file bytes and directories")
+    }
+    @Test fun `service commit validation uses the observed managed read memory ceiling`(): Unit = Fixture().use { f ->
+        val log = f.repositories.root.resolve("service-read-limits")
+        val executable = f.repositories.root.resolve("observed-service-git")
+        val detected = GitRuntime.detect() as GitAvailability.Available
+        Files.writeString(executable, "#!/bin/sh\nprintf '%s\\t%s\\t%s\\n' \"${'$'}*\" \"${'$'}(ulimit -Sv)\" \"${'$'}(ulimit -Hv)\" >> '$log'\nexec '${detected.executable}' \"${'$'}@\"\n")
+        Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"))
+        val service = f.open(runnerFactory = { _, environment -> GitCommandRunner(executable, environment) })
+        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "validation_limit_01"))
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        Files.writeString(workTree.resolve("validated.c"), "int validated;\n")
+        val first = f.repositories.commitAll(gitDir, workTree, "first")
+        Files.writeString(workTree.resolve("validated.c"), "int validated_again;\n")
+        val second = f.repositories.commitAll(gitDir, workTree, "second")
+
+        assertEquals(second, service.history(jobId, completed.repositoryId, second, 0, 1).first)
+        assertEquals(second, service.diff(jobId, completed.repositoryId, GitDiffScope.COMMIT, second, null).commit)
+        val validations = Files.readAllLines(log).filter { it.contains(" cat-file -e ") }
+        assertEquals(2, validations.size, "History and commit diff each validate the supplied full object ID")
+        assertTrue(validations.all { it.contains(second) })
+        assertTrue(validations.all { it.endsWith("\t524288\t524288") }, validations.toString())
+        assertEquals(40, first.length)
+    }
+    @Test fun `commit diff resolves a bounded parent without materializing history subjects`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val admission = service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "diff_parent_request_0001")
+        val completed = service.settle(admission)
+        assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        val base = f.repositories.commitAll(gitDir, workTree, "base")
+        val tree = f.repositories.git("--git-dir=$gitDir", "rev-parse", "$base^{tree}").trim()
+        val message = f.repositories.root.resolve("large-subject")
+        Files.writeString(message, "x".repeat(GitReads.MAX_HISTORY_BYTES + 1))
+        val large = f.repositories.git("--git-dir=$gitDir", "commit-tree", tree, "-F", message.toString()).trim()
+        val child = f.repositories.git("--git-dir=$gitDir", "commit-tree", tree, "-p", large, "-m", "small child").trim()
+
+        val diff = service.diff(jobId, completed.repositoryId, GitDiffScope.COMMIT, child, null)
+        assertTrue(diff.listing.complete)
+        assertTrue(diff.listing.files.isEmpty())
     }
 }
