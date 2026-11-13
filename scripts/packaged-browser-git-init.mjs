@@ -29,6 +29,14 @@ export async function qualifyGitInitIdentity({ repo, origin, makeTarget, cdp, ev
     Object.assign(workspace.data, { repositoryId, worktreeId: 'worktree_packaged_git_init',
       candidateRevisionId: run.data.resultRevisionId, headRefName: 'refs/heads/packaged-init' });
     workspace.data.refs[0].displayName = workspace.data.headRefName;
+    Object.assign(workspace.data.mapping, { repositoryId, revisionId: run.data.resultRevisionId });
+    assert.equal(workspace.data.mapping.repositoryId, workspace.data.repositoryId,
+      'Packaged workspace fixture mapping must belong to the acknowledged repository');
+    assert.equal(workspace.data.mapping.objectId, workspace.data.headObjectId,
+      'Packaged workspace fixture mapping must identify the returned head object');
+    assert.ok(workspace.data.refs.some((ref) => ref.refId === workspace.data.headRefId &&
+      ref.objectId === workspace.data.headObjectId && ref.displayName === workspace.data.headRefName),
+      'Packaged workspace fixture must contain the returned head ref');
 
     const tab = await makeTarget();
     const prefix = '/nested/api/v1/jobs/' + jobId;
