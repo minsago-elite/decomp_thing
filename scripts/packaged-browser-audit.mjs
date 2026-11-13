@@ -805,7 +805,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       return await new Promise((resolve, reject) => {
         const deadline = started + 10000;
         const visible = ${filterElementVisible.toString()};
-        let feedbackPending = false; let dataPending = false; let dataMs = null; let renderedJobId = null;
+        let presentationPending = false; let pendingSignal = null; let dataMs = null; let renderedJobId = null;
         const observe = () => {
           const status = heading.nextElementSibling?.matches('p[role="status"]') ? heading.nextElementSibling : null;
           const statusVisible = visible(status);
@@ -817,33 +817,38 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
           return { populated, loading, rowJobId };
         };
         const check = () => {
+          if (performance.now() > deadline) { reject(new Error('job filter timing deadline')); return; }
           const state = observe();
-          if (feedbackMs === null && !feedbackPending && location.search === expectedPageSearch && (state.loading || state.populated)) {
-            feedbackPending = true;
-            // The first rAF observation runs before paint. Confirm in the following frame so the
-            // signal was visible for at least one rendered frame rather than only in the DOM.
+          const signal = location.search !== expectedPageSearch ? null : state.loading ? 'loading' : state.populated ? 'data' : null;
+          if (!presentationPending && signal !== null) {
+            presentationPending = true;
+            pendingSignal = signal;
+            // requestAnimationFrame runs before paint. Require the same state in the following
+            // frame, proving it survived the intervening presentation before timing it.
             requestAnimationFrame(() => {
               const presented = observe();
-              if (location.search === expectedPageSearch && (presented.loading || presented.populated)) {
-                feedbackMs = performance.now() - started;
-                feedbackSignal = presented.loading ? 'loading' : 'data';
+              const presentedSignal = location.search !== expectedPageSearch ? null
+                : presented.loading ? 'loading' : presented.populated ? 'data' : null;
+              if (presentedSignal === pendingSignal) {
+                const elapsed = performance.now() - started;
+                if (feedbackMs === null) {
+                  feedbackMs = elapsed;
+                  feedbackSignal = presentedSignal;
+                }
+                if (presentedSignal === 'data' && dataMs === null) {
+                  dataMs = elapsed;
+                  renderedJobId = presented.rowJobId;
+                }
               }
-              feedbackPending = false;
+              presentationPending = false;
+              pendingSignal = null;
+              if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
+              else if (performance.now() > deadline) reject(new Error('job filter timing deadline'));
+              else requestAnimationFrame(check);
             });
-          }
-          if (state.populated && !dataPending && dataMs === null) {
-            dataPending = true;
-            requestAnimationFrame(() => {
-              const presented = observe();
-              if (presented.populated) {
-                dataMs = performance.now() - started;
-                renderedJobId = presented.rowJobId;
-              }
-              dataPending = false;
-            });
+            return;
           }
           if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
-          else if (performance.now() > deadline) reject(new Error('job filter timing deadline'));
           else requestAnimationFrame(check);
         };
         requestAnimationFrame(check);
@@ -857,8 +862,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       pageSearch, feedbackMs: measured.feedbackMs, dataMs: measured.dataMs, feedbackSignal: measured.feedbackSignal,
       renderedJobId: measured.renderedJobId,
       requestStartIndex: before, requestEndIndex: fulfilled.length,
-      requestIndex: requests.length === 1 ? requests[0].index : null,
-      request: requests.length === 1 ? requests[0].entry : null });
+      requestIndex: requests.length === 1 ? requests[0].index : null });
   }
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
@@ -1022,10 +1026,7 @@ export function jobFilterFailures(evidence, raw, fulfilled) {
       .filter(entry => entry?.method === 'GET' && entry?.path === '/jobs') : [];
     if (!request || Object.keys(expectedRequest).some(key => request[key] !== expectedRequest[key])
       || !Array.isArray(request.responseJobIds) || request.responseJobIds.length !== 1 || request.responseJobIds[0] !== expectedJobId
-      || requestsInWindow.length !== 1 || requestsInWindow[0] !== request
-      || !sample.request || Object.keys(expectedRequest).some(key => sample.request[key] !== expectedRequest[key])
-      || !Array.isArray(sample.request.responseJobIds) || sample.request.responseJobIds.length !== 1
-      || sample.request.responseJobIds[0] !== expectedJobId)
+      || requestsInWindow.length !== 1 || requestsInWindow[0] !== request)
       fail(`sample ${index}: not bound to its fulfilled ${query} request`);
   });
   for (const [name, values, label] of [['filterFeedback', raw?.filterFeedback, 'feedback'], ['filterData', raw?.filterData, 'first data']]) {
@@ -1040,4 +1041,41 @@ export function jobFilterFailures(evidence, raw, fulfilled) {
       fail(`${label}: raw samples do not match workload records`);
   }
   return failures;
+}
+
+/** Keep the /jobs request windows used by the filter verdict, not every route read. */
+export function compactJobFilterAuditEvidence(audit) {
+  const fulfilled = Array.isArray(audit?.fulfilled) ? audit.fulfilled : null;
+  const samples = Array.isArray(audit?.jobFilter?.samples) ? audit.jobFilter.samples : null;
+  if (!fulfilled || !samples) return audit;
+  const retained = [];
+  const indexes = new Map();
+  const retain = sourceIndex => {
+    if (!indexes.has(sourceIndex)) {
+      indexes.set(sourceIndex, retained.length);
+      retained.push(fulfilled[sourceIndex]);
+    }
+    return indexes.get(sourceIndex);
+  };
+  for (const sample of samples) {
+    const start = sample?.requestStartIndex;
+    const end = sample?.requestEndIndex;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > fulfilled.length) return audit;
+    for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1)
+      if (fulfilled[sourceIndex]?.method === 'GET' && fulfilled[sourceIndex]?.path === '/jobs') retain(sourceIndex);
+  }
+  const compactSamples = samples.map(sample => {
+    const sourceStart = sample.requestStartIndex;
+    const sourceEnd = sample.requestEndIndex;
+    const window = [];
+    for (let sourceIndex = sourceStart; sourceIndex < sourceEnd; sourceIndex += 1) {
+      if (indexes.has(sourceIndex)) window.push(indexes.get(sourceIndex));
+    }
+    const requestIndex = indexes.get(sample.requestIndex) ?? null;
+    return { ...sample, requestStartIndex: window[0] ?? retained.length,
+      requestEndIndex: window.length ? window.at(-1) + 1 : retained.length, requestIndex };
+  });
+  return { ...audit, fulfilled: retained,
+    fulfilledRequestSummary: { observed: fulfilled.length, retained: retained.length, scope: 'job-filter-request-windows' },
+    jobFilter: { ...audit.jobFilter, samples: compactSamples } };
 }
