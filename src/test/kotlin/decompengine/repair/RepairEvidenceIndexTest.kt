@@ -1,8 +1,8 @@
 package decompengine.repair
 
 import kotlin.test.Test
-import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 
@@ -37,6 +37,33 @@ class RepairEvidenceIndexTest {
             RepairEvidenceUncertainty("Makefile", "build-target", RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED),
         ),
     )
+
+    @Test
+    fun `evidence records retain the generated profile identifier bound including module prefix`() {
+        val origin = RepairEvidenceOrigin("module-plan", "c".repeat(64), 2, "/modules/0")
+        val moduleId = "m".repeat(4_096)
+        val entityId = "e".repeat(4_096)
+        val facts = RepairEvidenceFacts(
+            origins = listOf(origin),
+            entities = listOf(
+                RepairEntityFact("module:$moduleId", RepairEvidenceEntityKind.MODULE, null, origin),
+                RepairEntityFact(entityId, RepairEvidenceEntityKind.FUNCTION, "recovered", origin),
+            ),
+            relations = listOf(RepairEntityRelation(
+                RepairEvidenceRelationKind.MODULE_OWNS, "module:$moduleId", entityId, origin,
+            )),
+            declarations = listOf(RepairDeclarationEvidence(entityId, "recovered-prototype", origin)),
+            definitions = listOf(RepairDefinitionEvidence(entityId, "recovered-body", origin)),
+            uncertainties = listOf(RepairEvidenceUncertainty(
+                moduleId, "module-evidence", RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED, origin,
+            )),
+        )
+
+        assertEquals("module:$moduleId", facts.entities.first { it.kind == RepairEvidenceEntityKind.MODULE }.id)
+        assertEquals(entityId, facts.declarations.single().entityId)
+        assertEquals(moduleId, facts.uncertainties.single().subject)
+        assertNotEquals(0, facts.canonicalBytes(64 * 1024).size)
+    }
 
     @Test
     fun `canonical evidence is deterministic immutable and preserves typed relationship kinds`() {

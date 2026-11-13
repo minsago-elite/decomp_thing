@@ -183,6 +183,26 @@ class ProfiledGeneratedCRepairIndexTest {
     }
 
     @Test
+    fun `generated model entity IDs retain the full admitted identifier length`() {
+        val project = createTempDirectory("repair-semantic-long-entity-id-")
+        val entityId = "function_" + "e".repeat(4_087)
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "c".repeat(64),
+            functions = listOf(RecoveredFunction(entityId, "long_id_function", 0x1000UL, "int long_id_function(void)")),
+        ), project)
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select(
+            "compile", index.sourcePaths.joinToString("\n") { "$it:1: diagnostic" },
+        )
+
+        assertTrue(selection.evidenceFacts.entities.any {
+            it.id == entityId && it.kind == RepairEvidenceEntityKind.FUNCTION
+        })
+        assertTrue(selection.evidenceFacts.declarations.any { it.entityId == entityId })
+    }
+
+    @Test
     fun `generated repair evidence snapshot is identical across relocated equivalent projects`() {
         val descriptor = profile(GeneratedCMakeReconstructionProfile.descriptor)
         val repairProfile = GeneratedCRepairIndexProfile.forProfile(descriptor)

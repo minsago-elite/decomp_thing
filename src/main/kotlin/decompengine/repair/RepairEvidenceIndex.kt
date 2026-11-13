@@ -16,6 +16,8 @@ private fun <T> frozenEvidenceList(values: Collection<T>): List<T> =
     Collections.unmodifiableList(ArrayList(values))
 private const val MAXIMUM_EVIDENCE_JSON_BYTES = 64 * 1024 * 1024
 private const val MAXIMUM_EVIDENCE_JSON_NODES = 1_000_000
+// Generated-C admission permits 4,096-character identifiers. Module fact IDs add "module:".
+private const val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_112
 private val evidenceOriginOrder = compareBy<RepairEvidenceOrigin>(
     { it.documentRole }, { it.locator }, { it.contentSha256 }, { it.schemaVersion ?: 0 },
 )
@@ -67,7 +69,7 @@ data class RepairEntityFact(
     val origin: RepairEvidenceOrigin,
 ) {
     init {
-        require(id.isNotBlank() && id.length <= 512)
+        require(id.isNotBlank() && id.length <= MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS)
         require(extractionStatus == null || extractionStatus in setOf("recovered", "partial", "failed", "synthetic"))
     }
 }
@@ -79,7 +81,8 @@ data class RepairEntityRelation(
     val origin: RepairEvidenceOrigin,
 ) {
     init {
-        require(sourceEntityId.isNotBlank() && targetEntityId.isNotBlank())
+        require(sourceEntityId.isNotBlank() && sourceEntityId.length <= MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS &&
+            targetEntityId.isNotBlank() && targetEntityId.length <= MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS)
     }
 }
 
@@ -88,7 +91,10 @@ data class RepairDeclarationEvidence(
     val form: String,
     val origin: RepairEvidenceOrigin,
 ) {
-    init { require(entityId.isNotBlank() && form.matches(Regex("[a-z][a-z0-9_-]{0,63}"))) }
+    init {
+        require(entityId.isNotBlank() && entityId.length <= MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS &&
+            form.matches(Regex("[a-z][a-z0-9_-]{0,63}")))
+    }
 }
 
 data class RepairDefinitionEvidence(
@@ -96,7 +102,10 @@ data class RepairDefinitionEvidence(
     val form: String,
     val origin: RepairEvidenceOrigin,
 ) {
-    init { require(entityId.isNotBlank() && form.matches(Regex("[a-z][a-z0-9_-]{0,63}"))) }
+    init {
+        require(entityId.isNotBlank() && entityId.length <= MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS &&
+            form.matches(Regex("[a-z][a-z0-9_-]{0,63}")))
+    }
 }
 
 class RepairBuildEvidence(
@@ -191,7 +200,7 @@ data class RepairEvidenceUncertainty(
     val origin: RepairEvidenceOrigin? = null,
 ) {
     init {
-        require(subject.isNotBlank() && subject.length <= 512)
+        require(subject.isNotBlank() && subject.length <= MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS)
         require(category.matches(Regex("[a-z][a-z0-9_-]{0,63}")))
     }
 }
