@@ -99,7 +99,8 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
         return Capture(sha256, bytes.size.toLong(), lines)
     }
 
-    fun range(jobId: String, attempt: WorkflowAttempt, capture: Capture?, oversized: Boolean, query: Query, readAt: Instant): JsonObject = buildJsonObject {
+    fun range(jobId: String, attempt: WorkflowAttempt, capture: Capture?, oversized: Boolean, query: Query, readAt: Instant,
+        policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject = buildJsonObject {
         put("jobId", jobId); put("runId", attempt.runId); put("logId", "build"); put("source", "generated-build-log")
         put("attempt", buildJsonObject {
             put("state", attempt.state.wireName)
@@ -148,7 +149,7 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
             put("byteLimited", budgetStopped)
         })
         put("lines", buildJsonArray { selected.forEach { add(lineJson(it)) } })
-        put("search", query.search?.let { search(capture, it) } ?: JsonNull)
+        put("search", query.search?.let { search(capture, it, policy) } ?: JsonNull)
     }
 
     /** Download text: a provenance header, then every redacted line exactly as ranges present it. */
@@ -176,7 +177,7 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
         }
     }
 
-    private fun search(capture: Capture, query: String): JsonObject {
+    private fun search(capture: Capture, query: String, policy: WebRedactionPolicy): JsonObject {
         val matches = mutableListOf<Long>()
         var count = 0L
         for (line in capture.allLines()) if (line.searchText.contains(query)) {
@@ -184,7 +185,7 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
             if (matches.size < MAXIMUM_SEARCH_MATCHES) matches += line.number
         }
         return buildJsonObject {
-            put("query", query); put("scope", "whole-log"); put("matchCount", count.toString())
+            put("query", policy.boundedText(query, MAXIMUM_SEARCH_CHARACTERS)); put("scope", "whole-log"); put("matchCount", count.toString())
             put("matches", buildJsonArray { matches.forEach { add(JsonPrimitive(it.toString())) } })
             put("matchesTruncated", count > matches.size)
         }

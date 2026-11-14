@@ -85,7 +85,10 @@ internal class WebProgramStructurePages(
             header(index).apply {
                 put("query", buildJsonObject {
                     put("sort", sort); put("order", order)
-                    for (key in listOf("search", "status", "evidence", "ownership", "module")) put(key, query.fields[key]?.let(::JsonPrimitive) ?: JsonNull)
+                    for (key in listOf("search", "status", "evidence", "ownership", "module")) {
+                        val value = query.fields[key]
+                        put(key, value?.let { JsonPrimitive(if (key == "search") policy.boundedText(it, MAXIMUM_PUBLIC_SEARCH_CHARACTERS) else it) } ?: JsonNull)
+                    }
                 })
                 if (!index.available) {
                     if (query.cursor != null) invalidCursor()
@@ -418,6 +421,7 @@ internal class WebProgramStructurePages(
     companion object {
         private const val MAXIMUM_ITEM_BYTES = 1_000_000
         private const val MAXIMUM_PUBLIC_NAME_CHARACTERS = 4_096
+        private const val MAXIMUM_PUBLIC_SEARCH_CHARACTERS = 256
         private val SELECTOR = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
         /** Only identifiers that match the URL selector grammar are addressable; others remain listed without a link. */
         fun addressable(value: String): Boolean = SELECTOR.matches(value)

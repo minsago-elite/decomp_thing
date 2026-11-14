@@ -43,6 +43,12 @@ internal class WebRedactionPolicy private constructor(
     /** Replace every redactable span; stable when applied twice. */
     fun text(value: String): String = text(value, paths = true)
 
+    /** Redact before enforcing the public echo bound; oversized replacements become a stable safe marker. */
+    fun boundedText(value: String, maximumCharacters: Int): String {
+        require(maximumCharacters > 0)
+        return text(value).takeIf { it.length <= maximumCharacters } ?: SECRET_MARK
+    }
+
     /** Log adapters may label known roots after credential spans, before generic path masking. */
     fun credentials(value: String): String = text(value, paths = false)
 

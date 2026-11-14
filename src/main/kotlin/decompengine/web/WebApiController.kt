@@ -468,9 +468,10 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     val query = runLogs.parseQuery(exchange.requestURI.rawQuery)
                     val (attempt, file, oversized) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
-                    val capture = file?.let { runLogs.capture(it.bytes, it.sha256, WebRedactionPolicy.of(exchange)) }
+                    val policy = WebRedactionPolicy.of(exchange)
+                    val capture = file?.let { runLogs.capture(it.bytes, it.sha256, policy) }
                     sendWebApiResponse(exchange, 200, "logRange", runLogs.range(parts[1], attempt, capture,
-                        oversized || (file != null && capture == null), query, clock.instant()))
+                        oversized || (file != null && capture == null), query, clock.instant(), policy))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/logs/build/content")) -> {
                     val phase = logDownloadPhases.enter()
