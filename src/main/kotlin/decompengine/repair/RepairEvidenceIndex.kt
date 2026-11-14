@@ -301,7 +301,8 @@ class RepairEvidenceFacts(
                     maximumInputBytes = maximum,
                     maximumCanonicalBytes = maximum,
                     maximumDepth = 32,
-                    maximumNodes = MAXIMUM_EVIDENCE_JSON_NODES,
+                    // Canonical JSON uses at least one byte per value node, so the byte budget bounds traversal too.
+                    maximumNodes = maximum,
                     maximumStringBytes = maximum,
                     maximumTotalStringBytes = maximum,
                 ),
