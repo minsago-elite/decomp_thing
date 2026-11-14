@@ -382,7 +382,7 @@ class WebRevisionSourceSearchTest {
                 else -> error("Unexpected metadata target")
             }
         })
-        for (mode in listOf("valid", "changed", "missing", "busy", "valid")) {
+        for (mode in listOf("valid", "changed", "changed-during-read", "missing", "busy", "valid")) {
             val engine = WebRevisionSourceSearch({ _, _, _, scan ->
                 evidence.search(reference, { job, run, path, maximum ->
                     assertEquals(jobId, job); assertEquals(runId, run); assertEquals(WebRevisionSourceContent.MAXIMUM_FILE_BYTES, maximum)
@@ -392,12 +392,15 @@ class WebRevisionSourceSearchTest {
                     when {
                         path == "Makefile" -> captured(byteArrayOf(), 4)
                         mode == "changed" -> captured("int other;\n".toByteArray(), 5)
+                        mode == "changed-during-read" -> throw decompengine.jobs.ArtifactChangedException(
+                            "source input changed while the stable read was in progress",
+                        )
                         mode == "missing" -> throw decompengine.jobs.JobStoreException("source input is unavailable")
                         else -> captured(payload, 5)
                     }
                 }, scan)
             })
-            if (mode == "changed") {
+            if (mode in setOf("changed", "changed-during-read")) {
                 assertEquals("SOURCE_REVISION_CHANGED", assertFailsWith<WebAccessDenied> { search(engine, "q=needle") }.code)
             } else {
                 val page = search(engine, "q=needle")

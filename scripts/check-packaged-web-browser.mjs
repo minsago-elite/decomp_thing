@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { promises as fs, readFileSync, createReadStream } from 'node:fs';
-import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
+import { join, basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
+import { seedSourceTreeFixture } from './packaged-source-tree-fixture.mjs';
+import { qualifySourceTree, qualifySourceTreeColdPage } from './packaged-browser-source-tree.mjs';
+import { SOURCE_TREE_COLD_SAMPLE_COUNT, summarizeSourceTreeColdSamples } from './packaged-browser-source-tree-cold.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
@@ -18,20 +21,23 @@ import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostic
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const driverScriptPath = fileURLToPath(import.meta.url);
 const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
+  profile: { type: 'string', default: 'loopback' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
   'java-home': { type: 'string' },
   python: { type: 'string', default: '/usr/bin/python3' },
   'no-sandbox': { type: 'boolean', default: false },
+  'cold-report': { type: 'string' },
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|source-tree|live|proxy|upgrade|legacy|audit] [--profile loopback|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
@@ -49,7 +55,14 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'source-tree', 'source-tree-cold-worker', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be a supported packaged browser mode');
+if (values.mode === 'source-tree' || values.mode === 'source-tree-cold-worker') assert.ok(['loopback', 'constrained'].includes(values.profile), '--profile must be loopback or constrained for source-tree mode');
+if (values.mode === 'source-tree') {
+  assert.equal(process.env.DECOMP_PACKAGED_SOURCE_TREE_SUPERVISED, '1',
+    'Use run-packaged-browser-source-tree-supervised.mjs so the complete cold and warm process tree is owned');
+}
+if (values['cold-report']) assert.ok(isAbsolute(values['cold-report']), '--cold-report must be an absolute path');
+if (values.mode === 'source-tree-cold-worker') assert.ok(values['cold-report'], 'cold worker mode is internal and requires --cold-report');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -59,6 +72,10 @@ const archive = values.archive;
 const javaHome = values['java-home'];
 const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
+const buildRoot = await fs.realpath(join(repo, 'build'));
+const buildRootRelative = relative(repo, buildRoot);
+assert.ok(buildRootRelative !== '..' && !buildRootRelative.startsWith(`..${sep}`) && !isAbsolute(buildRootRelative),
+  'Repository build directory must resolve inside the repository');
 assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
 if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
 const sensitiveValues = [];
@@ -78,9 +95,17 @@ async function fileHash(path) {
   for await (const chunk of createReadStream(path)) digest.update(chunk);
   return digest.digest('hex');
 }
-const root = await fs.mkdtemp(join(repo, 'build/packaged-browser-'));
+async function javaRuntimeHashes(home) {
+  return {
+    javaSha256: await fileHash(join(home, 'bin/java')),
+    javaModulesSha256: await fileHash(join(home, 'lib/modules')),
+    javaReleaseSha256: await fileHash(join(home, 'release')),
+  };
+}
+const root = await fs.mkdtemp(join(values['work-parent'], 'packaged-browser-'));
 let application;
 let browser;
+let browserStartupMs = null;
 let vite;
 let work;
 let browserTmp;
@@ -90,21 +115,246 @@ const cdpDiagnostics = new PackagedBrowserCdpDiagnostics();
 const profile = join(root, 'browser profile');
 const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
+const sourceTreeDriverFiles = [
+  'scripts/check-packaged-web-browser.mjs',
+  'scripts/packaged-browser-upload.mjs',
+  'scripts/packaged-browser-scale.mjs',
+  'scripts/packaged-browser-contrast.mjs',
+  'scripts/packaged-source-tree-fixture.mjs',
+  'scripts/packaged-browser-source-tree.mjs',
+  'scripts/packaged-browser-source-tree-cold.mjs',
+  'scripts/packaged-browser-live.mjs',
+  'scripts/packaged-browser-history.mjs',
+  'scripts/packaged-browser-legacy.mjs',
+  'scripts/packaged-browser-restart.mjs',
+  'scripts/packaged-browser-upgrade.mjs',
+  'scripts/packaged-browser-audit.mjs',
+  'scripts/packaged-browser-cdp-diagnostics.mjs',
+  'scripts/packaged-browser-process-supervisor.py',
+  'scripts/run-packaged-browser-source-tree-supervised.mjs',
+  'scripts/packaged-browser-install.py',
+];
+let sourceTreeColdSummary = null;
+let checkoutCommit = null;
+let checkoutParents = null;
+let sourceTreeWorktreeClean = null;
+try {
+  const checkoutRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim());
+  if (checkoutRoot === repo) {
+    checkoutCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim();
+    const commit = execFileSync('git', ['cat-file', '-p', checkoutCommit], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 * 1024 });
+    checkoutParents = commit.split('\n').filter(line => line.startsWith('parent ')).map(line => line.slice('parent '.length));
+    sourceTreeWorktreeClean = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'],
+      { cwd: repo, encoding: 'utf8', maxBuffer: 1024 * 1024 }).trim() === '';
+  }
+} catch { /* An extracted source archive has no Git metadata; retain the driver hashes below. */ }
+if (!checkoutCommit && process.env.GITHUB_SHA && /^[0-9a-f]{40}$/i.test(process.env.GITHUB_SHA)) checkoutCommit = process.env.GITHUB_SHA;
+if (checkoutCommit && process.env.GITHUB_SHA && /^[0-9a-f]{40}$/i.test(process.env.GITHUB_SHA)) {
+  assert.equal(checkoutCommit, process.env.GITHUB_SHA, 'Checked-out source commit differs from the workflow commit');
+  assert.equal(sourceTreeWorktreeClean, true, 'Packaged browser qualification requires the workflow checkout to be clean');
+}
+let pullRequestIdentity = null;
+try {
+  if (process.env.GITHUB_EVENT_PATH) {
+    const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+    const pullRequest = event.pull_request;
+    if (pullRequest?.head?.sha && pullRequest?.base?.sha) pullRequestIdentity = {
+      headSha: pullRequest.head.sha, baseSha: pullRequest.base.sha,
+      mergeSha: process.env.GITHUB_SHA ?? null,
+    };
+  }
+} catch { /* Workflow payload attribution is optional outside GitHub Actions. */ }
 let cdp;
 let applicationError = '';
 let applicationOutput = '';
+let applicationStartupMs = null;
 let browserError = '';
 let viteError = '';
-const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
-  driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
+const report = { status: 'running', mode: values.mode, ...(['source-tree', 'source-tree-cold-worker'].includes(values.mode) ? { profile: values.profile } : {}), testDirectory: root, driverNode: nodeVersion,
+  driverCommit: checkoutCommit, checkoutParents, workflowSha: process.env.GITHUB_SHA ?? null,
+  pullRequestIdentity, sourceTreeWorktreeClean,
+  ...(['source-tree', 'source-tree-cold-worker'].includes(values.mode) ? { sourceTreeDriverSha256: Object.fromEntries(sourceTreeDriverFiles.map(path =>
+    [path, createHash('sha256').update(readFileSync(join(repo, path))).digest('hex')])) } : {}),
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
+let activeColdSupervisor = null;
+let externalCancellation = null;
+let finalReportWritten = false;
+const coldSampleRecords = [];
+let coldSupervisorLaunched = false;
+let coldSupervisorCleanupConfirmed = true;
+let sourceTreeRequestEvidencePromise = null;
+async function externalizeSourceTreeRequestEvidence() {
+  if (sourceTreeRequestEvidencePromise) return sourceTreeRequestEvidencePromise;
+  const routeRequests = report.sourceTreeScale?.requests;
+  if (report.mode !== 'source-tree' || !routeRequests || typeof routeRequests !== 'object') return null;
+  sourceTreeRequestEvidencePromise = (async () => {
+    const file = 'source-tree-scale-evidence.json';
+    const coldSummary = report.sourceTreeColdSamples;
+    if (!coldSummary || !Array.isArray(coldSummary.samples)) {
+      const counts = Object.fromEntries(Object.entries(routeRequests).map(([route, entries]) =>
+        [route, Array.isArray(entries) ? entries.length : null]));
+      report.status = 'failed';
+      report.sourceTreeScale.requests = { counts, artifact: null };
+      report.sourceTreeEvidenceRetention = { confirmed: false, reason: 'cold-sample-records-missing',
+        routeCounts: counts, completeSamplesRetained: false };
+      process.exitCode = 1;
+      return null;
+    }
+    const evidence = {
+      schema: 'decompengine.packaged-source-tree-scale-evidence.v1',
+      driverCommit: report.driverCommit,
+      workflowSha: report.workflowSha,
+      profile: report.profile,
+      fixture: report.sourceTreeScale.fixture,
+      runtime: {
+        archiveSha256: report.archiveSha256, applicationJarSha256: report.applicationJarSha256,
+        buildId: report.buildId, browserProduct: report.browser?.product ?? null,
+        chromeSha256: report.tools.chromeSha256, javaSha256: report.tools.javaSha256,
+        javaModulesSha256: report.tools.javaModulesSha256, javaReleaseSha256: report.tools.javaReleaseSha256,
+        checkoutParents: report.checkoutParents, pullRequestIdentity: report.pullRequestIdentity,
+        sourceTreeDriverSha256: report.sourceTreeDriverSha256,
+      },
+      requests: routeRequests,
+      coldSamples: coldSummary.samples,
+    };
+    const safeEvidence = scrubTokens(evidence, sensitiveValues);
+    const bytes = Buffer.from(`${JSON.stringify(safeEvidence, null, 2)}\n`, 'utf8');
+    const counts = Object.fromEntries(Object.entries(routeRequests).map(([route, entries]) =>
+      [route, Array.isArray(entries) ? entries.length : null]));
+    const coldFailures = coldSummary.samples.filter(sample => sample.status !== 'passed').map(sample => ({
+      index: sample.index, status: sample.status,
+      cleanup: sample.cleanup?.cleanup ?? 'unavailable',
+      cleanupScanIncomplete: sample.cleanup?.cleanupScanIncomplete ?? true,
+      survivors: sample.cleanup?.survivors ?? null,
+      outerSupervisor: sample.outerSupervisor ? {
+        timeout: sample.outerSupervisor.timeout, supervisorExited: sample.outerSupervisor.supervisorExited,
+        cleanupConfirmed: sample.outerSupervisor.cleanupConfirmed,
+        exitCode: sample.outerSupervisor.exitCode, signal: sample.outerSupervisor.signal,
+        error: sample.outerSupervisor.error ?? null,
+      } : null,
+      worker: sample.worker ? { status: sample.worker.status, error: sample.worker.error ?? null } : null,
+    }));
+    const maximumBytes = 8 * 1024 * 1024;
+    const retainFailureSummary = (reason, error = null) => {
+      report.status = 'failed';
+      report.sourceTreeEvidenceRetention = { confirmed: false, reason,
+        observedBytes: bytes.length, maximumBytes, routeCounts: counts,
+        ...(error ? { error: safeDiagnostic(error?.message ?? String(error)) } : {}),
+        completeSamplesRetained: false, sampleCount: coldSummary.samples.length };
+      report.sourceTreeScale.requests = { counts, artifact: null };
+      report.sourceTreeColdSamples = {
+        profile: coldSummary.profile, definition: coldSummary.definition,
+        filesystemState: coldSummary.filesystemState, sampleCount: coldSummary.sampleCount,
+        medianMs: coldSummary.medianMs, nearestRankP95Ms: coldSummary.nearestRankP95Ms,
+        gate: { ...coldSummary.gate, passed: false }, failedAttempts: coldFailures,
+        samplesArtifact: null,
+      };
+      process.exitCode = 1;
+      return null;
+    };
+    if (bytes.length > maximumBytes) {
+      return retainFailureSummary('evidence-artifact-exceeded-byte-bound');
+    }
+    const path = join(root, file);
+    try { await fs.writeFile(path, bytes, { flag: 'wx', mode: 0o600 }); }
+    catch (error) { return retainFailureSummary('evidence-artifact-write-failed', error); }
+    const reference = { file, bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'), counts,
+      schema: evidence.schema, retention: 'complete-request-and-cold-sample-records-in-separate-byte-bounded-artifact' };
+    report.sourceTreeScale.requests = { artifact: file, bytes: reference.bytes, sha256: reference.sha256, counts };
+    report.sourceTreeScale.requestEvidence = reference;
+    report.sourceTreeColdSamples = {
+      profile: coldSummary.profile, definition: coldSummary.definition,
+      filesystemState: coldSummary.filesystemState, sampleCount: coldSummary.sampleCount,
+      medianMs: coldSummary.medianMs, nearestRankP95Ms: coldSummary.nearestRankP95Ms,
+      gate: coldSummary.gate, failedAttempts: coldFailures,
+      samplesArtifact: { file, bytes: reference.bytes, sha256: reference.sha256,
+        sampleCount: coldSummary.samples.length, completeRawSamples: true },
+    };
+    return reference;
+  })();
+  return sourceTreeRequestEvidencePromise;
+}
+async function writeCancelledReport() {
+  await externalizeSourceTreeRequestEvidence().catch(() => null);
+  const cancelledReport = scrubTokens(boundReport(report), sensitiveValues);
+  const writes = [fs.writeFile(join(root, 'report.json'), JSON.stringify(cancelledReport, null, 2) + '\n')];
+  if (values['cold-report']) writes.push(fs.writeFile(values['cold-report'], JSON.stringify(cancelledReport, null, 2) + '\n'));
+  await Promise.all(writes).catch(() => { process.exitCode = 1; });
+}
+function onSourceTreeCancellation(signal) {
+  if (values.mode !== 'source-tree' || externalCancellation) return;
+  externalCancellation = signal;
+  report.status = 'failed';
+  report.externalCancellation = signal;
+  process.exitCode = 1;
+  if (finalReportWritten) void writeCancelledReport();
+  if (activeColdSupervisor) {
+    activeColdSupervisor.kill(signal);
+    return;
+  }
+  for (const child of [browser, application, vite]) {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+  }
+  try { cdp?.socket.close(); } catch { /* The main finally path records bounded cleanup. */ }
+}
+if (values.mode === 'source-tree') {
+  process.on('SIGTERM', () => onSourceTreeCancellation('SIGTERM'));
+  process.on('SIGINT', () => onSourceTreeCancellation('SIGINT'));
+}
 
 function startOwned(command, args, options) {
   const child = spawn(command, args, options);
   child.on('error', (error) => launchErrors.set(child, error));
   return child;
+}
+
+async function processIdentity(pid) {
+  const stat = await fs.readFile(`/proc/${pid}/stat`);
+  const close = stat.lastIndexOf(0x29);
+  assert.ok(close >= 0, 'Could not read process start identity');
+  const fields = stat.subarray(close + 2).toString('ascii').trim().split(/\s+/u);
+  assert.ok(fields.length > 19, 'Process identity record was truncated');
+  const startTicks = Number(fields[19]);
+  assert.ok(Number.isSafeInteger(startTicks) && startTicks >= 0, 'Process start identity was invalid');
+  const processName = stat.subarray(1, close).toString('utf8');
+  const executable = basename(await fs.readlink(`/proc/${pid}/exe`));
+  return { pid, startTicks, processName, executable };
+}
+
+async function javaProcessIdentity(launcherPid) {
+  const entries = (await fs.readdir('/proc')).filter(name => /^[1-9][0-9]*$/u.test(name)).map(Number);
+  const parents = new Map();
+  const names = new Map();
+  await Promise.all(entries.map(async pid => {
+    try {
+      const stat = await fs.readFile(`/proc/${pid}/stat`);
+      const close = stat.lastIndexOf(0x29);
+      if (close < 0) return;
+      const fields = stat.subarray(close + 2).toString('ascii').trim().split(/\s+/u);
+      if (fields.length > 19) { parents.set(pid, Number(fields[1])); names.set(pid, stat.subarray(1, close).toString('utf8')); }
+    } catch { /* Processes can exit while the observation snapshot is collected. */ }
+  }));
+  const descendants = new Set([launcherPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, parent] of parents) if (descendants.has(parent) && !descendants.has(pid)) {
+      descendants.add(pid);
+      changed = true;
+    }
+  }
+  const candidates = [];
+  for (const pid of descendants) {
+    try {
+      const executable = basename(await fs.readlink(`/proc/${pid}/exe`));
+      if (names.get(pid) === 'java' || /^java(?:[0-9.]*)?$/iu.test(executable)) candidates.push(await processIdentity(pid));
+    } catch { /* A transient exit is not a JVM identity. */ }
+  }
+  assert.equal(candidates.length, 1, 'The packaged launcher must own exactly one identifiable Java process');
+  return candidates[0];
 }
 
 async function waitFor(check, label, timeout = 20000) {
@@ -118,6 +368,184 @@ async function waitFor(check, label, timeout = 20000) {
     await delay(75);
   }
   throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function makeOwnedDirectoriesRemovable(directory) {
+  const info = await fs.lstat(directory);
+  assert.ok(info.isDirectory() && !info.isSymbolicLink(), 'Owned cleanup root must be a real directory');
+  await fs.chmod(directory, 0o700);
+  for (const name of await fs.readdir(directory)) {
+    const child = join(directory, name);
+    const childInfo = await fs.lstat(child);
+    if (childInfo.isDirectory() && !childInfo.isSymbolicLink()) {
+      await makeOwnedDirectoriesRemovable(child);
+    }
+  }
+}
+
+async function runSourceTreeColdSamples(expected) {
+  const samples = coldSampleRecords;
+  const sampleRoot = join(root, 'source-tree-cold-samples');
+  await fs.mkdir(sampleRoot);
+  let abortReason = null;
+  try {
+  for (let index = 0; index < SOURCE_TREE_COLD_SAMPLE_COUNT; index++) {
+    if (externalCancellation) { abortReason ??= 'cancelled-before-next-sample'; break; }
+    const sampleDirectory = join(sampleRoot, `sample-${String(index + 1).padStart(2, '0')}`);
+    await fs.mkdir(sampleDirectory);
+    const workerWorkParent = join(sampleDirectory, 'worker-owned-files');
+    await fs.mkdir(workerWorkParent);
+    const workerReport = join(sampleDirectory, 'worker-report.json');
+    const receiptPath = join(sampleDirectory, 'supervisor-receipt.json');
+    const supervisorDiagnosticPath = join(sampleDirectory, 'supervisor-diagnostic.log');
+    const supervisorPath = join(repo, 'scripts/packaged-browser-process-supervisor.py');
+    const workerArgs = [driverScriptPath, '--archive', archive, '--chrome', chromeBinary, '--java-home', javaHome,
+      '--python', values.python, '--work-parent', workerWorkParent, '--mode', 'source-tree-cold-worker',
+      '--profile', values.profile, '--cold-report', workerReport, '--keep-workdir'];
+    if (values['no-sandbox']) workerArgs.push('--no-sandbox');
+    const commandArgs = [supervisorPath, '--receipt', receiptPath, '--execution-timeout-seconds', '180', '--', process.execPath, ...workerArgs];
+    let diagnosticHandle;
+    let child;
+    let diagnosticCloseError = null;
+    try {
+      diagnosticHandle = await fs.open(supervisorDiagnosticPath, 'wx', 0o600);
+      child = spawn(values.python, commandArgs, { cwd: repo, env: process.env,
+        stdio: ['ignore', 'ignore', diagnosticHandle.fd] });
+    } catch (error) {
+      await diagnosticHandle?.close().catch(() => {});
+      samples.push({ index: index + 1, status: 'failed', result: null,
+        cleanup: { cleanup: 'not-started', cleanupScanIncomplete: false, survivors: [] },
+        identityMatchesOuterRun: false,
+        outerSupervisor: { timeout: false, supervisorExited: true, cleanupConfirmed: true,
+          retainedAsCleanupOwner: false, exitCode: null, signal: null,
+          error: safeDiagnostic(error.message), diagnostic: null },
+        worker: { status: null, exitCode: null, signal: null,
+          error: safeDiagnostic(error.message), report: basename(workerReport) } });
+      report.sourceTreeColdSamples = summarizeSourceTreeColdSamples(samples, values.profile);
+      abortReason = `cold-sample-${index + 1}-supervisor-launch-failed`;
+      break;
+    }
+    activeColdSupervisor = child;
+    coldSupervisorLaunched = true;
+    coldSupervisorCleanupConfirmed = false;
+    if (externalCancellation) child.kill(externalCancellation);
+    const closed = new Promise(resolve => {
+      child.once('error', error => resolve({ code: null, signal: null, error: safeDiagnostic(error.message) }));
+      child.once('close', (code, signal) => resolve({ code, signal }));
+    });
+    try { await diagnosticHandle.close(); }
+    catch (error) { diagnosticCloseError = safeDiagnostic(error.message); }
+    const waitForClose = milliseconds => new Promise(resolve => {
+      const timer = setTimeout(() => resolve(null), milliseconds);
+      closed.then(value => { clearTimeout(timer); resolve(value); });
+    });
+    let exit = await waitForClose(225_000); // 180-second worker deadline plus cleanup/report allowance.
+    let outerTimedOut = false;
+    if (!exit) {
+      outerTimedOut = true;
+      child.kill('SIGTERM');
+      exit = await waitForClose(40_000);
+    }
+    if (!exit) {
+      let escalationReceipt = null;
+      try { escalationReceipt = JSON.parse(await fs.readFile(receiptPath, 'utf8')); } catch { /* No proof means keep the only cleanup owner alive. */ }
+      const descendantsConfirmedGone = escalationReceipt && !escalationReceipt.cleanupScanIncomplete
+        && (escalationReceipt.survivors?.length ?? 0) === 0
+        && ['clean', 'terminated-leaked'].includes(escalationReceipt.cleanup);
+      if (descendantsConfirmedGone) {
+        child.kill('SIGKILL');
+        exit = await waitForClose(5_000);
+      }
+    }
+    const outerCleanupConfirmed = !!exit;
+    if (!outerCleanupConfirmed) child.unref(); // It remains the live subreaper/cleanup owner; never orphan its descendants.
+    exit ??= { code: null, signal: null, error: 'supervisor-did-not-exit-after-outer-escalation' };
+    if (outerCleanupConfirmed) activeColdSupervisor = null;
+    let receipt = null;
+    let worker = null;
+    try { receipt = JSON.parse(await fs.readFile(receiptPath, 'utf8')); } catch { /* Retain a missing/malformed receipt as a failed attempt. */ }
+    try { worker = JSON.parse(await fs.readFile(workerReport, 'utf8')); } catch { /* Retain a missing/malformed report as a failed attempt. */ }
+    let supervisorDiagnostic = null;
+    try {
+      const info = await fs.stat(supervisorDiagnosticPath);
+      const handle = await fs.open(supervisorDiagnosticPath, 'r');
+      try {
+        const length = Math.min(info.size, 65_536);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, Math.max(0, info.size - length));
+        supervisorDiagnostic = safeDiagnostic(buffer.toString('utf8'));
+      } finally { await handle.close(); }
+    } catch { /* Missing diagnostics do not erase the retained worker and receipt evidence. */ }
+    const cleanup = receipt ?? { cleanup: 'unavailable', cleanupScanIncomplete: true, supervisorExitCode: exit.code };
+    const result = worker?.coldSampleResult ?? null;
+    const expectedIdentity = { archiveSha256: expected.archiveSha256, applicationJarSha256: expected.applicationJarSha256,
+      buildId: expected.buildId, chromeSha256: expected.chromeSha256,
+      javaSha256: expected.javaSha256, javaModulesSha256: expected.javaModulesSha256,
+      javaReleaseSha256: expected.javaReleaseSha256,
+      workflowSha: expected.workflowSha, driverCommit: expected.driverCommit,
+      checkoutParents: expected.checkoutParents, pullRequestIdentity: expected.pullRequestIdentity,
+      sourceTreeWorktreeClean: expected.sourceTreeWorktreeClean,
+      sourceTreeDriverSha256: expected.sourceTreeDriverSha256, fixture: expected.fixture };
+    const observedIdentity = result && { archiveSha256: result.archiveSha256,
+      applicationJarSha256: result.applicationJarSha256, buildId: result.buildId,
+      chromeSha256: result.chromeSha256, javaSha256: result.javaSha256,
+      javaModulesSha256: result.javaModulesSha256, javaReleaseSha256: result.javaReleaseSha256,
+      workflowSha: result.workflowSha, driverCommit: result.driverCommit,
+      checkoutParents: result.checkoutParents, pullRequestIdentity: result.pullRequestIdentity,
+      sourceTreeWorktreeClean: result.sourceTreeWorktreeClean,
+      sourceTreeDriverSha256: result.sourceTreeDriverSha256, fixture: result.fixture };
+    const identityMatchesOuterRun = !!result && JSON.stringify(observedIdentity) === JSON.stringify(expectedIdentity);
+    const cleanupConfirmed = receipt && !receipt.cleanupScanIncomplete && (receipt.survivors?.length ?? 0) === 0
+      && ['clean', 'terminated-leaked'].includes(receipt.cleanup);
+    coldSupervisorCleanupConfirmed = outerCleanupConfirmed && !!cleanupConfirmed;
+    const status = !diagnosticCloseError && !outerTimedOut && outerCleanupConfirmed && exit.code === 0
+      && worker?.status === 'passed' && cleanupConfirmed && cleanup.cleanup === 'clean'
+      && cleanup.status === 'passed' && result
+      && identityMatchesOuterRun ? 'passed' : 'failed';
+    samples.push({ index: index + 1, status, result, cleanup, identityMatchesOuterRun: !!identityMatchesOuterRun,
+      outerSupervisor: { timeout: outerTimedOut, supervisorExited: outerCleanupConfirmed,
+        cleanupConfirmed: outerCleanupConfirmed && !!cleanupConfirmed,
+        retainedAsCleanupOwner: !outerCleanupConfirmed,
+        exitCode: exit.code, signal: exit.signal ?? null,
+        error: exit.error ?? diagnosticCloseError,
+        diagnostic: supervisorDiagnostic },
+      worker: { status: worker?.status ?? null, exitCode: exit.code, signal: exit.signal ?? null,
+        error: worker?.error ?? exit.error ?? supervisorDiagnostic, report: basename(workerReport) } });
+    report.sourceTreeColdSamples = summarizeSourceTreeColdSamples(samples, values.profile);
+    await fs.writeFile(join(sampleDirectory, 'sample-summary.json'), JSON.stringify(samples.at(-1), null, 2) + '\n');
+    console.log(`Source-tree cold sample ${index + 1}/${SOURCE_TREE_COLD_SAMPLE_COUNT}: ${status}`);
+    if (!cleanupConfirmed || !outerCleanupConfirmed) {
+      abortReason = `cold-sample-${index + 1}-teardown-unconfirmed`;
+      break;
+    }
+    // The worker retained all process-owned files. Remove them only after its
+    // subreaper receipt proves that every owned descendant has exited.
+    const workerBrowserTmp = resolve(worker?.browserTempDirectory ?? '');
+    assert.equal(await fs.realpath(dirname(workerBrowserTmp)), buildRoot, 'Cold worker temp directory escaped the short owned build path');
+    assert.match(basename(workerBrowserTmp), /^\.ct-[A-Za-z0-9]+$/u, 'Cold worker temp directory is not an owned Chromium socket directory');
+    await fs.rm(workerBrowserTmp, { recursive: true, force: true });
+    assert.equal(await fs.realpath(dirname(workerWorkParent)), await fs.realpath(sampleDirectory),
+      'Cold worker files escaped their unique sample owner');
+    await makeOwnedDirectoriesRemovable(workerWorkParent);
+    await fs.rm(workerWorkParent, { recursive: true, force: true });
+    samples.at(-1).cleanup = { ...samples.at(-1).cleanup,
+      browserTempRemovedAfterConfirmedTeardown: true, workerFilesRemovedAfterConfirmedTeardown: true };
+    await fs.writeFile(join(sampleDirectory, 'sample-summary.json'), JSON.stringify(samples.at(-1), null, 2) + '\n');
+    if (outerTimedOut) {
+      abortReason = `cold-sample-${index + 1}-outer-timeout`;
+      break;
+    }
+    if (cleanup.executionTimedOut) {
+      abortReason = `cold-sample-${index + 1}-execution-timeout`;
+      break;
+    }
+    if (externalCancellation) { abortReason ??= 'cancelled-during-cold-sample'; break; }
+  }
+  return { ...summarizeSourceTreeColdSamples(samples, values.profile),
+    ...(abortReason || externalCancellation ? { interrupted: { signal: externalCancellation, reason: abortReason } } : {}) };
+  } finally {
+    if (activeColdSupervisor?.exitCode !== null || activeColdSupervisor?.signalCode !== null) activeColdSupervisor = null;
+  }
 }
 
 class Protocol {
@@ -476,6 +904,7 @@ function recordInstallation(installation) {
 }
 
 async function launchApplication(installation, port = '0', frontendOrigin) {
+  const startupStarted = performance.now();
   applicationOutput = '';
   applicationError = '';
   application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', values.mode === 'legacy' ? 'legacy' : 'spa', '--host', '127.0.0.1', '--port', port,
@@ -488,6 +917,7 @@ async function launchApplication(installation, port = '0', frontendOrigin) {
     if (application.exitCode !== null || application.signalCode !== null) throw new Error(`Packaged application exited: ${applicationError}`);
     return applicationOutput.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
   }, 'packaged application listener');
+  applicationStartupMs = Math.round((performance.now() - startupStarted) * 100) / 100;
   console.log(`Packaged application ready: ${origin}${values.mode === 'legacy' ? '/' : '/nested/'}`);
   return origin;
 }
@@ -502,6 +932,9 @@ async function removeOwnedWork() {
 
 try {
   report.tools.chromeSha256 = await fileHash(chromeBinary);
+  if (['source-tree', 'source-tree-cold-worker'].includes(values.mode)) {
+    Object.assign(report.tools, await javaRuntimeHashes(javaHome));
+  }
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);
   const { manifest, data } = installation;
@@ -509,12 +942,32 @@ try {
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
+  const sourceTreeFixture = ['source-tree', 'source-tree-cold-worker'].includes(values.mode) ? await seedSourceTreeFixture(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
+  const populated = !!(historyFixture || restartFixture || scaleFixture || sourceTreeFixture || liveFixture);
   const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+    : sourceTreeFixture ? 'synthetic-source-tree.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
+  if (values.mode === 'source-tree') {
+    sourceTreeColdSummary = await runSourceTreeColdSamples({ archiveSha256: installation.archiveSha256,
+      applicationJarSha256: installation.jarSha256, buildId: installation.manifest.buildId,
+      chromeSha256: report.tools.chromeSha256, javaSha256: report.tools.javaSha256,
+      javaModulesSha256: report.tools.javaModulesSha256, javaReleaseSha256: report.tools.javaReleaseSha256,
+      workflowSha: report.workflowSha,
+      driverCommit: report.driverCommit, checkoutParents: report.checkoutParents,
+      pullRequestIdentity: report.pullRequestIdentity, sourceTreeWorktreeClean: report.sourceTreeWorktreeClean,
+      sourceTreeDriverSha256: report.sourceTreeDriverSha256,
+      fixture: { jobId: sourceTreeFixture.jobId, runId: sourceTreeFixture.runId,
+        revisionId: sourceTreeFixture.revisionId, fileCount: sourceTreeFixture.fileCount,
+        binarySha256: sourceTreeFixture.binarySha256, sourceSha256: sourceTreeFixture.sourceSha256,
+        profileId: sourceTreeFixture.profileId, profileSha256: sourceTreeFixture.profileSha256 } });
+    report.sourceTreeColdSamples = sourceTreeColdSummary;
+    if (sourceTreeColdSummary.interrupted) throw new Error(`Cold sampling stopped: ${JSON.stringify(sourceTreeColdSummary.interrupted)}`);
+    assert.equal(await fileHash(archive), installation.archiveSha256,
+      'The packaged archive changed during cold sampling');
+  }
   if (values.mode === 'proxy') {
     const reservation = createHttpServer();
     await new Promise((resolve, reject) => {
@@ -536,17 +989,20 @@ try {
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  browserTmp = await fs.mkdtemp(join(repo, 'build/.ct-'));
   report.browserTempDirectory = browserTmp;
+  report.browserProfileDirectory = profile;
   await fs.mkdir(profile);
+  const browserStartupStarted = performance.now();
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
-    env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
+    cwd: repo, env: { ...process.env, TMPDIR: relative(repo, browserTmp) }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
     if (browser.exitCode !== null || browser.signalCode !== null) throw new Error(`Browser exited: ${browserError}`);
     try { return await fs.readFile(join(profile, 'DevToolsActivePort'), 'utf8'); } catch { return false; }
   }, 'Chrome DevTools listener');
+  browserStartupMs = Math.round((performance.now() - browserStartupStarted) * 100) / 100;
   const [port, socketPath] = portFile.trim().split('\n');
   const socket = await connectDevTools(`ws://127.0.0.1:${port}${socketPath}`);
   cdp = new Protocol(socket);
@@ -569,6 +1025,65 @@ try {
   }
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
+  if (values.mode === 'source-tree-cold-worker') {
+    const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/nested/#bootstrap=')), 'fresh JVM bootstrap handoff');
+    const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
+    sensitiveValues.push(token);
+    const coldTab = await makeTarget();
+    const authenticationStarted = performance.now();
+    const exchange = await fetch(`${origin}/nested/api/v1/session`, {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json', origin },
+      body: JSON.stringify({ token }),
+      redirect: 'manual',
+    });
+    assert.equal(exchange.status, 200, 'Fresh bootstrap exchange did not create a session');
+    const exchangeBody = await exchange.json();
+    assert.ok(exchangeBody.data?.csrfToken && exchangeBody.data?.expiresAt, 'Session response omitted credential metadata');
+    const setCookie = exchange.headers.get('set-cookie');
+    assert.ok(setCookie, 'Session exchange omitted its HttpOnly cookie');
+    const cookiePair = setCookie.split(';', 1)[0];
+    const separator = cookiePair.indexOf('=');
+    assert.ok(separator > 0 && cookiePair.length - separator > 1, 'Session cookie was malformed');
+    const cookieName = cookiePair.slice(0, separator);
+    const cookieValue = cookiePair.slice(separator + 1);
+    sensitiveValues.push(cookieValue);
+    const cookieResult = await cdp.call('Network.setCookie', { url: `${origin}/nested/`, name: cookieName,
+      value: cookieValue, path: '/nested/', httpOnly: true, sameSite: 'Strict', secure: false }, coldTab.sessionId);
+    assert.equal(cookieResult.success, true, 'Could not install the real session cookie in the empty browser profile');
+    const installedCookies = (await cdp.call('Network.getCookies', { urls: [`${origin}/nested/`] }, coldTab.sessionId)).cookies;
+    assert.equal(installedCookies.length, 1, 'Cold profile contained storage beyond its one required session cookie');
+    assert.equal(installedCookies[0].name, cookieName);
+    assert.equal(installedCookies[0].path, '/nested/');
+    assert.equal(installedCookies[0].httpOnly, true);
+    assert.equal(installedCookies[0].sameSite, 'Strict');
+    const authenticationMs = Math.round((performance.now() - authenticationStarted) * 100) / 100;
+    const result = await qualifySourceTreeColdPage({ fixture: sourceTreeFixture, target: coldTab, cdp, evaluate, ready,
+      browserOrigin, profile: values.profile });
+    assert.equal(await evaluate(coldTab, 'location.hash'), '', 'The browser document must not contain a bootstrap fragment');
+    assert.equal(await evaluate(coldTab, 'localStorage.length + sessionStorage.length'), 0,
+      'Cold browser authentication must not add local or session storage');
+    report.coldSampleResult = { ...result, browserPid: browser.pid, jvmPid: application.pid,
+      profileId: createHash('sha256').update(profile).digest('hex'), jvmStartupMs: applicationStartupMs,
+      browserStartupMs, authenticationMs,
+      browserProcessIdentity: await processIdentity(browser.pid), jvmProcessIdentity: await javaProcessIdentity(application.pid),
+      archiveSha256: installation.archiveSha256, applicationJarSha256: installation.jarSha256,
+      buildId: manifest.buildId, chromeSha256: report.tools.chromeSha256,
+      javaSha256: report.tools.javaSha256,
+      javaModulesSha256: report.tools.javaModulesSha256, javaReleaseSha256: report.tools.javaReleaseSha256,
+      browserProduct: report.browser.product, workflowSha: report.workflowSha, driverCommit: report.driverCommit,
+      checkoutParents: report.checkoutParents, pullRequestIdentity: report.pullRequestIdentity,
+      sourceTreeWorktreeClean: report.sourceTreeWorktreeClean,
+      sourceTreeDriverSha256: report.sourceTreeDriverSha256,
+      fixture: { jobId: sourceTreeFixture.jobId, runId: sourceTreeFixture.runId,
+        revisionId: sourceTreeFixture.revisionId, fileCount: sourceTreeFixture.fileCount,
+        binarySha256: sourceTreeFixture.binarySha256, sourceSha256: sourceTreeFixture.sourceSha256,
+        profileId: sourceTreeFixture.profileId, profileSha256: sourceTreeFixture.profileSha256 },
+      applicationCacheBoundary: 'new packaged JVM; source fixture seeded before launch; no source API read before direct measured navigation; source catalog cache is process-local',
+      sessionBoundary: 'fresh bootstrap POST performed by the driver; exactly one HttpOnly session cookie installed before the first browser document; no bootstrap fragment, local storage, session storage, or prior session reused' };
+    report.sourceTreeScale = { coldFirstDataPage: { durationMs: result.durationMs } };
+    report.browserColdProfileId = report.coldSampleResult.profileId;
+  } else {
   report.cspDetectorProbe = await qualifyCspDetector();
   if (legacyFixture) {
     const tab = await makeTarget();
@@ -727,7 +1242,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'source-tree' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -884,7 +1399,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'source-tree' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -901,8 +1416,30 @@ try {
         return original.apply(this, arguments);
       };
     })();` }, authenticated.sessionId);
-    await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
+    const authenticationUrl = new URL(bootstrapUrl);
+    if (sourceTreeFixture) authenticationUrl.pathname = '/nested/runtime';
+    await cdp.call('Page.navigate', { url: authenticationUrl.href }, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.')`, 'authenticated packaged session');
+    if (sourceTreeFixture) {
+      await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status'`, 'authenticated source-tree session route');
+      report.sourceTreeScale = await qualifySourceTree({ fixture: sourceTreeFixture, makeTarget, cdp, evaluate, ready,
+        browserOrigin, serverPid: application.pid, profile: values.profile });
+      report.sourceTreeScale.coldFirstDataPage = {
+        profile: sourceTreeColdSummary.profile,
+        requiredSamples: sourceTreeColdSummary.gate.requiredSamples,
+        attemptedSamples: sourceTreeColdSummary.gate.attemptedSamples,
+        successfulSamples: sourceTreeColdSummary.gate.successfulSamples,
+        failedSamples: sourceTreeColdSummary.gate.failedSamples,
+        medianMs: sourceTreeColdSummary.medianMs,
+        nearestRankP95Ms: sourceTreeColdSummary.nearestRankP95Ms,
+        gate: sourceTreeColdSummary.gate,
+        fullSamplesAt: 'sourceTreeColdSamples.samples',
+      };
+      report.jobDataCreated = true;
+      report.session = { authenticated: true, sessionRoute: '/nested/runtime', jobDataCreated: true,
+        automaticMutationRetries: 0, installationUnchanged: true };
+      report.requests.authenticated = authenticated.requests;
+    } else {
     if (values.mode === 'proxy') {
       await waitFor(() => hmrConnected, 'real Vite HMR connection');
       report.hmrConnected = true;
@@ -1116,8 +1653,10 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'metadata' || populated);
     report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || values.mode === 'metadata' || populated };
     report.requests.authenticated = authenticated.requests;
+    }
   }
 
+  }
   // Let the final DevTools events drain before taking the evidence snapshot.
   await delay(100);
   report.contentSecurityPolicy = cspEvidence();
@@ -1136,6 +1675,10 @@ try {
     'A packaged production Document response omitted CSP');
   assert.deepEqual(report.contentSecurityPolicy.unsafePolicyDocuments, [],
     'A packaged Document response enabled unsafe-inline or unsafe-eval');
+  if (values.mode === 'source-tree' && !sourceTreeColdSummary?.gate?.passed) {
+    throw new Error('The fresh-process source-tree cold-page gate failed');
+  }
+  if (externalCancellation) throw new Error(`Packaged source-tree run was cancelled by ${externalCancellation}`);
   assert.deepEqual(await snapshot(installation.app), installation.before, 'Read-only installation bytes changed');
   report.installationUnchanged = true;
 
@@ -1170,10 +1713,18 @@ try {
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
+  const coldSupervisorShutdownConfirmed = values.mode !== 'source-tree'
+    || !coldSupervisorLaunched || coldSupervisorCleanupConfirmed;
+  if (values.mode === 'source-tree') report.coldSupervisorShutdownConfirmed = coldSupervisorShutdownConfirmed;
   if (values.mode === 'restart' && application && forcedKill.has(application)) {
     report.status = 'failed'; report.forcedShutdown = true; process.exitCode = 1;
   }
-  report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
+  report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled') && coldSupervisorShutdownConfirmed;
+  if (externalCancellation) {
+    report.status = 'failed';
+    report.externalCancellation = externalCancellation;
+    process.exitCode = 1;
+  }
   if (!report.shutdownConfirmed) {
     report.status = 'failed';
     report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => safeDiagnostic(result.reason));
@@ -1195,8 +1746,19 @@ try {
       process.exitCode = 1;
     }
   }
+  await externalizeSourceTreeRequestEvidence();
   const retained = scrubTokens(boundReport(report), sensitiveValues);
   await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained, null, 2) + '\n');
+  if (values['cold-report']) await fs.writeFile(values['cold-report'], JSON.stringify(retained, null, 2) + '\n');
+  if (externalCancellation && (retained.externalCancellation !== externalCancellation || retained.status !== 'failed')) {
+    report.status = 'failed';
+    report.externalCancellation = externalCancellation;
+    const cancelledReport = scrubTokens(boundReport(report), sensitiveValues);
+    await fs.writeFile(join(root, 'report.json'), JSON.stringify(cancelledReport, null, 2) + '\n');
+    if (values['cold-report']) await fs.writeFile(values['cold-report'], JSON.stringify(cancelledReport, null, 2) + '\n');
+  }
+  finalReportWritten = true;
+  if (externalCancellation) process.exitCode = 1;
   console.log(JSON.stringify(retained, null, 2));
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }

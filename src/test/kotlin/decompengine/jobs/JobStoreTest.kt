@@ -12,12 +12,43 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class JobStoreTest {
+    @Test
+    fun `job and source run identity patterns retain exact accepted boundaries`() {
+        val root = createTempDirectory("jobs-identity-boundaries-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("snapshot.elf", elfFixture())
+        assertEquals(job.sizeBytes.toLong(), store.readInputDigest(job.id).size)
+
+        for (invalid in listOf("a".repeat(31), "a".repeat(33), "A".repeat(32), "a".repeat(31) + " ",
+            "a".repeat(31) + "\n", "a".repeat(31) + "/")) {
+            val failure = assertFailsWith<JobStoreException> { store.readInputDigest(invalid) }
+            assertEquals("invalid job id: $invalid", failure.message)
+        }
+
+        val validRunIds = listOf("r", "a_b", "a-b", "a" + "b".repeat(127))
+        for (runId in validRunIds) {
+            val content = "source for $runId".toByteArray()
+            val source = root.resolve(job.id).resolve("reports/runs/$runId/source-tree/src/input.c")
+            java.nio.file.Files.createDirectories(source.parent)
+            java.nio.file.Files.write(source, content)
+            assertContentEquals(content, store.readSourceInput(job.id, runId, "src/input.c", 1024).bytes)
+        }
+
+        for (invalid in listOf("", "_run", "-run", "a".repeat(129), "run/child", "with space", "with\nline", "r\u00e9sum\u00e9", "nul\u0000byte")) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.readSourceInput(job.id, invalid, "src/input.c", 1024)
+            }
+            assertEquals("source attempt identity is invalid", failure.message)
+        }
+    }
+
     @Test
     fun `strict metadata read detects only owned sibling directory link count change`() {
         val root = createTempDirectory("jobs-metadata-sibling-diagnostic-")
@@ -173,7 +204,7 @@ class JobStoreTest {
                     java.nio.file.Files.createLink(metadata.resolveSibling("retained-job.json"), metadata)
                 }
             }
-            assertTrue(failure.message.orEmpty().contains("descriptor identity differs"))
+            assertTrue(failure.message.orEmpty().contains("descriptor changed while it was read"))
         }
 
         run {
@@ -209,7 +240,7 @@ class JobStoreTest {
             } finally {
                 java.nio.file.Files.setPosixFilePermissions(metadata, originalMode)
             }
-            assertTrue(failure.message.orEmpty().contains("identity differs"))
+            assertTrue(failure.message.orEmpty().contains("descriptor changed while it was read"))
         }
     }
 
@@ -225,6 +256,17 @@ class JobStoreTest {
         val selected = store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong())
         kotlin.test.assertContentEquals(payload, selected.bytes)
         assertEquals(decompengine.project.sha256(payload), selected.sha256)
+        val receipt = store.readArtifactDigest(job.id, "reports/ordinary.json", payload.size.toLong())
+        assertEquals(selected.sha256, receipt.sha256)
+        assertEquals(payload.size.toLong(), receipt.size)
+        assertEquals(selected.identity, receipt.identity)
+        val hardLink = reports.resolve("linked.json")
+        runCatching { java.nio.file.Files.createLink(hardLink, path) }.onSuccess {
+            assertFailsWith<JobStoreException> {
+                store.readArtifactDigest(job.id, "reports/ordinary.json", payload.size.toLong())
+            }
+            java.nio.file.Files.delete(hardLink)
+        }
         assertFailsWith<decompengine.repair.RepairBudgetExceededException> {
             store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong() - 1)
         }
@@ -250,6 +292,62 @@ class JobStoreTest {
         }
         assertTrue(replacedDirectory.message.orEmpty().contains("directory binding changed"))
         kotlin.test.assertContentEquals(payload, store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong()).bytes)
+    }
+
+    @Test
+    fun `streamed source metadata digests preserve input and artifact access timestamps`() {
+        val root = createTempDirectory("jobs-source-digest-noatime-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("snapshot.elf", elfFixture())
+        val reports = java.nio.file.Files.createDirectory(root.resolve(job.id).resolve("reports"))
+        val artifact = reports.resolve("metadata.json")
+        val bytes = "{\"files\":[]}".toByteArray()
+        java.nio.file.Files.write(artifact, bytes)
+        val expectedInputSha256 = store.readInput(job.id).sha256
+        val oldAtime = java.nio.file.attribute.FileTime.fromMillis(1_000)
+        val inputPath = root.resolve(job.id).resolve("input.elf")
+        java.nio.file.Files.setAttribute(inputPath, "lastAccessTime", oldAtime)
+        java.nio.file.Files.setAttribute(artifact, "lastAccessTime", oldAtime)
+
+        val inputReceipt = store.readInputDigest(job.id)
+        val artifactReceipt = store.readArtifactDigest(job.id, "reports/metadata.json", bytes.size.toLong())
+        assertEquals(expectedInputSha256, inputReceipt.sha256)
+        assertEquals(decompengine.project.sha256(bytes), artifactReceipt.sha256)
+        assertEquals(oldAtime, java.nio.file.Files.readAttributes(inputPath,
+            java.nio.file.attribute.BasicFileAttributes::class.java).lastAccessTime())
+        assertEquals(oldAtime, java.nio.file.Files.readAttributes(artifact,
+            java.nio.file.attribute.BasicFileAttributes::class.java).lastAccessTime())
+    }
+
+    @Test
+    fun `streamed digest refuses chunkwise rewrite even when size and mtime are restored`() {
+        val root = createTempDirectory("jobs-source-digest-ctime-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("snapshot.elf", elfFixture())
+        val reports = java.nio.file.Files.createDirectory(root.resolve(job.id).resolve("reports"))
+        val target = reports.resolve("changing.json")
+        val original = ByteArray(128 * 1024) { 'A'.code.toByte() }
+        val replacement = ByteArray(original.size) { 'B'.code.toByte() }
+        java.nio.file.Files.write(target, original)
+        val originalMtime = java.nio.file.Files.getLastModifiedTime(target)
+        var rewrote = false
+
+        assertFailsWith<decompengine.repair.StableFileChangedException> {
+            decompengine.repair.hashStableRegularFile(root, "${job.id}/reports/changing.json",
+                declaredSize = { assertEquals(original.size.toLong(), it) },
+                readBytes = { _, _ ->
+                    if (!rewrote) {
+                        rewrote = true
+                        java.nio.file.Files.write(target, replacement,
+                            java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)
+                        java.nio.file.Files.setLastModifiedTime(target, originalMtime)
+                    }
+                },
+                cancellationCheck = {})
+        }
+        assertTrue(rewrote)
+        assertEquals(original.size.toLong(), java.nio.file.Files.size(target))
+        assertEquals(originalMtime, java.nio.file.Files.getLastModifiedTime(target))
     }
 
     @Test

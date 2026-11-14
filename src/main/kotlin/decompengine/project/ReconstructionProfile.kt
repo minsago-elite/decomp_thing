@@ -356,8 +356,23 @@ internal fun requireNormalizedProjectPath(value: String, subject: String): Strin
         value.isNotBlank() && value.length <= 4_096 && !value.startsWith('/') && '\\' !in value &&
             value.none { it.code < 0x20 || it.code == 0x7f || it == ':' },
     ) { "$subject is not a normalized relative path: $value" }
-    require(value.split('/').none { it.isBlank() || it == "." || it == ".." || it.length > 255 }) {
-        "$subject is not a normalized relative path: $value"
+    var componentStart = 0
+    var componentEnd = 0
+    var componentHasNonWhitespace = false
+    while (componentEnd <= value.length) {
+        if (componentEnd == value.length || value[componentEnd] == '/') {
+            val componentLength = componentEnd - componentStart
+            val dotComponent = componentLength == 1 && value[componentStart] == '.'
+            val dotDotComponent = componentLength == 2 && value[componentStart] == '.' && value[componentStart + 1] == '.'
+            require(componentLength in 1..255 && componentHasNonWhitespace && !dotComponent && !dotDotComponent) {
+                "$subject is not a normalized relative path: $value"
+            }
+            componentStart = componentEnd + 1
+            componentHasNonWhitespace = false
+        } else if (!value[componentEnd].isWhitespace()) {
+            componentHasNonWhitespace = true
+        }
+        componentEnd++
     }
     return value
 }

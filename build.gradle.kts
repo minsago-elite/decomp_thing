@@ -64,6 +64,36 @@ kotlin {
 application {
     mainClass.set("decompengine.MainKt")
     applicationName = "llm_bin_patch"
+    // Avoid committing an ergonomic multi-gigabyte heap before the web process needs it.
+    applicationDefaultJvmArgs = listOf("-Xms64m")
+}
+
+// The current packaged web mode has a measured resident-memory ceiling. Keep it scoped to the
+// web command so reconstruction and analysis CLI processes retain the JVM's normal max heap.
+tasks.named<org.gradle.jvm.application.tasks.CreateStartScripts>("startScripts") {
+    doLast {
+        val scriptsDirectory = layout.buildDirectory.dir("scripts").get().asFile
+        val scriptBaseName = applicationName ?: "llm_bin_patch"
+        val unixScript = scriptsDirectory.resolve(scriptBaseName)
+        val unixMarker = "DEFAULT_JVM_OPTS='\"-Xms64m\"'"
+        val unixAddition = """# Keep packaged web serving within its measured RSS envelope.
+if [ "${'$'}{1-}" = "web" ]; then
+    DEFAULT_JVM_OPTS="${'$'}DEFAULT_JVM_OPTS \"-Xmx256m\" \"-XX:ActiveProcessorCount=4\""
+fi"""
+        require(unixScript.isFile) { "generated Unix application launcher is missing" }
+        val unixText = unixScript.readText()
+        require(unixMarker in unixText) { "generated Unix launcher JVM options changed unexpectedly" }
+        unixScript.writeText(unixText.replace(unixMarker, "$unixMarker\n$unixAddition"))
+
+        val windowsScript = scriptsDirectory.resolve("$scriptBaseName.bat")
+        val windowsMarker = "set DEFAULT_JVM_OPTS=\"-Xms64m\""
+        val windowsAddition = "@rem Keep packaged web serving within its measured RSS envelope.\r\n" +
+            "if \"%~1\"==\"web\" set DEFAULT_JVM_OPTS=%DEFAULT_JVM_OPTS% \"-Xmx256m\" \"-XX:ActiveProcessorCount=4\""
+        require(windowsScript.isFile) { "generated Windows application launcher is missing" }
+        val windowsText = windowsScript.readText()
+        require(windowsMarker in windowsText) { "generated Windows launcher JVM options changed unexpectedly" }
+        windowsScript.writeText(windowsText.replace(windowsMarker, "$windowsMarker\r\n$windowsAddition"))
+    }
 }
 
 val frontendDirectory = layout.projectDirectory.dir("frontend")

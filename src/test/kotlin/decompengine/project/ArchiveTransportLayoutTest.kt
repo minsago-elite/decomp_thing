@@ -181,4 +181,31 @@ class ArchiveTransportLayoutTest {
         assertFailsWith<IllegalArgumentException> { layout.excludes("output//result.txt") }
         assertFailsWith<IllegalArgumentException> { layout.requireRetains(listOf("")) }
     }
+
+    @Test
+    fun `normalized path components retain exact boundary behavior`() {
+        val layout = ArchiveTransportLayout(emptySet(), emptySet())
+        val longestComponent = "a".repeat(255)
+        layout.requireRetains(listOf("$longestComponent/${"é".repeat(255)}"))
+        layout.requireRetains(listOf("a/ foo /b", "a/\u2003x\u2003/b"))
+
+        for (path in listOf("a".repeat(256), "a/.", "a/..", "a//b", "a/", "a/ /b", "a/\u2003/b",
+            "a\\b", "a\u0001b", "a:b")) {
+            assertFailsWith<IllegalArgumentException>(path) { layout.requireRetains(listOf(path)) }
+        }
+        for (whitespace in listOf('\u00a0', '\u2003')) {
+            val component = whitespace.toString()
+            if (component.isBlank()) {
+                assertFailsWith<IllegalArgumentException> { layout.requireRetains(listOf("a/$component/b")) }
+            } else {
+                layout.requireRetains(listOf("a/$component/b"))
+            }
+        }
+        val maximumPath = "a/".repeat(2_047) + "aa"
+        assertEquals(4_096, maximumPath.length)
+        layout.requireRetains(listOf(maximumPath))
+        val overlongPath = "a/".repeat(2_047) + "aaa"
+        assertEquals(4_097, overlongPath.length)
+        assertFailsWith<IllegalArgumentException> { layout.requireRetains(listOf(overlongPath)) }
+    }
 }

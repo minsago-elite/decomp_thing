@@ -1,5 +1,6 @@
 package decompengine.web
 
+import decompengine.jobs.ArtifactChangedException
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.GeneratedFileEvidence
@@ -8,6 +9,7 @@ import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
 import decompengine.repair.RepairBudgetExceededException
+import decompengine.repair.StableFileDigest
 import decompengine.repair.StableRegularFile
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -36,26 +38,45 @@ internal class WebSourceCatalogEvidence(
     profiles: List<ReconstructionProfile>,
     private val readInput: (String) -> StableRegularFile,
     private val readArtifact: (String, String, Long) -> StableRegularFile,
+    private val readInputDigest: ((String) -> StableFileDigest)? = null,
+    private val readArtifactDigest: ((String, String, Long) -> StableFileDigest)? = null,
 ) {
     private val profiles = profiles.associateBy { it.id to it.sha256 }
     private val capturing = AtomicBoolean(false)
     private val searching = AtomicBoolean(false)
+    @Volatile private var metadataMemo: MetadataMemo? = null
+
+    private data class MetadataMemo(
+        val jobId: String,
+        val runId: String,
+        val input: StableFileDigest,
+        val manifest: StableFileDigest,
+        val parsed: decompengine.project.SourceTreeManifest,
+        val catalog: WebSourceCatalogSnapshot?,
+        val revision: RevisionMemo?,
+    )
+    private data class RevisionMemo(val reference: WebRevisionSourceReference, val descriptor: StableFileDigest,
+        val snapshot: WebRevisionSourceSnapshot)
+    private class CaptureContext(val prior: MetadataMemo?, val input: StableFileDigest, val manifest: StableFileDigest) {
+        var catalog: WebSourceCatalogSnapshot? = null
+        var revision: RevisionMemo? = null
+    }
 
     init { require(profiles.size in 1..16 && this.profiles.size == profiles.size) }
 
-    fun read(jobId: String, runId: String): WebSourceCatalogSnapshot = capture(jobId, runId) { manifest, captured ->
-        WebSourceCatalogSnapshot(captured.sha256, manifest.files)
+    fun read(jobId: String, runId: String): WebSourceCatalogSnapshot = capture(jobId, runId) { manifest, captured, context ->
+        context.prior?.catalog ?: WebSourceCatalogSnapshot(captured.sha256, manifest.files).also { context.catalog = it }
     }
 
-    fun readRevision(reference: WebRevisionSourceReference): WebRevisionSourceSnapshot = capture(reference.jobId, reference.runId) { manifest, captured ->
-        revision(reference, manifest, captured) { it }
+    fun readRevision(reference: WebRevisionSourceReference): WebRevisionSourceSnapshot = capture(reference.jobId, reference.runId) { manifest, captured, context ->
+        revision(reference, manifest, captured, context) { it }
     }
 
     /** Selected metadata only; the source body, private checkpoints and execution receipts are never read. */
     fun readFileMetadata(reference: WebRevisionSourceReference, fileId: String): WebRevisionFileMetadataSnapshot {
         revisionSourceFileIndex(fileId)
-        return capture(reference.jobId, reference.runId) { manifest, captured ->
-            revision(reference, manifest, captured) { snapshot ->
+        return capture(reference.jobId, reference.runId) { manifest, captured, context ->
+            revision(reference, manifest, captured, context) { snapshot ->
                 val selected = resolveRevisionSourceFile(snapshot, fileId)
                 val profile = profiles.getValue(manifest.profileId to manifest.profileSha256)
                 val files = WebRecordedModuleProvenance.evidenceFiles(profile, manifest, selected)
@@ -84,8 +105,8 @@ internal class WebSourceCatalogEvidence(
 
     fun readFile(reference: WebRevisionSourceReference, fileId: String, purpose: WebSourceReadPurpose,
         expectedMetadataVersion: String?, readSource: (String, String, String, Long) -> StableRegularFile): WebRevisionSourceContent =
-        capture(reference.jobId, reference.runId) { manifest, captured ->
-            revision(reference, manifest, captured) { snapshot ->
+        capture(reference.jobId, reference.runId) { manifest, captured, context ->
+            revision(reference, manifest, captured, context) { snapshot ->
                 if (expectedMetadataVersion != null && expectedMetadataVersion != snapshot.metadataVersion) expiredSourceMetadata()
                 val file = selectRevisionSourceFile(snapshot, fileId, purpose)
                 val content = WebRevisionSourceContent(snapshot, fileId, file,
@@ -113,12 +134,19 @@ internal class WebSourceCatalogEvidence(
                 val captured = try {
                     readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
                 } catch (failure: Exception) {
+                    if (failure is ArtifactChangedException) revisionSourceChanged()
                     if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
                     null
                 }
-                captured?.bytes?.copyOf()?.also { bytes ->
-                    if (bytes.size.toLong() != file.sizeBytes || captured.sha256 != file.evidence.sha256 ||
-                        WebExplorationArtifact.sha256(bytes) != file.evidence.sha256) revisionSourceChanged()
+                captured?.let { stable ->
+                    // The descriptor-bound reader already hashes exactly these captured bytes and
+                    // revalidates the file and its path before returning. The search scanner only
+                    // reads this array synchronously, so copying and hashing it again adds request-
+                    // time allocation without adding a freshness check.
+                    if (stable.bytes.size.toLong() != file.sizeBytes || stable.sha256 != file.evidence.sha256) {
+                        revisionSourceChanged()
+                    }
+                    stable.bytes
                 }
             }
             if (readRevision(reference).metadataVersion != before.metadataVersion) revisionSourceChanged()
@@ -127,20 +155,30 @@ internal class WebSourceCatalogEvidence(
     }
 
     private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,
-        captured: StableRegularFile, project: (WebRevisionSourceSnapshot) -> T): T {
+        captured: StableRegularFile, context: CaptureContext, project: (WebRevisionSourceSnapshot) -> T): T {
         val path = "reports/runs/${reference.runId}/source-tree/reports/build_contract.json"
-        val descriptor = readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES)
-        require(descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
-        val document = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
-            ?: throw IllegalArgumentException("Source input descriptor is invalid.")
-        val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, document, descriptor.sha256)
+        val descriptorStart = artifactDigest(reference.jobId, path, MAXIMUM_MANIFEST_BYTES)
+        val prior = context.prior?.takeIf {
+            it.jobId == reference.jobId && it.runId == reference.runId && it.input == context.input &&
+                it.manifest == context.manifest && it.revision?.reference == reference &&
+                it.revision.descriptor == descriptorStart
+        }?.revision
+        val snapshot = prior?.snapshot ?: run {
+            val descriptor = readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES)
+            if (descriptorStart != digestOf(descriptor)) revisionSourceChanged()
+            require(descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
+            val document = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
+                ?: throw IllegalArgumentException("Source input descriptor is invalid.")
+            parseWebRevisionSourceInputs(reference, manifest, captured.sha256, document, descriptor.sha256)
+        }
         val result = project(snapshot)
-        requireSame(descriptor, readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES))
+        if (descriptorStart != artifactDigest(reference.jobId, path, MAXIMUM_MANIFEST_BYTES)) revisionSourceChanged()
+        context.revision = RevisionMemo(reference, descriptorStart, snapshot)
         return result
     }
 
     private fun <T> capture(jobId: String, runId: String,
-        project: (decompengine.project.SourceTreeManifest, StableRegularFile) -> T): T {
+        project: (decompengine.project.SourceTreeManifest, StableRegularFile, CaptureContext) -> T): T {
         if (!capturing.compareAndSet(false, true)) {
             throw WebAccessDenied(429, "SOURCE_CATALOG_BUSY", "Another source metadata capture is in progress. Try this read again later.")
         }
@@ -148,29 +186,50 @@ internal class WebSourceCatalogEvidence(
     }
 
     private fun <T> captured(jobId: String, runId: String,
-        project: (decompengine.project.SourceTreeManifest, StableRegularFile) -> T): T {
+        project: (decompengine.project.SourceTreeManifest, StableRegularFile, CaptureContext) -> T): T {
         val path = "reports/runs/$runId/source-tree/source_tree_manifest.json"
         canonicalReportSegments(path)
-        val input = readInput(jobId)
-        val captured = readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES)
-        // Check the callback contract too; test adapters cannot silently bypass the production ceiling.
-        require(captured.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
-        val document = OracleJson.parse(captured.bytes, JSON_LIMITS) as? JsonObject
-            ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
-        val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-        val profileSha256 = (document["profileSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-        val profile = profiles[profileId to profileSha256]
-            ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
-        val declaredFiles = document["files"] as? JsonArray
-            ?: throw IllegalArgumentException("Source catalog files are invalid.")
-        require(declaredFiles.size <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
-        val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
-        require(manifest.inputSha256 == input.sha256)
-        val result = project(manifest, captured)
-        requireSame(captured, readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES))
-        requireSame(input, readInput(jobId))
+        val input = inputDigest(jobId)
+        val manifestStart = artifactDigest(jobId, path, MAXIMUM_MANIFEST_BYTES)
+        val prior = metadataMemo?.takeIf {
+            it.jobId == jobId && it.runId == runId && it.input == input && it.manifest == manifestStart
+        }
+        val manifest = prior?.parsed ?: run {
+            val captured = readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES)
+            if (manifestStart != digestOf(captured)) sourceCatalogChanged()
+            require(captured.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
+            val document = OracleJson.parse(captured.bytes, JSON_LIMITS) as? JsonObject
+                ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
+            val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            val profileSha256 = (document["profileSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            val profile = profiles[profileId to profileSha256]
+                ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
+            val declaredFiles = document["files"] as? JsonArray
+                ?: throw IllegalArgumentException("Source catalog files are invalid.")
+            require(declaredFiles.size <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
+            SourceTreeManifestReader.parse(document, profile).also {
+                require(it.inputSha256 == input.sha256)
+            }
+        }
+        val context = CaptureContext(prior, input, manifestStart)
+        val captured = StableRegularFile(ByteArray(0), manifestStart.sha256, manifestStart.identity)
+        val result = project(manifest, captured, context)
+        val manifestEnd = artifactDigest(jobId, path, MAXIMUM_MANIFEST_BYTES)
+        val inputEnd = inputDigest(jobId)
+        if (manifestStart != manifestEnd || input != inputEnd) sourceCatalogChanged()
+        metadataMemo = MetadataMemo(jobId, runId, input, manifestStart, manifest,
+            context.catalog ?: prior?.catalog, context.revision ?: prior?.revision)
         return result
     }
+
+    private fun inputDigest(jobId: String): StableFileDigest = readInputDigest?.invoke(jobId) ?: digestOf(readInput(jobId))
+    private fun artifactDigest(jobId: String, path: String, maximum: Long): StableFileDigest =
+        readArtifactDigest?.invoke(jobId, path, maximum) ?: digestOf(readArtifact(jobId, path, maximum))
+
+    private fun digestOf(file: StableRegularFile) = StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity)
+
+    private fun sourceCatalogChanged(): Nothing = throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED",
+        "Source catalog changed during capture. Refresh its first page.")
 
     private fun requireSame(expected: StableRegularFile, current: StableRegularFile) {
         if (expected.identity != current.identity || expected.sha256 != current.sha256 ||

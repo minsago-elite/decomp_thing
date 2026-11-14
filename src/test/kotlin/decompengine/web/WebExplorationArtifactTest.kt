@@ -7,6 +7,13 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class WebExplorationArtifactTest {
+    @Test fun `sha256 emits lowercase zero-padded hexadecimal`() {
+        assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            WebExplorationArtifact.sha256(ByteArray(0)))
+        assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            WebExplorationArtifact.sha256("abc".toByteArray()))
+    }
+
     @Test fun `artifact identity is job run and byte bound and rejects replacement`() {
         val root = createTempDirectory("web-artifact-identity-")
         val store = JobStore(root)

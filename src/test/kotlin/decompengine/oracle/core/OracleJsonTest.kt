@@ -59,6 +59,42 @@ class OracleJsonTest {
     }
 
     @Test
+    fun `plain ASCII strings use exact byte bounds and preserve slow-path semantics`() {
+        assertEquals(JsonPrimitive("plain ASCII / text"), OracleJson.parse("\"plain ASCII / text\"".toByteArray()))
+        assertEquals(JsonObject(mapOf("ascii" to JsonPrimitive("value"))), OracleJson.parse("{\"ascii\":\"value\"}".toByteArray()))
+
+        val exact = StrictJsonLimits(maximumStringBytes = 4, maximumTotalStringBytes = 4)
+        assertEquals(JsonPrimitive("four"), OracleJson.parse("\"four\"".toByteArray(), exact))
+        assertFailsWith<StrictJsonException> {
+            OracleJson.parse("\"five!\"".toByteArray(), exact)
+        }
+        assertFailsWith<StrictJsonException> {
+            OracleJson.parse(
+                "[\"aa\",\"bb\"]".toByteArray(),
+                StrictJsonLimits(maximumStringBytes = 2, maximumTotalStringBytes = 3),
+            )
+        }
+        assertFailsWith<StrictJsonException> {
+            OracleJson.parse("\"é\"".toByteArray(), StrictJsonLimits(maximumStringBytes = 1))
+        }
+
+        val checkpointCharacters = 16_384
+        val longPrefix = "a".repeat(checkpointCharacters + 7)
+        assertEquals(JsonPrimitive("$longPrefix\nλ"), OracleJson.parse("\"$longPrefix\\nλ\"".toByteArray()))
+
+        var checkpoints = 0
+        val cancelled = assertFailsWith<IllegalStateException> {
+            OracleJson.parse("\"${"a".repeat(checkpointCharacters * 2)}\"".toByteArray(), StrictJsonLimits()) { phase ->
+                if (phase == "while parsing strict JSON string" && ++checkpoints == 2) {
+                    throw IllegalStateException("cancelled during ASCII string")
+                }
+            }
+        }
+        assertEquals("cancelled during ASCII string", cancelled.message)
+        assertEquals(2, checkpoints)
+    }
+
+    @Test
     fun `parser accepts only strict finite JSON numbers`() {
         listOf(
             "+1",
