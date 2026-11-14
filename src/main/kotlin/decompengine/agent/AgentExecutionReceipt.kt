@@ -184,6 +184,30 @@ private fun digestAccessPolicy(request: AgentExecutionRequest): String = Request
             field("pathRule[$index].operation[$operationIndex]", operation)
         }
     }
+    request.accessPolicy.mutationAuthority?.let { authority ->
+        field("mutationAuthority.present", "true")
+        field("mutationAuthority.policyId", authority.policyId)
+        field("mutationAuthority.ownerId", authority.ownerId)
+        field("mutationAuthority.profileSha256", authority.profileSha256)
+        field("mutationAuthority.grantCount", authority.grants.size.toString())
+        authority.grants.forEachIndexed { index, grant ->
+            field("mutationAuthority.grant[$index].rootId", grant.path.rootId)
+            field("mutationAuthority.grant[$index].relativePath", grant.path.relativePath)
+            field("mutationAuthority.grant[$index].ownerId", grant.ownerId)
+            field("mutationAuthority.grant[$index].profileSha256", grant.profileSha256)
+            field("mutationAuthority.grant[$index].declarationId", grant.declarationId)
+            field("mutationAuthority.grant[$index].contentKind", grant.contentKind.name)
+            field("mutationAuthority.grant[$index].maximumBytes", grant.maximumBytes.toString())
+            val grantOperations = grant.operations.map(AgentOperation::name).sorted()
+            field("mutationAuthority.grant[$index].operationCount", grantOperations.size.toString())
+            grantOperations.forEachIndexed { operationIndex, operation ->
+                field("mutationAuthority.grant[$index].operation[$operationIndex]", operation)
+            }
+            val roles = grant.roles.sorted()
+            field("mutationAuthority.grant[$index].roleCount", roles.size.toString())
+            roles.forEachIndexed { roleIndex, role -> field("mutationAuthority.grant[$index].role[$roleIndex]", role) }
+        }
+    }
 }.finish()
 
 private class RequestBindingDigest {

@@ -894,7 +894,7 @@ class SourceTreeTest {
         ).cacheIdentity()
 
         assertNotEquals(first, second)
-        assertTrue(first.endsWith(":v4"))
+        assertTrue(first.endsWith(":v5"))
         assertFalse(first.contains(firstDescriptor))
     }
 
