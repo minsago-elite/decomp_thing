@@ -69,7 +69,8 @@ internal class WebProgramStructurePages(
             filters(query), query.limit, index.structureVersion, it)}") } ?: JsonNull)
     }
 
-    fun functions(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
+    fun functions(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?,
+        policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, setOf("sort", "order", "search", "status", "evidence", "ownership", "module"))
         val sort = query.fields["sort"] ?: "address"
         val order = query.fields["order"] ?: "asc"
@@ -113,7 +114,7 @@ internal class WebProgramStructurePages(
                 val items = ArrayList<JsonObject>(query.limit)
                 var bytes = 0
                 for (position in start until minOf(matched, start + query.limit)) {
-                    val item = entityItem(index, table, matches[position])
+                    val item = entityItem(index, table, matches[position], policy)
                     val size = item.toString().toByteArray(Charsets.UTF_8).size + 1
                     if (items.isNotEmpty() && bytes + size > MAXIMUM_ITEM_BYTES) break
                     bytes += size; items += item
@@ -190,7 +191,7 @@ internal class WebProgramStructurePages(
                 put("owned", owned(ids.size.takeIf { it > 0 }))
                 var bytes = utf8Bytes(JsonObject(this))
                 for (id in ids.subList(start, minOf(ids.size, start + query.limit))) {
-                    val item = table.index[id]?.let { entityItem(index, table, it) } ?: buildJsonObject {
+                    val item = table.index[id]?.let { entityItem(index, table, it, policy) } ?: buildJsonObject {
                         put("kind", kind.wire); put("entityId", id); put("selector", JsonNull); put("recorded", false)
                     }
                     val size = utf8Bytes(item) + if (items.isEmpty()) 0 else 1
@@ -214,13 +215,13 @@ internal class WebProgramStructurePages(
                 val row = table.index[selector]?.takeIf { addressable(selector) } ?: throw WebAccessDenied(404,
                     "ENTITY_NOT_FOUND", "The requested ${kind.wire} is not recorded in this revision's program model.")
                 val fields = readWebStructureEntity(readModel(), table.offsets[row], policy = policy)
-                put("entity", fitDetail(JsonObject(entityItem(index, table, row) + detail(index, table, row, fields))))
+                put("entity", fitDetail(JsonObject(entityItem(index, table, row, policy) + detail(index, table, row, fields, policy))))
             }.let(::JsonObject)
         }
     }
 
     private fun detail(index: WebProgramStructureIndex, table: WebStructureTable, row: Int,
-        fields: WebStructureEntityFields): Map<String, JsonElement> = buildJsonObject {
+        fields: WebStructureEntityFields, policy: WebRedactionPolicy): Map<String, JsonElement> = buildJsonObject {
         put("texts", JsonArray(fields.texts.map { (field, value) -> buildJsonObject {
             put("field", field); put("recorded", value != null)
             put("preview", value?.let(::text) ?: JsonNull)
@@ -230,21 +231,21 @@ internal class WebProgramStructurePages(
         val id = table.ids[row]
         if (table.kind == WebStructureKind.FUNCTION) {
             put("strings", buildJsonObject { put("total", table.stringCounts[row]); put("items", JsonArray(fields.strings.map(::text))) })
-            put("calls", references(table.calls[row].toList(), functions))
-            put("referencedGlobals", references(table.referencedGlobals[row].toList(), globals))
-            put("calledBy", references((0 until functions.size).filter { id in functions.calls[it] }.map { functions.ids[it] }, functions))
+            put("calls", references(table.calls[row].toList(), functions, policy))
+            put("referencedGlobals", references(table.referencedGlobals[row].toList(), globals, policy))
+            put("calledBy", references((0 until functions.size).filter { id in functions.calls[it] }.map { functions.ids[it] }, functions, policy))
         } else {
             put("strings", JsonNull); put("calls", JsonNull); put("referencedGlobals", JsonNull); put("calledBy", JsonNull)
         }
         put("referencedBy", if (table.kind == WebStructureKind.GLOBAL)
-            references((0 until functions.size).filter { id in functions.referencedGlobals[it] }.map { functions.ids[it] }, functions) else JsonNull)
+            references((0 until functions.size).filter { id in functions.referencedGlobals[it] }.map { functions.ids[it] }, functions, policy) else JsonNull)
         put("byteEvidence", when {
             table.kind != WebStructureKind.GLOBAL -> JsonNull
             (index.modelSchemaVersion ?: 0) < 3 -> JsonPrimitive("unsupported-schema")
             else -> JsonPrimitive(fields.byteEvidence ?: "not-recorded")
         })
         val group = table.names[row]?.let { index.collisions[it] }.orEmpty().filter { it.first != table.kind || it.second != row }
-        put("collisions", bounded(group, 20) { (kind, other) -> reference(index.table(kind), other) })
+        put("collisions", bounded(group, 20) { (kind, other) -> reference(index.table(kind), other, policy) })
         val owner = table.owners[row].takeIf { it >= 0 }?.let { index.modules[it] }
         put("sources", buildJsonObject {
             put("implementationPath", owner?.sourcePath?.let(::JsonPrimitive) ?: JsonNull)
@@ -256,16 +257,16 @@ internal class WebProgramStructurePages(
         })
     }
 
-    private fun references(ids: List<String>, target: WebStructureTable): JsonObject = bounded(ids, 50) { id ->
-        target.index[id]?.let { reference(target, it) } ?: buildJsonObject {
+    private fun references(ids: List<String>, target: WebStructureTable, policy: WebRedactionPolicy): JsonObject = bounded(ids, 50) { id ->
+        target.index[id]?.let { reference(target, it, policy) } ?: buildJsonObject {
             put("kind", target.kind.wire); put("entityId", id); put("selector", JsonNull); put("name", JsonNull); put("resolution", "no-record")
         }
     }
 
-    private fun reference(table: WebStructureTable, row: Int): JsonObject = buildJsonObject {
+    private fun reference(table: WebStructureTable, row: Int, policy: WebRedactionPolicy): JsonObject = buildJsonObject {
         put("kind", table.kind.wire); put("entityId", table.ids[row])
         put("selector", table.ids[row].takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
-        put("name", table.names[row]?.let(::JsonPrimitive) ?: JsonNull); put("resolution", "recorded")
+        put("name", publicName(table.names[row], policy)); put("resolution", "recorded")
     }
 
     /**
@@ -292,15 +293,21 @@ internal class WebProgramStructurePages(
         put("total", values.size); put("items", JsonArray(values.take(limit).map(render)))
     }
 
+    private fun publicName(value: String?, policy: WebRedactionPolicy): JsonElement {
+        val redacted = value?.let(policy::text) ?: return JsonNull
+        return redacted.takeIf { it.length <= MAXIMUM_PUBLIC_NAME_CHARACTERS }?.let(::JsonPrimitive) ?: JsonNull
+    }
+
     private fun text(value: WebStructureText): JsonObject = buildJsonObject {
         put("text", value.text); put("characters", value.characters.toString()); put("truncated", value.truncated)
     }
 
-    private fun entityItem(index: WebProgramStructureIndex, table: WebStructureTable, row: Int): JsonObject = buildJsonObject {
+    private fun entityItem(index: WebProgramStructureIndex, table: WebStructureTable, row: Int,
+        policy: WebRedactionPolicy): JsonObject = buildJsonObject {
         put("kind", table.kind.wire); put("entityId", table.ids[row])
         put("selector", table.ids[row].takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
         put("recorded", true)
-        put("name", table.names[row]?.let(::JsonPrimitive) ?: JsonNull)
+        put("name", publicName(table.names[row], policy))
         put("address", table.address(row)?.let(::JsonPrimitive) ?: JsonNull)
         put("extractionStatus", table.status[row].wire)
         put("evidenceState", table.evidence(row).wire)
@@ -410,6 +417,7 @@ internal class WebProgramStructurePages(
 
     companion object {
         private const val MAXIMUM_ITEM_BYTES = 1_000_000
+        private const val MAXIMUM_PUBLIC_NAME_CHARACTERS = 4_096
         private val SELECTOR = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
         /** Only identifiers that match the URL selector grammar are addressable; others remain listed without a link. */
         fun addressable(value: String): Boolean = SELECTOR.matches(value)
