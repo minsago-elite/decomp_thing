@@ -1,0 +1,29 @@
+[
+  {
+    "file": "compiler-request-v1-authored.json",
+    "schemaVersion": 1,
+    "kind": "authored",
+    "sha256": "c576640dc787991771033b7ef3ceee84bdf89c288730cb22116524262091e5fd",
+    "framing": "Fixed canonical fixture encoding; not a claim of captured raw request-wire bytes.",
+    "recordSource": null,
+    "recordPointer": null
+  },
+  {
+    "file": "compiler-request-v2-retained-parent-record-derived.json",
+    "schemaVersion": 2,
+    "kind": "retained-parent-record-derived",
+    "sha256": "78118f51b2d8e7880f4bdec084ccb2cb6d74a4a47df5c04039019705a331db17",
+    "framing": "Fixed canonical fixture encoding; not a claim of captured raw request-wire bytes.",
+    "recordSource": "parent-retained-accepted-checkpoint.json",
+    "recordPointer": "/compilation/containedProof/request"
+  },
+  {
+    "file": "compiler-request-v3-retained-FD-record-derived.json",
+    "schemaVersion": 3,
+    "kind": "retained-FD-record-derived",
+    "sha256": "b86cae529cc0214218a589763c64215656de7bc6009dbaeff60353851bda30b7",
+    "framing": "Fixed canonical fixture encoding; not a claim of captured raw request-wire bytes.",
+    "recordSource": "fd-retained-accepted-checkpoint.json",
+    "recordPointer": "/compilation/containedProof/request"
+  }
+]

@@ -18,9 +18,35 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
 
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class ArchivalAuditProvenanceTest {
+    @BeforeEach
+    fun requireConfiguredCompilerForAcceptedBaselines(test: TestInfo) {
+        if ("ci-live" !in test.tags) return
+        val file = System.getenv("GENERATED_C_MODULE_COMPILE_CONFIG_FILE")
+        val directory = System.getenv("GENERATED_C_MODULE_COMPILE_CONFIG_DIRECTORY")
+        val configured = !file.isNullOrBlank() || !directory.isNullOrBlank()
+        if (System.getenv("GENERATED_C_MODULE_COMPILE_REQUIRE") == "true") {
+            assertTrue(configured, "required archival provenance tests need the provisioned contained compiler runtime")
+        }
+        assumeTrue(configured, "configure the contained compiler to run accepted archival provenance tests")
+        // A configured but invalid runtime is a failure, never a qualification skip.
+        assertTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        if (!file.isNullOrBlank()) assertTrue(Files.isRegularFile(Path.of(file)), "configured compiler file is missing")
+        if (!directory.isNullOrBlank()) assertTrue(Files.isDirectory(Path.of(directory)), "configured compiler directory is missing")
+    }
+
     @Test
+    @Tag("ci-live")
     fun `audit requires profile bounded numeric prompt metadata for accepted agent checkpoints`() {
         val project = fixture(accepted = true)
         val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
@@ -68,6 +94,7 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `audit requires profile bounded prompt metadata for accepted custom checkpoints`() {
         val project = fixture(accepted = true)
         val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
@@ -112,6 +139,7 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `audit retains exact accepted compiler records through archive extraction`() {
         val project = fixture(accepted = true)
         val audit = ArchivalProjectAuditor.audit(project)
@@ -140,6 +168,7 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `historical recovered labels retain complete unassessed population bound to actual model bytes`() {
         val project = fixture(accepted = true)
         val modelPath = project.resolve("reports/program_model.json")
@@ -162,8 +191,9 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `schema two compiled entities remain unassessed in every reconstruction report`() {
-        val project = Files.createTempDirectory("unassessed-model-reports-")
+        val project = projectDirectory("unassessed-model-reports-")
         val model = RecoveredProgramModel(
             schemaVersion = 2,
             inputSha256 = "a".repeat(64),
@@ -197,6 +227,7 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `ordinary unresolved modules preserve diagnostic handling of accepted compiler defects`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -244,10 +275,15 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `accepted flags cannot hide missing or mismatched compiler evidence`() {
+        val baseline = fixture(accepted = true)
+        assertTrue(ArchivalProjectAuditor.audit(baseline).moduleCompilationEvidenceProblems.isEmpty())
         for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema", "unbound-schema", "foreign-binary", "foreign-model-schema", "foreign-profile",
             "diagnostic-hash", "diagnostic-count", "diagnostic-type", "compiler-extra", "foreign-entity", "missing-entity", "duplicate-entity", "unresolved-entity", "unresolved-issue")) {
-            val project = fixture(accepted = true)
+            // Each audit mutation starts from the same real accepted records. Copying
+            // them preserves recorded proof without claiming another live acceptance.
+            val project = copyFixture(baseline)
             assertTrue(ArchivalProjectAuditor.audit(project).moduleCompilationEvidenceProblems.isEmpty())
             val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
             val module = plan.getValue("modules").jsonArray.first().jsonObject
@@ -265,7 +301,7 @@ class ArchivalAuditProvenanceTest {
                 "foreign-source" -> checkpoint.withField("compilation", compilation.withField("sourceSha256", JsonPrimitive("0".repeat(64))))
                 "failed" -> checkpoint.withField("compilation", compilation.withField("outcome", JsonPrimitive("failed")))
                 "old-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(4))
-                "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(7))
+                "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(8))
                 "unbound-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(5))
                 "foreign-binary" -> checkpoint.withField("inputBinarySha256", JsonPrimitive("foreign-input"))
                 "foreign-model-schema" -> checkpoint.withField("modelSchemaVersion", JsonPrimitive(99))
@@ -321,6 +357,7 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `accepted source and explicit unresolved facts are reconciled independently`() {
         val project = fixture(accepted = true)
         assertEquals(emptyList(), ArchivalProjectAuditor.audit(project).unresolvedEntityIds)
@@ -363,6 +400,7 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `stale or missing source cannot receive current provenance or replace a prior audit`() {
         for (remove in listOf(false, true)) {
             val project = fixture(accepted = true)
@@ -443,7 +481,7 @@ class ArchivalAuditProvenanceTest {
 
     @Test
     fun `global implementations and shared types retain their independent unresolved facts`() {
-        val project = Files.createTempDirectory("archival-audit-globals-")
+        val project = projectDirectory("archival-audit-globals-")
         val model = RecoveredProgramModel(
             inputSha256 = "a".repeat(64),
             functions = listOf(RecoveredFunction("fn_entry", "entry", 0x1000UL, "int entry(void)")),
@@ -475,7 +513,7 @@ class ArchivalAuditProvenanceTest {
         accepted: Boolean = false,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     ): Path {
-        val project = Files.createTempDirectory("archival-audit-provenance-")
+        val project = projectDirectory("archival-audit-provenance-")
         val model = RecoveredProgramModel(
             inputSha256 = "a".repeat(64),
             functions = listOf(
@@ -483,8 +521,26 @@ class ArchivalAuditProvenanceTest {
                 RecoveredFunction("fn_100", "render_two", 0x2000UL, "int render_two(void)", "int render_two(void) { return 2; }"),
             ),
         )
-        SourceTreeGenerator.generate(model, project, reconstructor = EvidenceModuleReconstructor(accepted), profile = profile)
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = EvidenceModuleReconstructor(accepted), profile = profile)
+        if (accepted) assertTrue(manifest.unresolvedImplementationIds.isEmpty(), "fixture requires fresh contained acceptance")
         return project
+    }
+
+    private fun projectDirectory(prefix: String): Path {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        return Files.createTempDirectory(scratch, prefix)
+    }
+
+    private fun copyFixture(source: Path): Path {
+        val destination = projectDirectory("archival-audit-provenance-copy-")
+        Files.walk(source).use { paths ->
+            paths.forEach { path ->
+                val copied = destination.resolve(source.relativize(path))
+                if (Files.isDirectory(path)) Files.createDirectories(copied) else Files.copy(path, copied)
+            }
+        }
+        return destination
     }
 
     private fun implementationPath(project: Path): String = SourceTreeManifestReader.read(

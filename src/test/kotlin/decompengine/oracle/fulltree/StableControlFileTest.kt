@@ -678,6 +678,7 @@ class StableControlFileTest {
                 maximumBytes,
                 "descriptor selection fixture",
                 reflectedMutation,
+                false,
             ) as StableControlFile
         } catch (failure: InvocationTargetException) {
             throw failure.targetException

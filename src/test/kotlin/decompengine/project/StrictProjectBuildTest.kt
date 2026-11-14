@@ -73,7 +73,10 @@ class StrictProjectBuildTest {
                 ),
             ),
         )
-        SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = unacceptedRecoveredBuildFixture())
+        assertEquals(model.functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds)
+        assertTrue(manifest.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            .all { it.acceptedImplementation == false })
         val moduleId = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText())
             .jsonObject.getValue("modules").jsonArray.single().jsonObject.getValue("id").jsonPrimitive.content
 
@@ -105,7 +108,10 @@ class StrictProjectBuildTest {
                 ),
             ),
         )
-        SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = unacceptedRecoveredBuildFixture())
+        assertEquals(model.functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds)
+        assertTrue(manifest.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            .all { it.acceptedImplementation == false })
 
         val report = MakeProjectBuilder.build(project)
 
@@ -160,7 +166,10 @@ class StrictProjectBuildTest {
                 ),
             ),
         )
-        SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = unacceptedRecoveredBuildFixture())
+        assertEquals(model.functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds)
+        assertTrue(manifest.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            .all { it.acceptedImplementation == false })
         val moduleId = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText())
             .jsonObject.getValue("modules").jsonArray.single().jsonObject.getValue("id").jsonPrimitive.content
 
@@ -261,6 +270,20 @@ class StrictProjectBuildTest {
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         assertEquals("keep", sentinel.readText())
         assertTrue(project.resolve("reports/build_contract.json").readText().contains("\"returnCode\": 0"))
+    }
+
+    /** Build diagnostics exercise authored source without claiming reconstruction acceptance. */
+    private fun unacceptedRecoveredBuildFixture(): ModuleReconstructor = ModuleReconstructor { request ->
+        val candidate = RecoveredCModuleReconstructor().reconstruct(request)
+        candidate.copy(
+            generator = "authored-build-fixture",
+            issues = candidate.issues + ModuleReconstructionIssue(
+                "authored-build-fixture-unaccepted",
+                "authored source is supplied only for the separate strict project-build boundary",
+                request.module.functionIds + request.module.globalIds,
+            ),
+            retryable = false,
+        )
     }
 
     private fun buildableModel() = RecoveredProgramModel(

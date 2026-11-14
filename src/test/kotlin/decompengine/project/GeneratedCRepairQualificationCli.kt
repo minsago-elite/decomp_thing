@@ -25,7 +25,7 @@ import kotlinx.serialization.json.put
  * execution enters only the public production factory, with no test construction capability.
  */
 object GeneratedCRepairQualificationCli {
-    private val runtimeRoot = Path.of("/opt/decomp-generated-c-validation-ci")
+    private val runtimeRoot = Path.of("/var/lib/decomp-generated-c-runtime-ci")
     private val jsonLimits = StrictJsonLimits(maximumInputBytes = 256 * 1024,
         maximumCanonicalBytes = 512 * 1024, maximumNodes = 4096, maximumDepth = 16,
         maximumStringBytes = 4096, maximumTotalStringBytes = 256 * 1024)

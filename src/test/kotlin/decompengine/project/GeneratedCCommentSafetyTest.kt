@@ -8,7 +8,19 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
+
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class GeneratedCCommentSafetyTest {
+    @BeforeEach
+    fun requireConfiguredCompiler(test: TestInfo) = requireHostedModuleCompiler(test)
+
     @Test
     fun `escaped line comments in retained prototypes reject with the function identity`() {
         for (ending in ESCAPED_ENDINGS) {
@@ -40,6 +52,7 @@ class GeneratedCCommentSafetyTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `internal backslashes in retained line comments remain buildable without changing declarations`() {
         val prototype = "int convert(void) // retained \\ character"
         assertEquals("$prototype\n", normalizedPrototype(function(prototype)))

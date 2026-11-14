@@ -256,7 +256,7 @@ internal object GeneratedCEvidenceCarrier {
     fun validateArchivedCheckpoint(profile: ReconstructionProfile, source: GeneratedFileEvidence,
         checkpoint: ArchivedModuleCheckpointProvenance) {
         if (isSelected(profile)) {
-            require(!checkpoint.repairLineagePresent && checkpoint.schemaVersion == 6L &&
+            require(!checkpoint.repairLineagePresent && checkpoint.schemaVersion in setOf(6L, 7L) &&
                 source.acceptedImplementation == false && !checkpoint.accepted &&
                 source.generator == IDENTITY && checkpoint.generator == IDENTITY &&
                 checkpoint.reconstructorIdentity == IDENTITY &&
