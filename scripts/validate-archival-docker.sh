@@ -30,7 +30,7 @@ repair_permissions() {
       permission_repair_status=0
     elif ! check_root; then
       permission_repair_status=2
-    elif timeout --signal=TERM --kill-after=1s 10s docker run --rm --pull=never \
+    elif timeout --signal=TERM --kill-after=1s 10s docker run --rm --pull=never --user 0:0 \
       --volume "$validation_root/output:/output" --entrypoint sh decomp-thing-archival-ci \
       -c 'find /output -mindepth 1 -exec chmod a+rwX {} +' >/dev/null 2>&1; then
       permission_repair_status=0
