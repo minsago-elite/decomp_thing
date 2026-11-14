@@ -20,7 +20,7 @@ export function activityGroup(event: WebEvent): ActivityGroup {
     case 'message': return 'messages';
     case 'plan': return 'plans';
     case 'context_usage': case 'agent_finished': return 'usage';
-    case 'tool': case 'permission': case 'file_change': return 'tools';
+    case 'tool': case 'permission': case 'file_change': case 'terminal_output': return 'tools';
     default: return 'other';
   }
 }
@@ -86,6 +86,11 @@ export function ActivityRow({ event, basePath, selected = false, inspectionHref,
       {event.payload.fields.status && <p>{displayMessage(copy.observedStatus, { status: event.payload.fields.status })}</p>}
       <p>{displayMessage(copy.writer, { writer: event.payload.writerId })}</p>
       {event.payload.observationKind === 'plan' && <p>{displayMessage(copy.planEntries, { count: event.payload.fields.entryCount ?? copy.notRecorded, truncated: event.payload.fields.entriesTruncated ? copy.truncatedPlan : '' })}</p>}
+      {event.payload.observationKind === 'terminal_output' && <p>{displayMessage(copy.terminalOutput, {
+        retained: event.payload.fields.retainedOutputBytes ?? copy.notRecorded,
+        produced: event.payload.fields.producedOutputBytes ?? copy.notRecorded,
+        truncated: event.payload.fields.outputTruncated ? copy.terminalOutputTruncated : '',
+      })}</p>}
       <p>{displayMessage(copy.omitted, { count: event.payload.omittedFieldCount, sequenceGap: event.payload.fields.sourceSequenceGap ? copy.sequenceGap : '', textOmitted: event.payload.fields.textOmitted ? copy.textOmitted : '', trackingExhausted: event.payload.fields.messageTrackingExhausted ? copy.trackingExhausted : '' })}</p>
       <ObservedUsage observation={event.payload} occurredAt={event.occurredAt} sequence={event.sequence} />
       <details onToggle={toggle => setCorrelationOpen(toggle.currentTarget.open)}>
@@ -95,6 +100,7 @@ export function ActivityRow({ event, basePath, selected = false, inspectionHref,
         <dl class="job-facts">
           <dt>{copy.taskDigest}</dt><Reference kind="task" digest={event.payload.fields.taskIdSha256} identities={identities} event={event} basePath={basePath} onSelectTask={onSelectTask} />
           <dt>{copy.sessionDigest}</dt><Reference kind="session" digest={event.payload.fields.sessionIdSha256} identities={identities} event={event} basePath={basePath} onSelectTask={onSelectTask} />
+          {event.payload.fields.terminalIdSha256 && <><dt>{copy.terminalDigest}</dt><dd><code>{event.payload.fields.terminalIdSha256}</code></dd></>}
           <dt>{copy.revisionDigest}</dt><Reference kind="revision" digest={event.payload.fields.revisionIdSha256} identities={identities} event={event} basePath={basePath} onSelectTask={onSelectTask} />
           <dt>{copy.workflowRunDigest}</dt><Reference kind="workflow" digest={event.payload.fields.workflowRunIdSha256} identities={identities} event={event} basePath={basePath} onSelectTask={onSelectTask} />
           <dt>{copy.turn}</dt><dd><code>{event.payload.fields.turnId ?? copy.notRecorded}</code></dd>

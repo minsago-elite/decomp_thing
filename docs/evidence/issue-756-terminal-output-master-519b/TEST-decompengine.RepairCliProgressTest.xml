@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.RepairCliProgressTest" tests="15" skipped="0" failures="0" errors="0" timestamp="2026-11-12T18:41:00.353Z" hostname="whatsername" time="8.502">
+  <properties/>
+  <testcase name="reconstruction terminal display drains owned callbacks without retained file reads()" classname="decompengine.RepairCliProgressTest" time="0.779"/>
+  <testcase name="blocked console does not block journal producers or bounded observer close()" classname="decompengine.RepairCliProgressTest" time="0.521"/>
+  <testcase name="reconstruction cursor requires the acquired journal run and ignores other invocations()" classname="decompengine.RepairCliProgressTest" time="0.002"/>
+  <testcase name="live observer delivers persisted repair states with digest correlation()" classname="decompengine.RepairCliProgressTest" time="0.258"/>
+  <testcase name="workspace lease outlives a timed out full history writer()" classname="decompengine.RepairCliProgressTest" time="5.146"/>
+  <testcase name="one poll bounds phase output and marks omitted older updates()" classname="decompengine.RepairCliProgressTest" time="0.018"/>
+  <testcase name="reconstruction close drains terminal phases and an immediate unavailable warning()" classname="decompengine.RepairCliProgressTest" time="0.435"/>
+  <testcase name="cli history is input-bound and records analysis context()" classname="decompengine.RepairCliProgressTest" time="0.125"/>
+  <testcase name="reconstruction journal production and close survive a blocked console()" classname="decompengine.RepairCliProgressTest" time="0.782"/>
+  <testcase name="reconstruction unavailable warning preserves workflow failure with a blocked console()" classname="decompengine.RepairCliProgressTest" time="0.233"/>
+  <testcase name="progress cursor prints terminal output metadata without output contents()" classname="decompengine.RepairCliProgressTest" time="0.013"/>
+  <testcase name="reconstruction cursor bounds phases and rejects unrelated or private observations()" classname="decompengine.RepairCliProgressTest" time="0.002"/>
+  <testcase name="cursor skips prior history reports gaps and never copies peer text()" classname="decompengine.RepairCliProgressTest" time="0.001"/>
+  <testcase name="exploration report writes activate and preserve the selected input workspace()" classname="decompengine.RepairCliProgressTest" time="0.019"/>
+  <testcase name="reconstruction CLI observes terminal output from the task progress stream()" classname="decompengine.RepairCliProgressTest" time="0.142"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

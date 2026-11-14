@@ -171,6 +171,7 @@ class AgentProgressJournal private constructor(
                 post(when (event) {
                     is AgentMessageEvent -> "message"
                     is AgentContextUsageEvent -> "context_usage"
+                    is AgentTerminalOutputEvent -> "terminal_output"
                     is AgentPlanEvent -> "plan"
                     is AgentToolEvent -> "tool"
                     is AgentPermissionEvent -> "permission"
@@ -185,6 +186,14 @@ class AgentProgressJournal private constructor(
                             put("contextWindowTokens", event.contextWindowTokens.toString())
                             event.costAmount?.let { put("reportedCostAmount", it.toString()) }
                             event.costCurrency?.let { put("reportedCostCurrency", redactor.text(it)) }
+                        }
+                        is AgentTerminalOutputEvent -> {
+                            put("sessionIdSha256", event.sessionIdSha256)
+                            put("terminalIdSha256", event.terminalIdSha256)
+                            event.toolCallIdSha256?.let { put("toolCallIdSha256", it) }
+                            put("retainedOutputBytes", event.retainedByteCount.toString())
+                            put("producedOutputBytes", event.producedByteCount.toString())
+                            put("outputTruncated", event.truncated)
                         }
                         is AgentMessageEvent -> if (event.role == AgentMessageRole.THOUGHT) {
                             // Private reasoning is neither buffered, measured nor committed. The record

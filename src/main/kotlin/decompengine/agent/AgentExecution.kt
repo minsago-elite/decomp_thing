@@ -403,6 +403,25 @@ data class AgentContextUsageEvent(
     }
 }
 
+/** Safe metadata describing terminal output progress; terminal contents are never included. */
+data class AgentTerminalOutputEvent(
+    override val sequence: Long,
+    val sessionIdSha256: String,
+    val terminalIdSha256: String,
+    val toolCallIdSha256: String?,
+    val retainedByteCount: Int,
+    val producedByteCount: Long,
+    val truncated: Boolean,
+) : AgentExecutionEvent {
+    init {
+        require(sequence >= 0) { "event sequence must not be negative" }
+        require(sessionIdSha256.isSha256() && terminalIdSha256.isSha256()) { "terminal identifiers must be SHA-256" }
+        require(toolCallIdSha256 == null || toolCallIdSha256.isSha256()) { "tool call identifier must be SHA-256" }
+        require(retainedByteCount >= 0 && producedByteCount >= retainedByteCount) { "invalid terminal output byte counts" }
+        require(truncated == (producedByteCount > retainedByteCount)) { "terminal output truncation flag is inconsistent" }
+    }
+}
+
 data class AgentUsage(
     val inputTokens: Long? = null,
     val outputTokens: Long? = null,

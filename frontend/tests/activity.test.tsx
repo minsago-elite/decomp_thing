@@ -45,6 +45,21 @@ it('renders omission-only message metadata for every supported visibility role',
   expect(screen.getAllByText(/Producer omitted text/)).toHaveLength(4);
 });
 
+it('renders terminal output counts and truncation without exposing terminal contents', async () => {
+  const page = structuredClone(events);
+  const item = page.data.items[0]!;
+  item.payload.observationKind = 'terminal_output';
+  item.payload.fields = {
+    sessionIdSha256: 'a'.repeat(64), terminalIdSha256: 'b'.repeat(64), toolCallIdSha256: 'c'.repeat(64),
+    retainedOutputBytes: '4', producedOutputBytes: '9', outputTruncated: true,
+  };
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
+  mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+  expect(await screen.findByText(/Terminal output observed: 4 bytes retained of 9 produced/)).toBeTruthy();
+  expect(screen.getByText(/Earlier output was truncated/)).toBeTruthy();
+  expect(screen.queryByText(/raw terminal output/i)).toBeNull();
+});
+
 it('renders retained labels as text without creating active markup or links', async () => {
   const page = structuredClone(events);
   const marker = '<img src=x onerror="location.href=\'https://example.invalid\'">';

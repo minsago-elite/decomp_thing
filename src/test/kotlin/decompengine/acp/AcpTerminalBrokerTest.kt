@@ -19,11 +19,13 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -201,9 +203,19 @@ class AcpTerminalBrokerTest {
 
         val exit = broker.waitForExit(SESSION, terminalId)
         assertEquals(0u, exit.exitCode)
-        val output = broker.output(SESSION, terminalId)
+        var outputObservation: AgentTerminalOutputEventData? = null
+        val output = broker.output(SESSION, terminalId) { outputObservation = it }
         assertEquals("89abcdef", output.output)
         assertTrue(output.truncated)
+        val observed = assertNotNull(outputObservation)
+        fun sha(value: String) = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        assertEquals(sha(SESSION), observed.sessionIdSha256)
+        assertEquals(sha(terminalId), observed.terminalIdSha256)
+        assertEquals(sha("tool-1"), observed.toolCallIdSha256)
+        assertEquals(8, observed.retainedByteCount)
+        assertEquals(16L, observed.producedByteCount)
+        assertTrue(observed.truncated)
         broker.release(SESSION, terminalId)
         assertFailsWith<AcpExpectedError> { broker.release(SESSION, terminalId) }
         broker.close()
@@ -216,6 +228,85 @@ class AcpTerminalBrokerTest {
         assertTrue(records.all { it.networkIsolated })
         assertTrue(records.filter { it.reason == AcpTerminalAuditReason.OUTPUT_OBSERVED }
             .all { it.producedOutputBytes == 16L })
+        }
+    }
+
+    @Test
+    fun `concurrent output observations preserve audit and callback order`() = runBlocking {
+        val fixture = terminalFixture(mode = "terminal-burst-exit", retainedBytes = 4096)
+        val audit = AcpTerminalAuditRecorder()
+        withOwnedTerminalFixture(fixture, audit) { broker ->
+            broker.bindSession(SESSION)
+            val terminalId = broker.create(
+                SESSION,
+                fixture.command,
+                fixture.args,
+                fixture.root.path.toString(),
+                fixture.env,
+                8u,
+            ).terminalId
+            broker.observeToolCall(SESSION, terminalUpdate("tool-output-order", terminalId))
+            broker.waitForExit(SESSION, terminalId)
+
+            val firstCallbackEntered = CountDownLatch(1)
+            val releaseFirstCallback = CountDownLatch(1)
+            val secondCallbackEntered = CountDownLatch(1)
+            val secondCallStarted = CountDownLatch(1)
+            val secondThread = AtomicReference<Thread?>()
+            val callbackOrder = Collections.synchronizedList(mutableListOf<String>())
+            val executor = Executors.newFixedThreadPool(2)
+            try {
+                val first = executor.submit {
+                    runBlocking {
+                        broker.output(SESSION, terminalId) {
+                            firstCallbackEntered.countDown()
+                            check(releaseFirstCallback.await(5, TimeUnit.SECONDS))
+                            callbackOrder += "first"
+                        }
+                    }
+                }
+                assertTrue(firstCallbackEntered.await(3, TimeUnit.SECONDS), "first output observation never began")
+                val second = executor.submit {
+                    secondThread.set(Thread.currentThread())
+                    secondCallStarted.countDown()
+                    runBlocking {
+                        broker.output(SESSION, terminalId) {
+                            callbackOrder += "second"
+                            secondCallbackEntered.countDown()
+                        }
+                    }
+                }
+                assertTrue(secondCallStarted.await(3, TimeUnit.SECONDS), "second output call was not scheduled")
+                val contentionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+                var blockedInsideOutput = false
+                while (System.nanoTime() < contentionDeadline && secondCallbackEntered.count != 0L) {
+                    val thread = secondThread.get()
+                    if (thread?.state == Thread.State.BLOCKED && thread.stackTrace.any {
+                            it.className == AcpTerminalBroker::class.java.name && it.methodName.startsWith("output")
+                        }) {
+                        blockedInsideOutput = true
+                        break
+                    }
+                    Thread.yield()
+                }
+                assertTrue(
+                    blockedInsideOutput,
+                    "second output call neither contended inside output() nor overtook the first callback",
+                )
+                releaseFirstCallback.countDown()
+                first.get(5, TimeUnit.SECONDS)
+                second.get(5, TimeUnit.SECONDS)
+                assertTrue(secondCallbackEntered.await(1, TimeUnit.SECONDS))
+                assertEquals(listOf("first", "second"), callbackOrder.toList())
+            } finally {
+                releaseFirstCallback.countDown()
+                executor.shutdownNow()
+            }
+
+            val outputRecords = audit.snapshot().filter { it.reason == AcpTerminalAuditReason.OUTPUT_OBSERVED }
+            assertEquals(2, outputRecords.size)
+            assertTrue(outputRecords[0].sequence < outputRecords[1].sequence)
+            assertEquals(listOf(4096L, 4096L), outputRecords.map { it.producedOutputBytes })
         }
     }
 
@@ -626,9 +717,11 @@ class AcpTerminalBrokerTest {
             null,
         ).terminalId
         boundedAuditBroker.observeToolCall(SESSION, terminalUpdate("tool-audit-cap", boundedTerminal))
+        var overflowObservationDelivered = false
         assertFailsWith<AcpProtocolFailure> {
-            boundedAuditBroker.output(SESSION, boundedTerminal)
+            boundedAuditBroker.output(SESSION, boundedTerminal) { overflowObservationDelivered = true }
         }
+        assertFalse(overflowObservationDelivered, "output must not be observed when audit admission fails")
         assertEquals(3, boundedAudit.snapshot().size, "terminal audit evidence must remain finitely bounded")
         boundedAuditBroker.close()
         boundedAuditFixture.boundary.close()
