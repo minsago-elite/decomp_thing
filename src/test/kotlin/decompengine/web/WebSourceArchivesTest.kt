@@ -39,7 +39,7 @@ class WebSourceArchivesTest {
             override fun present(jobId: String, runId: String, path: String) = true
             override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
                 consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): StableFileDigest {
-                observe(); read(cancellationCheck); return StableFileDigest(digest, 10, identity)
+                observe(); read(cancellationCheck); return StableFileDigest(digest, 10, identity, validUtf8 = false)
             }
             override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget) = null
         }
@@ -326,7 +326,7 @@ class WebSourceArchivesConsistencyTest {
             override fun attempts(jobId: String) = listOf(attempt)
             override fun present(jobId: String, runId: String, path: String) = true
             override fun stream(jobId: String, runId: String, path: String, declaredSize: (Long) -> Unit,
-                consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit) = StableFileDigest(digest, 10, identity)
+                consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit) = StableFileDigest(digest, 10, identity, validUtf8 = false)
             override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget) = null
         }
         var round = 0
