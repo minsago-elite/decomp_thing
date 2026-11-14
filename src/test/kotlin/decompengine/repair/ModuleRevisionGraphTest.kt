@@ -983,6 +983,79 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `profile owned module may also select an explicitly mentioned shared build path`() {
+        val project = genericProject(
+            "repair-profile-owned-shared-path-",
+            mapOf("src/unit.src" to "unit\n", "config/shared.cfg" to "shared\n"),
+        )
+        val profile = object : RepairIndexProfile {
+            private val layout = RepairIndexLayout(
+                sourcePaths = listOf("config/shared.cfg", "src/unit.src"),
+                editablePaths = listOf("config/shared.cfg", "src/unit.src"),
+                modules = listOf(RepairModuleEvidence("unit", listOf("src/unit.src"))),
+                sharedContextPaths = listOf("config/shared.cfg"),
+                sharedInvalidationPaths = listOf("config/shared.cfg"),
+            )
+
+            override fun profileId() = "profile-owned-shared-diagnostic-v1"
+            override fun resolve(projectRoot: Path, budget: RepairResourceBudget) = layout
+            override fun failureOwnership(
+                projectRoot: Path,
+                sourceRevisionSha256: String,
+                budget: RepairResourceBudget,
+            ) = RepairFailureOwnership(moduleIds = listOf("unit"), includesSharedContext = false)
+        }
+
+        ModuleRevisionGraph.open(project, profile).use { graph ->
+            val context = graph.selectContext("compile", "config/shared.cfg:1: shared build failure")
+
+            assertEquals(listOf("unit"), context.seedModules)
+            assertEquals(listOf("config/shared.cfg", "src/unit.src"), context.writablePaths)
+            assertTrue(context.diagnosticEvidence?.includesSharedContext == true)
+            graph.requireContextBinding(context)
+            assertEquals(setOf("config/shared.cfg", "src/unit.src"), graph.preflightStagingContext(context).keys)
+        }
+    }
+
+    @Test
+    fun `generated build definition candidate does not alter static semantic index identity`() {
+        val project = generatedProject()
+        val profile = GeneratedCRepairIndexProfile
+        val initialIndex = ModuleRepairIndex.load(project, profile)
+        val indexSha256 = initialIndex.indexSha256
+        val makefile = project.resolve("Makefile")
+        val candidate = makefile.readBytes() + "\n# authorized candidate edit\n".toByteArray()
+
+        ModuleRevisionGraph.open(project, profile).use { graph ->
+            assertEquals(indexSha256, graph.snapshot.indexSha256)
+            val attempt = graph.beginAttempt(listOf("Makefile"))
+            val changes = graph.installCandidate(attempt, mapOf("Makefile" to candidate))
+
+            assertEquals(indexSha256, graph.snapshot.indexSha256)
+            assertEquals(listOf("Makefile"), changes.map { it.path })
+            assertContentEquals(candidate, makefile.readBytes())
+        }
+    }
+
+    @Test
+    fun `maximum retained behavior case id fits outcome uncertainty subject`() {
+        val project = generatedProject()
+        val caseId = "c".repeat(512)
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.retainRegressionInputs(listOf(ProcessInput(caseId, listOf("arg"), byteArrayOf(1))))
+            val context = graph.selectContext("compile", "src/modules/alpha.c:1: diagnostic")
+            val evidence = requireNotNull(context.evidenceSnapshot)
+            val uncertainty = evidence.uncertainties.single {
+                it.category == "observed-outcome" && it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+            }
+
+            assertEquals(caseId, uncertainty.subject)
+            graph.requireContextBinding(context)
+        }
+    }
+
+    @Test
     fun `fallback IDs and declared behavior roots must resolve exactly`() {
         val sources = listOf("code/a.src", "code/b.src")
         assertFailsWith<IllegalArgumentException> {
@@ -3415,7 +3488,10 @@ class ModuleRevisionGraphTest {
         val manifestBefore = fixture.project.resolve("source_tree_manifest.json").readBytes()
         val unresolvedBefore = fixture.project.resolve("UNRESOLVED.md").readBytes()
 
-        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+        val refusal = assertFailsWith<IllegalArgumentException> {
+            ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+        }
+        assertTrue(refusal.message.orEmpty().contains("recovery authorization differs"))
         assertContentEquals(manifestBefore, fixture.project.resolve("source_tree_manifest.json").readBytes())
         assertContentEquals(unresolvedBefore, fixture.project.resolve("UNRESOLVED.md").readBytes())
         assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
@@ -5861,6 +5937,26 @@ class ModuleRevisionGraphTest {
         }
 
         val context = graph.selectContext("compile", "src/modules/alpha.c: error")
+        val evidence = requireNotNull(context.evidenceSnapshot)
+        assertEquals(graph.snapshot.indexSha256, evidence.indexSha256)
+        assertEquals(context.sourceRevisionSha256, evidence.workingRevisionSha256)
+        assertTrue(evidence.staticFacts.relations.any {
+            it.kind == RepairEvidenceRelationKind.CALLS && it.sourceEntityId == "fn_alpha" && it.targetEntityId == "fn_beta"
+        })
+        assertTrue(evidence.uncertainties.any { it.reason == RepairEvidenceUncertaintyReason.AMBIGUOUS_ATTRIBUTION })
+        assertEquals(setOf("entities", "relations", "declarations", "definitions", "buildEvidence", "uncertainties"), evidence.omittedRecordCounts.keys)
+        assertEquals(context.diagnosticHintSha256, evidence.diagnosticEvidence.hintSha256)
+        assertEquals(context.seedModules, evidence.diagnosticEvidence.selectedModuleIds)
+        assertEquals(context.sourceRevisionSha256, evidence.diagnosticEvidence.subjectSourceRevisionSha256)
+        assertTrue(context.toContextJson().contains("evidenceSnapshotSha256"))
+        assertTrue(context.toContextJson().contains("omittedRecordCounts"))
+        assertTrue(context.toContextJson().contains("diagnosticEvidence"))
+        graph.requireContextBinding(context)
+        assertFailsWith<IllegalArgumentException> {
+            graph.requireContextBinding(context.copy(diagnosticHintSha256 = "0".repeat(64)))
+        }
+        graph.retainRegressionInputs(listOf(ProcessInput("later-case", listOf("later"), byteArrayOf(4))))
+        assertFailsWith<IllegalArgumentException> { graph.requireContextBinding(context) }
         assertFailsWith<UnsupportedOperationException> {
             @Suppress("UNCHECKED_CAST")
             (context.readablePaths as MutableList<String>).add("forged.c")
@@ -5896,8 +5992,111 @@ class ModuleRevisionGraphTest {
 
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
             assertContentEquals(installedBytes, target.readBytes())
-            assertEquals(listOf("original"), reopened.retainedRegressionCorpus().inputs.single().args)
-            assertContentEquals(byteArrayOf(1, 2, 3), reopened.retainedRegressionCorpus().inputs.single().stdin)
+            val reopenedCases = reopened.retainedRegressionCorpus().inputs.associateBy { it.id }
+            assertEquals(listOf("original"), reopenedCases.getValue("case").args)
+            assertContentEquals(byteArrayOf(1, 2, 3), reopenedCases.getValue("case").stdin)
+            assertEquals(listOf("later"), reopenedCases.getValue("later-case").args)
+            assertContentEquals(byteArrayOf(4), reopenedCases.getValue("later-case").stdin)
+        }
+    }
+
+    @Test
+    fun `context evidence retains regression IDs admitted by the corpus budget`() {
+        val project = generatedProject()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val caseId = "case-" + "x".repeat(4_108)
+            graph.retainRegressionInputs(listOf(ProcessInput(caseId)))
+
+            val context = graph.selectContext("compile", "src/modules/alpha.c: compiler diagnostic")
+            val evidence = requireNotNull(context.evidenceSnapshot)
+
+            assertEquals(caseId, evidence.behaviorCases.single().caseId)
+            assertTrue(evidence.uncertainties.any {
+                it.subject == caseId && it.category == "observed-outcome" &&
+                    it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+            })
+            graph.requireContextBinding(context)
+        }
+    }
+
+    @Test
+    fun `repair context refuses changed admitted model evidence before staging`() {
+        val project = generatedProject()
+        val model = project.resolve("reports/program_model.json")
+        val originalModel = model.readBytes()
+        val source = project.resolve("src/modules/alpha.c").readBytes()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val context = graph.selectContext("compile", "src/modules/alpha.c: error: stale evidence")
+            graph.requireContextBinding(context)
+
+            val changedModel = originalModel.toString(Charsets.UTF_8)
+                .replace("int alpha_run(void)", "long alpha_run(void)")
+            assertTrue(changedModel != originalModel.toString(Charsets.UTF_8))
+            model.writeText(changedModel)
+
+            val refusal = assertFailsWith<IllegalArgumentException> {
+                graph.preflightStagingContext(context)
+            }
+            assertTrue(refusal.message.orEmpty().contains("plan/model evidence changed"))
+            assertContentEquals(source, project.resolve("src/modules/alpha.c").readBytes())
+            assertEquals(null, graph.snapshot.pendingAttemptId)
+        }
+    }
+
+    @Test
+    fun `provisional context binds diagnostic subject to working revision and ownership to index basis`() {
+        val project = generatedProject()
+        val path = "src/modules/alpha.c"
+        val moduleId = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget()).modules
+            .single { path in it.ownedPaths }.id
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val indexBasisRevision = graph.snapshot.nodes.single().sourceRevisionSha256
+            val contractText =
+                "{\"schemaVersion\":3,\"sourceStableDuringBuild\":true," +
+                    "\"sourceRevisionSha256\":\"$indexBasisRevision\",\"modules\":[{\"id\":\"$moduleId\"}]," +
+                    "\"failedOwners\":[\"$moduleId\"]}"
+            project.resolve("reports/build_contract.json").writeText(contractText)
+            val corpus = graph.retainRegressionInputs(listOf(ProcessInput("provisional-context", emptyList(), byteArrayOf())))
+            graph.beginRun(1, 60_000)
+            val before = project.resolve(path).readBytes()
+            val after = before + "\n/* provisional context binding */\n".toByteArray()
+            val attempt = graph.beginAttempt(listOf(path), RevisionRepairMetadata(
+                iterationIndex = 1,
+                failureKind = "compile",
+                prompt = "bounded failure",
+                summary = null,
+                retainedRegressionIds = corpus.inputs.map(ProcessInput::id),
+                before = null,
+                regressionCorpusSha256 = corpus.sha256,
+            ))
+            graph.persistAndBindAgentInvocation(attempt, completeAcpReceiptDocument(project, attempt, path, before, after))
+            graph.installCandidate(attempt, mapOf(path to after))
+            val proof = archiveValidationProofFixture(graph, attempt, project, corpus.inputs, matched = false,
+                receiptName = "provisional-context.validation.json")
+            graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
+            graph.bindExpectedObservations(sha256(buildString {
+                append(proof.originalBinarySha256).append('\n')
+                corpus.inputs.forEach { input ->
+                    append(input.id.length).append(':').append(input.id).append(":0:")
+                        .append(sha256(byteArrayOf())).append(':').append(sha256(byteArrayOf())).append('\n')
+                }
+            }.toByteArray()))
+            graph.recordProvisional(attempt, RepairEvidence("behavior", "provisional context fixture"), proof)
+
+            val selection = graph.selectContext("compile", "$path: provisional failure")
+            val snapshot = requireNotNull(selection.evidenceSnapshot)
+            assertNotEquals(snapshot.indexBasisSourceRevisionSha256, snapshot.workingRevisionSha256)
+            assertEquals(snapshot.workingRevisionSha256, snapshot.diagnosticEvidence.subjectSourceRevisionSha256)
+            assertEquals(RepairDiagnosticAttributionBasis.PROFILE_BOUND_MODULES,
+                snapshot.diagnosticEvidence.attributionBasis)
+            assertEquals(snapshot.indexBasisSourceRevisionSha256,
+                snapshot.diagnosticEvidence.ownershipEvidenceSourceRevisionSha256)
+            assertEquals("build-contract", snapshot.diagnosticEvidence.ownershipEvidenceOrigin?.documentRole)
+            assertEquals(decompengine.project.sha256(contractText.toByteArray(Charsets.UTF_8)),
+                snapshot.diagnosticEvidence.ownershipEvidenceOrigin?.contentSha256)
+            graph.requireContextBinding(selection)
+            project.resolve("reports/build_contract.json").writeText(contractText + " ")
+            assertFailsWith<IllegalArgumentException> { graph.requireContextBinding(selection) }
         }
     }
 

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.builtin.BuiltinCapturedContextToolsTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-11-13T11:01:07.262Z" hostname="whatsername" time="0.844">
+  <properties/>
+  <testcase name="invalid paths offsets and unknown evidence fail without host lookup()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.002"/>
+  <testcase name="repair evidence snapshot hash and uncertainty survive immutable evidence pagination()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.499"/>
+  <testcase name="evidence text pages preserve surrogate pairs and the complete input digest()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.315"/>
+  <testcase name="serialized output and audit bounds are enforced before success()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.01"/>
+  <testcase name="directory inventory is sorted virtual and restricted by shared read policy()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.001"/>
+  <testcase name="evidence inventory pages bind immutable input hashes without losing entries()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.004"/>
+  <testcase name="captured harness routes directory and evidence tools into receipt audits()" classname="decompengine.builtin.BuiltinCapturedContextToolsTest" time="0.012"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

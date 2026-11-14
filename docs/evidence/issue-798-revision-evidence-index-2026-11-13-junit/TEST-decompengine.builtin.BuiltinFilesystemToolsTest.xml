@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.builtin.BuiltinFilesystemToolsTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-11-13T11:01:08.619Z" hostname="whatsername" time="0.041">
+  <properties/>
+  <testcase name="oracle writes and undeclared paths remain denied by the same captured policy()" classname="decompengine.builtin.BuiltinFilesystemToolsTest" time="0.005"/>
+  <testcase name="refused and failed turns retain staged change hashes without accepting the revision()" classname="decompengine.builtin.BuiltinFilesystemToolsTest" time="0.005"/>
+  <testcase name="literal search bounds matches and explicitly reports omitted matches()" classname="decompengine.builtin.BuiltinFilesystemToolsTest" time="0.003"/>
+  <testcase name="built-in read write read traverses the captured authority and retains exact candidate hashes()" classname="decompengine.builtin.BuiltinFilesystemToolsTest" time="0.005"/>
+  <testcase name="typed and direct ACP captured callbacks produce the same changes and decision evidence()" classname="decompengine.builtin.BuiltinFilesystemToolsTest" time="0.004"/>
+  <testcase name="typed host callbacks share descriptor containment atomic writes and symlink denial with ACP()" classname="decompengine.builtin.BuiltinFilesystemToolsTest" time="0.015"/>
+  <testcase name="captured file ceilings reject source and replacements without host fallback()" classname="decompengine.builtin.BuiltinFilesystemToolsTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
