@@ -74,6 +74,10 @@ def install(destination: Path) -> None:
                         shutil.copyfileobj(source, output, 64 * 1024)
                     target.chmod(0o644 | (mode & 0o111))
         extracted = stage / "chrome-linux64"
+        with (extracted / "chrome").open("rb") as browser:
+            browser_digest = hashlib.file_digest(browser, "sha256").hexdigest()
+        if browser_digest != lock["chromeSha256"]:
+            raise ValueError("extracted Chrome executable differs from its reviewed SHA-256 lock")
         # Installation does not execute the browser. Ubuntu CI installs the
         # reviewed archive's deb.deps before browser use.
         (extracted / "decomp-browser-lock.json").write_text(json.dumps(lock, indent=2) + "\n")

@@ -283,25 +283,76 @@ data class ModulePlan(
     val modules: List<PlannedModule>,
     val dependencyCycles: List<List<String>> = emptyList(),
 ) {
-    fun toJson(): String = buildString {
-        append("{\n  \"schemaVersion\": ").append(schemaVersion).append(",\n  \"modules\": [")
-        append(modules.sortedBy { it.id }.joinToString(",") { module ->
-            """
-            {
-              "id": "${module.id.json()}",
-              "sourcePath": "${module.sourcePath.json()}",
-              "headerPath": "${module.headerPath.json()}",
-              "functionIds": [${module.functionIds.joinToString(", ") { "\"${it.json()}\"" }}],
-              "globalIds": [${module.globalIds.joinToString(", ") { "\"${it.json()}\"" }}],
-              "typeIds": [${module.typeIds.joinToString(", ") { "\"${it.json()}\"" }}],
-              "boundaryEvidence": [${module.boundaryEvidence.joinToString(", ") { "\"${it.json()}\"" }}]
-            }""".trimIndent().prependIndent("    ")
-        })
-        append("\n  ],\n  \"dependencyCycles\": [")
-        append(dependencyCycles.joinToString(",") { cycle -> "[${cycle.joinToString(",") { "\"${it.json()}\"" }}]" })
-        append("]\n}\n")
-    }
+    fun toJson(): String = buildString { appendCanonicalJson(this) }
 }
+
+internal fun ModulePlan.appendCanonicalJson(output: Appendable) {
+    output.append("{\n  \"schemaVersion\": ").append(schemaVersion.toString()).append(",\n  \"modules\": [")
+    var modulesAreSorted = true
+    var moduleIndex = 1
+    while (moduleIndex < modules.size) {
+        if (modules[moduleIndex - 1].id.compareTo(modules[moduleIndex].id) > 0) {
+            modulesAreSorted = false
+            break
+        }
+        moduleIndex++
+    }
+    val canonicalModules = if (modulesAreSorted) modules else modules.sortedBy { it.id }
+    canonicalModules.forEachIndexed { index, module ->
+        if (index > 0) output.append(',')
+        output.append("    {\n      \"id\": ").appendJsonString(module.id)
+        output.append(",\n      \"sourcePath\": ").appendJsonString(module.sourcePath)
+        output.append(",\n      \"headerPath\": ").appendJsonString(module.headerPath)
+        output.append(",\n      \"functionIds\": ").appendJsonStringArray(module.functionIds)
+        output.append(",\n      \"globalIds\": ").appendJsonStringArray(module.globalIds)
+        output.append(",\n      \"typeIds\": ").appendJsonStringArray(module.typeIds)
+        output.append(",\n      \"boundaryEvidence\": ").appendJsonStringArray(module.boundaryEvidence)
+        output.append("\n    }")
+    }
+    output.append("\n  ],\n  \"dependencyCycles\": [")
+    dependencyCycles.forEachIndexed { cycleIndex, cycle ->
+        if (cycleIndex > 0) output.append(',')
+        output.append('[')
+        cycle.forEachIndexed { moduleIndex, moduleId ->
+            if (moduleIndex > 0) output.append(',')
+            output.appendJsonString(moduleId)
+        }
+        output.append(']')
+    }
+    output.append("]\n}\n")
+}
+
+private fun Appendable.appendJsonStringArray(values: List<String>) {
+    append('[')
+    values.forEachIndexed { index, value ->
+        if (index > 0) append(", ")
+        appendJsonString(value)
+    }
+    append(']')
+}
+
+private fun Appendable.appendJsonString(value: String) {
+    append('"')
+    value.forEach { char ->
+        when (char) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (char.code < 0x20) {
+                append("\\u")
+                append(HEX_DIGITS[(char.code shr 12) and 0xf])
+                append(HEX_DIGITS[(char.code shr 8) and 0xf])
+                append(HEX_DIGITS[(char.code shr 4) and 0xf])
+                append(HEX_DIGITS[char.code and 0xf])
+            } else append(char)
+        }
+    }
+    append('"')
+}
+
+private const val HEX_DIGITS = "0123456789abcdef"
 
 fun stableFunctionId(address: ULong): String = "fn_${address.toString(16).padStart(16, '0')}"
 fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

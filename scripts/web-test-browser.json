@@ -8,6 +8,7 @@
   "url": "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/linux64/chrome-linux64.zip",
   "bytes": 185646494,
   "sha256": "13113b963ac22fffdad898a677591028e4397c46c1daa9e61811258eed6e35b5",
+  "chromeSha256": "2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801",
   "entries": 308,
   "expandedBytes": 396335288
 }

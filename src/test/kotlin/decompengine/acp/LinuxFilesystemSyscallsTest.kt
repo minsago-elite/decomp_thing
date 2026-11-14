@@ -16,6 +16,97 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `stable reader classifies concurrent growth shrink and restored growth`() {
+        withLinuxDirectory("linux-stable-growth-") { root, _ ->
+            val path = root.resolve("state")
+            for (scenario in listOf("growth", "budget", "shrink", "restore")) {
+                Files.write(path, byteArrayOf(1, 2))
+                val modified = Files.getLastModifiedTime(path)
+                var checks = 0
+                val action = {
+                    decompengine.repair.readStableRegularFile(root, "state", 3,
+                        cancellationCheck = {
+                            checks++
+                            if (checks == 3) Files.write(path, when (scenario) {
+                                "budget" -> byteArrayOf(1, 2, 3, 4)
+                                "shrink" -> byteArrayOf(1)
+                                else -> byteArrayOf(1, 2, 3)
+                            })
+                            if (checks == 4 && scenario == "restore") {
+                                Files.write(path, byteArrayOf(1, 2))
+                                Files.setLastModifiedTime(path, modified)
+                            }
+                        })
+                }
+                if (scenario == "budget") assertFailsWith<decompengine.repair.RepairBudgetExceededException> { action() }
+                else assertFailsWith<decompengine.repair.StableFileChangedException> { action() }
+            }
+        }
+    }
+
+    @Test
+    fun `known size reader remembers growth even after size and mtime restoration`() {
+        withLinuxDirectory("linux-known-growth-") { root, directory ->
+            val path = root.resolve("state")
+            Files.write(path, byteArrayOf(1))
+            val modified = Files.getLastModifiedTime(path)
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "state")!!.use { authorized ->
+                LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+                    var checks = 0
+                    val result = LinuxFilesystemSyscalls.readKnownSize(readable, 1, 3) {
+                        checks++
+                        if (checks == 2) Files.write(path, byteArrayOf(1, 2))
+                        if (checks == 3) {
+                            Files.write(path, byteArrayOf(1))
+                            Files.setLastModifiedTime(path, modified)
+                        }
+                    }
+                    assertEquals(1L, Files.size(path))
+                    assertEquals(modified, Files.getLastModifiedTime(path))
+                    assertEquals(2L, result.observedCount)
+                    assertNull(result.bytes)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `known size reader preserves exact content and reports mismatches without padded content`() {
+        withLinuxDirectory("linux-known-size-") { root, directory ->
+            for (size in listOf(0, 1, 65537)) {
+                val content = ByteArray(size) { (it % 251).toByte() }
+                Files.write(root.resolve("state"), content)
+                for (expected in listOf(size, size + 1, (size - 1).coerceAtLeast(0)).distinct()) {
+                    LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "state")!!.use { authorized ->
+                        LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+                            val result = LinuxFilesystemSyscalls.readKnownSize(readable, expected, size + 1) {}
+                            assertEquals(size.toLong(), result.observedCount)
+                            if (size == expected) assertContentEquals(content, result.bytes)
+                            else assertNull(result.bytes)
+                        }
+                    }
+                }
+            }
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "state")!!.use { authorized ->
+                LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+                    assertFailsWith<LinuxResourceLimitException> {
+                        LinuxFilesystemSyscalls.readKnownSize(readable, 1, 1) {}
+                    }
+                }
+                LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+                    val cancelled = java.io.InterruptedIOException("cancelled")
+                    assertTrue(assertFailsWith<java.io.InterruptedIOException> {
+                        LinuxFilesystemSyscalls.readKnownSize(readable, 0, 100000) { throw cancelled }
+                    } === cancelled)
+                    assertFailsWith<IllegalArgumentException> {
+                        LinuxFilesystemSyscalls.readKnownSize(readable, 2, 1) {}
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `prefix observations retain successful owners through a later failed pin and cleanup`() {
         var clock = 0L
         val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create {

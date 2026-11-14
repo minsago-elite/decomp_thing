@@ -44,6 +44,24 @@ case "$mode" in
       exit 1
     fi
     ;;
+  gateway-once|integrity-after-gateway)
+    if ((count == 1)); then
+      echo 'LLVM release artifact fetch failed: HTTPS download returned HTTP 504' >&2
+      exit 1
+    fi
+    if [[ "$mode" == integrity-after-gateway ]]; then
+      echo 'LLVM release artifact fetch failed: HTTPS body SHA-256 differs from its release lock' >&2
+      exit 1
+    fi
+    ;;
+  gateway-always)
+    echo 'LLVM release artifact fetch failed: HTTPS download returned HTTP 504' >&2
+    exit 1
+    ;;
+  other-http)
+    echo 'LLVM release artifact fetch failed: HTTPS download returned HTTP 503' >&2
+    exit 1
+    ;;
   integrity)
     echo 'LLVM release artifact fetch failed: HTTPS body SHA-256 differs from its release lock' >&2
     exit 1
@@ -173,5 +191,3 @@ reset_control success
 run_wrapper "$scratch/fetch" "$state" success > "$log" 2>&1
 assert_attempts_and_pauses 1 ''
 grep -Fq 'verified full release artifact' "$log"
-
-echo 'bounded LLVM release transport retry checks passed'
