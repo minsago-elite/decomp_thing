@@ -441,6 +441,64 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `reconstructor identity v4 replays the historical path-only mutation commitment`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "reconstructor-v4-policy-replay-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                val harness = ArchiveEvidenceHarness(accepted = true)
+                createAgentProject(project, accepted = true, profile = profile, harness = harness)
+
+                val currentRequest = harness.executedRequest
+                val legacyRequest = AgentExecutionRequest(
+                    objective = currentRequest.objective,
+                    workspaceRoots = currentRequest.workspaceRoots,
+                    contextInputs = currentRequest.contextInputs,
+                    accessPolicy = AgentAccessPolicy(
+                        currentRequest.accessPolicy.pathRules,
+                        currentRequest.accessPolicy.allowedOperations,
+                    ),
+                    limits = currentRequest.limits,
+                    cancellation = currentRequest.cancellation,
+                    sessionContinuation = currentRequest.sessionContinuation,
+                )
+                val legacyBinding = AgentExecutionRequestBinding.capture(legacyRequest)
+                rewriteEvidenceAndBindings(project) { text ->
+                    val root = Json.parseToJsonElement(text).jsonObject
+                    val request = root.getValue("request").jsonObject
+                    JsonObject(root + ("request" to JsonObject(request + mapOf(
+                        "accessPolicySha256" to JsonPrimitive(legacyBinding.accessPolicySha256),
+                        "requestSha256" to JsonPrimitive(legacyBinding.requestSha256),
+                    )))).toString() + "\n"
+                }
+
+                val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+                val identity = checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content
+                assertTrue(identity.endsWith(":v5"))
+                rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint + mapOf(
+                    "reconstructorIdentity" to JsonPrimitive(identity.removeSuffix(":v5") + ":v4"),
+                    "executionRequestSha256" to JsonPrimitive(legacyBinding.requestSha256),
+                )))
+
+                val manifest = SourceTreeManifestReader.read(project, profile)
+                assertEquals(1, ReconstructionAcpEvidenceArchiveVerifier.verify(
+                    project,
+                    manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                    manifest.files.associate { it.path to Files.size(project.resolve(it.path)) },
+                    manifest,
+                    profile,
+                ).size, profile.id)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `archive gate rejects checkpoint path and digest ambiguity`() {
         val temp = createTempDirectory("acp-archive-checkpoint-")
         val baseline = createHistoricalAgentProject(temp.resolve("baseline"), accepted = true)
@@ -467,8 +525,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                         "\"executionTerminalOutcome\": \"returned-refused\"",
                     )
                     else -> checkpoint.replace(
-                        Regex("factory-[0-9a-f]{64}:v4"),
-                        "factory-${"0".repeat(64)}:v4",
+                        Regex("factory-[0-9a-f]{64}:v5"),
+                        "factory-${"0".repeat(64)}:v5",
                     )
                 }
             }

@@ -23,7 +23,7 @@ import java.util.Locale
 /** Fingerprint contracts are versioned with the built-in reconstruction request contract. */
 internal fun archivedModuleInputFingerprintProvider(reconstructorIdentity: String): String =
     if (reconstructorIdentity.matches(Regex(
-        "agent:.*:context-[1-9][0-9]*:factory-(?:[0-9a-f]{64}|unbound):v4",
+        "agent:.*:context-[1-9][0-9]*:factory-(?:[0-9a-f]{64}|unbound):v[45]",
         RegexOption.DOT_MATCHES_ALL,
     ))) "module-reconstruction-input-v3" else "module-reconstruction-input-v2"
 
