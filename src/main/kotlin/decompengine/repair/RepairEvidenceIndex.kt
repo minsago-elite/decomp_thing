@@ -137,8 +137,10 @@ class RepairBuildEvidence(
     override fun hashCode(): Int = listOf(buildDefinitionPath, origin, explicitTargets, sourcePathsByTarget).hashCode()
 }
 
-private fun isPortableEvidencePath(path: String): Boolean = path.isNotBlank() && path.length <= 1024 &&
-    !path.startsWith('/') && !path.contains('\\') && path.split('/').all { it.isNotBlank() && it != "." && it != ".." }
+private fun isPortableEvidencePath(path: String): Boolean = path.isNotBlank() && path.length <= 4_096 &&
+    !path.startsWith('/') && !path.contains('\\') &&
+    path.none { it.code < 0x20 || it.code == 0x7f || it == ':' } &&
+    path.split('/').all { it.isNotBlank() && it != "." && it != ".." && it.length <= 255 }
 
 data class RepairBehaviorCaseEvidence(
     val caseId: String,
