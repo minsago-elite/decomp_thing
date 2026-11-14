@@ -25,6 +25,7 @@
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "declaredUtf8Text": true,
         "declaredViewable": true,
+        "commitment": "source-input",
         "kind": "file"
       }
     ],

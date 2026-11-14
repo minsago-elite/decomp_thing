@@ -3,6 +3,16 @@ import { ApiClientError } from './errors';
 import type { Schema } from './schema-types';
 
 const patterns = new Map<string, RegExp>();
+const definitions = new Map<string, Schema>(Object.entries(contractSchema.definitions ?? {}));
+
+/** A lazily loaded route adds its generated exclusive definitions; an existing definition is never replaced. */
+export function registerDefinitions(entries: Readonly<Record<string, Schema>>): void {
+  for (const [key, value] of Object.entries(entries)) {
+    const existing = definitions.get(key);
+    if (existing !== undefined && existing !== value) throw new ApiClientError('unsupported_contract');
+    definitions.set(key, value);
+  }
+}
 export function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -33,7 +43,7 @@ export function validateSchema(value: unknown, schema: Schema, additive: boolean
   const step = () => { if (++steps > 250_000) throw new ApiClientError('response_too_large'); };
   const dereference = (node: Schema): Schema => {
     if (!node.$ref) return node;
-    const target = contractSchema.definitions?.[node.$ref.slice(14)];
+    const target = definitions.get(node.$ref.slice(14));
     if (!target) throw new ApiClientError('unsupported_contract');
     return target;
   };

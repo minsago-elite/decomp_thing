@@ -13,6 +13,7 @@ const files = [
   'frontend/src/api/generated.ts',
   'frontend/src/api/generated-schema.ts',
   'frontend/src/api/generated-schema-lazy.ts',
+  'frontend/src/api/generated-schema-structure.ts',
 ];
 
 function check(root, expectedStatus = 0) {

@@ -1,0 +1,168 @@
+{
+  "apiVersion": 1,
+  "kind": "entityDetail",
+  "requestId": "request_fixture_entityDetail",
+  "data": {
+    "binding": {
+      "jobId": "0123456789abcdef0123456789abcdef",
+      "runId": "run_fixture_structure",
+      "revisionId": "revision_fixture_structure"
+    },
+    "authority": "recorded-program-model",
+    "state": "not-recorded",
+    "stateReason": "MODEL_NOT_RECORDED",
+    "structureVersion": "5555555555555555555555555555555555555555555555555555555555555555",
+    "sourceSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "metadataVersion": "2222222222222222222222222222222222222222222222222222222222222222",
+    "manifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "model": {
+      "state": "not-recorded",
+      "stateReason": "MODEL_NOT_RECORDED",
+      "path": null,
+      "sha256": null,
+      "sizeBytes": null,
+      "schemaVersion": null
+    },
+    "plan": {
+      "state": "not-recorded",
+      "stateReason": "MODEL_UNAVAILABLE",
+      "path": null,
+      "sha256": null,
+      "sizeBytes": null,
+      "schemaVersion": null
+    },
+    "recoveryAssessment": "not-recorded",
+    "capabilities": [
+      {
+        "id": "function-inventory",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "recorded-prototypes",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "module-ownership",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "generated-headers",
+        "state": "not-recorded",
+        "reason": "MODULE_HEADERS_NOT_RECORDED"
+      },
+      {
+        "id": "global-byte-evidence",
+        "state": "not-recorded",
+        "reason": "MODEL_SCHEMA_BEFORE_3"
+      },
+      {
+        "id": "recovery-assessment",
+        "state": "not-recorded",
+        "reason": "EXTRACTION_LABELS_ARE_UNASSESSED"
+      },
+      {
+        "id": "type-references",
+        "state": "not-recorded",
+        "reason": "MODEL_RECORDS_DECLARATION_TEXT_ONLY"
+      },
+      {
+        "id": "type-layouts",
+        "state": "not-recorded",
+        "reason": "A_SERIES_LAYOUT_FACTS_NOT_RECORDED"
+      },
+      {
+        "id": "abi-interfaces",
+        "state": "not-recorded",
+        "reason": "A_SERIES_ABI_FACTS_NOT_RECORDED"
+      },
+      {
+        "id": "cpp-object-model",
+        "state": "not-recorded",
+        "reason": "A_SERIES_CPP_FACTS_NOT_RECORDED"
+      }
+    ],
+    "entity": {
+      "kind": "global",
+      "entityId": "global_0000000000404000",
+      "selector": "global_0000000000404000",
+      "recorded": true,
+      "name": "helper",
+      "address": "0x404000",
+      "extractionStatus": "recovered",
+      "evidenceState": "recovered",
+      "ownership": "owned",
+      "moduleId": "core",
+      "moduleSelector": "core",
+      "implementationUnresolved": false,
+      "reportedUnresolved": true,
+      "nameCollision": true,
+      "texts": [
+        {
+          "field": "type",
+          "recorded": true,
+          "preview": {
+            "text": "int",
+            "characters": "3",
+            "truncated": false
+          }
+        },
+        {
+          "field": "initializer",
+          "recorded": true,
+          "preview": {
+            "text": "{ 1 }",
+            "characters": "5",
+            "truncated": false
+          }
+        }
+      ],
+      "strings": null,
+      "calls": null,
+      "referencedGlobals": null,
+      "calledBy": null,
+      "referencedBy": {
+        "total": 1,
+        "items": [
+          {
+            "kind": "function",
+            "entityId": "fn_0000000000401000",
+            "selector": "fn_0000000000401000",
+            "name": "main",
+            "resolution": "recorded"
+          }
+        ]
+      },
+      "byteEvidence": "unsupported-schema",
+      "collisions": {
+        "total": 2,
+        "items": [
+          {
+            "kind": "function",
+            "entityId": "fn_0000000000401100",
+            "selector": "fn_0000000000401100",
+            "name": "helper",
+            "resolution": "recorded"
+          },
+          {
+            "kind": "function",
+            "entityId": "fn_ffffffffffffffff",
+            "selector": "fn_ffffffffffffffff",
+            "name": "helper",
+            "resolution": "recorded"
+          }
+        ]
+      },
+      "sources": {
+        "implementationPath": "src/modules/core.c",
+        "implementationFileId": "file_3_7777777777777777777777777777777777777777777777777777777777777777",
+        "interfacePath": "include/modules/core.h",
+        "interfaceFileId": "file_1_7777777777777777777777777777777777777777777777777777777777777777",
+        "sharedInterfacePath": "include/decomp_types.h",
+        "sharedInterfaceFileId": "file_0_7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    }
+  }
+}

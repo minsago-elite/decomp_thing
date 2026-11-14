@@ -3,7 +3,7 @@ import type { ContractDocument, RequestData, RequestKind, ResponseKind, Response
 import { ApiClientError } from './errors';
 import { MAX_JSON_BYTES, parseBoundedJson } from './json';
 import { checkSemantics } from './semantics';
-import { isObject, validateSchema } from './validate';
+import { isObject, registerDefinitions, validateSchema } from './validate';
 import type { Schema } from './schema-types';
 
 const variants = new Map<string, Schema>();
@@ -15,10 +15,23 @@ variants.set('event', { $ref: '#/definitions/event' });
 
 /** Lazily loaded routes add their generated contract extension once, before decoding those kinds. */
 export function registerContractExtension(extension: Schema) {
-  Object.assign(contractSchema.definitions ??= {}, extension.definitions);
+  registerDefinitions(extension.definitions ?? {});
   for (const schema of extension.oneOf ?? []) {
     const kind = schema.properties?.kind?.const;
     if (typeof kind === 'string') variants.set(kind, schema);
+  }
+}
+
+const groupChecks = new Map<string, (document: ContractDocument) => void>();
+
+/** Admit a generated lazy response group and its semantic checks; its kinds stay unsupported until the owning route loads. */
+export function registerContractGroup(group: Schema, check: (document: ContractDocument) => void): void {
+  registerDefinitions(group.definitions ?? {});
+  for (const schema of group.oneOf ?? []) {
+    const kind = schema.properties?.kind?.const;
+    if (typeof kind !== 'string' || (variants.has(kind) && variants.get(kind) !== schema)) throw new ApiClientError('unsupported_contract');
+    variants.set(kind, schema);
+    groupChecks.set(kind, check);
   }
 }
 
@@ -35,6 +48,7 @@ export function decodeContract(text: string, options: { mode?: 'producer' | 'res
   const additive = options.mode !== 'producer' && !value.kind.endsWith('Request');
   const document = validateSchema(value, schema, additive) as ContractDocument;
   checkSemantics(document, options.basePath ?? '/');
+  groupChecks.get(document.kind)?.(document);
   return document;
 }
 

@@ -30,9 +30,10 @@ class WebRevisionSourcesTest {
             acceptedImplementation = if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) false else null,
             roles = declaration.roles, contentKind = declaration.contentKind)
     }
-    private fun manifest(inputs: List<Input> = small, selected: ReconstructionProfile = profile): StableRegularFile = captured(
+    private fun manifest(inputs: List<Input> = small, selected: ReconstructionProfile = profile,
+        recorded: List<Input> = emptyList()): StableRegularFile = captured(
         SourceTreeManifest(profileId = selected.id, profileSha256 = selected.sha256, inputSha256 = input.sha256,
-            files = inputs.map { evidence(it, selected) }, unresolvedEntityIds = emptyList()).toJson().toByteArray(), 2)
+            files = (inputs + recorded).map { evidence(it, selected) }, unresolvedEntityIds = emptyList()).toJson().toByteArray(), 2)
     private fun descriptor(inputs: List<Input> = small): JsonObject = buildJsonObject {
         put("schemaVersion", 3); put("sourceRevisionSha256", sourceDigest(inputs))
         put("sourceInputs", JsonArray(inputs.sortedBy { it.path }.map { item -> buildJsonObject {
@@ -222,5 +223,49 @@ class WebRevisionSourcesTest {
         document = captured(descriptor().toString().toByteArray(), 3)
         assertEquals(2, reader.readRevision(reference()).files.size)
         assertEquals(2, reader.read(jobId, runId).files.size)
+    }
+
+    @Test fun `manifest-only reports and notes are reachable with digest bindings but no invented size or source commitment`() {
+        val json = "{\"note\":\"<b>inert</b>\"}\n".toByteArray(); val markdown = "# Unresolved\n\n- fn_1\n".toByteArray()
+        fun sha(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        val recorded = listOf(Input("UNRESOLVED.md", -1, sha(markdown)), Input("reports/confidence.json", -1, sha(json)))
+        val manifestFile = manifest(recorded = recorded); val descriptorFile = captured(descriptor().toString().toByteArray(), 3)
+        val bodies = mutableMapOf("UNRESOLVED.md" to markdown, "reports/confidence.json" to json)
+        val evidence = WebSourceCatalogEvidence(listOf(profile), { input }, { _, path, _ ->
+            if (path.endsWith("source_tree_manifest.json")) manifestFile else descriptorFile })
+        val snapshot = evidence.readRevision(reference())
+        // The revision digest is still the canonical input preimage; manifest-only entries never change it.
+        assertEquals(reference().sourceSha256, snapshot.reference.sourceSha256)
+        assertEquals(listOf("Makefile", "UNRESOLVED.md", "reports/confidence.json", "src/modules/unit.c"), snapshot.files.map { it.evidence.path })
+        assertEquals(listOf(true, false, false, true), snapshot.files.map { it.committedInput })
+        val flat = WebRevisionSourcePages { _, _, _ -> snapshot }.page("owner", jobId, runId, revisionId, null, includeManifest = true)
+            .getValue("items").jsonArray.map { it.jsonObject }
+        assertEquals(listOf("source-input", "manifest-digest", "manifest-digest", "source-input"), flat.map { it.getValue("commitment").jsonPrimitive.content })
+        assertEquals(listOf("0", null, null, "8"), flat.map { it.getValue("sizeBytes").jsonPrimitive.contentOrNull })
+        val root = WebRevisionDirectoryPages { _, _, _ -> snapshot }.page("owner", jobId, runId, revisionId, "root", null, includeManifest = true)
+        assertEquals(listOf("reports", "src", "Makefile", "UNRESOLVED.md"),
+            root.getValue("items").jsonArray.map { it.jsonObject.getValue("displayName").jsonPrimitive.content })
+        val note = root.getValue("items").jsonArray.map { it.jsonObject }.single { it.getValue("displayName").jsonPrimitive.content == "UNRESOLVED.md" }
+        assertEquals(JsonNull, note.getValue("sizeBytes")); assertEquals("manifest-digest", note.getValue("commitment").jsonPrimitive.content)
+        val noteId = note.getValue("fileId").jsonPrimitive.content
+        val detail = WebRevisionFileMetadata { _, _, _ -> snapshot }.read(jobId, runId, revisionId, noteId, includeManifest = true).getValue("item").jsonObject
+        assertTrue(detail.getValue("declaredViewable").jsonPrimitive.boolean && detail.getValue("declaredArchivable").jsonPrimitive.boolean)
+        fun read(id: String, purpose: WebSourceReadPurpose = WebSourceReadPurpose.PREVIEW) = evidence.readFile(reference(), id, purpose, null) { _, _, path, _ ->
+            captured(bodies.getValue(path), 9) }
+        val chunk = read(noteId).chunk(WebSourceChunkQuery.parse(null))
+        assertEquals(String(markdown), chunk.getValue("text").jsonPrimitive.content)
+        assertEquals(markdown.size.toString(), chunk.getValue("sizeBytes").jsonPrimitive.content)
+        assertEquals("utf8", chunk.getValue("representation").jsonPrimitive.content)
+        val jsonId = flat[2].getValue("fileId").jsonPrimitive.content
+        assertContentEquals(json, read(jsonId, WebSourceReadPurpose.DOWNLOAD).download())
+        // The manifest digest is the only binding, so substituted bytes are refused rather than displayed.
+        bodies["reports/confidence.json"] = "{}".toByteArray()
+        assertEquals("SOURCE_REVISION_CHANGED", assertFailsWith<WebAccessDenied> { read(jsonId) }.code)
+        val oversized = WebSourceCatalogEvidence(listOf(profile), { input }, { _, path, _ ->
+            if (path.endsWith("source_tree_manifest.json")) manifestFile else descriptorFile })
+        assertEquals("SOURCE_FILE_TOO_LARGE", assertFailsWith<WebAccessDenied> {
+            oversized.readFile(reference(), noteId, WebSourceReadPurpose.PREVIEW, null) { _, _, _, _ ->
+                throw decompengine.repair.RepairBudgetExceededException("over the reader limit") }
+        }.code)
     }
 }

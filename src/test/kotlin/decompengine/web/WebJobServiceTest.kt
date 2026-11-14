@@ -2,6 +2,7 @@ package decompengine.web
 
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import kotlinx.serialization.json.*
 import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.JobStore
 import decompengine.jobs.AtomicUploadPublisher
@@ -733,6 +734,55 @@ class WebJobServiceTest {
         }
     }
 
+    @Test fun `large nested build recordings do not make the seeded job library unavailable`() = withStore { store, root ->
+        val job = store.createFromUpload("synthetic-history.elf", elfFixture())
+        val limits = decompengine.jobs.WorkflowExecutionLimits(60_000uL, 15_000uL, 1_048_576uL, 16uL)
+        val history = mutableListOf<decompengine.jobs.WorkflowAttempt>()
+        var previous: String? = null
+        decompengine.jobs.WorkflowAttemptStore.open(root).use { owner ->
+            var snapshot = assertIs<decompengine.jobs.WorkflowJobInspection.Available>(owner.inspect(job.id)).snapshot
+            repeat(55) { index ->
+                val queued = owner.create(job.id, snapshot.version,
+                    decompengine.jobs.NewWorkflowAttempt(decompengine.jobs.WorkflowKind.RECONSTRUCT, limits, previousRunId = previous))
+                val running = owner.transition(job.id, queued.attempt.runId, queued.attempt.version,
+                    decompengine.jobs.WorkflowTransition.Start)
+                val state = when (index % 3) {
+                    0 -> decompengine.jobs.WorkflowRunState.COMPLETED
+                    1 -> decompengine.jobs.WorkflowRunState.FAILED
+                    else -> decompengine.jobs.WorkflowRunState.INTERRUPTED
+                }
+                val reason = when (state) {
+                    decompengine.jobs.WorkflowRunState.COMPLETED -> decompengine.jobs.WorkflowTerminalReason.COMPLETED
+                    decompengine.jobs.WorkflowRunState.FAILED -> decompengine.jobs.WorkflowTerminalReason.FAILED
+                    else -> decompengine.jobs.WorkflowTerminalReason.PROCESS_INTERRUPTED
+                }
+                val candidate = if (state == decompengine.jobs.WorkflowRunState.COMPLETED)
+                    decompengine.jobs.WorkflowCandidate("revision_fixture_$index", "a".repeat(64)) else null
+                val finished = owner.transition(job.id, running.attempt.runId, running.attempt.version,
+                    decompengine.jobs.WorkflowTransition.Finish(state, reason, candidate,
+                        decompengine.jobs.WorkflowUsage(inputTokens = ULong.MAX_VALUE)))
+                snapshot = finished.snapshot
+                previous = finished.attempt.runId
+                history += finished.attempt
+            }
+        }
+        assertEquals(55, history.size)
+        val log = root.resolve(job.id).resolve("reports/runs/${history[3].runId}/source-tree/reports/build.log")
+        Files.createDirectories(log.parent)
+        Files.write(log, ByteArray(2_000_000) { 'x'.code.toByte() } + byteArrayOf(0xff.toByte(), 0x0a))
+
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            service.initializeExistingStorage()
+            val rows = service.collectionRecords().toList()
+            assertEquals(1, rows.size)
+            assertEquals(job.id, rows.single().getValue("jobId").toString().trim('"'))
+            assertTrue(rows.single().toString().toByteArray(Charsets.UTF_8).size <= 4096)
+            val page = WebJobPages(service::collectionRecords).page("fixture-owner", WebJobQuery(), null)
+            assertEquals(job.id, page.getValue("items").jsonArray.single().jsonObject.getValue("jobId").jsonPrimitive.content)
+            assertEquals(listOf(job.id), service.dashboardRows().jobs.map { it.id })
+        }
+    }
+
     @Test fun `listings refuse durable commands crossing either workflow or presentation metadata capture`() {
         for (api in listOf(false, true)) for (lastRead in listOf(false, true)) withStore { store, _ ->
             val job = store.createFromUpload("durable.elf", elfFixture())
@@ -770,6 +820,91 @@ class WebJobServiceTest {
                     it.getValue("status").toString().trim('"')
                 }.toList())
             }
+        }
+    }
+
+    @Test fun `workflow epoch refusal emits only its fixed bounded diagnostic and sink failure preserves listing result`() {
+        for (throwingSink in listOf(false, true)) withStore { store, _ ->
+            val job = store.createFromUpload("epoch-diagnostic.elf", elfFixture())
+            lateinit var owner: WorkflowAttemptStore
+            val emitted = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val received = CountDownLatch(1)
+            val secret = "PRIVATE_DIAGNOSTIC_CANARY"
+            WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor,
+                attemptStoreFactory = { path -> WorkflowAttemptStore.open(path).also { owner = it } },
+                listingRefusalDiagnosticOutput = { line ->
+                    if (throwingSink) error(secret)
+                    emitted += line
+                    received.countDown()
+                }).use { service ->
+                service.initializeExistingStorage()
+                var changed = false
+                service.listingReadObserver = { relative ->
+                    if (!changed && relative.startsWith("${job.id}/")) {
+                        changed = true
+                        val version = (owner.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot.version
+                        owner.create(job.id, version, decompengine.jobs.NewWorkflowAttempt(
+                            decompengine.jobs.WorkflowKind.EXPLORE,
+                            decompengine.jobs.WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u)))
+                    }
+                }
+                val rows = service.dashboardRows()
+                assertTrue(rows.jobs.isEmpty())
+                assertEquals(listOf("JOB_RECORD_UNAVAILABLE"), rows.unavailable.map { it.code })
+                if (!throwingSink) {
+                    assertTrue(received.await(5, TimeUnit.SECONDS), "Workflow epoch refusal diagnostic was not delivered")
+                    assertEquals(listOf("web-listing-refusal boundary=workflow_epoch"), emitted)
+                    assertTrue(emitted.single().length <= 160)
+                    assertFalse(emitted.single().contains(secret))
+                    assertFalse(emitted.single().contains(job.id))
+                }
+            }
+        }
+    }
+
+    @Test fun `record inspection refusal attributes only the finite organization stage`() = withStore { store, root ->
+        val job = store.createFromUpload("organization-diagnostic.elf", elfFixture())
+        val emitted = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val received = CountDownLatch(1)
+        Files.writeString(root.resolve(job.id).resolve(decompengine.jobs.JobOrganization.FILE_NAME),
+            "{\"privateCanary\":\"/private/path\"}")
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor,
+            listingRefusalDiagnosticOutput = { line -> emitted += line; received.countDown() }).use { service ->
+            service.initializeExistingStorage()
+            val result = service.dashboardRows()
+            assertTrue(result.jobs.isEmpty())
+            assertEquals(listOf("JOB_RECORD_UNAVAILABLE"), result.unavailable.map { it.code })
+            assertTrue(received.await(5, TimeUnit.SECONDS), "record refusal diagnostic was not delivered")
+            assertEquals(listOf("web-listing-refusal boundary=organization"), emitted)
+            assertFalse(emitted.single().contains("privateCanary"))
+            assertFalse(emitted.single().contains("/private/path"))
+            assertFalse(emitted.single().contains(job.id))
+        }
+    }
+
+    @Test fun `successful recent retention no-op emits no listing refusal diagnostic`() = withStore { store, _ ->
+        val job = store.createFromUpload("recent-retention.elf", elfFixture())
+        lateinit var owner: WorkflowAttemptStore
+        val lines = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val barrier = CountDownLatch(1)
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor,
+            attemptStoreFactory = { path -> WorkflowAttemptStore.open(path).also { owner = it } },
+            listingRefusalDiagnosticOutput = { lines += it }).use { service ->
+            service.initializeExistingStorage()
+            val queued = owner.create(job.id, (owner.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot.version,
+                decompengine.jobs.NewWorkflowAttempt(decompengine.jobs.WorkflowKind.EXPLORE,
+                    decompengine.jobs.WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
+            val running = owner.transition(job.id, queued.runId, queued.version, decompengine.jobs.WorkflowTransition.Start).attempt
+            val terminal = owner.transition(job.id, running.runId, running.version,
+                decompengine.jobs.WorkflowTransition.Finish(decompengine.jobs.WorkflowRunState.COMPLETED,
+                    decompengine.jobs.WorkflowTerminalReason.NO_CHANGES)).attempt
+            assertEquals(decompengine.jobs.ProgressRetentionResult.RETAINED,
+                service.expireProgressJournal(job.id, terminal.runId, protectedFromRetention = false))
+            assertEquals(listOf(job.id), service.dashboardRows().jobs.map { it.id })
+            // A fixed event on the same FIFO executor drains any earlier work before asserting absence.
+            recordWebListingRefusal(WebListingRefusalBoundary.SERVICE_EPOCH) { line -> lines += line; barrier.countDown() }
+            assertTrue(barrier.await(5, TimeUnit.SECONDS), "diagnostic queue barrier was not delivered")
+            assertEquals(listOf("web-listing-refusal boundary=service_epoch"), lines)
         }
     }
 

@@ -21,6 +21,7 @@
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "declaredUtf8Text": true,
       "declaredViewable": true,
+      "commitment": "source-input",
       "declaredArchivable": false
     }
   }

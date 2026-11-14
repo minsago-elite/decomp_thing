@@ -15,6 +15,12 @@ function descriptor(text: string): Artifact {
 function response(body: BodyInit, extra: Record<string, string> = {}) {
   return new Response(body, { headers: { 'Content-Type': 'application/octet-stream', 'X-Request-ID': 'artifact_request', ...extra } });
 }
+function projectedHeaders(artifact: Artifact, text: string): Record<string, string> {
+  const sha = createHash('sha256').update(text).digest('hex');
+  return { 'Content-Length': Buffer.byteLength(text).toString(), 'ETag': `"${sha}"`,
+    'X-Decomp-Artifact-ID': artifact.artifactId, 'X-Decomp-Artifact-SHA256': artifact.sha256,
+    'X-Decomp-Content-SHA256': sha, 'X-Decomp-Content-Projection': 'redacted' };
+}
 beforeEach(() => { vi.stubGlobal('crypto', webcrypto); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -28,6 +34,58 @@ it('reads exactly one observed artifact with UTF-8 size and digest verification 
   expect(init).toMatchObject({ method: 'GET', credentials: 'same-origin', mode: 'same-origin', redirect: 'error', cache: 'no-store' });
   expect(new Headers(init?.headers).get('Accept')).toBe('application/octet-stream');
   expect(init?.body).toBeUndefined();
+});
+
+it('binds a redacted report to its stored artifact and verifies the distinct served bytes', async () => {
+  const artifact = descriptor('{"note":"PRIVATE-CANARY-0123456789"}');
+  artifact.content = { projection: 'redacted' };
+  const text = '{"note":"[redacted]"}';
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(text, projectedHeaders(artifact, text)));
+  await expect(createApiClient({ basePath: '/nested', fetch: fetcher }).readArtifactText(artifact, binding)).resolves.toBe(text);
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
+it('refuses missing or substituted redacted representation commitments without retry', async () => {
+  const artifact = descriptor('{"note":"PRIVATE-CANARY-0123456789"}');
+  artifact.content = { projection: 'redacted' };
+  const text = '{"note":"[redacted]"}';
+  for (const name of Object.keys(projectedHeaders(artifact, text))) {
+    const headers = projectedHeaders(artifact, text); delete headers[name];
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(text, headers));
+    await expect(createApiClient({ basePath: '/nested', fetch: fetcher }).readArtifactText(artifact, binding))
+      .rejects.toMatchObject({ code: 'invalid_headers' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  }
+  for (const mutation of ['stored-digest', 'served-digest', 'length'] as const) {
+    const headers = projectedHeaders(artifact, text);
+    if (mutation === 'stored-digest') headers['X-Decomp-Artifact-SHA256'] = '0'.repeat(64);
+    if (mutation === 'served-digest') { headers['X-Decomp-Content-SHA256'] = '0'.repeat(64); headers.ETag = `"${'0'.repeat(64)}"`; }
+    if (mutation === 'length') headers['Content-Length'] = String(Buffer.byteLength(text) + 1);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(text, headers));
+    await expect(createApiClient({ basePath: '/nested', fetch: fetcher }).readArtifactText(artifact, binding))
+      .rejects.toMatchObject({ code: mutation === 'stored-digest' ? 'invalid_headers' : 'invalid_response' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  }
+});
+
+it('does not let projection headers weaken a verbatim artifact commitment', async () => {
+  const artifact = descriptor('{"stored":true}'); artifact.content = { projection: 'verbatim' };
+  const text = '{}';
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(text, projectedHeaders(artifact, text)));
+  await expect(createApiClient({ basePath: '/nested', fetch: fetcher }).readArtifactText(artifact, binding))
+    .rejects.toMatchObject({ code: 'invalid_response' });
+});
+
+it('snapshots the projection state before a deferred redacted response', async () => {
+  const artifact = descriptor('{"note":"PRIVATE-CANARY-0123456789"}'); artifact.content = { projection: 'redacted' };
+  const text = '{"note":"[redacted]"}'; const headers = projectedHeaders(artifact, text);
+  let finish!: (value: Response) => void;
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const pending = createApiClient({ basePath: '/nested', fetch: fetcher }).readArtifactText(artifact, binding);
+  artifact.content.projection = 'verbatim';
+  finish(response(text, headers));
+  await expect(pending).resolves.toBe(text);
+  expect(fetcher).toHaveBeenCalledOnce();
 });
 
 it('refuses cross-paired identity, foreign URLs and unsupported descriptor limits before fetching', async () => {
@@ -47,6 +105,7 @@ it('refuses cross-paired identity, foreign URLs and unsupported descriptor limit
     value => { value.role = 'sanitized-derivative'; },
     value => { value.derivedFromArtifactId = 'a_derivative'; },
     value => { value.mediaType = 'text/html'; },
+    value => { value.content = { projection: 'unavailable' }; },
   ];
   for (const change of changes) {
     const artifact = descriptor('{}'); change(artifact);

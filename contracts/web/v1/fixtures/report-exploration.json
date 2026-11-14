@@ -27,7 +27,10 @@
       "sha256": "abababababababababababababababababababababababababababababababab",
       "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/artifact_example_1/content",
       "role": "raw-evidence",
-      "derivedFromArtifactId": null
+      "derivedFromArtifactId": null,
+      "content": {
+        "projection": "redacted"
+      }
     },
     "acceptance": "not-evaluated",
     "acceptanceArtifactId": null,

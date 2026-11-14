@@ -14,38 +14,42 @@
     "items": [
       {
         "fileId": "file_0_0000000000000000000000000000000000000000000000000000000000000000",
-        "displayName": "\u0085",
+        "displayName": "",
         "sizeBytes": "0",
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "declaredUtf8Text": true,
         "declaredViewable": true,
+        "commitment": "source-input",
         "kind": "file"
       },
       {
         "fileId": "file_1_1111111111111111111111111111111111111111111111111111111111111111",
-        "displayName": "\ud83d\ude00.c",
+        "displayName": "😀.c",
         "sizeBytes": "0",
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "declaredUtf8Text": true,
         "declaredViewable": true,
+        "commitment": "source-input",
         "kind": "file"
       },
       {
         "fileId": "file_2_2222222222222222222222222222222222222222222222222222222222222222",
-        "displayName": "\ue000.c",
+        "displayName": ".c",
         "sizeBytes": "0",
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "declaredUtf8Text": true,
         "declaredViewable": true,
+        "commitment": "source-input",
         "kind": "file"
       },
       {
         "fileId": "file_3_3333333333333333333333333333333333333333333333333333333333333333",
-        "displayName": "\ufeff",
+        "displayName": "﻿",
         "sizeBytes": "0",
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "declaredUtf8Text": true,
         "declaredViewable": true,
+        "commitment": "source-input",
         "kind": "file"
       }
     ],

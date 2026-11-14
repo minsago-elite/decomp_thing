@@ -118,10 +118,11 @@ describe('feature detection (#631)', () => {
     const text = 'int main(void) { return 0; }\n';
     const sha256 = createHash('sha256').update(text).digest('hex');
     const binding = { jobId: '1234567890abcdef1234567890abcdef', runId: 'run_example_1', revisionId: 'revision_1' };
-    const file: RevisionFile = { ...metadata, binding, item: { ...metadata.item, displayName: 'main.c', sizeBytes: String(Buffer.byteLength(text)), sha256 } };
+    const sizeBytes = String(Buffer.byteLength(text));
+    const file: RevisionFile = { ...metadata, binding, item: { ...metadata.item, displayName: 'main.c', sizeBytes, sha256 } };
     const chunk: SourceChunk = { ...fixture<{ data: SourceChunk }>('source-chunk-mid-line').data, binding: file.binding, fileId: file.item.fileId,
-      sourceSha256: file.sourceSha256, metadataVersion: file.metadataVersion, sha256, sizeBytes: file.item.sizeBytes, offsetBytes: '0',
-      lengthBytes: file.item.sizeBytes, nextOffsetBytes: null, completeFile: true, text, firstLine: '1', startsMidLine: false, endsMidLine: false };
+      sourceSha256: file.sourceSha256, metadataVersion: file.metadataVersion, sha256, sizeBytes, offsetBytes: '0',
+      lengthBytes: sizeBytes, nextOffsetBytes: null, completeFile: true, text, firstLine: '1', startsMidLine: false, endsMidLine: false };
     transport.get.mockResolvedValue({ data: chunk });
     return file;
   }

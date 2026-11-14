@@ -15,7 +15,7 @@
       {
         "kind": "directory",
         "directoryId": "dir_1_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "displayName": "\u00e9 space",
+        "displayName": "é space",
         "sourceFileCount": 3
       },
       {
@@ -25,6 +25,7 @@
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "declaredUtf8Text": true,
         "declaredViewable": true,
+        "commitment": "source-input",
         "kind": "file"
       }
     ],

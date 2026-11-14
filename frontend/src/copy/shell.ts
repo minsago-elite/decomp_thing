@@ -22,6 +22,7 @@ export const appCopy = {
   "workflowAttempt": "Workflow attempt",
   "attemptActivity": "Attempt activity",
   "attemptEvidence": "Attempt evidence",
+  "attemptLogs": "Attempt build log",
   "attemptHistory": "Attempt history",
   "pageUnavailable": "Page unavailable",
   "openingView": "Opening view…",
@@ -93,6 +94,7 @@ export const panelBoundaryCopy = {
     attemptControls: 'Attempt actions', progressPin: 'Progress pin', activity: 'Activity',
     exploration: 'Exploration evidence', validation: 'Validation evidence',
     sourcePreview: 'Source preview', digestCheck: 'Download digest check',
+    logs: 'Run logs', artifacts: 'Artifact catalog',
   },
 } as const;
 

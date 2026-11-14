@@ -4,8 +4,9 @@ FROM eclipse-temurin:21-jdk-jammy@sha256:55fb9bf738f5d9b4a6c01b39337e3070d3e2737
 
 ARG ANGR_VERSION=9.2.213
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN timeout --signal=KILL 10m sh -ec ' \
+    apt-get -oAcquire::Retries=2 -oAcquire::http::Timeout=30 -oAcquire::https::Timeout=30 update --error-on=any \
+    && apt-get -oAcquire::Retries=2 -oAcquire::http::Timeout=30 -oAcquire::https::Timeout=30 install -y --no-install-recommends \
         binutils \
         bubblewrap \
         build-essential \
@@ -16,7 +17,8 @@ RUN apt-get update \
         python3 \
         python3-pip \
         unzip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    '
 
 # pip connection retries do not retry a failed streaming download. Keep completed
 # downloads outside the image and bound retries of the complete installation.
