@@ -16,6 +16,8 @@ private fun <T> frozenEvidenceList(values: Collection<T>): List<T> =
     Collections.unmodifiableList(ArrayList(values))
 private const val MAXIMUM_EVIDENCE_JSON_BYTES = 64 * 1024 * 1024
 private const val MAXIMUM_EVIDENCE_JSON_NODES = 1_000_000
+// A 4,096-character path can double when escaped in a JSON Pointer locator, plus its role prefix.
+private const val MAXIMUM_EVIDENCE_LOCATOR_CHARACTERS = 8_192
 // Generated-C admission permits 4,096-character identifiers. Module fact IDs add "module:".
 private const val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_112
 private val evidenceOriginOrder = compareBy<RepairEvidenceOrigin>(
@@ -37,7 +39,7 @@ data class RepairEvidenceOrigin(
         require(documentRole.matches(Regex("[a-z][a-z0-9-]{0,63}")))
         require(contentSha256.matches(Regex("[0-9a-f]{64}")))
         require(schemaVersion == null || schemaVersion > 0)
-        require(locator.startsWith('/') && locator.length <= 1024 && '\\' !in locator &&
+        require(locator.startsWith('/') && locator.length <= MAXIMUM_EVIDENCE_LOCATOR_CHARACTERS && '\\' !in locator &&
             locator.split('/').drop(1).none { it == "." || it == ".." })
     }
 }
@@ -304,7 +306,7 @@ class RepairEvidenceFacts(
                     maximumCanonicalBytes = maximum,
                     maximumDepth = 32,
                     // Canonical JSON uses at least one byte per value node, so the byte budget bounds traversal too.
-                    maximumNodes = maximum,
+                    maximumNodes = minOf(maximum, MAXIMUM_EVIDENCE_JSON_NODES),
                     maximumStringBytes = maximum,
                     maximumTotalStringBytes = maximum,
                 ),
