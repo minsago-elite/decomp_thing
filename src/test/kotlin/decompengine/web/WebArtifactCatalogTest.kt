@@ -8,6 +8,13 @@ import kotlinx.serialization.json.*
 import java.time.Instant
 import kotlin.test.*
 
+private fun isValidUtf8(bytes: ByteArray): Boolean = runCatching {
+    Charsets.UTF_8.newDecoder()
+        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        .decode(java.nio.ByteBuffer.wrap(bytes))
+}.isSuccess
+
 /** In-memory attempts and byte arrays only. No store, listener or workflow is opened. */
 class WebArtifactCatalogTest {
     private val jobId = "a".repeat(32)
@@ -38,7 +45,7 @@ class WebArtifactCatalogTest {
             // Final revalidation failure after the whole body was hashed.
             if ((runId to path) in lateFailing) throw IllegalArgumentException("stable hash file changed during reading")
             return StableFileDigest(WebExplorationArtifact.sha256(bytes), bytes.size.toLong(),
-                LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false))
+                LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false), isValidUtf8(bytes))
         }
         override fun revisionCommitments(jobId: String, runId: String, revisionId: String, budget: WebArtifactReadBudget): Pair<String, String>? {
             inventoryReads++
