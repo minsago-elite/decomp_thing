@@ -121,21 +121,29 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
-  const expected = useRef<Identity | undefined>(undefined);
+  const expected = useRef(new Map<string, Identity>());
   const [refresh, setRefresh] = useState(0);
   let selection: ReturnType<typeof sourceDiffSelection> | null;
   try { selection = sourceDiffSelection(search); } catch { selection = null; }
   const base = selection?.base ?? null;
   const cursor = selection?.cursor ?? null;
   const key = [selected.jobId, selected.runId, selected.revisionId, search, refresh].join('/');
+  const comparisonKey = JSON.stringify([selected.jobId, selected.runId, selected.revisionId, base?.runId, base?.revisionId]);
   const [read, setRead] = useState<SourceReadState<SourceDiffPage>>({ key, state: 'loading' });
   useEffect(() => {
     if (!base) return undefined;
     return beginSourceRead(key, async signal => {
       const response = await client.get('sourceDiff', sourceDiffRoute(selected, base, cursor), { signal });
       if (signal.aborted) throw new ApiClientError('aborted');
-      const page = bindSourceDiff(response.data, selected, base, cursor === null ? undefined : expected.current);
-      expected.current = page;
+      const previous = cursor === null ? undefined : expected.current.get(comparisonKey);
+      const page = bindSourceDiff(response.data, selected, base, previous);
+      expected.current.delete(comparisonKey);
+      expected.current.set(comparisonKey, page);
+      while (expected.current.size > 32) {
+        const oldest = expected.current.keys().next().value;
+        if (oldest === undefined) break;
+        expected.current.delete(oldest);
+      }
       return page;
     }, setRead);
   }, [client, key]);
@@ -149,7 +157,6 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
   if (!base) return <BaseChooser selected={selected} basePath={basePath} onChoose={() => { moveFocus.current = true; }} />;
   function go(next: string | null) {
     moveFocus.current = true;
-    if (next === null) expected.current = undefined;
     location.route(sourceDiffPath(basePath, selected, base, next));
   }
   return <section class="source-diff" aria-labelledby="source-diff-results">
