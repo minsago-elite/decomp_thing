@@ -328,7 +328,7 @@ internal class WebApiController(
                             "The requested structure record is not addressable in this revision.")
                     }
                     val (kind, value) = when {
-                        parts.size == 7 && parts[6] == "functions" -> "functionInventory" to programStructure.functions(session.sessionId, parts[1], parts[3], parts[5], query)
+                        parts.size == 7 && parts[6] == "functions" -> "functionInventory" to programStructure.functions(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
                         parts.size == 7 -> "moduleInventory" to programStructure.modules(session.sessionId, parts[1], parts[3], parts[5], query)
                         parts[6] == "modules" -> "moduleDetail" to programStructure.module(session.sessionId, parts[1], parts[3], parts[5], parts[7], query, WebRedactionPolicy.of(exchange))
                         else -> "entityDetail" to programStructure.entity(WebStructureKind.entries.single { it.route == parts[6] },
