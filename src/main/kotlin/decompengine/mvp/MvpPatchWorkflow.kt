@@ -810,6 +810,8 @@ private fun requireElf64(path: Path) {
     }
 }
 
+private const val PATCH_COMPILE_REQUIREMENT = "The result must compile as C11 with -Wall -Wextra -Werror."
+
 // CWE-787 keeps its published prompts verbatim: ACP and Docker MVP fixture contracts match this text.
 private fun reconstructionPrompt(stdout: String, vulnerabilityCase: MvpVulnerabilityCase) =
     if (vulnerabilityCase == MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE) """
@@ -834,7 +836,7 @@ private fun patchPrompt(stdout: String, sanitizer: String, vulnerabilityCase: Mv
     Preserve observed output exactly:\n$stdout
     Sanitizer evidence:\n$sanitizer
     Edit patched.c in place with the complete fixed source. Do not change decompile/decompiled.c.
-    The result must compile as C11 with -Wall -Wextra -Werror. In the final summary, explain the
+    $PATCH_COMPILE_REQUIREMENT In the final summary, explain the
     vulnerability root cause, the exact code change, and why the change preserves observed behavior.
 """.trimIndent() else """
     Apply the smallest clear ${vulnerabilityCase.cwe} fix to the supplied reconstructed C.
@@ -844,7 +846,7 @@ private fun patchPrompt(stdout: String, sanitizer: String, vulnerabilityCase: Mv
     Original observed output is context only where behavior was undefined:\n$stdout
     Sanitizer evidence / case-specific ${vulnerabilityCase.evidenceKind}:\n$sanitizer
     Edit patched.c in place with the complete fixed source. Do not change decompile/decompiled.c.
-    The result must compile as C11 with -Wall -Wextra -Werror. In the final summary, explain the
+    $PATCH_COMPILE_REQUIREMENT In the final summary, explain the
     vulnerability root cause, the exact code change, and why the change satisfies the explicit safe behavior contract without stubs or hardcoded outputs.
 """.trimIndent()
 
