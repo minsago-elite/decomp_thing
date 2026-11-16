@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
@@ -61,6 +61,66 @@ it('reads eligibility explicitly and retry creates a visible new linked attempt 
   expect(screen.queryByRole('button', { name: 'Retry as a new attempt' })).toBeNull();
 });
 
+it.each([
+  ['cancel', 'Request cancellation'],
+  ['retry', 'Retry as a new attempt'],
+] as const)('moves focus to the stable section heading when %s replaces its action control', async (action, label) => {
+  const initialRun = action === 'cancel'
+    ? { ...failed, state: 'running' as const, endedAt: null, terminalReason: null }
+    : failed;
+  const initialControls = controls({ state: initialRun.state, [action]: { available: true, reason: null } });
+  transport.get.mockResolvedValueOnce(initialControls).mockResolvedValueOnce(controls());
+  let finish: ((value: unknown) => void) | undefined;
+  transport.post.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  mount(initialRun);
+
+  fireEvent.click(button('Read available actions'));
+  const actionButton = await screen.findByRole('button', { name: label });
+  actionButton.focus();
+  expect(document.activeElement).toBe(actionButton);
+  fireEvent.click(actionButton);
+
+  const heading = screen.getByRole('heading', { name: 'Attempt controls' });
+  expect(heading.getAttribute('tabindex')).toBe('-1');
+  expect(document.activeElement).toBe(heading);
+  expect(transport.post).toHaveBeenCalledOnce();
+
+  const result = action === 'cancel'
+    ? { ...initialRun, state: 'cancelling' as const }
+    : newRun().data;
+  await act(() => { finish?.({ data: result }); });
+  await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+  expect(document.activeElement).toBe(heading);
+});
+
+it('moves focus to the heading when an explicit discard removes an unconfirmed command', () => {
+  sessionStorage.setItem(slot, JSON.stringify({ version: 1, action: 'retry', jobId, runId, expectedVersion: failed.version,
+    key: 'k'.repeat(24), expectedInputRevisionId: null, createdAt: Date.now() }));
+  mount();
+  const discard = button('Discard unconfirmed request');
+  discard.focus();
+  expect(document.activeElement).toBe(discard);
+  fireEvent.click(discard);
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Attempt controls' }));
+  expect(sessionStorage.getItem(slot)).toBeNull();
+});
+
+it('does not steal focus on a passive stale-version update or from an outside focus owner', async () => {
+  transport.get.mockResolvedValue(controls());
+  const outside = document.createElement('button');
+  outside.textContent = 'Outside focus owner';
+  document.body.append(outside);
+  try {
+    const { view } = mount();
+    fireEvent.click(button('Read available actions'));
+    await screen.findByRole('button', { name: 'Retry as a new attempt' });
+    outside.focus();
+    view.rerender(<AttemptControls jobId={jobId} runId={runId} basePath="/nested/" session={session}
+      run={{ ...failed, version: 'run_version_changed' }} onChanged={() => undefined} />);
+    expect(document.activeElement).toBe(outside);
+  } finally { outside.remove(); }
+});
+
 it('retains a lost acknowledgement across reload and replays it only on request with the same key and version', async () => {
   transport.get.mockResolvedValue(controls());
   transport.post.mockRejectedValueOnce(new ApiClientError('network_error'));
@@ -119,7 +179,10 @@ it('explains what a resume restores and reports a specific refusal without retai
   mount();
   fireEvent.click(button('Read available actions'));
   expect(await screen.findByText(/Only accepted project evidence is restored; the agent conversation starts new/)).toBeTruthy();
-  fireEvent.click(button('Resume from checkpoint'));
+  const resume = button('Resume from checkpoint');
+  resume.focus();
+  fireEvent.click(resume);
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Attempt controls' }));
   await waitFor(() => expect(screen.getByRole('status').textContent).toContain('The server refused the command: the workspace differs from its accepted evidence.'));
   expect(screen.getByRole('status').textContent).toContain('0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f');
   expect(transport.post.mock.calls[0]![3]).toEqual({ mode: 'resume', expectedInputRevisionId: null });
