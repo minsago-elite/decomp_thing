@@ -350,6 +350,8 @@ jobs:
             bubblewrap \
             binutils \
             build-essential \
+            clang \
+            llvm \
             dbus-user-session \
             e2fsprogs \
             bzip2 \
