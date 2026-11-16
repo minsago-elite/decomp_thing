@@ -117,6 +117,51 @@ class BuiltinTerminalToolsTest {
         } finally { dispatcher.close(); executor.shutdownNow(); assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS)) }
     }
 
+    @Test fun `harness cancellation during process tool work returns only after terminal cleanup`() = fixture(mode = "escape") { fixture ->
+        val tools = java.util.concurrent.atomic.AtomicReference<BuiltinProcessToolSession>()
+        val workspace = object : BuiltinToolSession {
+            override val definitions = emptyList<ModelToolDefinition>()
+            override fun authorize(call: ModelToolCall, control: BuiltinExecutionControl) = false
+            override fun execute(call: ModelToolCall, control: BuiltinExecutionControl) = error("No workspace tool was registered")
+            override fun changes(control: BuiltinExecutionControl) = emptyList<AgentFileChange>()
+            override fun close() {}
+        }
+        val provider = ModelProvider { _, _ ->
+            ModelResponse("", listOf(call()), ModelFinishReason.TOOL_CALLS, ModelUsage(1, 1, false), 1)
+        }
+        val harness = BuiltinAgentHarness(provider, { request, control ->
+            BuiltinProcessToolSession(workspace, fixture.open(control)).also(tools::set)
+        })
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val work = executor.submit<AgentExecutionReceipt> { harness.executeReceipt(fixture.request) {} }
+            val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
+            var dispatcher: BuiltinProcessToolSession? = null
+            while (System.nanoTime() < deadline && !work.isDone) {
+                dispatcher = tools.get()
+                if (dispatcher?.terminalAudit()?.any { it.reason == AcpTerminalAuditReason.CREATED } == true) break
+                Thread.sleep(10)
+            }
+            assertNotNull(dispatcher, "harness never opened its process session")
+            assertTrue(dispatcher.terminalAudit().any { it.reason == AcpTerminalAuditReason.CREATED })
+            fixture.cancellation.cancel()
+
+            val receipt = work.get(12, TimeUnit.SECONDS)
+            val evidence = assertIs<BuiltinLoopEvidence>(receipt.providerEvidence)
+            assertEquals(BuiltinStop.CANCELLED, evidence.stop)
+            assertTrue(evidence.cleanupComplete)
+            assertEquals(AgentStopReason.CANCELLED, receipt.requireResult().stopReason)
+            val audit = dispatcher.terminalAudit()
+            assertTrue(audit.any { it.reason == AcpTerminalAuditReason.RELEASED })
+            assertTrue(audit.none { it.reason == AcpTerminalAuditReason.CLEANUP_FAILED })
+            assertTrue(dispatcher.sandboxEvidence().launches.isNotEmpty())
+        } finally {
+            fixture.cancellation.cancel()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
     @Test fun `loop receives structured process feedback and still requires workflow validation`() = fixture { fixture ->
         var modelCalls = 0
         var tools: BuiltinProcessToolSession? = null
