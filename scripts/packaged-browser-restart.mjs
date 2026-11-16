@@ -97,7 +97,7 @@ export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl =
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
 export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay, readOutput, restartApplication,
-  captureSafe, sensitiveValues }) {
+  captureSafe, sensitiveValues, sessionSemantics }) {
   const basePath = '/nested';
   const runPath = `${basePath}/jobs/${fixture.jobId}/runs/${RUN}`;
   const pinUrl = `${origin}${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/progress-pin`;
@@ -229,6 +229,12 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assert.ok(instanceAfter && instanceAfter !== instanceBefore, 'serverInstanceId did not change across the restart');
   evidence.serverInstanceChanged = true;
   evidence.serverRestartNoticeShown = true;
+  // #1895: the real restart is the only packaged path to the application-instance-changed status.
+  if (sessionSemantics) {
+    await sessionSemantics.checkpoint(old, 'connected-instance-changed', { container: 'connected',
+      statusText: 'Application instance changed.', buttons: ['Sign out'] });
+    evidence.sessionSemantics = sessionSemantics.results;
+  }
 
   // Reconciliation: durable bytes, pin policy and activity match the pre-restart view.
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Restart changed workflow-state bytes');
