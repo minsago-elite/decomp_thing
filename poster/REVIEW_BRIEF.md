@@ -1,3 +1,15 @@
+# Keyboard punctuation council — 2026-11-17
+
+Three rounds completed. All requested corrections resolved; no further changes requested.
+
+| Delegate | Round 1 | Round 2 | Round 3 |
+| --- | --- | --- | --- |
+| Opus 5.5 | 9/10 | 9/10 | 9.5/10 |
+| GPT-6 Astra | 9.5/10 | 9.5/10 | 10/10 |
+| GPT-6.1 Sol | 10/10 | 10/10 | 10/10 |
+
+Final files use ordinary keyboard punctuation. Pipeline stages 01-07 followed by END; aligned code comments; unbroken Korean words; one A1 page. Canonical HTML, PDF and PNG in /home/june/poster_forge_decomp match repo poster/ mirrors.
+
 # Final council results — 2026-11-16
 
 | Delegate | Round 1 | Round 2 | Correction check |

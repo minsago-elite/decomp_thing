@@ -272,9 +272,9 @@
         <div class="card tint">
           <div class="shead"><span class="no">00</span><span class="t">프로젝트 요약</span><span class="en">ABSTRACT</span></div>
           <ul class="clean">
-            <li><b>문제</b> : 소스 없는 바이너리의 취약점은 <strong>사람이 직접</strong> 어셈블리와 디컴파일 코드를 읽어 찾아야 해서 시간과 전문 지식이 많이 든다</li>
-            <li><b>방법</b> : <span class="kw">Ghidra</span>로 구조를 추출하고, <span class="kw">LLM 에이전트</span>가 C 코드를 복원하고 패치하며, <span class="kwt">컴파일러와 새니타이저</span>로 매&nbsp;단계를 실행해 검증한다</li>
-            <li><b>결과</b> : <strong>10종 참조 패치</strong>의 취약점 재현과 수정 후 동작을 CI에서 검증했다. 패치 워크플로는 <strong>10종 선택</strong>을 지원하며 실제 LLM 성공률은 미평가다</li>
+            <li><b>문제</b>: 소스 없는 바이너리의 취약점은 <strong>사람이 직접</strong> 어셈블리와 디컴파일 코드를 읽어 찾아야 해서 시간과 전문 지식이 많이 든다</li>
+            <li><b>방법</b>: <span class="kw">Ghidra</span>로 구조를 추출하고, <span class="kw">LLM 에이전트</span>가 C 코드를 복원하고 패치하며, <span class="kwt">컴파일러와 새니타이저</span>로 매&nbsp;단계를 실행해 검증한다</li>
+            <li><b>결과</b>: <strong>10종 참조 패치</strong>의 취약점 재현과 수정 후 동작을 CI에서 검증했다. 패치 워크플로는 <strong>10종 선택</strong>을 지원하며 실제 LLM 성공률은 미평가다</li>
           </ul>
         </div>
 
@@ -282,14 +282,14 @@
         <div class="card">
           <div class="shead"><span class="no">01</span><span class="t">제작 동기 및 필요성</span><span class="en">MOTIVATION</span></div>
           <ul class="clean">
-            <li><b>배경</b> : 소스가 없는 배포 바이너리의 취약점 점검은 Ghidra나 IDA로 사람이 직접 읽는 수작업이었다</li>
-            <li><b>기회</b> : LLM이 디컴파일 결과를 <strong>다시 컴파일 가능한 C</strong>로 다듬을 수 있음이 보고되었다<span class="mono">[1]</span></li>
-            <li><b>차별성</b> : 기존 연구<span class="mono">[1-3]</span>와 달리 <strong>취약점 위치를 모르는 바이너리 전체</strong>를 대상으로 하고, 패치한 복원 코드로 <strong>실행 파일 전체를 새로 만든다</strong></li>
-            <li><b>필요성</b> : 점검을 자동화하면 더 많은 프로그램을 더 빨리 검사할 수 있고, LLM 출력을 <strong>실행 결과로 검증</strong>하므로 환각을 그대로 믿지 않는다</li>
+            <li><b>배경</b>: 소스가 없는 배포 바이너리의 취약점 점검은 Ghidra나 IDA로 사람이 직접 읽는 수작업이었다</li>
+            <li><b>기회</b>: LLM이 디컴파일 결과를 <strong>다시 컴파일 가능한 C</strong>로 다듬을 수 있음이 보고되었다<span class="mono">[1]</span></li>
+            <li><b>차별성</b>: 기존 연구<span class="mono">[1-3]</span>와 달리 <strong>취약점 위치를 모르는 바이너리 전체</strong>를 대상으로 하고, 패치한 복원 코드로 <strong>실행 파일 전체를 새로 만든다</strong></li>
+            <li><b>필요성</b>: 점검을 자동화하면 더 많은 프로그램을 더 빨리 검사할 수 있고, LLM 출력을 <strong>실행 결과로 검증</strong>하므로 환각을 그대로 믿지 않는다</li>
           </ul>
           <div class="rq">
             <div class="label">연구 질문</div>
-            <div class="q">리버싱 도구와 LLM을 결합하여 디컴파일 -&gt; 취약점 탐색 -&gt; 패치 -&gt; 재컴파일을 <span class="kwf">하나의 자동화된 흐름</span>으로 연결할 수 있는가?</div>
+            <div class="q">리버싱 도구와 LLM을 결합하여 디컴파일 -&gt; 취약점 탐색 -&gt; 패치 -&gt; 재컴파일을 <span class="kwf">하나의 자동화된 <span style="white-space:nowrap">흐름</span></span>으로 연결할 수 있는가?</div>
           </div>
         </div>
 
@@ -326,7 +326,7 @@
                 </tbody>
               </table>
               <ul class="clean sm" style="margin-top:4mm">
-                <li><b>직접 만든 이유</b> : 취약점의 <strong>위치와 정답 동작</strong>을 알아야 패치 성공을 채점할 수 있다. GCC는 심볼이 있는 빌드와 없는 빌드를 짝지어 복원 정확도의 정답으로 쓴다</li>
+                <li><b>직접 만든 이유</b>: 취약점의 <strong>위치와 정답 동작</strong>을 알아야 패치 성공을 채점할 수 있다. GCC는 심볼이 있는 빌드와 없는 빌드를 짝지어 복원 정확도의 정답으로 쓴다</li>
               </ul>
             </div>
           </div>
@@ -344,24 +344,24 @@
           <div class="subh">알고리즘</div>
           <div class="pipe"><svg id="pipesvg" viewBox="0 0 1000 196"></svg></div>
           <ul class="clean" style="margin-top:3mm">
-            <li><b>검증 우선</b> : LLM 출력은 컴파일, 실행, 새니타이저 결과를 통과해야만 받아들인다. 실패하면 오류 로그를 되먹여 <span class="kw">수정과 재컴파일</span>을 반복한다</li>
+            <li><b>검증 우선</b>: LLM 출력은 컴파일, 실행, 새니타이저 결과를 통과해야만 받아들인다. 실패하면 오류 로그를 되먹여 <span class="kw">수정과 재컴파일</span>을 반복한다</li>
           </ul>
 
           <div class="subh">핵심 코드</div>
-          <div class="code"><span class="fn">mvp/MvpPatchWorkflow.kt, 흐름을 보여 주는 의사코드 (10종 분기 중 핵심 단계만 추림)</span><span class="c">// 2. Ghidra 추출 -&gt; 3. LLM 복원 -&gt; 4. ASan 빌드 -&gt; 5. 취약점 재현</span>
-decompiler.decompile(input, raw)                      <span class="c">// 내장 Ghidra 12.1.3</span>
+          <div class="code"><span class="fn">mvp/MvpPatchWorkflow.kt, 흐름을 보여 주는 의사코드 (10종 분기 중 핵심 단계만 추림)</span><span class="c">// 02 Ghidra 추출 -&gt; 03 LLM 복원 -&gt; 04 ASan 빌드 -&gt; 05 취약점 재현</span>
+decompiler.decompile(input, raw)                             <span class="c">// 내장 Ghidra 12.1.3</span>
 <span class="k">val</span> src = agent.request(<span class="f">reconstructionPrompt</span>(original.stdout), raw)
-compile(src, vulnerable, sanitizer = <span class="k">true</span>)            <span class="c">// -fsanitize=address,undefined</span>
-<span class="k">val</span> finding = reproduceCase(case, vulnerable)       <span class="c">// 격리 실행 또는 컴파일 진단</span>
+compile(src, vulnerable, sanitizer = <span class="k">true</span>)                   <span class="c">// -fsanitize=address,undefined</span>
+<span class="k">val</span> finding = reproduceCase(case, vulnerable)                <span class="c">// 격리 실행 또는 컴파일 진단</span>
 <span class="k">if</span> (!case.matchesFinding(finding))
     <span class="k">throw</span> MvpPatchException(<span class="s">"case-specific reproduction failed"</span>)
-<span class="c">// 6. LLM 패치 -&gt; 7. 재컴파일, 보안과 동작 검증 (실패하면 중단, 반복은 repair 워크플로)</span>
+<span class="c">// 06 LLM 패치 -&gt; 07 재컴파일, 보안과 동작 검증 (실패하면 중단, 반복은 repair 워크플로)</span>
 <span class="k">val</span> patched = agent.request(<span class="f">patchPrompt</span>(original.stdout, finding.output), src)
 compile(patched, patchedAsan, sanitizer = <span class="k">true</span>, werror = <span class="k">true</span>)
-verify(patchedAsan, case.safeStdout)                         <span class="c">// 재현 입력에서 Sanitizer 보고 없음</span>
-compile(patched, release, sanitizer = <span class="k">false</span>)          <span class="c">// PIE, RELRO, FORTIFY_SOURCE=2</span>
+verify(patchedAsan, case.safeStdout)                         <span class="c">// 재현 입력에서 새니타이저 보고 없음</span>
+compile(patched, release, sanitizer = <span class="k">false</span>)                 <span class="c">// PIE, RELRO, FORTIFY_SOURCE=2</span>
 verifyHardening(release); verify(release, case.safeStdout)   <span class="c">// 사례별 안전한 stdout과 exit 확인</span>
-publish(release, evidence)                            <span class="c">// 모두 통과해야 patched_binary 공개</span></div>
+publish(release, evidence)                                   <span class="c">// 모두 통과해야 patched_binary 공개</span></div>
         </div>
 
       </div><!-- /left -->
@@ -374,7 +374,7 @@ publish(release, evidence)                            <span class="c">// 모두 
           <div class="shead"><span class="no">03</span><span class="t">산출물 결과</span><span class="en">RESULTS</span></div>
 
           <div class="subh first">binary_01 (CWE-787) 기존 데모와 최신 검증 범위</div>
-          <div class="term first"><div class="bar"><i></i><i></i><i></i><span>1. 원본 실행 -&gt; 3. 복원 C -&gt; 4. ASan 빌드 -&gt; 5. 취약점 재현</span></div><span class="p">$</span> ./binary_01 ; echo exit=$?
+          <div class="term first"><div class="bar"><i></i><i></i><i></i><span>원본 실행 -&gt; 03 복원 C -&gt; 04 ASan 빌드 -&gt; 05 취약점 재현</span></div><span class="p">$</span> ./binary_01 ; echo exit=$?
 [03] Alexandria Stone
 <span class="ok">exit=0</span>                                              <span class="dim"># 패치 후에도 보존해야 할 기준 동작</span>
 <span class="p">$</span> ASAN_OPTIONS=halt_on_error=1 ./reconstructed_asan <span class="dim"># 복원 C의 ASan, UBSan 빌드</span>
@@ -383,7 +383,7 @@ publish(release, evidence)                            <span class="c">// 모두 
     #0 main  decompiled.c:7    <span class="w">badge[i] = message[i];</span>
     [64, 72) <span class="w">'badge'</span> &lt;== overflows this variable
 <span class="dim">SUMMARY: AddressSanitizer: stack-buffer-overflow decompiled.c:7 in main</span></div>
-          <div class="term"><div class="bar"><i></i><i></i><i></i><span>6. 패치 -&gt; 7. 재컴파일과 검증 (테스트용 응답기 응답, 실제 LLM 미사용)</span></div><span class="p">$</span> diff -u decompiled.c patched.c                    <span class="dim"># evidence/approved.patch</span>
+          <div class="term"><div class="bar"><i></i><i></i><i></i><span>06 패치 -&gt; 07 재컴파일과 검증 (테스트용 응답기 응답, 실제 LLM 미사용)</span></div><span class="p">$</span> diff -u decompiled.c patched.c                    <span class="dim"># evidence/approved.patch</span>
 <span class="err">-    char badge[8];</span>
 <span class="err">-    const char *message = "[03] Alexandria Stone";</span>
 <span class="err">-    for (volatile int i = 0; message[i] != '\0'; i++) {</span>
@@ -396,7 +396,7 @@ publish(release, evidence)                            <span class="c">// 모두 
 [03] Alexandria Stone
 <span class="ok">exit=0</span>
 <span class="ok">OK 기본 실행 stdout과 exit 일치   OK ASan 보고 없음   OK 강화 빌드 통과</span></div>
-          <p class="note">Note: 복원과 패치 응답은 수용 검증 스크립트에 든 <strong>테스트용 응답기</strong>의 고정 응답이다. LLM의 능력을 보여 주는 결과가 아니며, 실제 LLM 연결은 진행 중이다. 위 출력은 2026.11.10 데모 발췌다. 최신 CI(11.16)는 별도로 <strong>10종 참조 패치</strong>를 검증하며, 모델 성능을 뜻하지 않는다.</p>
+          <p class="note">참고: 복원과 패치 응답은 수용 검증 스크립트에 든 <strong>테스트용 응답기</strong>의 고정 응답이다. LLM의 능력을 보여 주는 결과가 아니며, 실제 LLM 연결은 진행 중이다. 위 출력은 2026.11.10 데모 발췌다. 최신 CI(11.16)는 별도로 <strong>10종 참조 패치</strong>를 검증하며, 모델 성능을 뜻하지 않는다.</p>
 
           <div class="subh">실제 산출물 화면</div>
           <div class="figs">
@@ -436,8 +436,8 @@ publish(release, evidence)                            <span class="c">// 모두 
             </div>
           </div>
           <ul class="clean" style="margin-top:5mm">
-            <li><b>핵심 흐름 연결 확인</b> : 10종 참조 패치와 사례 선택 워크플로를 추가하고, PR마다 필수 CI 검증을 실행한다</li>
-            <li><b>규모 확장은 진행 중</b> : GCC와 LLVM 전체 복원, 실제 LLM 연결, 내장 에이전트, 웹 GUI를 이슈 단위로 추적한다</li>
+            <li><b>핵심 흐름 연결 확인</b>: 10종 참조 패치와 사례 선택 워크플로를 추가하고, PR마다 필수 CI 검증을 실행한다</li>
+            <li><b>규모 확장은 진행 중</b>: GCC와 LLVM 전체 복원, 실제 LLM 연결, 내장 에이전트, 웹 GUI를 이슈 단위로 추적한다</li>
           </ul>
         </div>
 
@@ -457,8 +457,8 @@ publish(release, evidence)                            <span class="c">// 모두 
           <div class="shead"><span class="no">06</span><span class="t">결론</span><span class="en">CONCLUSION</span></div>
           <div class="big">따로 다루던 <span class="hl2">재컴파일 가능한 디컴파일</span>과 <span class="hl">바이너리 패치</span>를 하나의 자동화 흐름으로 연결하고, 10종의 참조 패치를 검증했다.</div>
           <ul class="clean">
-            <li><b>답할 수 있는 것</b> : 10종의 취약점별 검증 계약과 참조 수정본을 CI에서 확인했다</li>
-            <li><b>아직 답하지 못한 것</b> : 실제 LLM 성공률과 전체 프로그램 동작 동등성. 대규모 복원은 계속 검증 중이다</li>
+            <li><b>답할 수 있는 것</b>: 10종의 취약점별 검증 계약과 참조 수정본을 CI에서 확인했다</li>
+            <li><b>아직 답하지 못한 것</b>: 실제 LLM 성공률과 전체 프로그램 동작 동등성. 대규모 복원은 계속 검증 중이다</li>
           </ul>
         </div>
 
@@ -499,7 +499,7 @@ publish(release, evidence)                            <span class="c">// 모두 
         { n: '05', t: '취약점 재현', s: '격리 실행', fill: C.flareTint, stroke: '#F4B9A8', tc: C.flare },
         { n: '06', t: 'LLM 패치', s: '최소 수정', fill: C.blueTint, stroke: C.blue, tc: C.blueDeep, bold: true },
         { n: '07', t: '재컴파일', s: '동작 검증', fill: C.tealTint, stroke: C.teal, tc: C.teal, bold: true },
-        { n: 'OK', t: '패치 ELF', s: '증거 기록', fill: C.ink, stroke: C.ink, tc: '#fff' },
+        { n: 'END', t: '패치 ELF', s: '증거 기록', fill: C.ink, stroke: C.ink, tc: '#fff' },
       ];
       const W = 1000, bw = 106, gap = (W - 8 * bw - 8) / 7, top = 38, bh = 92;
       steps.forEach((b, i) => {
