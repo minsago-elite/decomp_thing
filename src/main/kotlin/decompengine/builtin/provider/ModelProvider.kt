@@ -101,6 +101,15 @@ data class ModelUsage(val inputTokens: Long, val outputTokens: Long, val estimat
     init { require(inputTokens >= 0 && outputTokens >= 0) }
 }
 
+/** Stable configured identity exposed by the provider instance that performs the request. */
+class ModelProviderIdentity(val provider: String, val model: String) {
+    init {
+        require(provider.matches(Regex("[A-Za-z0-9._:/-]{1,128}")))
+        require(model.matches(Regex("[A-Za-z0-9._:/-]{1,200}")))
+    }
+    override fun toString() = "ModelProviderIdentity(redacted)"
+}
+
 sealed interface ModelEvent {
     class TextDelta(val text: String) : ModelEvent { override fun toString() = "TextDelta(redacted)" }
     class ToolCall(val call: ModelToolCall) : ModelEvent { override fun toString() = "ToolCall(redacted)" }
@@ -123,4 +132,7 @@ class ModelResponse(
 /** A response proposes actions. It never authorizes tools or accepts a workspace revision. */
 fun interface ModelProvider {
     fun generate(request: ModelRequest, onEvent: (ModelEvent) -> Unit): ModelResponse
+
+    /** Null for providers that do not expose a stable configured identity. */
+    val identity: ModelProviderIdentity? get() = null
 }

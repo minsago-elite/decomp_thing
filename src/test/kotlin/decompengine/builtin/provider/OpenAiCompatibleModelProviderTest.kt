@@ -201,6 +201,14 @@ class OpenAiCompatibleModelProviderTest {
             assertEquals(ModelFailureKind.CONFIGURATION, failure.kind)
             assertFalse(failure.stackTraceToString().contains(key))
         }
+        val first = OpenAiCompatibleModelProvider(OpenAiCompatibleConfiguration("https://example.com/v1", "model", key)).identity!!
+        val same = OpenAiCompatibleModelProvider(OpenAiCompatibleConfiguration("https://example.com/v1", "model", "different-secret")).identity!!
+        val otherEndpoint = OpenAiCompatibleModelProvider(OpenAiCompatibleConfiguration("https://other.example/v1", "model", key)).identity!!
+        val otherModel = OpenAiCompatibleModelProvider(OpenAiCompatibleConfiguration("https://example.com/v1", "other-model", key)).identity!!
+        assertEquals(first.provider, same.provider); assertEquals(first.model, same.model)
+        assertNotEquals(first.provider, otherEndpoint.provider); assertEquals(first.model, otherEndpoint.model)
+        assertEquals(first.provider, otherModel.provider); assertNotEquals(first.model, otherModel.model)
+        assertFalse(first.provider.contains("example.com")); assertFalse(first.toString().contains(key))
         assertFalse(OpenAiCompatibleConfiguration("https://example.com/v1", "model", key).toString().contains(key))
     }
 

@@ -123,11 +123,12 @@ class BuiltinAgentHarness(
 
     /** The workflow must reopen the exact staged source before requesting a continuation. */
     fun resumeReceipt(request: AgentExecutionRequest, checkpoint: BuiltinCheckpointReference,
-        onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt =
-        Invocation(request, onEvent, checkpoint).run(AgentExecutionRequestBinding.capture(request))
+        expectedAcceptedRevisionSha256: String, onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt =
+        Invocation(request, onEvent, checkpoint, expectedAcceptedRevisionSha256).run(AgentExecutionRequestBinding.capture(request))
 
     private inner class Invocation(val request: AgentExecutionRequest, val onEvent: (AgentExecutionEvent) -> Unit,
-        val resume: BuiltinCheckpointReference? = null) {
+        val resume: BuiltinCheckpointReference? = null, val expectedAcceptedRevisionSha256: String? = null) {
+        private val configuredProviderIdentity = if (checkpointConfiguration != null) provider.identity else null
         val started = System.nanoTime()
         val control = BuiltinExecutionControl(request, started + minOf(request.limits.wallClockTimeout, Duration.ofDays(1)).toNanos())
         val records = mutableListOf<BuiltinTraceRecord>()
@@ -158,6 +159,7 @@ class BuiltinAgentHarness(
             var failureKind: AgentFailureKind? = null
             var cleanup = false
             try {
+                verifyCheckpointIdentity()
                 if (resume == null) journal = journalConfiguration?.let { BuiltinJournal.open(it, request, secrets) }
                 else {
                     val commitment = checkpointStore.read(resume)
@@ -242,6 +244,19 @@ class BuiltinAgentHarness(
                     wallClock = Duration.ofNanos(priorWallClockNanos + maxOf(0, System.nanoTime() - started))),
             ))
             return AgentExecutionReceipt(binding, outcome, evidence)
+        }
+
+        private fun verifyCheckpointIdentity() {
+            if (checkpointConfiguration == null) return
+            val expected = journalConfiguration?.identity ?: throw ModelProviderException(ModelFailureKind.CONFIGURATION)
+            val actual = configuredProviderIdentity ?: throw ModelProviderException(ModelFailureKind.CONFIGURATION)
+            if (actual.provider != expected.provider || actual.model != expected.model)
+                throw ModelProviderException(ModelFailureKind.CONFIGURATION)
+            if (resume != null) {
+                val accepted = expectedAcceptedRevisionSha256
+                if (accepted == null || !accepted.matches(Regex("[a-f0-9]{64}")) || accepted != expected.acceptedRevisionSha256)
+                    throw ModelProviderException(ModelFailureKind.CONFIGURATION)
+            }
         }
 
         fun state(value: BuiltinLoopState, digest: String? = null) {
@@ -460,7 +475,11 @@ class BuiltinAgentHarness(
             val context = contextBytes(definitions)
             val remainingNanos = control.remaining().toNanos()
             val value = buildJsonObject {
-                put("version", 2); put("state", "READY_FOR_MODEL")
+                val identity = journalConfiguration!!.identity
+                val providerIdentity = checkNotNull(configuredProviderIdentity)
+                put("version", 3); put("state", "READY_FOR_MODEL")
+                put("provider", providerIdentity.provider); put("model", providerIdentity.model)
+                put("stageSha256", identity.stageSha256); put("acceptedRevisionSha256", identity.acceptedRevisionSha256)
                 put("loopLimitsSha256", digest(limits.toString().toByteArray()))
                 put("context", journalContext(definitions)); put("contextSha256", digest(context)); put("sourceSha256", snapshot.sha256)
                 val authority = tools.checkpointAuthoritySha256(control)
@@ -494,10 +513,17 @@ class BuiltinAgentHarness(
             val value = payload.getValue("resumeState").jsonObject
             // A redacted checkpoint is evidence only. Never feed replacement text back as original context/source.
             check(payload["stateSha256"] == JsonPrimitive(checkpointStateHash(value, journalConfiguration!!.maximumRecordBytes)))
-            val required = setOf("version", "state", "loopLimitsSha256", "context", "contextSha256", "sourceSha256", "toolAuthoritySha256", "usage",
+            val required = setOf("version", "state", "provider", "model", "stageSha256", "acceptedRevisionSha256", "loopLimitsSha256", "context", "contextSha256", "sourceSha256", "toolAuthoritySha256", "usage",
                 "eventSequence", "remainingWallClockNanos", "deadlineEpochMillis", "elapsedWallClockNanos", "usedCallIds", "repeated", "records", "contextEntries")
             check(value.keys == required || value.keys == required + "toolAudit")
-            check(value["version"] == JsonPrimitive(2) && value["state"] == JsonPrimitive("READY_FOR_MODEL"))
+            check(value["version"] == JsonPrimitive(3) && value["state"] == JsonPrimitive("READY_FOR_MODEL"))
+            val identity = journalConfiguration!!.identity
+            val providerIdentity = checkNotNull(configuredProviderIdentity)
+            check(value["provider"] == JsonPrimitive(providerIdentity.provider) && providerIdentity.provider == identity.provider)
+            check(value["model"] == JsonPrimitive(providerIdentity.model) && providerIdentity.model == identity.model)
+            check(value["stageSha256"] == JsonPrimitive(identity.stageSha256))
+            check(value["acceptedRevisionSha256"] == JsonPrimitive(identity.acceptedRevisionSha256))
+            check(expectedAcceptedRevisionSha256 == identity.acceptedRevisionSha256)
             check(value["loopLimitsSha256"] == JsonPrimitive(digest(limits.toString().toByteArray())))
             fun number(key: String) = value.getValue(key).jsonPrimitive.long
             val remainingNanos = number("remainingWallClockNanos")
