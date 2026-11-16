@@ -647,16 +647,26 @@ state except `available`:
 `WebExplorationReportTest`, `WebExplorationPreparationReportTest`,
 `RecordedRepairValidationDiagnosticTest` and `RecordedRepairValidationCasesTest` cover each row.
 
+The default legacy `GET /jobs/{J}` page uses the same exploration-state classifier on one bounded
+capture of the selected report. It distinguishes unknown, partial, unsupported and invalid data;
+only `available` data shows summary metrics and candidate rows. A legacy page's `available` label
+has the same limited meaning as the adapter state above: structure was checked, not acceptance or
+behavioral equivalence. Captured bytes remain downloadable even when their classification is not
+available.
+
 `available` means the adapter verified the report's structure and bindings, not that the
 reconstruction was accepted: `acceptance` stays `not-evaluated` unless an acceptance artifact
 supplies it.
 
 Sizes, counts and addresses keep their exact values on the wire and in the SPA. Unsigned
 counts and byte sizes are canonical decimal strings, and the SPA prints them unchanged
-(`formatExactBytes` adds only a unit label, never `Number` rounding). ELF entry addresses are
+(`formatExactBytes` adds only a unit label, never `Number` rounding). The legacy HTML page adds a
+human-readable binary unit and preserves the exact decimal byte count in parentheses (for example,
+`1.5 MiB (1572864 bytes)`; `KiB` uses 1,024 bytes and `MiB` uses 1,048,576 bytes). ELF entry addresses are
 hexadecimal strings shown as sent. Timestamps keep their original fractional digits and
 offset; the SPA only replaces `T` with a space and a trailing `Z` with ` UTC`. The exploration
-confidence `score` is the one JSON number, a producer ratio in `[0, 1]`, shown as received.
+confidence `score` is the one JSON number, a producer ratio in `[0, 1]`, shown as received in both
+the SPA and legacy HTML (the optional legacy gauge uses a numeric value only for its visual scale).
 Each report carries its provenance: the `binding` (job, run, revision), `sourceArtifact`
 digest descriptor, `producerSchemaVersion`, `adapterVersion` and `limitations`.
 

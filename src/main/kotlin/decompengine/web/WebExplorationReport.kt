@@ -8,16 +8,27 @@ import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.*
 import java.security.MessageDigest
 
-/** Version-one presentation of legacy success and versioned failure records; never acceptance evidence. */
-internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray?, basePath: String = "/"): JsonObject {
+internal data class WebExplorationClassification(
+    val state: String,
+    val producerSchemaVersion: Int?,
+    val summary: JsonObject?,
+    val limitation: String,
+    val root: JsonObject?,
+    val bytesCaptured: Boolean,
+)
+
+/** Classifies the exact bounded capture without inventing attempt or artifact identity. */
+internal fun classifyWebExploration(bytes: ByteArray?): WebExplorationClassification {
     var state = "unknown"
     var summary: JsonObject? = null
     var producerSchemaVersion: Int? = null
     var limitation = "Report bytes are missing, inaccessible or changed during the bounded read."
+    var parsedRoot: JsonObject? = null
     if (bytes != null) {
         try {
             require(bytes.size <= 1_048_576)
             val root = OracleJson.parse(bytes).jsonObject
+            parsedRoot = root
             val schema = root["schema"]?.jsonPrimitive?.contentOrNull
             val versionedSuccess = schema == "decomp-exploration" &&
                 root["schemaVersion"]?.jsonPrimitive?.intOrNull == 2 &&
@@ -90,7 +101,8 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
                 val score = confidence.getValue("score").jsonPrimitive
                 require(!score.isString && score.doubleOrNull?.let { it.isFinite() && it in 0.0..1.0 } == true)
                 summary = buildJsonObject {
-                    put("candidateCount", candidateCount); put("expandedOutputSignatures", count(root, "expandedOutputSignatures"))
+                    put("candidateCount", candidateCount)
+                    put("expandedOutputSignatures", count(root, "expandedOutputSignatures"))
                     put("confidence", buildJsonObject {
                         put("score", score)
                         for (name in listOf("inputCount", "sourceCount", "outputSignatureCount", "newOutputSignatureCount")) put(name, count(confidence, name))
@@ -103,16 +115,28 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
             state = "invalid"; summary = null; limitation = "Report bytes are malformed or exceed this adapter's structural limits."
         }
     }
+    return WebExplorationClassification(state, producerSchemaVersion, summary, limitation, parsedRoot, bytes != null)
+}
+
+/** Captures a selected report once; only read failures become unknown rather than invalid. */
+internal fun captureWebExploration(read: () -> ByteArray): WebExplorationClassification {
+    val bytes = try { read() } catch (_: Exception) { null }
+    return classifyWebExploration(bytes)
+}
+
+/** Version-one presentation of legacy success and versioned failure records; never acceptance evidence. */
+internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray?, basePath: String = "/"): JsonObject {
+    val classification = classifyWebExploration(bytes)
     val digest = bytes?.let { MessageDigest.getInstance("SHA-256").digest(it).take(16).joinToString("") { b -> "%02x".format(b) } }
     return buildJsonObject {
         put("reportId", "exploration_${digest ?: "unavailable"}")
         put("binding", buildJsonObject { put("jobId", jobId); put("runId", runId); put("revisionId", JsonNull) })
         put("reportType", "exploration"); put("adapterVersion", 1)
-        put("producerSchemaVersion", producerSchemaVersion?.let { JsonPrimitive(it) } ?: JsonNull)
-        put("state", state); put("authority", "observations"); put("sourceArtifact", bytes?.let { WebExplorationArtifact.descriptor(jobId, runId, it, basePath) } ?: JsonNull)
+        put("producerSchemaVersion", classification.producerSchemaVersion?.let { JsonPrimitive(it) } ?: JsonNull)
+        put("state", classification.state); put("authority", "observations"); put("sourceArtifact", bytes?.let { WebExplorationArtifact.descriptor(jobId, runId, it, basePath) } ?: JsonNull)
         put("acceptance", "not-evaluated"); put("acceptanceArtifactId", JsonNull)
-        put("limitations", JsonArray(listOf(JsonPrimitive(limitation))))
-        put("summary", summary ?: JsonNull)
+        put("limitations", JsonArray(listOf(JsonPrimitive(classification.limitation))))
+        put("summary", classification.summary ?: JsonNull)
         put("validationCases", JsonNull); put("validationFailure", JsonNull)
     }
 }
