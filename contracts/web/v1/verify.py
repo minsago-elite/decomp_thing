@@ -573,6 +573,18 @@ def check_semantics(document: dict) -> None:
             previous = sequence
         if data["items"] and data["nextCursor"] != data["items"][-1]["cursor"]:
             raise ValueError("poll continuation must follow the last returned event")
+    elif kind == "gitStatus":
+        expected_head = {"attached": (True, True), "unborn": (True, False), "detached": (False, True)}[data["headState"]]
+        if (data["headRefName"] is not None, data["headObjectId"] is not None) != expected_head:
+            raise ValueError("Git status HEAD state disagrees with its branch and object")
+        if len({entry["fileId"] for entry in data["entries"]}) != len(data["entries"]):
+            raise ValueError("Git status file identities must be unique")
+    elif kind == "gitDiff":
+        if (data["scope"] == "commit") != (data["commitObjectId"] is not None):
+            raise ValueError("only a commit diff names a commit")
+        patch = data["patch"]
+        if patch is not None and patch["fileId"] not in {item["fileId"] for item in data["files"]}:
+            raise ValueError("a diff patch must belong to a listed file")
     elif kind == "gitWorkspace":
         length = {"sha1": 40, "sha256": 64}.get(data["objectFormat"])
         object_ids = [data["headObjectId"]]

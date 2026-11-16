@@ -4,6 +4,8 @@
   "partition": "core",
   "classes": {
     "decompengine.acp.AcpHarnessFactoryTest": 16,
+    "decompengine.git.GitReadsTest": 21,
+    "decompengine.git.ManagedGitRepositoriesTest": 31,
     "decompengine.web.DurableWebWorkflowTest": 20,
     "decompengine.web.SourceTreeJobReconstructorTest": 7,
     "decompengine.web.UploadServerTest": 72,
@@ -15,6 +17,7 @@
     "decompengine.web.WebCancellationControllerTest": 11,
     "decompengine.web.WebContainmentHttpTest": 2,
     "decompengine.web.WebEventStreamTest": 8,
+    "decompengine.web.WebGitControllerTest": 18,
     "decompengine.web.WebHarnessProbeAdmissionTest": 4,
     "decompengine.web.WebHarnessReadinessTest": 8,
     "decompengine.web.WebNegotiationMatrixTest": 5,
