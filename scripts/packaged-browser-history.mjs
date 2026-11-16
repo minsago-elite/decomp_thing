@@ -16,13 +16,14 @@ export async function seedHistory(root) {
   const at = new Date(Date.now() - 300_000).toISOString();
   const job = { id: jobId, filename: 'synthetic-history.elf', status: 'uploaded', created_at: at, updated_at: at,
     size_bytes: 64, binary_path: join(directory, 'input.elf'), metadata: { format: 'ELF64', endianness: 'little',
-      elf_version: 1, os_abi: 'System V', object_type: 'EXEC', machine: 'x86-64', entry_point: 0,
+      elf_version: 1, os_abi: 'System V', object_type: 'executable', machine: 'x86-64', entry_point: 0,
       elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
   const jobBytes = JSON.stringify(job);
   const attempts = Array.from({ length: 55 }, (_, index) => {
     const state = ['completed', 'failed', 'interrupted'][index % 3];
     const time = new Date(Date.parse(at) + index * 2000).toISOString();
-    return { runId: `run_fixture_${index}`, jobId, workflow: 'reconstruct', state, version: `version_fixture_${index}`,
+    return { runId: `run_fixture_${index}`, jobId, workflow: 'reconstruct', state,
+      version: `version_${createHash('sha256').update(`fixture-attempt-${index}`).digest('hex').slice(0, 32)}`,
       createdAt: time, startedAt: time, endedAt: new Date(Date.parse(time) + 1000).toISOString(),
       previousRunId: index ? `run_fixture_${index - 1}` : null, inputRevisionId: null, harnessCapabilityId: null,
       limits: { wallClockMs: '60000', idleMs: '15000', maxOutputBytes: '1048576', maxToolCalls: '16' },
@@ -31,7 +32,8 @@ export async function seedHistory(root) {
       candidate: state === 'completed' ? { revisionId: `revision_fixture_${index}`, sourceSha256: 'e'.repeat(64) } : null,
       acceptedRevision: null };
   });
-  const state = { schemaVersion: 1, jobId, version: 'version_fixture_history',
+  const state = { schemaVersion: 1, jobId,
+    version: `version_${createHash('sha256').update('fixture-history').digest('hex').slice(0, 32)}`,
     legacy: { originalJobSha256: createHash('sha256').update(jobBytes).digest('hex'), status: 'uploaded', recoveredInterrupted: false },
     attempts, acceptedRevision: null };
   const retained = { 'input.elf': input, 'job.json': jobBytes, 'workflow-state.json': JSON.stringify(state) };

@@ -25,11 +25,16 @@ internal object AgentProgressJournalMaintenance {
     private const val LOCK_FILE = "agent-progress.lock"
     private const val JOURNAL = AgentProgressJournal.FILE_NAME
 
+    /** Shared pre-filesystem eligibility guard. True means maintenance is a proven in-memory no-op. */
+    fun retainWithoutFilesystem(attempt: WorkflowAttempt, now: Instant, retention: Duration): Boolean {
+        require(!retention.isZero && !retention.isNegative)
+        if (!attempt.state.terminal || attempt.publicationPending || attempt.progressRetentionPinned) return true
+        return Duration.between(requireNotNull(attempt.endedAt), now) < retention
+    }
+
     fun expire(root: Path, attempt: WorkflowAttempt, now: Instant, retention: Duration,
         fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult {
-        require(!retention.isZero && !retention.isNegative)
-        if (!attempt.state.terminal || attempt.publicationPending || attempt.progressRetentionPinned ||
-            Duration.between(requireNotNull(attempt.endedAt), now) < retention) return ProgressRetentionResult.RETAINED
+        if (retainWithoutFilesystem(attempt, now, retention)) return ProgressRetentionResult.RETAINED
         require(attempt.jobId.matches(Regex("[a-f0-9]{32}")))
         require(attempt.runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
         Fs.requireSupported(root)

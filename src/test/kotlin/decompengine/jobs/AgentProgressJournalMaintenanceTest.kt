@@ -67,6 +67,52 @@ class AgentProgressJournalMaintenanceTest {
         assertEquals(ProgressRetentionResult.RETAINED, f.expire())
     }
 
+    @Test fun `due expiration invalidates listing at exact retention boundary including uncertain publication`() = Fixture().use { f ->
+        val originalMetadata = Files.readAllBytes(f.root.resolve("${f.job}/workflow-state.json"))
+        var reads = 0
+        val refusal = assertFailsWith<WorkflowStoreException> {
+            f.owner.inspectForListing(f.job, { relative, maximum ->
+                Files.readAllBytes(f.root.resolve(relative)).also { bytes ->
+                    reads++
+                    assertTrue(bytes.size <= maximum)
+                }
+            }) { captured ->
+                assertEquals(ProgressRetentionResult.EXPIRED, f.expire())
+                captured
+            }
+        }
+        assertEquals("JOB_RECORD_UNAVAILABLE", refusal.code)
+        assertEquals(2, reads, "due expiry must invalidate without retrying metadata")
+        assertContentEquals(originalMetadata, Files.readAllBytes(f.root.resolve("${f.job}/workflow-state.json")))
+        assertTrue(AgentProgressJournal.read(f.directory)!!.containsKey("retentionExpiredAt"))
+
+        // A fresh exact-boundary journal with a failure after synced preparation is uncertain and
+        // must also invalidate a listing even though its callback catches the public maintenance error.
+        val nextJob = JobStore(f.root).createFromUpload("fixture.elf", elfFixture()).id
+        val queued = f.owner.create(nextJob, (f.owner.inspect(nextJob) as WorkflowJobInspection.Available).snapshot.version,
+            NewWorkflowAttempt(WorkflowKind.EXPLORE, WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
+        val started = f.owner.transition(nextJob, queued.runId, queued.version, WorkflowTransition.Start).attempt
+        val terminal = f.owner.transition(nextJob, started.runId, started.version,
+            WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+        val directory = f.root.resolve("$nextJob/reports/runs/${terminal.runId}")
+        AgentProgressJournal(directory, "explore").use { }
+        f.clock.now = f.clock.now.plus(Duration.ofHours(24))
+        var failureReads = 0
+        val failedRefusal = assertFailsWith<WorkflowStoreException> {
+            f.owner.inspectForListing(nextJob, { relative, maximum ->
+                Files.readAllBytes(f.root.resolve(relative)).also { bytes -> failureReads++; assertTrue(bytes.size <= maximum) }
+            }) { captured ->
+                assertEquals("PROGRESS_RETENTION_FAILED", assertFailsWith<WorkflowStoreException> {
+                    f.owner.expireProgressJournal(nextJob, terminal.runId, false,
+                        fault = { point -> if (point == ProgressRetentionFaultPoint.AFTER_TEMP_SYNC) error("private canary") })
+                }.code)
+                captured
+            }
+        }
+        assertEquals("JOB_RECORD_UNAVAILABLE", failedRefusal.code)
+        assertEquals(2, failureReads, "uncertain expiry must invalidate without retrying metadata")
+    }
+
     @Test fun `active attempts and absent journals do not acquire a retention publication`() {
         Fixture(terminal = false).use { f ->
             val original = Files.readAllBytes(f.journal)

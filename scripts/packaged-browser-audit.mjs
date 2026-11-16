@@ -10,7 +10,7 @@ import { join } from 'node:path';
 // response is a schema fixture the SPA validates exactly as it would a server response.
 
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
-  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
+  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file', 'structure functions'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
@@ -71,6 +71,8 @@ export function auditFixtures(repo, buildId) {
   exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
+  // The lazily loaded Structure route reads the recorded function inventory for this revision.
+  const functions = bound('function-inventory', selected);
   const owner = history.data.items[0];
   const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
   const routes = [
@@ -93,6 +95,7 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions$`), () => ok(functions)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), () => ok(chunk)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), () => ok(file)],
@@ -117,6 +120,7 @@ export function auditFixtures(repo, buildId) {
     { action: `Inspect cases: ${owner.ownerKind} ${owner.ownerId}`, reads: [`${api}/reports/revision-validation`],
       content: [{ selector: '[aria-label="Recorded validation cases"] tbody', text: validation.data.validationCases.items[0].caseId }] },
   ];
+  const inventoryRange = `Showing 1–${functions.data.items.length} of ${functions.data.matchedFunctions} matching functions (${functions.data.totalFunctions} recorded).`;
   // Unknown paths are a server 404 document, not an SPA view, so the router's not-found view
   // stays covered by the component accessibility gate.
   const pages = [
@@ -138,6 +142,12 @@ export function auditFixtures(repo, buildId) {
         { selector: '.source-token-string', text: '"/very/deep/source/tree' },
         { selector: '.source-token-comment', text: 'Synthetic audit source' },
         { selector: '.source-token-number', text: '0x00' },
+      ] }] },
+    // The inventory loads on navigation; the explicit refresh proves a fresh bound read and a re-rendered table.
+    { name: 'structure functions', path: `${base}/revisions/${revisionId}/functions`, rendered: inventoryRange,
+      preparation: [{ action: 'Refresh from the first page', reads: [`${api}/revisions/${revisionId}/functions`], content: [
+        { selector: '.structure-view [role="status"]', text: inventoryRange },
+        { selector: '.structure-view tbody', text: functions.data.items.at(-1).address },
       ] }] },
   ];
   return {
@@ -293,6 +303,9 @@ export const measureContrast = `(() => {
   return { measured: results.length, minimum: results.length ? Number(Math.min(...results).toFixed(3)) : null, failures: failures.slice(0, 12), failureCount: failures.length, unsupported: unsupported.slice(0, 12), tokens };
 })()`;
 
+/** Failure-only focus trajectory bounds, independent of every assertion deadline. */
+export const focusTrajectoryFrames = 30;
+export const focusTrajectoryMs = 1000;
 export const measureFocus = `(async () => {
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const element = document.activeElement;
@@ -310,8 +323,12 @@ export const measureFocus = `(async () => {
   const box = element.getBoundingClientRect();
   const hit = document.elementFromPoint(Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1), Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1));
   const [low, high] = outline && adjacent ? [luminance(outline), luminance(adjacent)].sort((a, b) => a - b) : [0, 0];
-  return {
+  const result = {
     key: ids.get(element), heading: element.matches('main h1'),
+    // Numeric layout facts only; keep the original sample and verdict, without scrolling or extra waits.
+    geometry: { left: box.left, top: box.top, right: box.right, bottom: box.bottom,
+      width: box.width, height: box.height, viewportWidth: innerWidth, viewportHeight: innerHeight,
+      scrollX, scrollY },
     target: element.tagName.toLowerCase() + (element.id ? '#' + element.id : '') + ' ' + JSON.stringify((element.getAttribute('aria-label') || element.textContent || '').trim().slice(0, 40)),
     focusVisible: element.matches(':focus-visible'), outlineStyle: style.outlineStyle, outlineWidth: parseFloat(style.outlineWidth),
     contrast: outline && adjacent ? Number(((high + 0.05) / (low + 0.05)).toFixed(3)) : null,
@@ -319,6 +336,25 @@ export const measureFocus = `(async () => {
     inViewport: box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth,
     unobscured: hit !== null && (element.contains(hit) || hit.contains(element)),
   };
+  // Failure-only diagnostic: after an off-screen sample, record later frames without scrolling or
+  // refocusing, so a delayed engine focus scroll is distinguishable from a persistent one. Numbers
+  // and a fixed same-target flag only. Bounded by ${focusTrajectoryFrames} frames and ${focusTrajectoryMs} ms.
+  if (!result.inViewport) {
+    const started = performance.now(); const trajectory = [];
+    for (let frame = 1; frame <= ${focusTrajectoryFrames}; frame += 1) {
+      const elapsed = performance.now() - started;
+      if (elapsed >= ${focusTrajectoryMs}) break;
+      const ticked = await new Promise(resolve => { const timer = setTimeout(() => resolve(false), ${focusTrajectoryMs} - elapsed);
+        requestAnimationFrame(() => { clearTimeout(timer); resolve(true); }); });
+      if (!ticked) break;
+      const later = element.getBoundingClientRect();
+      trajectory.push({ frame, ms: Number((performance.now() - started).toFixed(1)), top: later.top, bottom: later.bottom,
+        left: later.left, right: later.right, viewportWidth: innerWidth, viewportHeight: innerHeight, scrollX, scrollY,
+        sameTarget: document.activeElement === element });
+    }
+    result.trajectory = trajectory;
+  }
+  return result;
 })()`;
 
 function percentile(values, fraction) {

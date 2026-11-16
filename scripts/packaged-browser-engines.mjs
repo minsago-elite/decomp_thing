@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
+import { attachExceptionContext, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
 // is Chromium-only; this runner drives Firefox, WebKit or Chromium through Playwright against the
@@ -367,6 +368,7 @@ async function context(options = {}) {
     page.on('pageerror', (error) => record.exceptions.push(String(error)));
     page.on('worker', (worker) => record.workers.push({ url: worker.url(), responses: [] }));
   });
+  record.exceptionContext = attachExceptionContext(created);
   return { context: created, record };
 }
 
@@ -466,6 +468,7 @@ async function probeApplicationShellCsp(origin) {
 /** Real server session: bootstrap link, cookie restore across reload, runtime identity and sign-out. */
 async function smoke(origin, manifest) {
   const { context: created, record } = await context();
+  record.exceptionContext.phase = 'smoke';
   const page = await created.newPage();
   const link = await waitFor(() => output.split(/\s+/).find((part) => part.startsWith(`${origin}/nested/#bootstrap=`)), 'local bootstrap handoff');
   secrets.push(parseUrl(link, 'bootstrap handoff').hash.slice('#bootstrap='.length));
@@ -490,6 +493,7 @@ async function smoke(origin, manifest) {
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.getByText(/You signed out of this browser/).waitFor();
   const storage = await page.evaluate(() => localStorage.length + sessionStorage.length);
+  record.exceptionContext.phase = 'smoke closing';
   await created.close();
   return { record, result: { authenticated: true, fragmentRemoved: true, restoredAfterReload: true, runtimeBuild: manifest.buildId, signedOut: true, storageEntries: storage } };
 }
@@ -511,6 +515,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
   const open = async (target, page, context, prepare = true) => {
+    records.at(-1).exceptionContext.phase = `${context}: ${page.name}`;
     try {
       interactions.push(...await openEngineAuditPage(target, { origin, page, fulfilled, context, prepare }));
     } catch (failure) {
@@ -648,6 +653,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       await open(target, source, 'worker/CSP qualification');
       highlightedTokens = await target.locator('.source-token').count();
     }
+    record.exceptionContext.phase = `${viewport.name} closing`;
     await created.close();
   }
   // Timing: initial-route metadata only; explicit-read population is recorded in interactions.
@@ -663,6 +669,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       const cycle = fixtures.pages.filter((page) => page.name !== 'upload');
       for (let index = 0; index < 50; index += 1) {
         const page = cycle[(index + 1) % cycle.length];
+        record.exceptionContext.phase = `route timing ${index}: ${page.name}`;
         const timing = await target.evaluate(`new Promise((resolve, reject) => {
           const target = ${JSON.stringify(page.path)};
           const link = document.createElement('a'); link.href = target; link.textContent = 'audit'; document.querySelector('main').append(link);
@@ -679,6 +686,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         feedback.push(timing.focused); data.push(timing.populated);
       }
     }
+    record.exceptionContext.phase = `cold sample ${sample} closing`;
     await created.close();
   }
   const summary = (list) => { const sorted = [...list].sort((a, b) => a - b); const at = (f) => Number(sorted[Math.min(sorted.length - 1, Math.ceil(f * sorted.length) - 1)].toFixed(1));
@@ -719,6 +727,7 @@ try {
     violations: applicationCspViolations, playwrightScreenshotViolations: playwrightScreenshotEvents,
     exceptions: records.flatMap((record) => record.exceptions),
   };
+  report.pageExceptionContexts = summarizeExceptionContexts(records.map((record) => record.exceptionContext.snapshot()));
   const failures = [...report.auditVerdict.failures];
   if (report.contentSecurityPolicy.violations.length) failures.push(`CSP violations: ${JSON.stringify(report.contentSecurityPolicy.violations)}`);
   if (report.contentSecurityPolicy.missingPolicyDocuments.length) failures.push('A packaged document omitted CSP');

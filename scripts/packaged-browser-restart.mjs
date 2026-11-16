@@ -57,6 +57,132 @@ export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
   return bounded;
 }
 
+// Lossless report publication (#1882). The retained primary report.json keeps its 512 KiB bound;
+// a larger scrubbed report is published byte-exact as at most 16 x 4 MiB parts (64 MiB of parts).
+// Including the bounded primary, retained output is at most 64 MiB + 512 KiB in 17 files.
+export const REPORT_PART_BYTES = 4 * 1024 * 1024;
+export const MAX_REPORT_PARTS = 16;
+const FAILURE_PREVIEW_BYTES = 16 * 1024;
+const FAILURE_RECORD_BYTES = 64 * 1024;
+const prettyJSON = value => JSON.stringify(value, null, 2) + '\n';
+
+/** Longest UTF-8 prefix of text within maxBytes, never splitting a character. */
+function utf8Prefix(text, maxBytes) {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+/** A bounded, already-scrubbed view of a string fact with the size and digest of the whole fact. */
+function factPreview(text, maxBytes = FAILURE_PREVIEW_BYTES) {
+  const bytes = Buffer.from(text, 'utf8');
+  const preview = utf8Prefix(text, maxBytes);
+  return { bytes: bytes.length, sha256: sha256(bytes), preview, complete: preview.length === text.length };
+}
+
+/** Primary report: every top-level fact inline until the bound is met, then the largest replaced by digest references. */
+function primaryReport(full, evidence, maxBytes) {
+  const primary = { ...full, reportEvidence: evidence };
+  const sizes = Object.entries(full).filter(([key, value]) => key !== 'status' && value !== undefined)
+    .map(([key, value]) => [key, Buffer.from(JSON.stringify(value) ?? 'null', 'utf8')])
+    .sort((a, b) => b[1].length - a[1].length);
+  let text = prettyJSON(primary);
+  for (const [key, bytes] of sizes) {
+    if (Buffer.byteLength(text, 'utf8') <= maxBytes) break;
+    primary[key] = { reportEvidence: key, bytes: bytes.length, sha256: sha256(bytes) };
+    evidence.referencedKeys.push(key);
+    text = prettyJSON(primary);
+  }
+  assert.ok(Buffer.byteLength(text, 'utf8') <= maxBytes, 'Primary report exceeds its byte bound after evidence references');
+  return text;
+}
+
+/** A failed publication never claims a report or cleanup it did not retain; it repeats the facts it can bound. */
+function failureRecord(full, fullBytes, reason, written, partAttempted, limits) {
+  const record = { status: 'failed', mode: typeof full.mode === 'string' ? utf8Prefix(full.mode, 256) : null,
+    statusBeforePublication: typeof full.status === 'string' ? utf8Prefix(full.status, 256) : null,
+    reportPublication: { status: 'failed', reason: factPreview(reason), primaryReportRetained: false,
+      fullBytes: fullBytes.length, fullSha256: sha256(fullBytes), ...limits, partsWritten: written,
+      // A rejected write may have left this file partially present; it is not verified evidence.
+      partAttempted, partAttemptedUnverified: partAttempted !== null } };
+  for (const key of ['shutdownConfirmed', 'forcedShutdown', 'workRetained', 'workCleanupConfirmed', 'installationUnchanged']) {
+    if (typeof full[key] === 'boolean') record[key] = full[key];
+  }
+  for (const key of ['error', 'workCleanupError', 'applicationError', 'browserError', 'viteError']) {
+    if (typeof full[key] === 'string') record[key] = factPreview(full[key], 4096);
+  }
+  if (Array.isArray(full.cleanupErrors)) record.cleanupErrors = { count: full.cleanupErrors.length,
+    first: full.cleanupErrors.slice(0, 8).map(item => factPreview(String(item), 2048)) };
+  let text = prettyJSON(record);
+  // JSON escaping can expand a bounded UTF-8 preview (for example a NUL) sixfold.
+  // Preserve exact scrubbed lengths/digests and cleanup facts even when previews
+  // cannot fit. This is one in-memory encoding choice, not another write attempt.
+  if (Buffer.byteLength(text, 'utf8') > FAILURE_RECORD_BYTES) {
+    const omitPreview = fact => { fact.preview = ''; fact.complete = fact.bytes === 0; };
+    omitPreview(record.reportPublication.reason);
+    for (const key of ['error', 'workCleanupError', 'applicationError', 'browserError', 'viteError']) {
+      if (record[key]) omitPreview(record[key]);
+    }
+    for (const fact of record.cleanupErrors?.first ?? []) omitPreview(fact);
+    record.reportPublication.previewsOmittedForByteBound = true;
+    text = prettyJSON(record);
+  }
+  assert.ok(Buffer.byteLength(text, 'utf8') <= FAILURE_RECORD_BYTES, 'Report publication failure record exceeds its bound');
+  return text;
+}
+
+/**
+ * Scrubs once, then publishes report.json (and, only when needed, byte-exact parts of the full report).
+ * Every emitted byte and digest is computed from the scrubbed text. Throws after a bounded failure record
+ * on any cap or I/O failure; never retries, overwrites a part, or reports success it did not achieve.
+ */
+export async function publishReport(directory, report, tokens, { fsApi = fs, maxBytes = MAX_REPORT_BYTES,
+  partBytes = REPORT_PART_BYTES, maxParts = MAX_REPORT_PARTS } = {}) {
+  const full = scrubTokens(report, tokens);
+  const text = prettyJSON(full);
+  const fullBytes = Buffer.from(text, 'utf8');
+  const primaryPath = join(directory, 'report.json');
+  const limits = { primaryMaxBytes: maxBytes, partBytes, maxParts };
+  const written = [];
+  let partAttempted = null;
+  let primaryText = text;
+  let evidence = null;
+  try {
+    if (fullBytes.length > maxBytes) {
+      assert.ok(fullBytes.length <= partBytes * maxParts,
+        `Scrubbed report has ${fullBytes.length} bytes, over its ${partBytes * maxParts}-byte evidence bound`);
+      const parts = [];
+      for (let offset = 0; offset < fullBytes.length; offset += partBytes) {
+        const data = fullBytes.subarray(offset, offset + partBytes);
+        parts.push({ file: `report.full.part-${String(parts.length).padStart(3, '0')}`, bytes: data.length, sha256: sha256(data), data });
+      }
+      evidence = { format: 'Concatenate parts in order: UTF-8 JSON.stringify(report, null, 2) plus newline', ...limits,
+        bytes: fullBytes.length, sha256: sha256(fullBytes), parts: parts.map(({ file, bytes, sha256 }) => ({ file, bytes, sha256 })),
+        referencedKeys: [] };
+      primaryText = primaryReport(full, evidence, maxBytes);
+      for (const { file, bytes, sha256, data } of parts) {
+        partAttempted = file;
+        await fsApi.writeFile(join(directory, file), data, { flag: 'wx' });
+        written.push({ file, bytes, sha256 });
+        partAttempted = null;
+      }
+    }
+    await fsApi.writeFile(primaryPath, primaryText);
+  } catch (error) {
+    const reason = scrubTokens(String(error?.stack ?? error), tokens);
+    let recorded = false;
+    try {
+      await fsApi.writeFile(primaryPath, failureRecord(full, fullBytes, reason, written, partAttempted, limits));
+      recorded = true;
+    } catch {}
+    throw new Error(`Report publication failed (${recorded ? 'bounded failure record written' : 'no failure record written'}; ` +
+      `${written.length} evidence part(s) written): ${utf8Prefix(reason, 4096)}`);
+  }
+  return { primaryText, evidence };
+}
+
 export function summarizeRequests(requests) {
   const methods = {};
   for (const request of requests) methods[request.method] = (methods[request.method] ?? 0) + 1;
