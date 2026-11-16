@@ -13,7 +13,7 @@ import { GitRepositoryPanel } from '../jobs/GitRepositoryPanel';
 import { receive } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
-import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { MetadataReceipt, StaleMetadataNotice } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
 import { onLibraryChange } from '../jobs/libraryChannel';
@@ -65,7 +65,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
   return <>
     {loading && <p role="status">{job ? copy.refreshingJob : copy.loadingJob}</p>}
     {error && <p role="alert">{error}</p>}
-    {error && job && <p>{copy.previousJobMetadataMayBeOutdated}</p>}
+    {error && job && <StaleMetadataNotice />}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshJob}</button>
     {job && <>
       <MetadataReceipt kind="job" receipt={observation?.receipt} />

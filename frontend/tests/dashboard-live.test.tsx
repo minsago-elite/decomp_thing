@@ -61,7 +61,7 @@ it('defers the whole changed snapshot while a row is focused and applies it on e
   expect(order()).toEqual(['live-3.elf', 'live-2.elf', 'live-1.elf']);
   expect(within(screen.getByRole('link', { name: 'live-2.elf' }).closest('li')!).getByText('Failed')).toBeTruthy();
   expect(screen.queryByText(/New or changed jobs are available/)).toBeNull();
-  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
+  expect(document.activeElement).toBe(focused);
 });
 
 it('adds new jobs automatically when no job row is focused without stealing other focus', async () => {

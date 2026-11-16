@@ -18,7 +18,7 @@ import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
-import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { MetadataReceipt, StaleMetadataNotice } from '../shared/MetadataReceipt';
 import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
@@ -61,7 +61,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
   return <>
     {loading && <p role="status">{run ? copy.refreshingAttempt : copy.loadingAttempt}</p>}
     {error && <p role="alert">{error}</p>}
-    {error && run && <p>{copy.previousAttemptMetadataMayBeOutdated}</p>}
+    {error && run && <StaleMetadataNotice />}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshAttempt}</button>
     {run && <>
       <MetadataReceipt kind="run" receipt={observation?.receipt} />

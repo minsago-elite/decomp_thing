@@ -101,3 +101,40 @@ it('aborts the obsolete job read and never lets its late response replace the ne
     expect(transport.get).toHaveBeenCalledTimes(2);
   } finally { auth.dispose(); }
 });
+
+it('preserves job metadata node, selection, focus, scroll and receipt through transient failure and retry', async () => {
+  const auth = await session();
+  let rejectRead: (failure: unknown) => void = () => undefined;
+  transport.get.mockResolvedValueOnce({ data: jobA })
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectRead = reject; }))
+    .mockResolvedValueOnce({ data: jobA });
+  history.replaceState(null, '', '/nested/jobs/' + jobA.jobId);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const heading = await screen.findByRole('heading', { name: jobA.displayFilename });
+    const identity = screen.getByText(jobA.jobId);
+    const receipt = screen.getByLabelText('Job metadata').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+    heading.tabIndex = -1; heading.focus();
+    const range = document.createRange(); range.selectNodeContents(heading);
+    window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range);
+    document.documentElement.scrollTop = 432;
+    const before = transport.get.mock.calls.length;
+    // Put focus and selection back after the explicit request has been initiated.
+    screen.getByRole('button', { name: jobCopy.refreshJob }).click();
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(before + 1));
+    heading.focus(); window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range);
+    await act(async () => { rejectRead(new ApiClientError('network_error')); await Promise.resolve(); });
+    expect(await screen.findByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: jobA.displayFilename })).toBe(heading);
+    expect(screen.getByText(jobA.jobId)).toBe(identity);
+    expect(document.activeElement).toBe(heading);
+    expect(window.getSelection()?.toString()).toBe(jobA.displayFilename);
+    expect(document.documentElement.scrollTop).toBe(432);
+    expect(screen.getByLabelText('Job metadata').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(receipt);
+    screen.getByRole('button', { name: jobCopy.refreshJob }).click();
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(before + 2));
+    expect(await screen.findByRole('heading', { name: jobA.displayFilename })).toBe(heading);
+    expect(document.activeElement).toBe(heading);
+    expect(document.documentElement.scrollTop).toBe(432);
+  } finally { auth.dispose(); }
+});

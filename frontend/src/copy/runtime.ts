@@ -62,6 +62,7 @@ export const storageSummaryCopy = {
   "read": "Read storage and maintenance preview",
   "reading": "Reading storage…",
   "failed": "Storage could not be read. Nothing was changed.",
+  "sessionChanged": "Storage results were cleared because the local session changed. Read again for current data.",
   "partial": "Not every entry could be inspected; totals are lower bounds.",
   "total": "Total",
   "jobs": "Jobs",
