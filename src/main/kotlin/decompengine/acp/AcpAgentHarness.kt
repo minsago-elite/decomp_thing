@@ -731,7 +731,7 @@ class AcpAgentHarness(
         }
         val completedPrimaryFailure = primaryFailure
         if (completedPrimaryFailure != null) {
-            val original = mapFailure(completedPrimaryFailure, running, translator.sessionReference())
+            val original = mapFailure(completedPrimaryFailure, running, translator.sessionReference(), prefixObservation)
             running.attachStdoutShutdownFacts(original)
             throw original
         }
@@ -1614,6 +1614,7 @@ class AcpAgentHarness(
         failure: Throwable,
         running: RunningAcpProcess,
         session: AgentSessionReference?,
+        prefixObservation: RuntimeCopyStatistics.Prefix?,
     ): AgentExecutionException {
         if (failure is Error) throw failure
         if (failure is AgentExecutionException) return failure
@@ -1660,16 +1661,7 @@ class AcpAgentHarness(
             )
         }
         if (failure is AcpPhaseTimeout || failure is AcpIdleTimeout) {
-            return AgentExecutionException(
-                AgentFailure(
-                    AgentFailureKind.TIMEOUT,
-                    failure.message ?: "ACP execution timed out",
-                    retryable = true,
-                    session = session,
-                    details = mapOf("pid" to running.process.pid().toString()),
-                ),
-                failure,
-            )
+            return mapTimeoutFailure(failure, running.process.pid(), session, prefixObservation)
         }
         if (failure is AcpOutputLimitFailure) {
             return AgentExecutionException(
@@ -2113,12 +2105,30 @@ private class ProductionAcpSandboxExecution(
     }
 }
 
+/** Pure timeout mapping; PID is captured at the existing timeout branch before diagnostics. */
+private fun mapTimeoutFailure(
+    cause: Throwable,
+    pid: Long,
+    session: AgentSessionReference?,
+    observation: RuntimeCopyStatistics.Prefix?,
+): AgentExecutionException = mappedPrelaunchFailure(
+    AgentFailure(
+        AgentFailureKind.TIMEOUT,
+        cause.message ?: "ACP execution timed out",
+        retryable = true,
+        session = session,
+        details = mapOf("pid" to pid.toString()),
+    ),
+    cause,
+    observation,
+)
+
 /** Inlined diagnostic-only guard includes construction of the bound budget argument. */
 private inline fun createOptionalPrelaunchObservation(
     create: () -> RuntimeCopyStatistics.Prefix?,
 ): RuntimeCopyStatistics.Prefix? = try { create() } catch (_: Throwable) { null }
 
-/** Only an existing mapping's freshly constructed typed exception can receive this record. */
+/** Only a freshly constructed typed exception can receive this optional diagnostic record. */
 private fun mappedPrelaunchFailure(
     failure: AgentFailure,
     cause: Throwable,
