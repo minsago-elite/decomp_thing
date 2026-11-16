@@ -954,6 +954,24 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         }
     }
 
+    private fun verifyTerminalOutputEvent(event: JsonObject) {
+        event.requireExactKeys(setOf("sequence", "type", "sessionIdSha256", "terminalIdSha256", "toolCallIdSha256",
+            "retainedBytes", "producedBytes", "truncated"), "terminal output event")
+        require(event.requiredString("type", "terminal output event") == "terminal_output")
+        event.requiredNonNegativeLong("sequence", "terminal output event")
+        listOf("sessionIdSha256", "terminalIdSha256").forEach { key ->
+            require(event.requiredString(key, "terminal output event").matches(Regex("[a-f0-9]{64}")))
+        }
+        val tool = event.getValue("toolCallIdSha256")
+        if (tool !is JsonNull) require(tool.requiredString("terminal tool digest").matches(Regex("[a-f0-9]{64}")))
+        val retained = event.requiredNonNegativeLong("retainedBytes", "terminal output event")
+        val produced = event.requiredNonNegativeLong("producedBytes", "terminal output event")
+        val truncated = event.requiredBoolean("truncated", "terminal output event")
+        require(produced >= retained && truncated == (produced > retained)) {
+            "terminal output event byte counts are inconsistent"
+        }
+    }
+
     private fun verifyReceiptEvents(events: JsonObject): List<VerifiedAcpReceiptChange> {
         events.requireExactKeys(RECEIPT_EVENTS_FIELDS, "ACP receipt events")
         require(events.requiredNonNegativeLong("maximumRetainedEvents", "ACP receipt events") ==
@@ -976,6 +994,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             }
             when (event.requiredString("type", "ACP receipt event")) {
                 "context_usage" -> verifyContextUsageEvent(event)
+                "terminal_output" -> verifyTerminalOutputEvent(event)
                 "message" -> {
                     event.requireExactKeys(RECEIPT_MESSAGE_EVENT_FIELDS, "ACP receipt message event")
                     require(event.requiredString("role", "ACP receipt message event") in MESSAGE_ROLES) {

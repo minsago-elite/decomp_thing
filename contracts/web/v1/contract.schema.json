@@ -2727,6 +2727,7 @@
             "tool",
             "permission",
             "file_change",
+            "terminal_output",
             "agent_finished",
             "workflow_phase",
             "workflow_run_state",
@@ -2858,6 +2859,10 @@
               "type": "string",
               "pattern": "^[a-f0-9]{64}$"
             },
+            "terminalIdSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
             "toolCallIdSha256": {
               "type": "string",
               "pattern": "^[a-f0-9]{64}$"
@@ -2909,6 +2914,12 @@
             "entryCount": {
               "$ref": "#/definitions/uint64"
             },
+            "retainedOutputBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "producedOutputBytes": {
+              "$ref": "#/definitions/uint64"
+            },
             "entriesTruncated": {
               "type": "boolean"
             },
@@ -2926,6 +2937,9 @@
             },
             "messageTrackingExhausted": {
               "type": "boolean"
+            },
+            "outputTruncated": {
+              "type": "boolean"
             }
           },
           "additionalProperties": false
@@ -2941,6 +2955,31 @@
         "observationKind",
         "fields",
         "omittedFieldCount"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "observationKind": {
+                "const": "terminal_output"
+              }
+            },
+            "required": ["observationKind"]
+          },
+          "then": {
+            "properties": {
+              "fields": {
+                "required": [
+                  "sessionIdSha256",
+                  "terminalIdSha256",
+                  "retainedOutputBytes",
+                  "producedOutputBytes",
+                  "outputTruncated"
+                ]
+              }
+            }
+          }
+        }
       ],
       "additionalProperties": false
     },

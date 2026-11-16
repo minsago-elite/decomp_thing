@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpAgentHarnessTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-12T18:41:08.860Z" hostname="whatsername" time="9.356">
+  <properties/>
+  <testcase name="fake agent exercises official terminal create wait output release and tool correlation()" classname="decompengine.acp.AcpAgentHarnessTest" time="9.354"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

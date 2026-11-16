@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.AgentProgressJournalTest" tests="37" skipped="0" failures="0" errors="0" timestamp="2026-11-12T18:41:34.919Z" hostname="whatsername" time="11.084">
+  <properties/>
+  <testcase name="writer retires ownership after a timed out close once publication has stopped()" classname="decompengine.jobs.AgentProgressJournalTest" time="5.036"/>
+  <testcase name="completion preserves available usage including zero cache and exact elapsed duration()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.006"/>
+  <testcase name="split basic authorization is never previewed raw or persisted with its token()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.014"/>
+  <testcase name="basic authorization credentials are removed without a configured token()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.006"/>
+  <testcase name="messages redact split secrets and completion remains distinct from acceptance()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.007"/>
+  <testcase name="noisy stream remains bounded and records exact omission counts()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.085"/>
+  <testcase name="timed out snapshot close retains ownership until full history finalizes()" classname="decompengine.jobs.AgentProgressJournalTest" time="5.068"/>
+  <testcase name="concurrent tasks retain invocation identity and failures carry no exception text()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.01"/>
+  <testcase name="redactor handles credential fields and removes terminal control codes()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.001"/>
+  <testcase name="saturated queue retains the last terminal phase and exact loss through the CLI projection()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.248"/>
+  <testcase name="indexed literal redaction preserves bounded replacement and UTF16 matching()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.169"/>
+  <testcase name="snapshot size planning preserves exact maximal suffix across Unicode gaps and counter boundaries()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.107"/>
+  <testcase name="source sequence loss suppresses incomplete message previews()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.004"/>
+  <testcase name="configured literals cannot erase credential indicators before format masking()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.002"/>
+  <testcase name="replacement output cannot synthesize a reordered secret()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.001"/>
+  <testcase name="sequence exhaustion preserves a readable boundary and releases rejected startup ownership()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.023"/>
+  <testcase name="complete configured diagnostic secrets survive format matching only as masked coverage()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.002"/>
+  <testcase name="historical replay withholds old prose while preserving typed facts and commitments()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.002"/>
+  <testcase name="fixed omission markers cannot disclose configured secrets()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.002"/>
+  <testcase name="private reasoning is neither retained measured nor committed()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.011"/>
+  <testcase name="persisted history rejects unexplained loss and inconsistent omission counters()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.006"/>
+  <testcase name="snapshot publication failure marks the retained full history incomplete()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.134"/>
+  <testcase name="omission ranges preserve prefix interior and trailing gaps across legacy restart()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.002"/>
+  <testcase name="snapshot encoding releases producers and publishes one coherent loss boundary()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.023"/>
+  <testcase name="streamed display commitments preserve whole text encoding across bounded chunks()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.019"/>
+  <testcase name="terminal output progress persists only bounded metadata and validates byte consistency()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.01"/>
+  <testcase name="message tracking overflow never admits a continuation after capacity is released()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.008"/>
+  <testcase name="redaction bounds raw configuration and intermediate replacement work()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.02"/>
+  <testcase name="historical replay bounds fields and omission counts without inventing legacy metadata()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.005"/>
+  <testcase name="durable run and revision correlation survives writer restart without promoting provisional state()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.006"/>
+  <testcase name="oversized messages omit the entire preview and cannot publish partial secrets()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.003"/>
+  <testcase name="display commitments keep malformed UTF16 identities and interleaved messages distinct()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.012"/>
+  <testcase name="restart retains events and allocates a new run without repeating sequence numbers()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.003"/>
+  <testcase name="nonaccepted run observations cannot carry accepted source identity()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.001"/>
+  <testcase name="history eviction precedes retained events while queue loss may follow them()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.002"/>
+  <testcase name="journal persists safe empty previews when omission markers are sensitive()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.008"/>
+  <testcase name="second writer is rejected and oversized persisted data fails bounded read()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[Exception in thread "decomp-progress-reconstruction" java.lang.IllegalStateException: full run journal recording failed
+	at decompengine.jobs.FullRunJournalWriter.close(FullRunJournal.kt:395)
+	at decompengine.jobs.AgentProgressJournal.writeLoop(AgentProgressJournal.kt:409)
+	at decompengine.jobs.AgentProgressJournal._init_$writeLoop(AgentProgressJournal.kt:105)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.lang.IllegalStateException: private append failure
+	at decompengine.jobs.AgentProgressJournalTest.timed_out_snapshot_close_retains_ownership_until_full_history_finalizes$lambda$0(AgentProgressJournalTest.kt:594)
+	at decompengine.jobs.FullRunJournalWriter.writeLoop(FullRunJournal.kt:345)
+	at decompengine.jobs.FullRunJournalWriter.writer$writeLoop(FullRunJournal.kt:301)
+	... 1 more
+]]></system-err>
+</testsuite>

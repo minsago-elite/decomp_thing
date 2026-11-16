@@ -278,6 +278,7 @@ class AcpSandboxPolicyTest {
         val baseAudit = AcpTerminalAuditRecord(
             sequence = 0,
             sessionId = "session",
+            sessionIdSha256 = "e".repeat(64),
             method = "terminal/output",
             requestSha256 = "f".repeat(64),
             terminalIdSha256 = "0".repeat(64),

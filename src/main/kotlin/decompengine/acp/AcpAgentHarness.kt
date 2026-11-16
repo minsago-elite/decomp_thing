@@ -75,6 +75,7 @@ import decompengine.agent.AgentSessionRecoveryException
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentToolStatus
+import decompengine.agent.AgentTerminalOutputEvent
 import decompengine.agent.AgentUsage
 import decompengine.agent.AgentContextUsageEvent
 import decompengine.agent.AgentWorkspacePath
@@ -2922,6 +2923,44 @@ internal class AcpEventTranslator(
 
     fun toolCallCount(): Int = toolIds.size
 
+    fun onTerminalOutput(observation: AgentTerminalOutputEventData) {
+        try {
+            emitter.emit { sequence ->
+                AgentTerminalOutputEvent(
+                    sequence = sequence,
+                    sessionIdSha256 = observation.sessionIdSha256,
+                    terminalIdSha256 = observation.terminalIdSha256,
+                    toolCallIdSha256 = observation.toolCallIdSha256,
+                    retainedByteCount = observation.retainedByteCount,
+                    producedByteCount = observation.producedByteCount,
+                    truncated = observation.truncated,
+                )
+            }
+        } catch (failure: Exception) {
+            val wrapped = when (failure) {
+                is AgentExecutionException -> failure
+                is AcpProtocolFailure, is SerializationException -> AgentExecutionException(
+                    AgentFailure(
+                        AgentFailureKind.PROTOCOL,
+                        failure.message ?: "ACP agent sent invalid terminal output",
+                        session = sessionReference(),
+                    ),
+                    failure,
+                )
+                else -> AgentExecutionException(
+                    AgentFailure(
+                        AgentFailureKind.INTERNAL,
+                        "ACP event consumer failed: ${failure.message ?: failure.javaClass.simpleName}",
+                        session = sessionReference(),
+                    ),
+                    failure,
+                )
+            }
+            callbackFailure.compareAndSet(null, wrapped)
+            throw wrapped
+        }
+    }
+
     @Synchronized
     fun summary(): String = summary.toString()
 
@@ -3127,7 +3166,7 @@ private class PolicyClientOperations(
         _meta: JsonElement?,
     ): TerminalOutputResponse {
         requireWorkAuthorized()
-        return terminal.output(sessionId, terminalId)
+        return terminal.output(sessionId, terminalId, translator::onTerminalOutput)
     }
 
     override suspend fun terminalWaitForExit(

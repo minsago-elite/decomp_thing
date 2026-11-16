@@ -24,12 +24,15 @@ import decompengine.agent.AgentPermissionEvent
 import decompengine.agent.AgentPlanEvent
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentToolEvent
+import decompengine.agent.AgentTerminalOutputEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.agent.execute
 import decompengine.agent.executeReceipt
+import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.publicProgressRecord
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
 import decompengine.project.ArchivalBundleVerifier
@@ -67,6 +70,10 @@ import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.collect
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
@@ -1195,7 +1202,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(103, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(104, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -1902,6 +1909,14 @@ class AcpAgentHarnessTest {
             events.filterIsInstance<AgentToolEvent>().count { it.toolCallId == "terminal-tool" },
             "permission callback terminal binding must validate and count its tool call exactly once",
         )
+        val outputEvent = events.filterIsInstance<AgentTerminalOutputEvent>().single()
+        assertEquals(14, outputEvent.retainedByteCount)
+        assertEquals(14L, outputEvent.producedByteCount)
+        assertFalse(outputEvent.truncated)
+        val outputAudit = harness.latestTerminalAudit().single { it.reason == AcpTerminalAuditReason.OUTPUT_OBSERVED }
+        assertEquals(outputAudit.terminalIdSha256, outputEvent.terminalIdSha256)
+        assertEquals(outputAudit.toolCallIdSha256, outputEvent.toolCallIdSha256)
+        assertFalse(outputEvent.toString().contains("wire-terminal"))
         assertEquals(AgentPermissionDecision.DENY, events.filterIsInstance<AgentPermissionEvent>().single().decision)
         assertEquals(AcpPermissionAuditReason.DEFAULT_DENY, harness.latestPermissionAudit().single().reason)
         val evidence = assertNotNull(harness.latestSandboxEvidence())
@@ -1909,6 +1924,68 @@ class AcpAgentHarnessTest {
         assertEquals(
             listOf(AcpSandboxLaunchPurpose.OUTER_AGENT, AcpSandboxLaunchPurpose.TERMINAL),
             evidence.launches.map { it.purpose },
+        )
+
+        val failingHarness = harness(
+            "terminal-lifecycle-crash-after-output",
+            sentinel = "wire",
+            timeouts = timeouts(request = 5_000),
+            terminalPolicy = terminalPolicy,
+        )
+        val failedAttemptEvents = mutableListOf<decompengine.agent.AgentExecutionEvent>()
+        val failedProgressDirectory = createTempDirectory("acp-terminal-failed-progress-")
+        val failedReceipt = AgentProgressJournal(failedProgressDirectory, "reconstruction").use { progress ->
+            val taskProgress = progress.beginTask("terminal-lifecycle-crash", request)
+            val receipt = failingHarness.executeReceipt(request) { event ->
+                failedAttemptEvents += event
+                taskProgress.event(event)
+            }
+            taskProgress.complete(receipt)
+            receipt
+        }
+        val failedOutcome = assertIs<AgentExecutionOutcome.Failed>(failedReceipt.outcome)
+        assertEquals(AgentFailureKind.PROCESS_CRASH, failedOutcome.failure.kind)
+        val failedOutputEvent = failedAttemptEvents.filterIsInstance<AgentTerminalOutputEvent>().single()
+        assertEquals(14, failedOutputEvent.retainedByteCount)
+        assertEquals(14L, failedOutputEvent.producedByteCount)
+        val failedOutputAudit = failingHarness.latestTerminalAudit().single {
+            it.reason == AcpTerminalAuditReason.OUTPUT_OBSERVED
+        }
+        assertEquals(failedOutputAudit.terminalIdSha256, failedOutputEvent.terminalIdSha256)
+        val failedInvocation = assertIs<AcpInvocationEvidenceSnapshot>(failedReceipt.providerEvidence)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, failedInvocation.cleanupDisposition)
+        assertNull(failedInvocation.completeExecutionEvidence)
+        assertTrue(failedInvocation.diagnostics?.remainingProcessIds.isNullOrEmpty())
+        assertEquals(FORBIDDEN_CANARY_CONTENT, forbiddenCanary.readText())
+        val replayedProgress = assertNotNull(AgentProgressJournal.read(failedProgressDirectory))
+        val replayedEvents = replayedProgress.getValue("events").jsonArray.map { it.jsonObject }
+        val replayedTerminalOutput = replayedEvents.single {
+            it["kind"]?.jsonPrimitive?.content == "terminal_output"
+        }
+        val replayedOutputRecord = publicProgressRecord(replayedTerminalOutput)
+        assertEquals("terminal_output", replayedOutputRecord.observationKind)
+        assertEquals("14", replayedOutputRecord.fields.getValue("retainedOutputBytes").jsonPrimitive.content)
+        assertEquals("14", replayedOutputRecord.fields.getValue("producedOutputBytes").jsonPrimitive.content)
+        assertEquals(
+            failedOutputEvent.sessionIdSha256,
+            replayedOutputRecord.fields.getValue("sessionIdSha256").jsonPrimitive.content,
+        )
+        assertEquals(
+            failedOutputEvent.terminalIdSha256,
+            replayedOutputRecord.fields.getValue("terminalIdSha256").jsonPrimitive.content,
+        )
+        assertFalse(replayedTerminalOutput.toString().contains("wire-terminal"))
+        val replayedFailure = replayedEvents.single {
+            it["kind"]?.jsonPrimitive?.content == "agent_finished"
+        }
+        assertEquals(
+            "process_crash",
+            publicProgressRecord(replayedFailure).fields.getValue("failureKind").jsonPrimitive.content,
+        )
+        assertTrue(
+            replayedTerminalOutput.getValue("sequence").jsonPrimitive.long <
+                replayedFailure.getValue("sequence").jsonPrimitive.long,
+            "failed-attempt journal replay must retain terminal output before its failure outcome",
         )
 
         val orphanHarness = harness(

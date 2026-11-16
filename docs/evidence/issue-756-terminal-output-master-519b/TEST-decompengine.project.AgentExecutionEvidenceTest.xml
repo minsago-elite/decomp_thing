@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.project.AgentExecutionEvidenceTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-12T18:41:46.004Z" hostname="whatsername" time="2.147">
+  <properties/>
+  <testcase name="event recorder retains an explicit bounded incomplete prefix()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.003"/>
+  <testcase name="schema v1 launch JSON retains every field bound by sandbox evidence()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.003"/>
+  <testcase name="malformed peer text persists as an injective partial v2 commitment()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.11"/>
+  <testcase name="compact receipt fallback and exposed assessment share false release marker()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.006"/>
+  <testcase name="terminal output archive retains only identity commitments and byte metadata()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.001"/>
+  <testcase name="candidate lineage index rejects archives without an accepted ACP contribution()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.217"/>
+  <testcase name="receipt persistence failure never becomes an evidence-free fallback and can retry()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.141"/>
+  <testcase name="agent candidate changed by publication normalization is rejected()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.098"/>
+  <testcase name="ACP reconstruction archives bounded execution and validation evidence()" classname="decompengine.project.AgentExecutionEvidenceTest" time="1.348"/>
+  <testcase name="ordinary refused cancelled limit and typed failure outcomes persist invocation receipts()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.213"/>
+  <testcase name="tool detail commitments cannot move delimiters between keys and values()" classname="decompengine.project.AgentExecutionEvidenceTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

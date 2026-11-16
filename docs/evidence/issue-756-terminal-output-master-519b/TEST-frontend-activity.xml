@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="13" failures="0" errors="0" time="1.114637531">
+    <testsuite name="tests/activity.test.tsx" timestamp="2026-11-12T18:35:56.897Z" hostname="whatsername" tests="13" failures="0" errors="0" skipped="0" time="1.114637531">
+        <testcase classname="tests/activity.test.tsx" name="starts on request, preserves exact omissions and pause position, and deduplicates replay without focus changes" time="0.204611699">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="renders omission-only message metadata for every supported visibility role" time="0.027725997">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="renders terminal output counts and truncation without exposing terminal contents" time="0.029060382">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="renders retained labels as text without creating active markup or links" time="0.026675178">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="pauses on EVENT_GAP and explicitly resets history with a fresh snapshot" time="0.028268745">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="pauses on PROGRESS_GAP and explicitly resets history with a fresh snapshot" time="0.022840618">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="refuses cross-attempt content and aborts requests when unmounted" time="0.014748267">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="preserves the display boundary and checks the next page starts contiguously (200)" time="0.329259876">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="preserves the display boundary and checks the next page starts contiguously (201)" time="0.273226668">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="rejects a discontinuous continuation without changing the displayed position" time="0.028491716">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="filters categories and task digests locally without discarding rows or moving the cursor" time="0.07887333">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="links the exact attempt and exposes digest-only correlation without inventing evidence links" time="0.038685238">
+        </testcase>
+        <testcase classname="tests/activity.test.tsx" name="does not infer an empty plan when count metadata is absent" time="0.01041006">
+        </testcase>
+    </testsuite>
+</testsuites>

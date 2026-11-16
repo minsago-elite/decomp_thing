@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpTerminalBrokerTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-11-12T18:41:18.263Z" hostname="whatsername" time="16.655">
+  <properties/>
+  <testcase name="timeout output limit cancellation and close terminate process trees()" classname="decompengine.acp.AcpTerminalBrokerTest" time="11.527"/>
+  <testcase name="kill is idempotent while release and cross-session ids are strict()" classname="decompengine.acp.AcpTerminalBrokerTest" time="1.884"/>
+  <testcase name="tool terminal ids cannot be orphaned or rebound()" classname="decompengine.acp.AcpTerminalBrokerTest" time="1.892"/>
+  <testcase name="exact argv cwd and environment mismatches fail before launch without secret disclosure()" classname="decompengine.acp.AcpTerminalBrokerTest" time="0.558"/>
+  <testcase name="terminal lifecycle requires tool binding truncates output and invalidates release()" classname="decompengine.acp.AcpTerminalBrokerTest" time="0.516"/>
+  <testcase name="capability is the immutable intersection of workflow policy and verified boundary()" classname="decompengine.acp.AcpTerminalBrokerTest" time="0.271"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

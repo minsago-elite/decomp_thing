@@ -66,6 +66,20 @@ represented by this contract must be counted as omitted by the adapter. That
 count concerns payload fields, not dropped events; journal queue/history gaps
 still require the separate replay/retention protocol.
 
+`terminal_output` records a bounded observation of the output snapshot returned
+by an ACP `terminal/output` callback. It carries only session, terminal and
+optional tool-call SHA-256 identifiers, retained and produced byte counts, and
+the truncation flag. It never retains or publishes terminal text, command,
+environment, or a digest of output contents. Repeated reads may report the same
+cumulative counts because the protocol response is a snapshot. The event is
+emitted only after its terminal audit record is admitted, and an audit-cap
+failure emits no progress event.
+The activity row classifies it with tool observations and renders the retained/
+produced byte counts plus truncation state; the terminal digest remains in the
+row's correlation details. The CLI prints the same bounded counts and a short
+terminal digest prefix, without printing terminal contents or implying that the
+command or workflow succeeded.
+
 Shared fixtures cover observation/poll envelopes, large exact counts, separate
 writer/attempt identities, reported acceptance without authority, bounded plans
 and explicit omissions. Negative fixtures reject alternate authority, numeric

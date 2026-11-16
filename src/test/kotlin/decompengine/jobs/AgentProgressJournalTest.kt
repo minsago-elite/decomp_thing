@@ -10,6 +10,35 @@ import kotlin.test.*
 class AgentProgressJournalTest {
 
     @Test
+    fun `terminal output progress persists only bounded metadata and validates byte consistency`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/terminal-output-progress").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        AgentProgressJournal(root, "repair").use { journal ->
+            journal.beginTask("terminal-task", request(root)).event(AgentTerminalOutputEvent(
+                sequence = 0,
+                sessionIdSha256 = "a".repeat(64),
+                terminalIdSha256 = "b".repeat(64),
+                toolCallIdSha256 = "c".repeat(64),
+                retainedByteCount = 4,
+                producedByteCount = 9,
+                truncated = true,
+            ))
+        }
+        val snapshot = assertNotNull(AgentProgressJournal.read(root))
+        val event = snapshot.getValue("events").jsonArray.map { it.jsonObject }
+            .single { it["kind"]?.jsonPrimitive?.content == "terminal_output" }
+        assertEquals("terminal_output", event.getValue("kind").jsonPrimitive.content)
+        assertEquals("4", event.getValue("retainedOutputBytes").jsonPrimitive.content)
+        assertEquals("9", event.getValue("producedOutputBytes").jsonPrimitive.content)
+        assertEquals(true, event.getValue("outputTruncated").jsonPrimitive.boolean)
+        assertFalse(event.toString().contains("PRIVATE_TERMINAL_OUTPUT"))
+        assertEquals("terminal_output", publicProgressRecord(event).observationKind)
+        assertFailsWith<IllegalArgumentException> {
+            publicProgressRecord(JsonObject(event.toMutableMap().apply { put("outputTruncated", JsonPrimitive(false)) }))
+        }
+    }
+
+    @Test
     fun `historical replay withholds old prose while preserving typed facts and commitments`() {
         val record = buildJsonObject {
             put("sequence", 19); put("runId", "writer-1"); put("workflow", "repair")
