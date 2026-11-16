@@ -4,6 +4,7 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useState } from 'preact/hooks';
 import type { Report } from '../api/generated';
 import { withApiFailureReference } from '../api/errors';
+import { metadataFailureKind } from '../shared/retainMetadata';
 import { ExplorationCases } from './ExplorationCases';
 import { OutputSignatureBreadth } from './OutputSignatureBreadth';
 
@@ -29,7 +30,17 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
       }
       setReport(receive(value));
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(withApiFailureReference(copy.explorationEvidenceCouldNotBeReadCheckTheSessionAnd, failure));
+      if (!controller.signal.aborted) {
+        const message = {
+          session: copy.sessionExpired,
+          denied: copy.accessDenied,
+          missing: copy.missing,
+          unsupported: copy.unsupported,
+          unverified: copy.unverified,
+          failed: copy.failed,
+        }[metadataFailureKind(failure)];
+        setError(withApiFailureReference(message, failure));
+      }
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [client, jobId, runId, request]);

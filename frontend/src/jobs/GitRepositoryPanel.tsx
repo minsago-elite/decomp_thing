@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Capability, GitRepositories, GitWorkspace, Job, Operation } from '../api/generated';
 import type { BrowserSession } from '../session/session';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 const terminal = new Set<Operation['state']>(['completed', 'failed', 'cancelled', 'interrupted', 'recovery-required']);
 const defaultPollIntervalMs = 1000;
@@ -94,12 +95,21 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
       if (controller.signal.aborted) return;
       setObserved(null);
       const status = failure instanceof ApiClientError ? failure.status ?? 0 : 0;
-      setStatus(withApiFailureReference(
-        [401, 403].includes(status) ? copy.accessDenied
-        : status === 412 ? copy.jobChanged
-        : status === 409 ? copy.conflict
-        : status === 503 ? copy.unavailableNow
-        : initialize ? copy.initializationUnconfirmed : copy.readFailed, failure));
+      const message = initialize
+        ? status === 401 || status === 403 ? copy.accessDenied
+          : status === 412 ? copy.jobChanged
+          : status === 409 ? copy.conflict
+          : status === 503 ? copy.unavailableNow
+          : copy.initializationUnconfirmed
+        : {
+          session: copy.readSessionExpired,
+          denied: copy.readDenied,
+          missing: copy.readMissing,
+          unsupported: copy.readUnsupported,
+          unverified: copy.readUnverified,
+          failed: copy.readFailed,
+        }[metadataFailureKind(failure)];
+      setStatus(withApiFailureReference(message, failure));
     } finally {
       if (active.current === controller) { active.current = null; setBusy(false); }
     }

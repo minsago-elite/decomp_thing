@@ -9,6 +9,7 @@ import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 /** Pin policy is separate from workflow state and activity delivery. */
 export function ProgressPin({ jobId, runId, basePath, session }: {
@@ -28,7 +29,7 @@ export function ProgressPin({ jobId, runId, basePath, session }: {
     return () => { active.current?.abort(); active.current = null; };
   }, [jobId, runId, client, available]);
   function verify(data: Policy) {
-    if (data.jobId !== jobId || data.runId !== runId) throw new Error('binding');
+    if (data.jobId !== jobId || data.runId !== runId) throw new ApiClientError('invalid_response');
     return data;
   }
   async function act(change: boolean) {
@@ -52,14 +53,26 @@ export function ProgressPin({ jobId, runId, basePath, session }: {
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
       setPolicy(null);
-      setMessage(withApiFailureReference(failure instanceof ApiClientError && [401, 403].includes(failure.status ?? 0)
-        ? copy.progressRetentionAccessWasDeniedReconnectTheLocalSession
-        : failure instanceof ApiClientError && failure.status === 412
-        ? copy.theAttemptChangedReadTheCurrentPolicyBeforeChoosingAnother
-        : failure instanceof ApiClientError && failure.status === 429
-        ? copy.pinRequestHistoryIsAtCapacityReadTheCurrentPolicy
-        : change ? copy.theChangeCouldNotBeConfirmedReadTheCurrentPolicy
-        : copy.theCurrentPinPolicyCouldNotBeVerifiedCheckThe, failure));
+      let message: string;
+      if (!change) {
+        message = {
+          session: copy.readSessionExpired,
+          denied: copy.readAccessDenied,
+          missing: copy.readMissing,
+          unsupported: copy.readUnsupported,
+          unverified: copy.theCurrentPinPolicyCouldNotBeVerifiedCheckThe,
+          failed: copy.readFailed,
+        }[metadataFailureKind(failure)];
+      } else if (failure instanceof ApiClientError && [401, 403].includes(failure.status ?? 0)) {
+        message = copy.progressRetentionAccessWasDeniedReconnectTheLocalSession;
+      } else if (failure instanceof ApiClientError && failure.status === 412) {
+        message = copy.theAttemptChangedReadTheCurrentPolicyBeforeChoosingAnother;
+      } else if (failure instanceof ApiClientError && failure.status === 429) {
+        message = copy.pinRequestHistoryIsAtCapacityReadTheCurrentPolicy;
+      } else {
+        message = copy.theChangeCouldNotBeConfirmedReadTheCurrentPolicy;
+      }
+      setMessage(withApiFailureReference(message, failure));
     } finally {
       if (active.current === controller) { active.current = null; setBusy(false); }
     }

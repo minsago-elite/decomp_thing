@@ -6,6 +6,7 @@ import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Job } from '../src/api/generated';
 import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
+import Home from '../src/routes/Home';
 import { createBrowserSession } from '../src/session/session';
 import { Dashboard } from '../src/jobs/Dashboard';
 import { DEFAULT_FILTERS, jobFilters, filterSearch } from '../src/jobs/query';
@@ -17,6 +18,10 @@ vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/job-lossless.json'), 'utf8')) as { data: Job }).data;
 function job(index: number): Job { return { ...sample, jobId: index.toString(16).padStart(32, '0'), displayFilename: `program-${index}.elf` }; }
 function page(items: Job[], nextCursor: string | null = null) { return { data: { items, page: { nextCursor, limit: 50, snapshotVersion: 'snapshot_1' } } }; }
+function snapshotPage(items: Job[], currentCursor: string, navigation: { previousCursor?: string | null; nextCursor?: string | null; pageNumber?: number } = {}) {
+  return { data: { items, page: { currentCursor, previousCursor: navigation.previousCursor ?? null,
+    nextCursor: navigation.nextCursor ?? null, pageNumber: navigation.pageNumber ?? 1, limit: 50, snapshotVersion: 'snapshot_1' } } };
+}
 beforeEach(() => { transport.get.mockReset(); });
 
 it('renders only a bounded page of a 10000-job library and navigates without background reorder', async () => {
@@ -167,8 +172,8 @@ it.each([
     failure: new ApiClientError('timeout'), stale: 'The previous library snapshot was empty; current results are unknown until refresh succeeds.',
   },
   {
-    name: 'no matches followed by incomplete backend read', query: '?search=missing', empty: 'No jobs match these filters.',
-    failure: new ApiClientError('http_error', { status: 503, serverCode: 'JOB_RECORD_UNAVAILABLE' }),
+    name: 'no matches followed by a transient timeout', query: '?search=missing', empty: 'No jobs match these filters.',
+    failure: new ApiClientError('timeout'),
     stale: 'The previous filtered result had no matches; current results are unknown until refresh succeeds.',
   },
 ])('does not present $name as a fresh empty result', async ({ query, empty, failure, stale }) => {
@@ -191,14 +196,40 @@ it.each([
   await act(async () => { rejectRefresh(failure); await Promise.resolve(); });
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain(stale);
-  if (failure.serverCode === 'JOB_RECORD_UNAVAILABLE') {
-    expect(alert.textContent).toContain('The server has not returned a partial library');
-  } else expect(alert.textContent).toContain('The server may be unavailable');
+  expect(alert.textContent).toContain('Refresh the job library to try again');
   expect(screen.queryByText(empty)).toBeNull();
   expect(screen.getByRole('status').textContent).not.toContain('0 jobs on this page');
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   expect(await screen.findByText('program-5.elf')).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it.each([
+  ['session expiry', new ApiClientError('http_error', { status: 401, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'SECRET_DIAGNOSTIC' }), 'Your local session expired or is unavailable', true],
+  ['access denial', new ApiClientError('http_error', { status: 403, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'SECRET_DIAGNOSTIC' }), 'Access to the job library was denied', true],
+  ['missing library route', new ApiClientError('http_error', { status: 404, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'SECRET_DIAGNOSTIC' }), 'The job library is unavailable at this address', true],
+  ['unsupported contract', new ApiClientError('unsupported_contract', { serverCode: 'SECRET_DIAGNOSTIC' }), 'This interface cannot read the job library response format', false],
+  ['corrupt stored entry', new ApiClientError('http_error', { status: 503, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'CORRUPT_LEGACY_JOB' }), 'Stored jobs could not be listed completely', true],
+  ['unavailable listing', new ApiClientError('http_error', { status: 503, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'LISTING_UNAVAILABLE' }), 'Stored jobs could not be listed completely', true],
+  ['malformed response', new ApiClientError('invalid_response', { serverCode: 'SECRET_DIAGNOSTIC' }), 'Stored jobs could not be listed completely', false],
+  ['non-transient request refusal', new ApiClientError('http_error', { status: 422, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'SECRET_DIAGNOSTIC' }), 'Jobs could not be loaded. Refresh the job library to try again.', true],
+] as const)('classifies %s and removes unverified prior rows and page navigation', async (_name, failure, expected, hasReference) => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce(page([job(1)], 'next_page')).mockRejectedValueOnce(failure);
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(expected);
+  if (hasReference) expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+  else expect(alert.textContent).not.toContain('Reference ID:');
+  expect(alert.textContent).not.toContain('SECRET_DIAGNOSTIC');
+  expect(alert.textContent).not.toContain('CORRUPT_LEGACY_JOB');
+  expect(alert.textContent).not.toContain('ApiClientError');
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('button', { name: 'Apply filters' })).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledTimes(2);
 });
 
 it('ignores late results after filter replacement and cancels reads on unmount', async () => {
@@ -227,7 +258,7 @@ it('rejects invalid saved filters without fetching and has a visible reset', asy
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
   transport.get.mockRejectedValueOnce(new ApiClientError('timeout'));
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
-  expect((await screen.findByRole('alert')).textContent).toContain('The server may be unavailable');
+  expect((await screen.findByRole('alert')).textContent).toContain('Refresh the job library to try again');
   history.back();
   await waitFor(() => {
     expect(location.search).toBe('?limit=10000');
@@ -388,7 +419,7 @@ it('distinguishes a partial storage failure from server unavailability', async (
   render(<Dashboard basePath="" />);
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.');
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
-  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The server may be unavailable'));
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Refresh the job library to try again'));
 });
 
 it.each([
@@ -412,6 +443,93 @@ it.each([
   expect(screen.queryByText('program-1.elf')).toBeNull();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(transport.get).toHaveBeenCalledTimes(3);
+});
+
+it('keeps a retained signed snapshot navigable after a transient read failure', async () => {
+  transport.get.mockResolvedValueOnce(snapshotPage([job(1)], 'cursor_before', { nextCursor: 'cursor_next' }))
+    .mockRejectedValueOnce(new ApiClientError('timeout'))
+    .mockResolvedValueOnce(snapshotPage([job(2)], 'cursor_next', { previousCursor: 'cursor_before', pageNumber: 2 }));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  expect(location.search).toBe('?cursor=cursor_before');
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('Jobs could not be loaded. Refresh the job library to try again.');
+  expect(screen.getByText('program-1.elf')).toBeTruthy();
+  expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  expect(location.search).toBe('?cursor=cursor_before');
+  const next = screen.getByRole('button', { name: 'Next page' });
+  expect(next).toHaveProperty('disabled', false);
+  fireEvent.click(next);
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(location.search).toBe('?cursor=cursor_next');
+  expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', false);
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual(['/jobs?limit=50', '/jobs?limit=50', '/jobs?limit=50&cursor=cursor_next']);
+});
+
+it('retries the next legacy page from the retained page without skipping or auto-retrying', async () => {
+  history.replaceState(null, '', '/');
+  transport.get.mockResolvedValueOnce(page([job(1)], 'cursor_1'))
+    .mockRejectedValueOnce(new ApiClientError('timeout'))
+    .mockResolvedValueOnce(page([job(2)], 'cursor_2'))
+    .mockResolvedValueOnce(page([job(3)]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  await waitFor(() => expect(document.activeElement).toBe(alert));
+  expect(screen.getByText('Page 1')).toBeTruthy();
+  expect(screen.getByText('program-1.elf')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', false);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(transport.get).toHaveBeenCalledTimes(2);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByText('Page 2')).toBeTruthy();
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' })));
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual([
+    '/jobs?limit=50', '/jobs?limit=50&cursor=cursor_1', '/jobs?limit=50&cursor=cursor_1',
+  ]);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('program-3.elf')).toBeTruthy();
+  expect(screen.getByText('Page 3')).toBeTruthy();
+  expect(transport.get.mock.calls[3]?.[1]).toBe('/jobs?limit=50&cursor=cursor_2');
+});
+
+it('bases previous navigation on the displayed legacy page after a failed next read', async () => {
+  history.replaceState(null, '', '/');
+  transport.get.mockResolvedValueOnce(page([job(1)], 'cursor_1'))
+    .mockResolvedValueOnce(page([job(2)], 'cursor_2'))
+    .mockResolvedValueOnce(page([job(3)], 'cursor_3'))
+    .mockRejectedValueOnce(new ApiClientError('timeout'))
+    .mockResolvedValueOnce(page([job(2)], 'cursor_2'));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('program-3.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  const alert = await screen.findByRole('alert');
+  await waitFor(() => expect(document.activeElement).toBe(alert));
+
+  expect(screen.getByText('Page 3')).toBeTruthy();
+  expect(screen.getByText('program-3.elf')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', false);
+  fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+  await waitFor(() => expect(document.querySelector('ul[aria-label="Uploaded jobs"] li h4 a')?.textContent).toBe('program-2.elf'));
+  expect(screen.getByText('Page 2')).toBeTruthy();
+  console.log('focus after previous', document.activeElement?.outerHTML, 'page', screen.getByText('Page 2').textContent);
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' })));
+  expect(transport.get.mock.calls[4]?.[1]).toBe('/jobs?limit=50&cursor=cursor_1');
 });
 
 it('preserves nanosecond date ranges and compares timezone-equivalent boundaries exactly', () => {
@@ -464,7 +582,7 @@ it('does not revive a retained first page after a continuation denies access', a
   next.focus();
   fireEvent.click(next);
   const alert = await screen.findByRole('alert');
-  expect(alert).toHaveProperty('textContent', 'Access to this job library is unavailable. Check your local session.');
+  expect(alert).toHaveProperty('textContent', 'Access to the job library was denied. Check the local session and server permissions.');
   await waitFor(() => expect(document.activeElement).toBe(alert));
   expect(screen.queryByText('program-1.elf')).toBeNull();
   expect(screen.getByText('No page available')).toBeTruthy();
@@ -473,6 +591,29 @@ it('does not revive a retained first page after a continuation denies access', a
   expect(await screen.findByText('program-2.elf')).toBeTruthy();
   expect(screen.getByText('Page 1')).toBeTruthy();
   expect(transport.get).toHaveBeenCalledTimes(3);
+});
+
+it('refreshes a signed first-page route after a non-retainable read clears its rows', async () => {
+  transport.get.mockResolvedValueOnce(snapshotPage([job(1)], 'cursor_before'))
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 403 }))
+    .mockResolvedValueOnce(snapshotPage([job(2)], 'cursor_after'));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  expect(location.search).toBe('?cursor=cursor_before');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByRole('alert')).toBeTruthy();
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(location.search).toBe('?cursor=cursor_before');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(location.search).toBe('?cursor=cursor_after');
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual([
+    '/jobs?limit=50', '/jobs?limit=50', '/jobs?limit=50',
+  ]);
 });
 
 it('identifies and focuses invalid dates without changing the current result snapshot', async () => {
@@ -512,6 +653,23 @@ async function metadataSession() {
   await auth.initialize({ kind: 'absent' });
   return auth;
 }
+
+it('keeps the independent upload and filter controls available when the dashboard listing fails', async () => {
+  const auth = await metadataSession();
+  transport.get.mockRejectedValueOnce(new ApiClientError('http_error', {
+    status: 503, serverCode: 'CORRUPT_WORKFLOW_STATE', requestId: '123e4567-e89b-42d3-a456-426614174000',
+  }));
+  try {
+    render(<Home basePath="/nested" session={auth} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Stored jobs could not be listed completely');
+    expect(alert.textContent).toContain('Reference ID: 123e4567-e89b-42d3-a456-426614174000.');
+    expect(screen.getByRole('heading', { name: 'Upload a binary' })).toBeTruthy();
+    expect(screen.getByLabelText('Binary file')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Apply filters' })).toBeTruthy();
+    expect(document.body.textContent).not.toContain('CORRUPT_WORKFLOW_STATE');
+  } finally { auth.dispose(); }
+});
 
 it('retains job navigation through a transient metadata refresh and explicit recovery', async () => {
   const auth = await metadataSession(); const selected = job(3);

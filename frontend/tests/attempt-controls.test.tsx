@@ -61,6 +61,36 @@ it('reads eligibility explicitly and retry creates a visible new linked attempt 
   expect(screen.queryByRole('button', { name: 'Retry as a new attempt' })).toBeNull();
 });
 
+it('distinguishes available-action read failures with safe correlation and leaves the read available', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  const failures: [ApiClientError, string, boolean][] = [
+    [new ApiClientError('http_error', { status: 401, requestId, serverCode: 'SESSION_EXPIRED' }), 'Reconnect the local session to read available attempt actions.', true],
+    [new ApiClientError('http_error', { status: 403, requestId, serverCode: 'ACCESS_DENIED' }), 'Access to available attempt actions was denied.', true],
+    [new ApiClientError('http_error', { status: 404, requestId, serverCode: 'NOT_FOUND' }), 'unavailable at this server address', true],
+    [new ApiClientError('unsupported_contract', { serverCode: 'PRIVATE_DIAGNOSTIC' }), 'cannot read the available-actions response', false],
+    [new ApiClientError('invalid_response', { serverCode: 'CORRUPT_WORKFLOW_STATE' }), 'could not be verified', false],
+    [new ApiClientError('http_error', { status: 503, requestId, serverCode: 'INTERNAL_ERROR' }), 'could not be read. Retry this read', true],
+  ];
+  const messages = new Set<string>();
+  for (const [failure, expected, hasReference] of failures) {
+    transport.get.mockRejectedValueOnce(failure);
+    const mounted = mount();
+    fireEvent.click(button('Read available actions'));
+    const status = await screen.findByRole('status');
+    await waitFor(() => expect(status.textContent).toContain(expected));
+    const text = status.textContent ?? '';
+    expect(text.includes(`Reference ID: ${requestId}.`)).toBe(hasReference);
+    for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'PRIVATE_DIAGNOSTIC', 'ApiClientError', 'Web API request failed'])
+      expect(text).not.toContain(leaked);
+    messages.add(text.replace(` Reference ID: ${requestId}.`, ''));
+    expect(button('Read available actions')).toHaveProperty('disabled', false);
+    expect(transport.post).not.toHaveBeenCalled();
+    mounted.view.unmount();
+  }
+  expect(messages.size).toBe(failures.length);
+  expect(transport.get).toHaveBeenCalledTimes(failures.length);
+});
+
 it('retains a lost acknowledgement across reload and replays it only on request with the same key and version', async () => {
   transport.get.mockResolvedValue(controls());
   transport.post.mockRejectedValueOnce(new ApiClientError('network_error'));
