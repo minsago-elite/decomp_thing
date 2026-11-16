@@ -138,6 +138,24 @@ internal class BuiltinJournal private constructor(
     override fun close(): Unit = guarded { try { lock.release() } finally { channel.close() } }
 
     companion object {
+        /** Redact secrets inside bounded nested JSON text without unboundedly expanding patterns. */
+        private const val MAX_JSON_ESCAPE_DEPTH = 3
+
+        private fun redactionPatterns(secrets: List<String>): List<String> = secrets
+            .filter { it.isNotEmpty() }
+            .flatMap { secret ->
+                buildList {
+                    var encoded = secret
+                    add(encoded)
+                    repeat(MAX_JSON_ESCAPE_DEPTH) {
+                        encoded = JsonPrimitive(encoded).toString().drop(1).dropLast(1)
+                        add(encoded)
+                    }
+                }
+            }
+            .distinct()
+            .sortedByDescending { it.length }
+
         fun open(configuration: BuiltinJournalConfiguration, request: AgentExecutionRequest, secrets: List<String>): BuiltinJournal {
             var channel: FileChannel? = null
             try {
@@ -153,9 +171,7 @@ internal class BuiltinJournal private constructor(
                 val lock = channel.tryLock() ?: error("Locked")
                 val key = Files.readAttributes(configuration.path, BasicFileAttributes::class.java, NOFOLLOW_LINKS).fileKey()
                     ?: error("File identity unavailable")
-                val redactionPatterns = secrets.filter { it.isNotEmpty() }.flatMap {
-                    listOf(it, JsonPrimitive(it).toString().drop(1).dropLast(1))
-                }.distinct().sortedByDescending { it.length }
+                val redactionPatterns = redactionPatterns(secrets)
                 val journal = BuiltinJournal(configuration, channel, lock, key, redactionPatterns)
                 val identity = identity(configuration.identity, AgentExecutionRequestBinding.capture(request))
                 // Identities must remain usable for exact trusted comparison; do not persist secret-bearing configuration.
@@ -242,9 +258,7 @@ internal class BuiltinJournal private constructor(
                 }
                 check(read == expected.bytes && digest.digest().joinToString("") { "%02x".format(it) } == inspection.contentSha256)
                 verifyFile(configuration.path, key)
-                val patterns = secrets.filter { it.isNotEmpty() }.flatMap {
-                    listOf(it, JsonPrimitive(it).toString().drop(1).dropLast(1))
-                }.distinct().sortedByDescending { it.length }
+                val patterns = redactionPatterns(secrets)
                 val journal = BuiltinJournal(configuration, channel, lock, key, patterns)
                 journal.count = expected.records; journal.bytes = expected.bytes; journal.head = expected.headSha256
                 return journal to inspection.records.last().getValue("payload").jsonObject

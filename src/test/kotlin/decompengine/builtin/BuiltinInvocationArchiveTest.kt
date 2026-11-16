@@ -13,14 +13,15 @@ import kotlin.test.*
 class BuiltinInvocationArchiveTest {
     @TempDir lateinit var directory: Path
     private val base = mapOf("source.c" to "old".toByteArray())
-    private fun request(root: AgentWorkspaceRoot) = AgentExecutionRequest("repair source private-secret", listOf(root),
+    private fun request(root: AgentWorkspaceRoot, sensitiveContext: String = "private-secret") = AgentExecutionRequest("repair source $sensitiveContext", listOf(root),
         accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(AgentWorkspacePath(root.id, "source.c"), setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE)))))
-    private fun response(calls: List<ModelToolCall> = emptyList(), finish: ModelFinishReason = if (calls.isEmpty()) ModelFinishReason.STOP else ModelFinishReason.TOOL_CALLS) =
-        ModelResponse("", calls, finish, ModelUsage(100, 10, false), 1)
+    private fun response(calls: List<ModelToolCall> = emptyList(), finish: ModelFinishReason = if (calls.isEmpty()) ModelFinishReason.STOP else ModelFinishReason.TOOL_CALLS,
+        text: String = "") = ModelResponse(text, calls, finish, ModelUsage(100, 10, false), 1)
     private fun write() = ModelToolCall("write1", "write_text", buildJsonObject { put("root", "project"); put("path", "source.c"); put("content", "candidate") })
     private data class Invocation(val configuration: BuiltinJournalConfiguration, val request: AgentExecutionRequest,
         val receipt: AgentExecutionReceipt, val identity: BuiltinInvocationArchiveIdentity)
-    private fun invocation(name: String = "invocation", ending: String = "done"): Invocation {
+    private fun invocation(name: String = "invocation", ending: String = "done", declaredSecrets: List<String> = listOf("private-secret"),
+        echoedProviderState: String = ""): Invocation {
         val root = Files.createDirectory(directory.resolve(name))
         Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
         val source = BuiltinWorkspaceSnapshot.capture(base.mapKeys { AgentWorkspacePath("project", it.key) })
@@ -28,17 +29,17 @@ class BuiltinInvocationArchiveTest {
             "b".repeat(64), "c".repeat(64)))
         var turns = 0
         val provider = ModelProvider { _, _ ->
-            if (turns++ == 0) response(listOf(write()))
+            if (turns++ == 0) response(listOf(write()), text = echoedProviderState)
             else when (ending) {
                 "failed" -> throw ModelProviderException(ModelFailureKind.TRANSPORT)
-                "refused" -> response(finish = ModelFinishReason.REFUSED)
-                else -> response()
+                "refused" -> response(finish = ModelFinishReason.REFUSED, text = echoedProviderState)
+                else -> response(text = echoedProviderState)
             }
         }
         lateinit var request: AgentExecutionRequest
         val execution = CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider,
-            journalConfiguration = configuration, secrets = listOf("private-secret")), base, setOf("source.c"), RepairResourceBudget(),
-            { root -> request(root).also { request = it } }) {}
+            journalConfiguration = configuration, secrets = declaredSecrets), base, setOf("source.c"), RepairResourceBudget(),
+            { root -> request(root, declaredSecrets.joinToString(" ")).also { request = it } }) {}
         val identity = BuiltinInvocationArchiveIdentity("repair", "attempt-1", "d".repeat(64), AgentExecutionRequestBinding.capture(request), configuration.identity)
         return Invocation(configuration, request, execution.receipt, identity)
     }
@@ -49,26 +50,66 @@ class BuiltinInvocationArchiveTest {
     private fun root(document: BuiltinInvocationArchiveDocument) = Json.parseToJsonElement(document.bytes.decodeToString()).jsonObject
 
     @Test fun `portable captured artifact verifies without runtime journal paths and never claims release qualification`() {
-        val invocation = invocation()
-        val document = capture(invocation)
-        assertTrue(document.verified.candidateEvidenceComplete)
-        assertFalse(document.verified.releaseComplete)
-        assertFalse(document.verified.indeterminate)
-        assertEquals("returned-COMPLETED", document.verified.terminalOutcome)
-        assertEquals(invocation.receipt.requestBinding.requestSha256, document.verified.requestSha256)
-        assertEquals(1, document.verified.candidateChanges.size)
-        val audit = root(document).getValue("receipt").jsonObject.getValue("toolAudit").jsonObject
-        assertEquals(1, audit.getValue("filesystem").jsonArray.size)
-        assertTrue(audit.getValue("restoration").jsonArray.isEmpty())
-        val bytes = document.bytes
-        Files.delete(invocation.configuration.path)
-        val restored = verifyBuiltinInvocationArchive(bytes, invocation.identity, commitment(invocation))
-        assertEquals(document.verified.resultChangesSha256, restored.resultChangesSha256)
-        assertFalse(bytes.decodeToString().contains("private-secret"))
-        assertFalse(bytes.decodeToString().contains(directory.toString()))
-        val copy = document.bytes; copy[0] = 0
-        assertEquals('{'.code.toByte(), document.bytes[0])
-        assertEquals(checkpointHash(bytes), document.sha256)
+        val credential = "credential-sentinel-7d2d"
+        val endpoint = "https://provider.invalid/v1?token=endpoint-sentinel-13a1"
+        val transientToken = "transient-provider-token-b87c"
+        val operatorValue = "operator-config-value-291e"
+        val escapedProviderSecret = "escaped\nprovider\"token-61ae"
+        val privatePathMarker = "operator-config-path-only-041f"
+        val declaredSecrets = listOf("private-secret", credential, endpoint, transientToken, operatorValue, escapedProviderSecret)
+        val providerEcho = buildJsonObject {
+            declaredSecrets.forEachIndexed { index, secret -> put("state-$index", secret) }
+            put("escaped", JsonPrimitive(JsonPrimitive(escapedProviderSecret).toString()))
+        }.toString()
+        val sentinels = declaredSecrets + privatePathMarker + JsonPrimitive(escapedProviderSecret).toString().drop(1).dropLast(1)
+        for ((index, ending) in listOf("done", "refused", "failed").withIndex()) {
+            val invocation = invocation("runtime-$privatePathMarker-$index", ending, declaredSecrets, providerEcho)
+            assertTrue(invocation.configuration.path.toString().contains(privatePathMarker))
+            val document = capture(invocation)
+            if (ending == "done") {
+                assertTrue(document.verified.candidateEvidenceComplete)
+                assertEquals("returned-COMPLETED", document.verified.terminalOutcome)
+                assertEquals(invocation.receipt.requestBinding.requestSha256, document.verified.requestSha256)
+                assertEquals(1, document.verified.candidateChanges.size)
+                val audit = root(document).getValue("receipt").jsonObject.getValue("toolAudit").jsonObject
+                assertEquals(1, audit.getValue("filesystem").jsonArray.size)
+                assertTrue(audit.getValue("restoration").jsonArray.isEmpty())
+            } else {
+                assertFalse(document.verified.candidateEvidenceComplete)
+                assertFalse(document.verified.releaseComplete)
+                assertEquals(ending == "failed", document.verified.indeterminate)
+            }
+            assertFalse(document.verified.releaseComplete)
+            val bytes = document.bytes
+            val serialized = bytes.decodeToString()
+            sentinels.forEach { assertFalse(serialized.contains(it), "archive leaked a sensitive sentinel") }
+            fun assertNoSentinel(value: JsonElement) {
+                when (value) {
+                    is JsonObject -> value.forEach { (key, child) ->
+                        sentinels.forEach { assertFalse(key.contains(it), "archive key leaked a sensitive sentinel") }
+                        assertNoSentinel(child)
+                    }
+                    is JsonArray -> value.forEach(::assertNoSentinel)
+                    is JsonPrimitive -> if (value.isString) sentinels.forEach {
+                        assertFalse(value.content.contains(it), "archive value leaked a sensitive sentinel")
+                    }
+                }
+            }
+            assertNoSentinel(Json.parseToJsonElement(serialized))
+            val records = Json.parseToJsonElement(serialized).jsonObject.getValue("records").jsonArray
+            records.filter { it.jsonObject.getValue("kind").jsonPrimitive.content == BuiltinJournalKind.MODEL_RESPONSE.name }
+                .forEach { record ->
+                    val embedded = record.jsonObject.getValue("payload").jsonObject.getValue("text").jsonPrimitive.content
+                    assertNoSentinel(Json.parseToJsonElement(embedded))
+                }
+            Files.delete(invocation.configuration.path)
+            val restored = verifyBuiltinInvocationArchive(bytes, invocation.identity, commitment(invocation))
+            assertEquals(document.verified.resultChangesSha256, restored.resultChangesSha256)
+            assertFalse(restored.releaseComplete)
+            val copy = document.bytes; copy[0] = 0
+            assertEquals('{'.code.toByte(), document.bytes[0])
+            assertEquals(checkpointHash(bytes), document.sha256)
+        }
     }
 
     @Test fun `failed archive binds failure classification to terminal evidence`() {
