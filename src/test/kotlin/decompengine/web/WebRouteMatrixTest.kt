@@ -74,8 +74,10 @@ class WebRouteMatrixTest {
         // Keep Allow assertions aligned with the documented organization and deletion
         // mutations on the job resource, even though this matrix probes GET as its
         // representative fixture read.
-        "$J" to Live(setOf("DELETE", "GET", "PATCH"), Outcome(200, "job")),
+        "$J" to Live(setOf("DELETE", "GET", "PATCH"), Outcome(200, "job"),
+            mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
         "$J/deletion-preview" to Live(setOf("GET"), Outcome(200, "jobDeletionPreview")),
+        "$J/operations/{operationId}" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
         "/api/v1/storage" to Live(setOf("GET"), Outcome(200, "storageSummary")),
         "/api/v1/storage/maintenance-preview" to Live(setOf("GET"), Outcome(200, "maintenancePreview")),
         "$J/runs" to Live(setOf("GET", "POST"), Outcome(200, "runs"), Query.PAGED,
