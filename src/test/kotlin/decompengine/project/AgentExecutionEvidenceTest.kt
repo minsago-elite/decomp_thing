@@ -65,7 +65,6 @@ import java.time.Duration
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.createDirectories
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -85,8 +84,32 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlin.test.assertNotNull
+import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
 
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class AgentExecutionEvidenceTest {
+    @BeforeEach
+    fun requireConfiguredCompilerForHostedWorkflow(test: TestInfo) {
+        if ("ci-live" !in test.tags) return
+        val file = System.getenv(ContainedModuleCompilationRuntimeConfiguration.ENVIRONMENT)
+        val directory = System.getenv(ContainedModuleCompilationRuntimeConfiguration.DIRECTORY_ENVIRONMENT)
+        val configured = !file.isNullOrBlank() || !directory.isNullOrBlank()
+        if (System.getenv("GENERATED_C_MODULE_COMPILE_REQUIRE") == "true") {
+            assertTrue(configured, "required ACP workflow tests need the provisioned contained compiler runtime")
+        }
+        assumeTrue(configured, "configure the contained compiler to run ACP SourceTree workflow tests")
+        // Configuration errors must fail qualification rather than silently skip it.
+        ContainedModuleCompilationPolicy.requireAvailable(GeneratedCMakeReconstructionProfile.descriptor)
+    }
+
     @Test
     fun `schema v1 launch JSON retains every field bound by sandbox evidence`() {
         val temp = createTempDirectory("acp-v1-launch-evidence-")
@@ -308,6 +331,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `ACP reconstruction archives bounded execution and validation evidence`() {
         val temp = createTempDirectory("acp-execution-evidence-")
         val project = temp.resolve("project")
@@ -410,7 +434,7 @@ class AgentExecutionEvidenceTest {
         assertFalse(text.contains("stderr peer output"))
 
         val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("\"schemaVersion\": 6"))
+        assertTrue(checkpoint.contains("\"schemaVersion\": 7"))
         assertTrue(checkpoint.contains("\"executionEvidencePath\": \"$evidencePath\""))
         assertTrue(checkpoint.contains(sha256(evidenceFile.readBytes())))
         val manifestEntry = manifest.files.single { it.path == evidencePath }
@@ -678,6 +702,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `agent candidate changed by publication normalization is rejected`() {
         val temp = createTempDirectory("acp-normalization-binding-")
         val project = temp.resolve("project")
@@ -702,6 +727,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `receipt persistence failure never becomes an evidence-free fallback and can retry`() {
         val temp = createTempDirectory("acp-receipt-persistence-")
         val project = temp.resolve("project")
@@ -734,6 +760,69 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
+    fun `bounded terminal outcomes persist their invocation receipt before interpretation`() {
+        val scenarios = listOf(
+            "refused" to EvidenceHarness("session-refused", "message", "tool", terminalStopReason = AgentStopReason.REFUSED),
+            "cancelled" to EvidenceHarness("session-cancelled", "message", "tool", terminalStopReason = AgentStopReason.CANCELLED),
+            "limit-exhausted" to EvidenceHarness("session-limit", "message", "tool", terminalStopReason = AgentStopReason.LIMIT_EXHAUSTED),
+            "failed-protocol" to EvidenceHarness("session-failed", "message", "tool", failWithProtocolOutcome = true),
+        )
+        for ((name, harness) in scenarios) {
+            val project = createTempDirectory("bounded-terminal-$name-")
+            val generated = generatedRequest(project)
+            var persisted: ReconstructionAgentExecutionEvidence? = null
+            val evidencePath = project.resolve("reports/agent-executions/parse.json")
+            val request = generated.copy(persistAgentExecutionEvidence = { evidence ->
+                assertEquals(null, persisted, "one invocation must persist one receipt")
+                persisted = evidence
+                evidencePath.parent.createDirectories()
+                evidencePath.writeText(evidence.toReceiptJson(generated.module.id))
+            })
+            val reconstructor = BoundedLlmModuleReconstructor(harness,
+                harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor)
+            if (name in setOf("cancelled", "limit-exhausted")) {
+                val failure = assertFailsWith<ModuleReconstructionInterruptedException> { reconstructor.reconstruct(request) }
+                assertEquals(assertNotNull(persisted), failure.agentExecutionEvidence)
+            } else {
+                assertFailsWith<IllegalStateException> { reconstructor.reconstruct(request) }
+            }
+            val evidence = assertNotNull(persisted, "receipt sink was not invoked for $name")
+            val text = evidencePath.readText()
+            assertEquals(evidence.toReceiptJson(generated.module.id), text)
+            assertEquals(harness.requestBinding.requestSha256, evidence.requestSha256)
+            assertFalse(evidence.releaseComplete)
+            assertTrue(text.contains("\"releaseComplete\": false"), name)
+            assertTrue(text.contains("\"stopReason\":\"${name.removePrefix("failed-")}\"") ||
+                text.contains("\"kind\":\"protocol\""), name)
+            assertFalse(text.contains("typed protocol failure"), name)
+            assertFalse(project.resolve(generated.module.sourcePath).exists(), "failed invocation must restore absent source")
+            assertFalse(project.resolve("reports/modules/parse.json").exists(), "direct provider invocation cannot issue acceptance")
+        }
+    }
+
+    @Test
+    fun `bounded malformed peer receipt retains injective UTF16 commitment without acceptance`() {
+        val project = createTempDirectory("bounded-malformed-receipt-")
+        val malformed = "peer-\uD800-text"
+        val harness = EvidenceHarness("session", malformed, "tool")
+        val generated = generatedRequest(project)
+        var persisted: ReconstructionAgentExecutionEvidence? = null
+        val reconstructed = BoundedLlmModuleReconstructor(harness,
+            harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor).reconstruct(
+            generated.copy(persistAgentExecutionEvidence = { evidence -> persisted = evidence }))
+        val evidence = assertNotNull(persisted)
+        assertEquals(evidence, reconstructed.agentExecutionEvidence)
+        val text = evidence.toReceiptJson(generated.module.id)
+        assertTrue(text.contains("\"encoding\":\"jvm-utf16be\""))
+        assertTrue(text.contains("\"releaseComplete\": false"))
+        assertFalse(text.contains(malformed))
+        assertFalse(evidence.releaseComplete)
+        assertEquals(harness.requestBinding.requestSha256, evidence.requestSha256)
+        assertFalse(project.resolve("reports/modules/parse.json").exists(), "direct provider invocation cannot issue acceptance")
+    }
+
+    @Test
+    @Tag("ci-live")
     fun `ordinary refused cancelled limit and typed failure outcomes persist invocation receipts`() {
         val temp = createTempDirectory("acp-terminal-receipts-")
         val scenarios = listOf(
@@ -779,6 +868,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `malformed peer text persists as an injective partial v2 commitment`() {
         val temp = createTempDirectory("acp-malformed-receipt-")
         val project = temp.resolve("project")
@@ -1087,6 +1177,20 @@ class AgentExecutionEvidenceTest {
             .digest(value.toByteArray())
             .joinToString("") { "%02x".format(it) }
     }
+
+    /** Exercise the real planner and prompt inputs without issuing a workflow compiler permit. */
+    private fun generatedRequest(project: Path): ModuleReconstructionRequest {
+        val model = evidenceModel()
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val plan = DeterministicModulePlanner.forProfile(profile).plan(model)
+        val module = plan.modules.single()
+        project.resolve(module.sourcePath).parent.createDirectories()
+        return ProfileModulePromptInputs(model, plan, profile).request(module.id, project, null)
+    }
+
+    private fun createTempDirectory(prefix: String): Path = Files.createTempDirectory(
+        Path.of("build", "tmp", "agent-execution-evidence-tests").toAbsolutePath().normalize().createDirectories(), prefix,
+    )
 
     private fun evidenceModel(): RecoveredProgramModel = RecoveredProgramModel(
         inputSha256 = "a".repeat(64),

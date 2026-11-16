@@ -1,0 +1,9 @@
+{
+  "acceptance": "unchanged-keysets;monotonic;all-except-memory.low-zero-at-both-samples",
+  "baseline": "exact-pinned-scope-before-authenticated-START",
+  "cleanup": "exact-unit-cgroup-and-retained-pidfds-absent",
+  "counters": "pids.events:all;memory.events:all;required:low,high,max,oom,oom_kill,oom_group_kill",
+  "output": "HMAC-protocol-v2;sha256-of-owned-pipe-bytes;captured-files-must-match-counts-and-hashes",
+  "provider": "kotlin-contained-command-terminal-resources-v1",
+  "terminal": "same-scope-frozen-with-only-retained-BOOT-keepers-before-kill"
+}

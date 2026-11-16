@@ -1,5 +1,8 @@
 package decompengine.project
 
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.Json
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
@@ -10,7 +13,19 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
+
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class GeneratedCAtomicDeclarationsTest {
+    @BeforeEach
+    fun requireConfiguredCompiler(test: TestInfo) = requireHostedModuleCompiler(test)
+
     @Test
     fun `atomic specifiers and qualifiers retain their exact declaration spelling`() {
         for (prototype in listOf(
@@ -115,6 +130,7 @@ class GeneratedCAtomicDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `retained atomic parameters globals typedefs and nested pointers build and execute`() {
         val functions = listOf(
             function("read_atomic", "int read_atomic(_Atomic(int) value)", "int read_atomic(_Atomic(int) value) { return value; }"),
@@ -157,11 +173,15 @@ class GeneratedCAtomicDeclarationsTest {
         val model = model(atomic, function("main", "int main(void)", "int main(void) { return 0; }"))
             .copy(types = listOf(RecoveredType("atomic_type", "typedef _Atomic(int) AtomicInt;")))
         val project = project()
-        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor { request ->
-            val evidence = EvidenceModuleReconstructor().reconstruct(request)
-            evidence.copy(source = evidence.source.replace("decomp_placeholder_result", "renamed_atomic_result"),
-                generator = "scripted-agent", issues = emptyList())
-        })
+        val manifest = SourceTreeGenerator.generate(model, project, overrides = mapOf("fn_read" to "core", "fn_main" to "core"),
+            reconstructor = ModuleReconstructor { request ->
+                val evidence = EvidenceModuleReconstructor().reconstruct(request)
+                evidence.copy(source = evidence.source.replace("decomp_placeholder_result", "renamed_atomic_result"),
+                    generator = "scripted-agent", issues = emptyList())
+            })
+        assertTrue(manifest.files.none { it.acceptedImplementation == true })
+        assertEquals(JsonNull, Json.parseToJsonElement(project.resolve("reports/modules/core.json").readText())
+            .jsonObject.getValue("compilation"), "placeholder rejection precedes compiler admission")
         assertTrue("fn_read" in manifest.unresolvedImplementationIds)
         val reports = Files.walk(project.resolve("reports/modules")).use { paths ->
             paths.filter { it.toString().endsWith(".json") }.toList().map { it.readText() }
@@ -171,6 +191,7 @@ class GeneratedCAtomicDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `invalid atomic target types reach the compiler without rewriting the retained spelling`() {
         val project = project()
         val model = model(function("main", "int main(void)", "int main(void) { return 0; }"))

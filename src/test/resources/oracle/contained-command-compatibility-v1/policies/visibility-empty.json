@@ -1,0 +1,13 @@
+{
+  "activeControl": "control-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "aggregateBytes": 0,
+  "files": [],
+  "maximumAggregateBytes": 134217728,
+  "maximumDepth": 4,
+  "maximumFiles": 64,
+  "maximumParents": 128,
+  "mode": "empty-readonly-root-with-owned-active-control",
+  "parentCount": 1,
+  "provider": "contained-retained-input-visibility-v1",
+  "schemaVersion": 1
+}

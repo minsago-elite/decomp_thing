@@ -15,11 +15,17 @@ import stat
 import subprocess
 import sys
 
-RUNTIME = Path('/opt/decomp-generated-c-validation-ci')
+RUNTIME = Path('/var/lib/decomp-generated-c-runtime-ci')
 MOUNTS = Path('/var/lib/decomp-generated-c-validation-ci')
+COMPILER_SUBPROGRAMS = ('cc1', 'collect2')
 MAX_BYTES = 768 * 1024 * 1024
 MAX_ENTRIES = 100_000
+MAX_WORKER_BYTES = 256 * 1024 * 1024
+MAX_WORKER_ENTRIES = 512
+MAX_WORKER_MANIFEST_BYTES = 256 * 1024
 FIXTURE_SOURCE = '''#include <stdio.h>
+#include <stddef.h>
+#include <stdint.h>
 int main(int argc, char **argv) {
     (void)argv;
     printf("args=%d\\n", argc - 1);
@@ -28,6 +34,160 @@ int main(int argc, char **argv) {
     return argc > 2 ? 3 : 0;
 }
 '''
+HEADER_CLOSURE_SOURCE = FIXTURE_SOURCE + '#include <stdlib.h>\n#include <string.h>\n'
+
+
+def no_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('worker classpath manifest has duplicate fields')
+        result[key] = value
+    return result
+
+
+def worker_path(value, build_root):
+    if not isinstance(value, str) or len(value) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('worker classpath path is invalid')
+    path = Path(value)
+    if not path.is_absolute() or str(path) != value or path.resolve(strict=True) != path or not path.is_relative_to(build_root):
+        raise ValueError('worker classpath must use canonical paths within checkout/build')
+    return path
+
+
+def read_module_worker_classpath(manifest, build_root, expected_uid=None):
+    """Admit explicit data only; no classpath discovery, executable command, or user directory copy."""
+    build_root = build_root.resolve(strict=True)
+    path = worker_path(str(manifest), build_root)
+    with open_worker_file(path, MAX_WORKER_MANIFEST_BYTES, expected_uid) as source:
+        payload = source.read(MAX_WORKER_MANIFEST_BYTES + 1)
+    if len(payload) > MAX_WORKER_MANIFEST_BYTES:
+        raise ValueError('worker classpath manifest exceeds its byte bound')
+    document = json.loads(payload, object_pairs_hook=no_duplicate_keys)
+    if (not isinstance(document, dict) or set(document) != {'schemaVersion', 'entries'} or
+            type(document['schemaVersion']) is not int or document['schemaVersion'] != 1):
+        raise ValueError('worker classpath manifest differs from schema v1')
+    entries = document['entries']
+    if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_WORKER_ENTRIES:
+        raise ValueError('worker classpath entry count exceeds its bound')
+    admitted = []
+    names, identities = set(), set()
+    total = 0
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {'path', 'bytes', 'sha256'}:
+            raise ValueError('worker classpath entry differs from schema v1')
+        path = worker_path(entry['path'], build_root)
+        if path.suffix != '.jar' or path in names:
+            raise ValueError('worker classpath requires distinct regular JAR paths')
+        size, digest = entry['bytes'], entry['sha256']
+        if (type(size) is not int or not 0 < size <= MAX_WORKER_BYTES or not isinstance(digest, str) or
+                not re.fullmatch('[0-9a-f]{64}', digest)):
+            raise ValueError('worker classpath entry size or digest is malformed')
+        total += size
+        if total > MAX_WORKER_BYTES:
+            raise ValueError('worker classpath aggregate exceeds its byte bound')
+        with open_worker_file(path, size, expected_uid) as source:
+            identity = os.fstat(source.fileno())
+            key = (identity.st_dev, identity.st_ino)
+            if identity.st_size != size or key in identities:
+                raise ValueError('worker classpath contains an alias or wrong file size')
+            prefix = source.read(4)
+            if prefix not in (b'PK\x03\x04', b'PK\x05\x06'):
+                raise ValueError('worker classpath entry is not a JAR container')
+            source.seek(0)
+            digest_state = hashlib.sha256()
+            count = 0
+            while chunk := source.read(128 * 1024):
+                count += len(chunk)
+                if count > size:
+                    raise ValueError('worker classpath grew during hashing')
+                digest_state.update(chunk)
+            actual = digest_state.hexdigest()
+            if count != size or actual != digest or file_version(os.fstat(source.fileno())) != file_version(identity):
+                raise ValueError('worker classpath entry changed or differs from its pin')
+            if file_version(path.stat(follow_symlinks=False)) != file_version(identity):
+                raise ValueError('worker classpath file name changed during admission')
+        names.add(path)
+        identities.add(key)
+        admitted.append({'path': str(path), 'bytes': size, 'sha256': digest})
+    return admitted
+
+
+def file_version(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def open_worker_file(path, maximum, expected_uid=None):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 0 < info.st_size <= maximum or
+                expected_uid is not None and info.st_uid != expected_uid):
+            raise ValueError('worker classpath input must be a bounded single-link regular file')
+        return os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def copy_module_worker_classpath(entries, destination, expected_uid=None):
+    """Copy only admitted exact file bytes; recheck pins at the privileged copy boundary."""
+    destination.mkdir(mode=0o755)
+    installed = []
+    for index, entry in enumerate(entries):
+        path = Path(entry['path'])
+        target = destination / f'classpath-{index}.jar'
+        digest = hashlib.sha256()
+        target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(target_fd, 'wb') as output, open_worker_file(path, entry['bytes'], expected_uid) as source:
+            before = os.fstat(source.fileno())
+            count = 0
+            while chunk := source.read(128 * 1024):
+                count += len(chunk)
+                if count > entry['bytes']:
+                    raise ValueError('worker classpath grew during copy')
+                digest.update(chunk)
+                output.write(chunk)
+            if (count != entry['bytes'] or digest.hexdigest() != entry['sha256'] or
+                    file_version(os.fstat(source.fileno())) != file_version(before) or
+                    file_version(path.stat(follow_symlinks=False)) != file_version(before) or path.resolve(strict=True) != path):
+                raise ValueError('worker classpath changed during privileged copy')
+            output.flush()
+            os.fsync(output.fileno())
+        target.chmod(0o444)
+        installed.append({'path': str(target), 'bytes': count, 'sha256': entry['sha256']})
+    return {'schemaVersion': 1, 'entries': installed}
+
+
+def copy_pinned_module_exec_helper(value, expected_digest, build_root, destination, expected_uid):
+    """Install the exact user-built helper as a root-owned immutable runtime file."""
+    source = worker_path(value, build_root)
+    if source.stat(follow_symlinks=False).st_mode & 0o111 == 0:
+        raise ValueError('module compiler trampoline must be executable')
+    digest = hashlib.sha256()
+    with open_worker_file(source, 16 * 1024 * 1024, expected_uid) as input_file:
+        before = os.fstat(input_file.fileno())
+        if before.st_mode & 0o111 == 0:
+            raise ValueError('module compiler trampoline lost executable mode')
+        target = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o500)
+        with os.fdopen(target, 'wb') as output:
+            count = 0
+            while chunk := input_file.read(128 * 1024):
+                count += len(chunk)
+                if count > before.st_size or count > 16 * 1024 * 1024:
+                    raise ValueError('module compiler trampoline grew during copy')
+                digest.update(chunk)
+                output.write(chunk)
+            if (count != before.st_size or file_version(os.fstat(input_file.fileno())) != file_version(before) or
+                    file_version(source.stat(follow_symlinks=False)) != file_version(before) or source.resolve(strict=True) != source):
+                raise ValueError('module compiler trampoline changed during privileged copy')
+            output.flush()
+            os.fsync(output.fileno())
+    if digest.hexdigest() != expected_digest:
+        destination.unlink(missing_ok=True)
+        raise ValueError('module compiler trampoline differs from its explicit content pin')
+    destination.chmod(0o555)
+    return {'source': str(source), 'destination': str(destination), 'bytes': count, 'sha256': expected_digest}
 
 
 def command(args, *, input_text=None):
@@ -38,6 +198,137 @@ def command(args, *, input_text=None):
     return result.stdout.strip()
 
 
+def parse_gcc_include_search_paths(stderr):
+    if not isinstance(stderr, bytes) or len(stderr) > 1024 * 1024:
+        raise ValueError('compiler include-search diagnostics exceed their byte bound')
+    text = stderr.decode('utf-8', errors='strict')
+    start = '#include <...> search starts here:'
+    end = 'End of search list.'
+    if text.count(start) != 1 or text.count(end) != 1:
+        raise ValueError('compiler did not report one complete include-search list')
+    lines = text.splitlines()
+    first = lines.index(start)
+    last = lines.index(end)
+    if last <= first:
+        raise ValueError('compiler include-search list is malformed')
+    paths = []
+    for line in lines[first + 1:last]:
+        value = line.strip()
+        if value.endswith(' (framework directory)'):
+            value = value.removesuffix(' (framework directory)')
+        path = Path(value)
+        if (not value or not path.is_absolute() or str(path) != value or '//' in value or
+                any(part in ('.', '..') for part in path.parts) or any(ord(c) < 32 for c in value)):
+            raise ValueError('compiler include-search path is not canonical and absolute')
+        paths.append(value)
+    if not paths or len(paths) != len(set(paths)):
+        raise ValueError('compiler include-search inventory is empty or duplicated')
+    return paths
+
+
+def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_roots, staged_headers_root):
+    """Capture bounded search-path evidence from the exact staged compiler bytes."""
+    staged_compiler = trusted(staged_compiler)
+    subprogram_prefix = trusted(subprogram_prefix)
+    staged_headers_root = trusted(Path(staged_headers_root))
+    mounts = tuple((trusted(Path(source)), trusted(Path(destination))) for source, destination in mounted_roots)
+    if not mounts or len({source for source, _ in mounts}) != len(mounts) or len({dest for _, dest in mounts}) != len(mounts):
+        raise ValueError('compiler include evidence lacks a unique mounted-root inventory')
+    result = subprocess.run([str(staged_compiler), f'-B{subprogram_prefix}/', f'-I{staged_headers_root}',
+                            '-v', '-E', '-x', 'c', '-'],
+                            input='#include <stddef.h>\n#include <stdarg.h>\n', text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=30, check=False,
+                            env={'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC', 'PATH': str(subprogram_prefix)})
+    stderr = result.stderr.encode('utf-8')
+    if len(result.stdout.encode('utf-8')) > 1024 * 1024:
+        raise ValueError('compiler include-search output exceeds its byte bound')
+    paths = parse_gcc_include_search_paths(stderr)
+    candidates = {'stddef.h': [], 'stdarg.h': []}
+    candidate_roots = (*mounts, (staged_headers_root, staged_headers_root))
+    for directory in paths:
+        search_root = Path(directory)
+        for source_root, mounted_root in candidate_roots:
+            if not search_root.is_relative_to(source_root):
+                continue
+            relative = search_root.relative_to(source_root)
+            for name in candidates:
+                mounted_path = mounted_root / relative / name
+                if mounted_path.is_file() and not mounted_path.is_symlink():
+                    data = mounted_path.read_bytes()
+                    candidates[name].append({'searchPath': str(search_root), 'mountedPath': str(mounted_path),
+                                             'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+            break
+    return {'exitCode': result.returncode, 'searchPaths': paths, 'stddefCandidates': candidates['stddef.h'],
+            'stdargCandidates': candidates['stdarg.h'], 'builtinHeaderCandidates': candidates,
+            'diagnosticsBytes': len(stderr), 'diagnosticsSha256': hashlib.sha256(stderr).hexdigest()}
+
+
+def require_compiler_stddef_candidate(evidence):
+    if evidence['exitCode'] == 0 and evidence['stddefCandidates']:
+        return
+    # This stdout is retained as operator-provisioning.json by the hosted lane. Keep
+    # enough bounded, non-secret evidence to distinguish compiler failure from path
+    # projection failure without retaining arbitrary compiler diagnostics.
+    print(json.dumps({'schemaVersion': 1, 'compilerIncludeSearch': evidence}, sort_keys=True))
+    raise ValueError('registered compiler has no authenticated readable stddef include candidate')
+
+
+def require_compiler_builtin_header_candidate(evidence, include_directory, header_name, mounted_directory=None):
+    expected_search_path = str(Path(include_directory))
+    expected_mount_path = str(Path(mounted_directory)) if mounted_directory is not None else None
+    if header_name not in ('stddef.h', 'stdarg.h'):
+        raise ValueError('unsupported compiler builtin header admission')
+    candidates = evidence.get('builtinHeaderCandidates', {}).get(header_name, [])
+    if evidence['exitCode'] == 0 and any(candidate.get('searchPath') == expected_search_path and
+            (expected_mount_path is None or candidate.get('mountedPath') == str(Path(expected_mount_path) / header_name))
+            for candidate in candidates):
+        return
+    print(json.dumps({'schemaVersion': 1, 'compilerIncludeSearch': evidence,
+                      'requiredBuiltinHeader': header_name, 'requiredSearchPath': expected_search_path}, sort_keys=True))
+    raise ValueError(f'registered compiler has no authenticated readable GCC builtin {header_name} candidate')
+
+
+def copy_compiler_builtin_include_directory(source, gcc_runtime, tools_root, copier):
+    """Stage the pinned GCC builtin include tree at the authenticated -B prefix."""
+    gcc_runtime = trusted(Path(gcc_runtime))
+    source = trusted(Path(source))
+    tools_root = Path(tools_root)
+    destination = tools_root / 'include'
+    if not source.is_dir() or source.name != 'include' or not source.is_relative_to(gcc_runtime) or source == gcc_runtime:
+        raise ValueError('compiler builtin include directory must be a pinned include subtree of GCC runtime')
+    if destination.exists() or destination.is_symlink():
+        raise ValueError('compiler builtin include destination already exists')
+    copier.copy(source, destination)
+    required = destination / 'stdarg.h'
+    if required.is_symlink() or not required.is_file():
+        raise ValueError('pinned GCC builtin include tree lacks a regular stdarg.h')
+    return destination
+
+
+def preserve_compiler_builtin_headers(dependencies, gcc_runtime, headers_root, copier):
+    """Expose GCC's required builtin stddef header through the declared /usr/include alias."""
+    gcc_runtime = trusted(Path(gcc_runtime))
+    headers_root = Path(headers_root)
+    target = headers_root / 'stddef.h'
+    if target.exists():
+        if target.is_symlink() or not target.is_file():
+            raise ValueError('authenticated stddef header destination is not a regular file')
+        return
+    candidates = []
+    for value in dependencies:
+        source = Path(value)
+        if source.name != 'stddef.h':
+            continue
+        resolved = trusted(source)
+        if resolved.is_relative_to(gcc_runtime):
+            candidates.append(resolved)
+    if len(set(candidates)) != 1:
+        raise ValueError('compiler dependency closure lacks one pinned GCC builtin stddef header')
+    copier.copy(candidates[0], target)
+    if target.is_symlink() or not target.is_file():
+        raise ValueError('authenticated stddef header copy is not a regular file')
+
+
 def trusted(path):
     path = path.resolve(strict=True)
     for item in (path, *path.parents):
@@ -45,6 +336,53 @@ def trusted(path):
         if info.st_uid != 0 or info.st_mode & 0o022:
             raise ValueError(f'operator source is writable or not root owned: {item}')
     return path
+
+
+def compiler_subprogram(gcc, role):
+    """Resolve only the two reviewed GCC subprocesses, never a PATH-selected command."""
+    if role not in COMPILER_SUBPROGRAMS:
+        raise ValueError('unsupported compiler subprogram role')
+    gcc = trusted(gcc)
+    gcc_info = gcc.stat()
+    if not stat.S_ISREG(gcc_info.st_mode) or not gcc_info.st_mode & 0o111:
+        raise ValueError('selected GCC must be a trusted regular executable')
+    value = command([str(gcc), f'-print-prog-name={role}'])
+    if (not value or len(value.encode()) > 4096 or
+            any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise ValueError('compiler subprogram path is malformed or exceeds its bound')
+    path = Path(value)
+    if not path.is_absolute() or path.name != role:
+        raise ValueError('compiler subprogram must have its exact absolute role path')
+    # GCC may print an absolute search path containing ../ components. Retain only
+    # its canonical, trusted target; relative answers never fall back to PATH.
+    path = trusted(path)
+    info = path.stat()
+    if path.name != role or not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111:
+        raise ValueError('compiler subprogram must be a trusted regular executable for its role')
+    return path
+
+
+def copy_compiler_subprograms(gcc, copier):
+    subprograms = {role: compiler_subprogram(gcc, role) for role in COMPILER_SUBPROGRAMS}
+    mounts = []
+    for role, source in subprograms.items():
+        destination = RUNTIME / 'tools' / role
+        copier.copy(source, destination)
+        # The module compiler mounts tools as one finite tree. The shared repair
+        # runtime binds its closed tools individually, so retain these two exact
+        # additional files at its existing -B prefix without adding tool roles.
+        mounts.append({'source': str(destination), 'destination': f'/decomp-generated-c-tools/{role}'})
+    return subprograms, mounts
+
+
+def require_fresh_qualification_roots():
+    # Admit every existing parent before creating either root. Never repair or
+    # change ownership/permissions of a deployment ancestor such as /opt.
+    for root in (RUNTIME, MOUNTS):
+        if trusted(root.parent) != root.parent or not root.parent.is_dir():
+            raise ValueError('qualification target parent is not a canonical trusted directory')
+        if root.exists() or root.is_symlink():
+            raise ValueError(f'refusing to adopt existing qualification target: {root}')
 
 
 class Copier:
@@ -113,15 +451,28 @@ def cleanup(run_id):
 def prepare(args):
     if args.uid <= 0 or args.gid < 0:
         raise ValueError('qualification must run as a distinct non-root application user')
-    for root in (RUNTIME, MOUNTS):
-        if root.exists() or root.is_symlink():
-            raise ValueError(f'refusing to adopt existing qualification target: {root}')
+    require_fresh_qualification_roots()
+    worker = None
+    if args.module_worker_classpath is not None:
+        worker = read_module_worker_classpath(Path(args.module_worker_classpath),
+                                            Path(__file__).resolve().parents[1] / 'build', args.uid)
     copier = Copier()
     try:
         for root in (RUNTIME, MOUNTS):
             root.mkdir(mode=0o755)
             (root / 'qualification-owner.json').write_text(json.dumps({
                 'runId': args.run_id, 'purpose': 'generated-c-public-factory-ci'}))
+        if worker is not None:
+            worker_manifest = copy_module_worker_classpath(worker, RUNTIME / 'worker', args.uid)
+            worker_manifest_path = RUNTIME / 'module-worker-classpath.json'
+            worker_manifest_path.write_text(json.dumps(worker_manifest, sort_keys=True) + '\n')
+            worker_manifest_path.chmod(0o444)
+            (RUNTIME / 'tools').mkdir(mode=0o755)
+            module_helper = copy_pinned_module_exec_helper(args.module_compiler_exec_helper,
+                args.module_compiler_exec_helper_sha256, Path(__file__).resolve().parents[1] / 'build',
+                RUNTIME / 'tools' / 'decomp-module-compiler-exec', args.uid)
+        else:
+            module_helper = None
         tools = {}
         names = {'make': 'make', 'compiler': 'gcc', 'linker': 'ld', 'assembler': 'as',
                  'shell': 'dash', 'find': 'find', 'mkdir': 'mkdir'}
@@ -132,12 +483,16 @@ def prepare(args):
             copier.copy(source, destination)
             tools[role] = {'source': str(destination), 'destination': f'/decomp-generated-c-tools/{destination.name}'}
         gcc = trusted(Path('/usr/bin/gcc'))
+        subprograms, subprogram_mounts = copy_compiler_subprograms(gcc, copier)
         gcc_runtime = trusted(Path(command([str(gcc), '-print-libgcc-file-name'])).parent)
         copier.copy(gcc_runtime, RUNTIME / 'gcc')
-        build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}]
-        # The qualification image intentionally retains only the system headers needed by the
-        # fixed benign stdio fixture. A general deployment supplies its own reviewed closure.
-        dependency_text = command([str(gcc), '-M', '-x', 'c', '-'], input_text=FIXTURE_SOURCE)
+        gcc_builtin_include = trusted(Path(command([str(gcc), '-print-file-name=include'])))
+        copy_compiler_builtin_include_directory(gcc_builtin_include, gcc_runtime, RUNTIME / 'tools', copier)
+        build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}] + subprogram_mounts + [
+            {'source': str(RUNTIME / 'tools' / 'include'), 'destination': '/decomp-generated-c-tools/include'}]
+        # The qualification image retains the fixed fixture headers and additional standard
+        # headers used by module compilation controls. A deployment supplies its own reviewed closure.
+        dependency_text = command([str(gcc), '-M', '-x', 'c', '-'], input_text=HEADER_CLOSURE_SOURCE)
         headers = dependency_text.replace('\\\n', ' ').partition(':')[2].split()
         for header in headers:
             path = Path(header)
@@ -147,7 +502,16 @@ def prepare(args):
                 copier.copy(path, RUNTIME / 'headers' / path.relative_to('/usr/include'))
             elif not path.resolve().is_relative_to(gcc_runtime):
                 raise ValueError(f'unsupported compiler header authority: {path}')
+        preserve_compiler_builtin_headers(headers, gcc_runtime, RUNTIME / 'headers', copier)
         build.append({'source': str(RUNTIME / 'headers'), 'destination': '/usr/include'})
+        compiler_include_search = staged_compiler_include_search(
+            RUNTIME / 'tools' / 'cc', RUNTIME / 'tools',
+            ((gcc_runtime, RUNTIME / 'gcc'), (RUNTIME / 'tools', RUNTIME / 'tools'),
+             (Path('/usr/include'), RUNTIME / 'headers')), RUNTIME / 'headers')
+        require_compiler_stddef_candidate(compiler_include_search)
+        require_compiler_builtin_header_candidate(
+            compiler_include_search, RUNTIME / 'tools' / 'include', 'stdarg.h',
+            RUNTIME / 'tools' / 'include')
         link_parent = None
         for name in ('crt1.o', 'Scrt1.o', 'crti.o', 'crtn.o', 'libc.so', 'libc_nonshared.a'):
             path = Path(command([str(gcc), f'-print-file-name={name}'])).absolute().resolve()
@@ -162,7 +526,7 @@ def prepare(args):
         libraries = {}
         # ldd only inspects immutable operator-supplied host tools and compiler internals.
         # Candidate or rebuilt executables are never passed to this provisioning helper.
-        elf_inputs = [Path('/usr/bin') / name for name in names.values()] + [gcc_runtime / 'cc1', gcc_runtime / 'collect2']
+        elf_inputs = [Path('/usr/bin') / name for name in names.values()] + list(subprograms.values())
         for executable in elf_inputs:
             output = command(['/usr/bin/ldd', str(trusted(executable))])
             for line in output.splitlines():
@@ -202,10 +566,20 @@ def prepare(args):
                 'buildRuntimeMounts': build + runtime, 'programRuntimeMounts': runtime,
                 'sourceTmpfs': str(MOUNTS / 'source'), 'outputTmpfs': str(MOUNTS / 'output')}
         (RUNTIME / 'runtime-plan.json').write_text(json.dumps(plan, sort_keys=True) + '\n')
-        print(json.dumps({'runtimePlan': str(RUNTIME / 'runtime-plan.json'), 'runtimeEntries': copier.entries,
-                          'runtimeBytes': copier.bytes, 'sourceTmpfs': plan['sourceTmpfs'], 'outputTmpfs': plan['outputTmpfs']}))
-    except BaseException:
-        cleanup(args.run_id)
+        summary = {'runtimePlan': str(RUNTIME / 'runtime-plan.json'), 'runtimeEntries': copier.entries,
+                   'runtimeBytes': copier.bytes, 'sourceTmpfs': plan['sourceTmpfs'], 'outputTmpfs': plan['outputTmpfs'],
+                   'compilerIncludeSearch': compiler_include_search}
+        if worker is not None:
+            summary.update({'moduleWorkerManifest': str(RUNTIME / 'module-worker-classpath.json'),
+                            'moduleWorkerEntries': len(worker), 'moduleWorkerBytes': sum(entry['bytes'] for entry in worker),
+                            'moduleCompilerExecHelper': module_helper})
+        print(json.dumps(summary))
+    except BaseException as failure:
+        try:
+            cleanup(args.run_id)
+        except BaseException as cleanup_failure:
+            failure.add_note(f'Qualification cleanup also failed; cleanup is not proved: '
+                             f'{type(cleanup_failure).__name__}: {cleanup_failure}')
         raise
 
 
@@ -217,6 +591,9 @@ def main():
     parser.add_argument('--gid', type=int)
     parser.add_argument('--gate-helper')
     parser.add_argument('--gate-sha256')
+    parser.add_argument('--module-worker-classpath', help='optional pinned JAR manifest under checkout/build for contained module qualification')
+    parser.add_argument('--module-compiler-exec-helper', help='pinned native Landlock trampoline under checkout/build')
+    parser.add_argument('--module-compiler-exec-helper-sha256', help='full SHA-256 of the native trampoline')
     args = parser.parse_args()
     if os.geteuid() != 0 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', args.run_id):
         parser.error('requires an explicit root operator invocation and portable CI run identity')
@@ -225,6 +602,11 @@ def main():
     else:
         if any(value is None for value in (args.uid, args.gid, args.gate_helper, args.gate_sha256)):
             parser.error('prepare requires uid, gid, gate-helper and gate-sha256')
+        if (args.module_worker_classpath is None) != (args.module_compiler_exec_helper is None) or \
+                (args.module_compiler_exec_helper is None) != (args.module_compiler_exec_helper_sha256 is None):
+            parser.error('module worker qualification requires both compiler trampoline path and digest')
+        if args.module_compiler_exec_helper_sha256 is not None and not re.fullmatch('[0-9a-f]{64}', args.module_compiler_exec_helper_sha256):
+            parser.error('module compiler trampoline digest must be a full SHA-256 value')
         if not re.fullmatch('[0-9a-f]{64}', args.gate_sha256):
             parser.error('gate-sha256 must be the full helper content digest')
         prepare(args)

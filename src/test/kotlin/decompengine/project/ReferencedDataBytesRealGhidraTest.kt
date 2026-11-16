@@ -101,7 +101,7 @@ class ReferencedDataBytesRealGhidraTest {
         assertEquals(model.globals.associate { it.id to it.byteEvidence }, planning.globals.associate { it.id to it.byteEvidence },
             "planning and full exports must retain identical windows")
         val request = ModuleReconstructionRequest(
-            PlannedModule("fixture", "src/fixture.c", "include/fixture.h", emptyList(), model.globals.map { it.id }, boundaryEvidence = emptyList()),
+            PlannedModule("fixture", "src/modules/fixture.c", "include/modules/fixture.h", emptyList(), model.globals.map { it.id }, boundaryEvidence = emptyList()),
             model, "", "", "", emptyMap(), root)
         val prompt = GeneratedCModulePrompt.render(request).evidence
         model.globals.forEach { global ->

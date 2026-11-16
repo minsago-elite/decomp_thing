@@ -1,5 +1,6 @@
 package decompengine.project
 
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -13,7 +14,19 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
+
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class GeneratedCDeclarationsTest {
+    @BeforeEach
+    fun requireConfiguredCompiler(test: TestInfo) = requireHostedModuleCompiler(test)
+
     @Test
     fun `recovered types reject every directive spelling before header publication`() {
         for (marker in listOf("#", "%:", "??=")) {
@@ -138,6 +151,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `cross module parameterized calls build under the strict profile`() {
         val project = project()
         val model = model(
@@ -159,6 +173,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `unknown signature and global types fail the actual compiler and remain unresolved`() {
         for (unknown in listOf("undefined8", "byte", "pointer")) {
             val project = project()
@@ -182,6 +197,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `explicit named typedefs and placeholder-like parameter identifiers remain valid`() {
         val project = project()
         val model = model(
@@ -223,9 +239,13 @@ class GeneratedCDeclarationsTest {
             val project = project()
             val model = model(function("convert", prototype, recovered), function("main", "int main(void)", "int main(void) { return 0; }"))
                 .copy(types = listOf(RecoveredType("result_type", "struct result { int value; };")))
-            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor { request ->
-                EvidenceModuleReconstructor().reconstruct(request).copy(generator = "scripted-agent", issues = emptyList())
-            })
+            val manifest = SourceTreeGenerator.generate(model, project, overrides = mapOf("fn_convert" to "core", "fn_main" to "core"),
+                reconstructor = ModuleReconstructor { request ->
+                    EvidenceModuleReconstructor().reconstruct(request).copy(generator = "scripted-agent", issues = emptyList())
+                })
+            assertTrue(manifest.files.none { it.acceptedImplementation == true })
+            assertEquals(JsonNull, Json.parseToJsonElement(project.resolve("reports/modules/core.json").readText())
+                .jsonObject.getValue("compilation"), "placeholder rejection precedes compiler admission")
             assertTrue("fn_convert" in manifest.unresolvedImplementationIds, prototype)
             val reports = Files.walk(project.resolve("reports/modules")).use { paths ->
                 paths.filter { it.toString().endsWith(".json") }.toList().map { it.readText() }
@@ -236,6 +256,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `retained complex global definitions are recognized and compile`() {
         for (type in listOf("int (* const)(int)", "int (**)(int)", "int (*[2])(int)")) {
             val project = project()
@@ -268,6 +289,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `recovered definition conflicting with declared return type fails rather than changing header`() {
         val project = project()
         val model = model(function("main", "int main(void)", "int main(void) { return 0; }"),
@@ -293,6 +315,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `genuine noreturn implementation compiles with the compiler library declaration`() {
         val project = project()
         val prototype = "_Noreturn Void stop(void)"
@@ -334,6 +357,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `known integer entry return types retain the program exit status`() {
         for (returnType in listOf("int", "unsigned long", "size_t", "Status")) {
             val project = project()
@@ -363,6 +387,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `sole void typedef parameter admits an entry call without rewriting its prototype`() {
         val project = project()
         val prototype = "int entry(Void)"
@@ -418,6 +443,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `private static inline implementation remains valid within its planned module`() {
         val project = project()
         val prototype = "static inline int helper(int value)"
@@ -436,32 +462,39 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
-    fun `unreferenced private static functions remain buildable in evidence and recovered modes`() {
-        for (includeRecovered in listOf(false, true)) {
-            val project = project()
-            val prototype = "static int helper(int value)"
-            val model = model(
-                function("helper", prototype, "$prototype { return value + 3; }"),
-                function("main", "int main(void)", "int main(void) { return 17; }"),
-            )
-            val before = model.toJson()
-            val reconstructor = if (includeRecovered) RecoveredCModuleReconstructor() else EvidenceModuleReconstructor()
-            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = reconstructor,
-                overrides = mapOf("fn_helper" to "utility", "fn_main" to "entry"))
-            if (includeRecovered) {
-                assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
-            } else {
-                assertTrue("fn_helper" in manifest.unresolvedImplementationIds)
-            }
-            assertEquals(before, model.toJson())
-            assertTrue(project.resolve("src/modules/utility_internal.h").readText().contains("__attribute__((unused))\n$prototype;"))
-            assertTrue(project.resolve("src/modules/utility.c").readText().contains("$prototype {"))
-            assertFalse(project.resolve("include/modules/utility.h").readText().contains("helper("))
-            assertEquals(0, MakeProjectBuilder.build(project).returnCode, "includeRecovered=$includeRecovered")
+    fun `unreferenced private static functions remain buildable in evidence mode`() =
+        assertUnreferencedStaticFunctions(includeRecovered = false)
+
+    @Test
+    @Tag("ci-live")
+    fun `unreferenced private static functions remain buildable in recovered mode`() =
+        assertUnreferencedStaticFunctions(includeRecovered = true)
+
+    private fun assertUnreferencedStaticFunctions(includeRecovered: Boolean) {
+        val project = project()
+        val prototype = "static int helper(int value)"
+        val model = model(
+            function("helper", prototype, "$prototype { return value + 3; }"),
+            function("main", "int main(void)", "int main(void) { return 17; }"),
+        )
+        val before = model.toJson()
+        val reconstructor = if (includeRecovered) RecoveredCModuleReconstructor() else EvidenceModuleReconstructor()
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = reconstructor,
+            overrides = mapOf("fn_helper" to "utility", "fn_main" to "entry"))
+        if (includeRecovered) {
+            assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+        } else {
+            assertTrue("fn_helper" in manifest.unresolvedImplementationIds)
         }
+        assertEquals(before, model.toJson())
+        assertTrue(project.resolve("src/modules/utility_internal.h").readText().contains("__attribute__((unused))\n$prototype;"))
+        assertTrue(project.resolve("src/modules/utility.c").readText().contains("$prototype {"))
+        assertFalse(project.resolve("include/modules/utility.h").readText().contains("helper("))
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode, "includeRecovered=$includeRecovered")
     }
 
     @Test
+    @Tag("ci-live")
     fun `private static address references remain usable without recorded call edges`() {
         val project = project()
         val prototype = "static int helper(int value)"
@@ -480,6 +513,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `private static unused suppression leaves warnings inside the recovered body enforced`() {
         val project = project()
         val model = model(
@@ -500,6 +534,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `private extern inline implementation retains an external definition for an indirect same module call`() {
         val project = project()
         val prototype = "extern inline int helper(int value)"
@@ -533,6 +568,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `typedef arrays keep supplied initializers and permit fixed extents and pointers`() {
         val project = project()
         val model = model(function("main", "int main(void)", "int main(void) { return values[0] + values[1]; }")
@@ -555,6 +591,7 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `multiple typedef declarators and qualified alias chains compile unchanged`() {
         val project = project()
         val declarations = "typedef int Scalar, *Pointer, Vector[2]; " +
@@ -632,9 +669,13 @@ class GeneratedCDeclarationsTest {
             val project = project()
             val model = model(function("convert", prototype, recovered), function("main", "int main(void)", "int main(void) { return 0; }"))
                 .copy(types = listOf(RecoveredType("void_types", "typedef void Void; typedef Void VoidAlias;")))
-            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor { request ->
-                EvidenceModuleReconstructor().reconstruct(request).copy(generator = "scripted-agent", issues = emptyList())
-            })
+            val manifest = SourceTreeGenerator.generate(model, project, overrides = mapOf("fn_convert" to "core", "fn_main" to "core"),
+                reconstructor = ModuleReconstructor { request ->
+                    EvidenceModuleReconstructor().reconstruct(request).copy(generator = "scripted-agent", issues = emptyList())
+                })
+            assertTrue(manifest.files.none { it.acceptedImplementation == true })
+            assertEquals(JsonNull, Json.parseToJsonElement(project.resolve("reports/modules/core.json").readText())
+                .jsonObject.getValue("compilation"), "placeholder rejection precedes compiler admission")
             assertTrue("fn_convert" in manifest.unresolvedImplementationIds, prototype)
             val reports = Files.walk(project.resolve("reports/modules")).use { paths ->
                 paths.filter { it.toString().endsWith(".json") }.toList().map { it.readText() }

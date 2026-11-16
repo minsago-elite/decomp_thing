@@ -12,27 +12,25 @@ A successful agent turn is a candidate revision. Acceptance requires exact
 agreement between its source bytes and reported change, complete ACP release
 evidence, attributable definitions for every owned entity, no generic placeholder
 definitions or undefined decompiler types, and the generated-C compiler gate.
-The compiler uses the profile's driver and flags, including mandatory `-Werror`,
-and compiles the module to `/dev/null`. Its execution uses the profile's time and
-output limits and the same environment sanitation as the full-project builder.
+The current compiler gate uses the exact admitted budget variant of a registered profile through an authenticated,
+root-owned compiler/runtime closure. It compiles a private, read-only snapshot of the
+candidate and declared headers to one owned ELF relocatable object, with mandatory
+`-Werror`. The provider receives neither that full header closure nor runtime authority.
+See [contained module compilation](module-compilation-acceptance.md) for the runtime,
+terminal evidence, bounds, and qualification contract.
 
-New module checkpoints use schema 6. They retain the selected input-binary identity,
-model schema version and profile SHA-256 alongside the module fingerprint.
-Cache reuse, rollback acceptance and archival audit require these identities to
-match the current model and profile. Their compilation record binds the command,
-source SHA-256, outcome, return code, and diagnostic digest and byte count. The
-archive verifier checks a successful record against the source and declared
-profile. The archive reader accepts historical schema-4 and schema-5 records, but current
-audit treats their acceptance as unresolved. Generation regenerates those
-checkpoints to retain input identities and pass the current compiler gate.
-Full-project linking and behavior validation remain required by their respective
-archive and release workflows.
+New module checkpoints use schema 7. Acceptance requires a same-process permit issued
+only after real compilation, exact result capture, and verified cleanup. The record binds
+source and header hashes, the compiler/runtime/profile, raw compiler status, authenticated
+keeper pipe hashes, terminal resource counters, and process/scratch cleanup. Decoding a
+record never recreates its live permit. Exact cache reuse retains the source and ACP
+receipt but recompiles under the current runtime before issuing refreshed evidence.
 
-This compiler gate is a local host subprocess. Its record does not independently
-authenticate the compiler executable, runtime, or consumed header bytes, and it
-does not prove contained production compilation. A local passed record therefore
-does not by itself establish production release eligibility; #64 tracks the
-qualified contained compiler and complete input/output artifact closure.
+Historical schema-4/5/6 records remain readable at their recorded assurance. Schema-6
+accepted revisions can be restored byte-for-byte after a failed retry; their local host
+compiler records cannot authorize current acceptance. Historical prompt rendering and
+compiler-policy fingerprints retain their original commands. Full-project linking,
+behavior validation, and release authority remain separate.
 
 If a retry fails validation or is cancelled, the workflow restores the preceding
 accepted source and ACP receipt and keeps its checkpoint. A rejected attempt is
@@ -58,16 +56,15 @@ Cancellation at the module compiler gate stops reconstruction. It does not becom
 an ordinary compile rejection or a cached unresolved checkpoint. When a prior
 accepted revision exists, the workflow restores its source and execution evidence,
 retains an interrupted-attempt report, and preserves the caller's interrupt flag.
-The prior accepted checkpoint and manifest remain reusable. Compiler wait
-interruption and interrupted file I/O propagate through the cancellation path;
-this local behavior does not establish authenticated production compiler identity.
+The prior accepted checkpoint and manifest remain available for restoration. Compiler wait
+interruption, including an interrupted wait wrapped by the contained launcher, propagates
+through cancellation after cleanup. Ordinary runtime exceptions follow the same source
+and receipt restoration path without inventing a compiler result.
 
-The authored running-compiler regression first compiles an accepted revision with
-`cc`, then pauses the next compiler-wrapper invocation after explicit readiness.
-It confirms changed candidate bytes are present before interrupting generation,
-then requires wrapper termination, restored accepted source/checkpoint/manifest
-bytes, preserved cancellation and reuse without another reconstruction call.
-This is a local interruption fixture, not production compiler qualification.
+The required hosted compiler lane observes a real compiler inside its nonce-bound scope,
+interrupts generation, and checks retained pidfds, exact scope/cgroup absence, scratch
+removal, cancellation, and prior source/checkpoint/manifest bytes. Those controls require
+installed runtime authority; a skipped or unconfigured run supplies no qualification.
 
 Current bounded-agent requests use contract `v4` and input fingerprint provider
 `module-reconstruction-input-v3`. The fingerprint binds the input binary/model
@@ -191,15 +188,15 @@ helpers. Orchestration retains invocation release, prompt budgets, prior issues,
 checkpoint acceptance and rollback. These checks remain the existing local
 acceptance policy; they do not certify behavioral equivalence or ABI correctness.
 
-`ModuleCompilationPolicy` is the local compilation contract. Application-owned
+`ModuleCompilationPolicy` is the registered module compilation contract. Application-owned
 `ReconstructionCompilationPolicies` selects it by registered profile ID; profile
 data cannot register implementation code. Prompt commands, generation, checkpoint
 reuse, fingerprint policy identity, archival audit and archive command checks use
 that selection. Generation rejects an unregistered profile before writing the
-project or dispatching reconstruction. The generated-C policy identity and
-compiler evidence encoding are unchanged. This contract supplies local compilation
-only; qualified runner/input/output receipts and complete alternate-profile
-routing remain required for production acceptance under #84.
+project or dispatching reconstruction. Historical compiler evidence keeps its recorded policy identity. Current module
+acceptance uses the contained compiler policy and its live issuance contract.
+Whole-project build, alternate-profile qualification, and release routing retain
+their separate requirements under #84.
 
 `ReconstructionAdapters` selects local generation behavior and compilation together
 by profile ID. The workflow obtains interface/entrypoint/build-definition rendering,

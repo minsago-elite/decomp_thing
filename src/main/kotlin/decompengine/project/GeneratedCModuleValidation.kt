@@ -80,14 +80,16 @@ internal object GeneratedCModuleValidation : ModuleCompilationPolicy {
         val diagnostics = output.toByteArray()
         return ModuleCompilationEvidence(
             before, command, outcome, returnCode, sha256(diagnostics), diagnostics.size.toLong(),
-            diagnosticFeedback(diagnostics, projectDir),
+            diagnosticsPrefix = diagnosticFeedback(diagnostics, projectDir),
         )
     }
 
-    private fun diagnosticFeedback(bytes: ByteArray, projectDir: Path): String {
-        val raw = bytes.copyOfRange(0, minOf(bytes.size, 32_768)).toString(Charsets.UTF_8)
-            .replace(projectDir.toAbsolutePath().normalize().toString(), "<workspace>")
-            .replace(Regex("\\u001B\\[[0-?]*[ -/]*[@-~]"), "")
+    internal fun diagnosticFeedback(bytes: ByteArray, projectDir: Path, redactedRoots: List<Path> = emptyList()): String {
+        var raw = bytes.copyOfRange(0, minOf(bytes.size, 32_768)).toString(Charsets.UTF_8)
+        for (root in listOf(projectDir) + redactedRoots) {
+            raw = raw.replace(root.toAbsolutePath().normalize().toString(), "<workspace>")
+        }
+        raw = raw.replace(Regex("\\u001B\\[[0-?]*[ -/]*[@-~]"), "")
         val selected = raw.lineSequence().filter { line ->
             listOf("error:", "fatal error:", "warning:", "undefined reference", "note:").any(line::contains)
         }.map { line ->
