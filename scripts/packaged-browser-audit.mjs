@@ -12,6 +12,7 @@ import { join } from 'node:path';
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
   'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
+export const displayPreferencesKey = 'decomp.display-preferences.v1';
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
 const longFilename = `${'reconstructed-firmware-image-with-an-unbroken-very-long-name-'.repeat(4)}0123456789abcdef.elf`.slice(0, 255);
@@ -725,13 +726,229 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     })`);
     feedback.push(timing.focused); data.push(timing.populated);
   }
+  // Run after the visual and navigation measurements so the stored test values cannot affect them.
+  const crossTabPreferences = await qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, evaluate, ready, capture });
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
-    workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
+    workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice, crossTabPreferences,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
 }
 
+export async function qualifyCrossTabPreferences({ origin, cdp, makeTarget, intercept, evaluate, ready, capture }) {
+  const tabs = [];
+  const cleanupFailures = [];
+  const installed = [];
+  const state = (tab) => evaluate(tab, `(() => {
+    const controls = [...document.querySelectorAll('.display-preference-fields select')];
+    return { theme: controls[0]?.value ?? null, motion: controls[1]?.value ?? null,
+      dataTheme: document.documentElement.getAttribute('data-theme'), dataMotion: document.documentElement.getAttribute('data-motion'),
+      storageEvents: window.__displayPreferenceAudit?.events.length ?? null,
+      writes: window.__displayPreferenceAudit?.writes ?? null,
+      lastStorageEventTrusted: window.__displayPreferenceAudit?.events.at(-1)?.trusted ?? null,
+      lastStorageEventArea: window.__displayPreferenceAudit?.events.at(-1)?.storageArea ?? null };
+  })()`);
+  const setField = async (tab, index, value) => evaluate(tab, `(() => {
+    const control = document.querySelectorAll('.display-preference-fields select')[${index}];
+    if (!control) return false;
+    control.value = ${JSON.stringify(value)};
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+  const result = { sameOrigin: false, targetIds: [], initial: null, initialTabs: [], steps: [], finalTabs: [] };
+  let preferenceMutationStarted = false;
+  let originalPreferenceRecord;
+  let originalPreferenceCaptured = false;
+  let expectedRestoredEventCount;
+  try {
+    tabs.push(await makeTarget());
+    result.targetIds.push(tabs[0].targetId);
+    tabs.push(await makeTarget());
+    result.targetIds.push(tabs[1].targetId);
+    for (const tab of tabs) {
+      await intercept(tab);
+      await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
+      await ready(tab, `document.querySelectorAll('.display-preference-fields select').length === 2`, 'display preferences in packaged workspace');
+    }
+    result.sameOrigin = await Promise.all(tabs.map((tab) => evaluate(tab, 'location.origin')))
+      .then((origins) => origins.length === 2 && origins[0] === origins[1] && origins[0] === new URL(origin).origin);
+    assert.ok(result.sameOrigin, 'Preference tabs must share the packaged origin');
+    originalPreferenceRecord = await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)})`);
+    assert.ok(originalPreferenceRecord === null || typeof originalPreferenceRecord === 'string', 'Stored preference record must be readable');
+    originalPreferenceCaptured = true;
+    result.initialTabs = await Promise.all(tabs.map(state));
+    result.initial = result.initialTabs[0];
+    assert.ok(result.initialTabs.every(initial => initial.theme === 'system' && initial.motion === 'system'),
+      'Fresh audit profile must start with default preferences in both tabs');
+    for (const tab of tabs) {
+      const installedHandler = await evaluate(tab, `(() => {
+        const key = ${JSON.stringify(displayPreferencesKey)};
+        const audit = { events: [], writes: 0, counting: true };
+        window.__displayPreferenceAudit = audit;
+        audit.onStorage = (event) => {
+          if (event.key === key || event.key === null) audit.events.push({ key: event.key, trusted: event.isTrusted,
+            storageArea: event.storageArea === window.localStorage ? 'localStorage' : 'other' });
+        };
+        window.addEventListener('storage', audit.onStorage);
+        audit.originalSetItem = Storage.prototype.setItem;
+        audit.originalRemoveItem = Storage.prototype.removeItem;
+        audit.originalClear = Storage.prototype.clear;
+        Storage.prototype.setItem = function (name, value) {
+          if (audit.counting && this === window.localStorage && name === key) audit.writes += 1;
+          return audit.originalSetItem.call(this, name, value);
+        };
+        Storage.prototype.removeItem = function (name) {
+          if (audit.counting && this === window.localStorage && name === key) audit.writes += 1;
+          return audit.originalRemoveItem.call(this, name);
+        };
+        Storage.prototype.clear = function () {
+          if (audit.counting && this === window.localStorage && this.getItem(key) !== null) audit.writes += 1;
+          return audit.originalClear.call(this);
+        };
+        return true;
+      })()`);
+      assert.equal(installedHandler, true, 'Could not install bounded preference event observation');
+      installed.push(tab);
+      await evaluate(tab, `document.querySelector('.display-preferences > button')?.click()`);
+    }
+    preferenceMutationStarted = true;
+    assert.equal(await setField(tabs[0], 0, 'dark'), true, 'First tab theme control is missing');
+    await ready(tabs[1], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === 'dark' && s[1]?.value === 'system' && window.__displayPreferenceAudit.events.length === 1; })()`,
+      'second packaged tab receives first preference update');
+    const firstDelivery = await state(tabs[1]);
+    result.steps.push({ writer: 0, receiver: 1, key: displayPreferencesKey, state: firstDelivery,
+      trusted: firstDelivery.lastStorageEventTrusted, storageArea: firstDelivery.lastStorageEventArea });
+
+    assert.equal(await setField(tabs[1], 1, 'reduce'), true, 'Second tab motion control is missing');
+    await ready(tabs[0], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === 'dark' && s[1]?.value === 'reduce' && window.__displayPreferenceAudit.events.length === 1; })()`,
+      'first packaged tab receives second preference update');
+    const secondDelivery = await state(tabs[0]);
+    result.steps.push({ writer: 1, receiver: 0, key: displayPreferencesKey, state: secondDelivery,
+      trusted: secondDelivery.lastStorageEventTrusted, storageArea: secondDelivery.lastStorageEventArea });
+    await Promise.all(tabs.map((tab, index) => capture(tab, `audit-preferences-tab-${index + 1}.png`)));
+    result.finalTabs = await Promise.all(tabs.map(state));
+    result.storage = await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)})`);
+  } catch (error) {
+    result.failure = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown browser audit failure';
+  } finally {
+    if (preferenceMutationStarted) {
+      let currentRecord;
+      try {
+        currentRecord = await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)})`);
+        result.storage ??= currentRecord;
+      } catch (error) { cleanupFailures.push(String(error)); }
+      try {
+        const otherTabBeforeRestore = await state(tabs[1]);
+        if (currentRecord !== undefined) {
+          expectedRestoredEventCount = (otherTabBeforeRestore.storageEvents ?? 0) + (currentRecord === originalPreferenceRecord ? 0 : 1);
+        }
+      } catch (error) { cleanupFailures.push(String(error)); }
+      for (const tab of installed) {
+        await evaluate(tab, 'if (window.__displayPreferenceAudit) window.__displayPreferenceAudit.counting = false')
+          .catch((error) => cleanupFailures.push(String(error)));
+      }
+      try {
+        const preferenceRestored = await evaluate(tabs[0], `(() => {
+          const key = ${JSON.stringify(displayPreferencesKey)};
+          const original = ${JSON.stringify(originalPreferenceRecord)};
+          if (original === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, original);
+          return localStorage.getItem(key) === original;
+        })()`);
+        result.cleanup = { preferenceRestored: preferenceRestored === true, otherTabRestored: false, targetsClosed: false };
+        assert.equal(preferenceRestored, true, 'Cross-tab audit must restore the original preference record');
+      } catch (error) {
+        result.cleanup ??= { preferenceRestored: false, otherTabRestored: false, targetsClosed: false };
+        cleanupFailures.push(String(error));
+      }
+      if (result.cleanup?.preferenceRestored === true) {
+        try {
+          if (expectedRestoredEventCount === undefined) throw new Error('Could not capture the peer tab before restoration');
+          const priorState = result.initialTabs[1];
+          await ready(tabs[1], `(() => { const s=document.querySelectorAll('.display-preference-fields select'); return s[0]?.value === ${JSON.stringify(priorState.theme)} && s[1]?.value === ${JSON.stringify(priorState.motion)} && window.__displayPreferenceAudit.events.length === ${expectedRestoredEventCount}; })()`,
+            'preference tabs restore their initial state');
+          result.cleanup.otherTabRestored = true;
+        } catch (error) { cleanupFailures.push(String(error)); }
+      }
+    } else if (result.sameOrigin && originalPreferenceCaptured) {
+      try {
+        result.cleanup = { preferenceRestored: await evaluate(tabs[0], `localStorage.getItem(${JSON.stringify(displayPreferencesKey)}) === ${JSON.stringify(originalPreferenceRecord)}`),
+          otherTabRestored: true, targetsClosed: false };
+      } catch (error) { cleanupFailures.push(String(error)); }
+    }
+    for (const tab of installed) {
+      await evaluate(tab, `(() => {
+        const audit = window.__displayPreferenceAudit;
+        if (!audit) return true;
+        window.removeEventListener('storage', audit.onStorage);
+        Storage.prototype.setItem = audit.originalSetItem;
+        Storage.prototype.removeItem = audit.originalRemoveItem;
+        Storage.prototype.clear = audit.originalClear;
+        delete window.__displayPreferenceAudit;
+        return true;
+      })()`).catch((error) => cleanupFailures.push(String(error)));
+    }
+    const closed = [];
+    for (const tab of tabs) {
+      try {
+        const response = await cdp.call('Target.closeTarget', { targetId: tab.targetId });
+        closed.push(response?.success === true);
+      } catch (error) { closed.push(false); cleanupFailures.push(String(error)); }
+    }
+    result.cleanup ??= { preferenceRestored: false, otherTabRestored: false, targetsClosed: false };
+    result.cleanup.targetsClosed = closed.length === tabs.length && closed.every(Boolean);
+  }
+  result.cleanupFailures = cleanupFailures;
+  return result;
+}
+
+/** Fails closed unless two real packaged tabs exchange both admitted preference fields once. */
+export function crossTabPreferenceFailures(evidence) {
+  const failures = [];
+  const fail = (message) => failures.push(`cross-tab preferences: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing evidence'); return failures; }
+  if (typeof evidence.failure === 'string' && evidence.failure) fail(`scenario failed: ${evidence.failure}`);
+  if (Array.isArray(evidence.cleanupFailures)) for (const cleanupFailure of evidence.cleanupFailures)
+    fail(`cleanup failed: ${cleanupFailure}`);
+  if (evidence.sameOrigin !== true) fail('tabs did not prove a shared packaged origin');
+  const targets = Array.isArray(evidence.targetIds) ? evidence.targetIds : [];
+  if (targets.length !== 2 || targets.some((value) => typeof value !== 'string' || !value) || new Set(targets).size !== 2)
+    fail(`expected two distinct browser targets, got ${JSON.stringify(targets)}`);
+  const initial = evidence.initial ?? {};
+  if (initial.theme !== 'system' || initial.motion !== 'system') fail(`unexpected initial state ${JSON.stringify(initial)}`);
+  const initialTabs = Array.isArray(evidence.initialTabs) ? evidence.initialTabs : [];
+  if (initialTabs.length !== 2 || initialTabs.some(tab => tab.theme !== 'system' || tab.motion !== 'system'))
+    fail(`both tabs must start with defaults ${JSON.stringify(initialTabs)}`);
+  const steps = Array.isArray(evidence.steps) ? evidence.steps : [];
+  const expected = [
+    { writer: 0, receiver: 1, theme: 'dark', motion: 'system' },
+    { writer: 1, receiver: 0, theme: 'dark', motion: 'reduce' },
+  ];
+  if (steps.length !== expected.length) fail(`expected two update deliveries, got ${steps.length}`);
+  expected.forEach((want, index) => {
+    const step = steps[index] ?? {};
+    const state = step.state ?? {};
+    if (step.writer !== want.writer || step.receiver !== want.receiver || step.key !== displayPreferencesKey)
+      fail(`step ${index + 1} identity ${JSON.stringify(step)}`);
+    if (step.trusted !== true || step.storageArea !== 'localStorage') fail(`step ${index + 1} is not a real localStorage event`);
+    if (state.theme !== want.theme || state.motion !== want.motion || state.dataTheme !== want.theme || state.dataMotion !== want.motion)
+      fail(`step ${index + 1} rendered state ${JSON.stringify(state)}`);
+    if (state.storageEvents !== 1 || state.writes !== index) fail(`step ${index + 1} echoed a remote write ${JSON.stringify(state)}`);
+  });
+  const finalTabs = Array.isArray(evidence.finalTabs) ? evidence.finalTabs : [];
+  if (finalTabs.length !== 2) fail(`expected two final tab states, got ${finalTabs.length}`);
+  for (const [index, tab] of finalTabs.entries()) {
+    if (tab.theme !== 'dark' || tab.motion !== 'reduce' || tab.dataTheme !== 'dark' || tab.dataMotion !== 'reduce')
+      fail(`final tab ${index + 1} diverged ${JSON.stringify(tab)}`);
+    if (tab.storageEvents !== 1 || tab.writes !== 1) fail(`final tab ${index + 1} event/write counts ${JSON.stringify(tab)}`);
+  }
+  if (evidence.storage !== '{"version":1,"theme":"dark","motion":"reduce"}') fail('shared persisted record does not match the final controls');
+  if (evidence.cleanup?.preferenceRestored !== true || evidence.cleanup?.otherTabRestored !== true || evidence.cleanup?.targetsClosed !== true)
+    fail(`original preference state or browser targets were not restored ${JSON.stringify(evidence.cleanup)}`);
+  return failures;
+}
+
 /** Assertions are separate from measurement so the full report is retained when one fails. */
-export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 }, { connectionNotice = true } = {}) {
+export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 },
+  { connectionNotice = true, crossTabPreferences = true } = {}) {
   const failures = [];
   // Expectations come from the qualification contract, not the report's claimed coverage.
   const schemes = ['light', 'dark'];
@@ -793,6 +1010,7 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   }
   // Chrome-DevTools-only evidence; the Playwright cross-engine runner opts out explicitly.
   if (connectionNotice !== false) failures.push(...connectionNoticeFailures(audit.connectionNotice));
+  if (crossTabPreferences !== false) failures.push(...crossTabPreferenceFailures(audit.crossTabPreferences));
   if (audit.unmapped.length) failures.push(`unmapped API reads: ${[...new Set(audit.unmapped)].join(', ')}`);
   // Every packaged script, style, worker and font must resolve under the deployment base.
   const assetBase = `${origin}/nested/assets/ui/`;

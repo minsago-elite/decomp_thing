@@ -19,6 +19,28 @@ export function qualifyUpgrade(previous, current) {
   return { previousRuntime, currentRuntime };
 }
 
+/**
+ * Model a cache/proxy that keeps returning a stale packaged-shell identity while leaving the
+ * current document and executable bundle intact. The browser journey uses this only for the
+ * repeated-reload guard; it is not a substitute for serving a complete historical package.
+ */
+export function rewritePackagedShellBuildIdentity(html, currentBuildId, staleBuildId) {
+  assert.equal(typeof html, 'string', 'Packaged shell HTML must be text');
+  assert.match(currentBuildId, /^[0-9a-f]{64}$/, 'Current build identity must be a canonical SHA-256');
+  assert.match(staleBuildId, /^[0-9a-f]{64}$/, 'Stale build identity must be a canonical SHA-256');
+  assert.notEqual(staleBuildId, currentBuildId, 'Stale shell identity must differ from the current package');
+  const matches = [...html.matchAll(/<meta\b[^>]*>/g)].filter(([tag]) => /(?:^|\s)name="decomp-ui-build"(?:\s|>)/.test(tag));
+  assert.equal(matches.length, 1, 'Packaged shell must contain exactly one UI build identity tag');
+  const [tag] = matches[0];
+  const index = matches[0].index;
+  const content = /(?:^|\s)content="([0-9a-f]{64})"(?:\s|>)/.exec(tag);
+  assert.ok(content, 'Packaged shell UI build tag must contain one canonical identity');
+  assert.equal(content[1], currentBuildId, 'Packaged shell did not contain the expected current build identity');
+  const contentOffset = content.index + content[0].indexOf(content[1]);
+  const rewrittenTag = `${tag.slice(0, contentOffset)}${staleBuildId}${tag.slice(contentOffset + currentBuildId.length)}`;
+  return `${html.slice(0, index)}${rewrittenTag}${html.slice(index + tag.length)}`;
+}
+
 // Manifest entry assets are mandatory even if the browser failed to observe
 // them. Also retain every observed eager JS/CSS dependency as a cache obligation.
 export function qualifyUpgradeCache(previous, assetBaseUrl, evidence) {
