@@ -4,12 +4,13 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { applyAuditProfile, assertAudit, auditProfileEvidence, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, chromiumSupplementalInteractionContexts, engineSupplementalInteractionContexts, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const origin = 'http://127.0.0.1:1';
+const interactionPages = auditFixtures(repo, 'b'.repeat(64)).pages;
 const base = `${origin}/nested/assets/ui/`;
 const manifest = { buildId: 'b'.repeat(64), files: [{ path: 'index.html' }, { path: 'assets/index-a.js' }, { path: 'assets/index-a.css' },
   { path: 'assets/Home-a.js' }, { path: 'assets/highlight.worker-a.js' }, { path: 'assets/mark-a.svg' }] };
@@ -23,7 +24,12 @@ function clean() {
   const fixtures = auditFixtures(repo, manifest.buildId);
   const matrix = fixtures.pages.flatMap(({ name: page }) => auditViewports.flatMap(viewport =>
     ['light', 'dark'].map(scheme => ({ page, viewport: viewport.name, scheme }))));
+  const interactions = auditViewports.flatMap(viewport => fixtures.pages.flatMap(page =>
+    (page.preparation ?? []).map((step, stepIndex) => ({ page: page.name, action: step.action, stepIndex,
+      elapsedMs: 20, reads: [...step.reads], context: viewport.name }))));
+  const timing = timingEvidence();
   return {
+    profile: auditProfileEvidence('reference'),
     layout: matrix.map(identity => ({ ...identity, pageOverflowPx: 0, overflow: [], overflowCount: 0, clippedActions: [], smallTargets: [],
       headingWithinWidth: true, navigation: { narrow: true, toggleShown: true, linksShown: false }, animations: 0,
       scrollRegions: [{ fits: true, scrolls: true, focusable: true, named: true }] })),
@@ -31,9 +37,11 @@ function clean() {
       measured: 40, minimum: 4.8, failures: [], failureCount: 0, unsupported: [], tokens: Object.fromEntries(auditTokenKinds.map(kind => [kind, 1])) })),
     focus: fixtures.pages.flatMap(({ name: page }) => ['light', 'dark'].map(scheme => ({ page, scheme,
       stops: [{ ...stop }, { ...stop, key: 2 }, { ...stop, key: 3 }] }))),
+    interactions,
     unmapped: [],
     workers: { highlightedTokens: 12, targets: [{ url: `${base}assets/highlight.worker-a.js`, responses: [{ url: `${base}assets/highlight.worker-a.js`, status: 200 }] }] },
-    timing: timingEvidence(),
+    timing: { ...timing, interactions: { samples: interactions.length, median: 20, p95: 20 },
+      raw: { ...timing.raw, interactions: interactions.map(entry => entry.elapsedMs) } },
     connectionNotice: connectionEvidence(),
   };
 }
@@ -50,7 +58,8 @@ function connectionEvidence() {
       listenersRemoved: true, accessibilityDisabled: true, failed: [] },
   };
 }
-const verdict = (audit, served = responses) => assertAudit(audit, manifest, served, origin).failures;
+const verdict = (audit, served = responses) => assertAudit(audit, manifest, served, origin, undefined,
+  { interactionPages }).failures;
 
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
@@ -80,7 +89,7 @@ test('rejects absent, empty, partial, duplicate and unexpected measurement matri
   }
   const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = [];
   empty.timing = { coldLoad: { p95: null }, routeFeedback: { p95: null }, routeData: { p95: null } };
-  assert.equal(verdict(empty).length, 6, 'the independently reproduced empty/null report must fail');
+  assert.equal(verdict(empty).length, 7, 'the independently reproduced empty/null report must fail');
 });
 
 test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
@@ -111,10 +120,125 @@ test('requires finite, complete timing samples and consistent summaries before b
   }
   for (const timing of [undefined, null, {}]) {
     const audit = clean(); audit.timing = timing;
-    assert.equal(verdict(audit).length, 3);
+    assert.equal(verdict(audit).length, 4);
   }
   const noRaw = clean(); delete noRaw.timing.raw;
-  assert.equal(verdict(noRaw).length, 3);
+  assert.equal(verdict(noRaw).length, 4);
+});
+
+test('interaction records match each fixture action and are summarized without a new budget', () => {
+  assert.deepEqual(verdict(clean()), []);
+
+  const chromiumAudit = clean();
+  const chromiumContexts = chromiumSupplementalInteractionContexts(interactionPages);
+  for (const { page: pageName, context } of chromiumContexts) {
+    const page = interactionPages.find(entry => entry.name === pageName);
+    for (const [stepIndex, step] of page.preparation.entries()) {
+      chromiumAudit.interactions.push({ page: page.name, action: step.action, stepIndex,
+        elapsedMs: 11, reads: [...step.reads], context });
+      chromiumAudit.timing.raw.interactions.push(11);
+    }
+  }
+  chromiumAudit.timing.interactions.samples = chromiumAudit.interactions.length;
+  assert.deepEqual(assertAudit(chromiumAudit, manifest, responses, origin, undefined, {
+    interactionPages,
+    extraInteractionContexts: chromiumContexts,
+  }).failures, [], 'Chromium focus and operational preparation records are accepted');
+  assert.match(verdict(chromiumAudit).join('\n'), /unexpected action/,
+    'the same supplemental records fail closed without the Chromium context contract');
+
+  const missing = clean();
+  missing.interactions.pop();
+  missing.timing.interactions.samples -= 1;
+  missing.timing.raw.interactions.pop();
+  assert.match(verdict(missing).join('\n'), /interactions: missing action/);
+
+  for (const elapsedMs of [NaN, Infinity, -1]) {
+    const invalid = clean();
+    invalid.interactions[0].elapsedMs = elapsedMs;
+    invalid.timing.raw.interactions[0] = elapsedMs;
+    assert.match(verdict(invalid).join('\n'), /invalid elapsed time/);
+  }
+
+  const mismatchedReads = clean();
+  mismatchedReads.interactions[0].reads = [];
+  assert.match(verdict(mismatchedReads).join('\n'), /reads do not match fixture/);
+
+  for (const field of ['page', 'action', 'context']) {
+    const foreign = clean();
+    foreign.interactions[0][field] = 'unqualified';
+    assert.match(verdict(foreign).join('\n'), /unexpected action/);
+  }
+
+  const duplicate = clean();
+  duplicate.interactions[1] = structuredClone(duplicate.interactions[0]);
+  assert.match(verdict(duplicate).join('\n'), /duplicate action/);
+
+  const mismatchedRaw = clean();
+  mismatchedRaw.timing.raw.interactions[0] += 1;
+  assert.match(verdict(mismatchedRaw).join('\n'), /raw samples do not match interaction records/);
+
+  const sparseRaw = clean();
+  delete sparseRaw.timing.raw.interactions[0];
+  assert.match(verdict(sparseRaw).join('\n'), /interaction timing: invalid evidence/);
+
+  const mismatchedSummary = clean();
+  mismatchedSummary.timing.interactions.p95 += 1;
+  assert.match(verdict(mismatchedSummary).join('\n'), /summary does not match raw samples/);
+
+  const slow = clean();
+  for (const interaction of slow.interactions) interaction.elapsedMs = 10_000;
+  slow.timing.raw.interactions = slow.interactions.map(entry => entry.elapsedMs);
+  slow.timing.interactions = { samples: slow.interactions.length, median: 10_000, p95: 10_000 };
+  assert.deepEqual(verdict(slow), [], 'interaction timings are summarized but have no unapproved threshold');
+
+  const crossEngine = clean();
+  for (const { page: pageName, context } of engineSupplementalInteractionContexts) {
+    const page = interactionPages.find(entry => entry.name === pageName);
+    for (const [stepIndex, step] of page.preparation.entries()) {
+      crossEngine.interactions.push({ page: page.name, action: step.action, stepIndex,
+        elapsedMs: 7, reads: [...step.reads], context });
+      crossEngine.timing.raw.interactions.push(7);
+    }
+  }
+  crossEngine.timing.interactions.samples = crossEngine.interactions.length;
+  assert.deepEqual(assertAudit(crossEngine, manifest, responses, origin, undefined, {
+    interactionPages,
+    extraInteractionContexts: engineSupplementalInteractionContexts,
+  }).failures, []);
+  assert.match(verdict(crossEngine).join('\n'), /unexpected action/);
+});
+
+test('the constrained profile is explicit, applies 4x CPU and 10 Mbit/s, and does not apply reference budgets', async () => {
+  const calls = [];
+  const cdp = { call: async (...args) => { calls.push(args); return {}; } };
+  assert.deepEqual(await applyAuditProfile(cdp, 'target-session', 'reference'), auditProfileEvidence('reference'));
+  assert.deepEqual(calls, [], 'the default reference profile must not alter browser conditions');
+  const profile = await applyAuditProfile(cdp, 'target-session', 'constrained');
+  assert.deepEqual(profile, auditProfileEvidence('constrained'));
+  assert.deepEqual(calls, [
+    ['Emulation.setCPUThrottlingRate', { rate: 4 }, 'target-session'],
+    ['Network.emulateNetworkConditions', { offline: false, latency: 0,
+      downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 }, 'target-session'],
+  ]);
+  await assert.rejects(applyAuditProfile(cdp, 'target-session', 'unknown'), /Unknown packaged audit profile/);
+
+  const missingProfile = clean(); delete missingProfile.profile;
+  assert.match(verdict(missingProfile).join('\n'), /audit profile: report does not match requested reference profile/);
+
+  const constrained = clean();
+  constrained.profile = auditProfileEvidence('constrained');
+  const interactions = constrained.timing.interactions;
+  const rawInteractions = constrained.timing.raw.interactions;
+  constrained.timing = timingEvidence(5000, 500, 501);
+  constrained.timing.interactions = interactions;
+  constrained.timing.raw.interactions = rawInteractions;
+  const verdictForConstrained = assertAudit(constrained, manifest, responses, origin, undefined, {
+    interactionPages, profile: 'constrained',
+  });
+  assert.deepEqual(verdictForConstrained.failures, []);
+  assert.equal(verdictForConstrained.profile, 'constrained');
+  assert.equal(verdictForConstrained.timingBudgetsEnforced, false);
 });
 
 test('reports page-wide horizontal scrolling, clipped actions and small targets', () => {
@@ -164,7 +288,11 @@ test('requires every declared script/style and the worker to resolve under the b
 
 test('enforces the documented loopback timing budgets', () => {
   const audit = clean();
+  const interactions = audit.timing.interactions;
+  const rawInteractions = audit.timing.raw.interactions;
   audit.timing = timingEvidence(1600, 101, 501);
+  audit.timing.interactions = interactions;
+  audit.timing.raw.interactions = rawInteractions;
   assert.equal(verdict(audit).length, 3);
 });
 
@@ -267,11 +395,13 @@ test('preparation refuses missing rendered content or unused read fixtures', asy
 test('qualifyAudit prepares every fresh layout/contrast/focus navigation before measuring', async () => {
   const fixtures = auditFixtures(repo, manifest.buildId);
   let current, page, onRequest;
+  const calls = [];
   const counts = { layout: 0, contrast: 0, focus: 0, navigations: 0 };
   const completed = new Error('stop before worker/browser qualification');
   const cdp = {
     on(event, callback) { if (event === 'Fetch.requestPaused') onRequest = callback; },
     async call(method, params) {
+      calls.push([method, params]);
       if (method === 'Target.setAutoAttach') throw completed;
       if (method === 'Page.navigate') {
         page = fixtures.pages.find(candidate => origin + candidate.path === params.url);
@@ -286,6 +416,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
   };
   await assert.rejects(qualifyAudit({ origin, repo, manifest, evidenceDirectory: repo, cdp,
     makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => {},
+    profile: 'constrained',
     ready: async (tab, expression, label) => current.ready(tab, expression, label),
     evaluate: async (tab, expression) => {
       let kind = null;
@@ -302,6 +433,11 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
     },
   }), error => error === completed);
   assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
+  assert.deepEqual(calls.filter(([method]) => ['Emulation.setCPUThrottlingRate', 'Network.emulateNetworkConditions'].includes(method)), [
+    ['Emulation.setCPUThrottlingRate', { rate: 4 }],
+    ['Network.emulateNetworkConditions', { offline: false, latency: 0,
+      downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 }],
+  ], 'the active audit path applies the constrained profile before navigation');
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
@@ -536,9 +672,10 @@ test('connection notice evidence fails closed when missing, misbound, mis-ordere
   fails(c => { delete c.restoration; }, /cleanup/);
   assert.deepEqual(connectionNoticeFailures(connectionEvidence()), []);
   const engine = clean(); delete engine.connectionNotice;
-  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined, { connectionNotice: false }).failures, [],
+  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined,
+    { connectionNotice: false, interactionPages }).failures, [],
     'only the explicit cross-engine opt-out skips Chrome connection evidence');
-  assert.match(assertAudit(engine, manifest, responses, origin, undefined, {}).failures.join('\n'), /missing evidence/);
+  assert.match(assertAudit(engine, manifest, responses, origin, undefined, { interactionPages }).failures.join('\n'), /missing evidence/);
 });
 
 test('connection accessibility summary keeps only exposed region and status names', () => {

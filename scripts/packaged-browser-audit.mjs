@@ -12,6 +12,34 @@ import { join } from 'node:path';
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
   'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
+export const engineSupplementalInteractionContexts = [
+  ...['attempt overview', 'attempt activity', 'attempt evidence', 'source file'].flatMap(page =>
+    ['focus light', 'focus dark'].map(context => ({ page, context }))),
+  { page: 'attempt overview', context: 'keyboard commands' },
+  { page: 'source file', context: 'keyboard download' },
+  { page: 'source file', context: 'worker/CSP qualification' },
+];
+export const auditProfileEvidence = (profile) => {
+  if (profile === 'reference') return { name: 'reference', cpuThrottlingRate: 1, network: 'browser-default' };
+  if (profile === 'constrained') return { name: 'constrained', cpuThrottlingRate: 4,
+    network: { offline: false, latency: 0, downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 } };
+  throw new Error(`Unknown packaged audit profile: ${profile}`);
+};
+export async function applyAuditProfile(cdp, sessionId, profile) {
+  const evidence = auditProfileEvidence(profile);
+  if (profile === 'constrained') {
+    await cdp.call('Emulation.setCPUThrottlingRate', { rate: evidence.cpuThrottlingRate }, sessionId);
+    await cdp.call('Network.emulateNetworkConditions', evidence.network, sessionId);
+  }
+  return evidence;
+}
+export function chromiumSupplementalInteractionContexts(pages) {
+  return [
+    ...pages.filter(page => (page.preparation ?? []).length > 0).flatMap(({ name }) =>
+      ['focus light', 'focus dark'].map(context => ({ page: name, context }))),
+    { page: 'source file', context: 'worker/CSP qualification' },
+  ];
+}
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
 const longFilename = `${'reconstructed-firmware-image-with-an-unbroken-very-long-name-'.repeat(4)}0123456789abcdef.elf`.slice(0, 255);
@@ -340,7 +368,7 @@ export const auditContentReady = (checks) => `(${JSON.stringify(checks)}).every(
 /** Runs after every fresh navigation, before any layout/contrast/focus measurement. */
 export async function prepareAuditPage({ tab, page, evaluate, ready, fulfilled }) {
   const interactions = [];
-  for (const step of page.preparation ?? []) {
+  for (const [stepIndex, step] of (page.preparation ?? []).entries()) {
     const before = fulfilled.length;
     const started = Date.now();
     const clicked = await evaluate(tab, `(() => {
@@ -353,7 +381,7 @@ export async function prepareAuditPage({ tab, page, evaluate, ready, fulfilled }
     await ready(tab, auditContentReady(step.content), `${page.name}: ${step.action} content`);
     for (const path of step.reads) assert.ok(fulfilled.slice(before).some(entry =>
       entry.method === 'GET' && entry.path === path && entry.status === 200), `${page.name}: ${step.action} did not read ${path}`);
-    interactions.push({ page: page.name, action: step.action, elapsedMs: Date.now() - started, reads: step.reads });
+    interactions.push({ page: page.name, action: step.action, stepIndex, elapsedMs: Date.now() - started, reads: step.reads });
   }
   await ready(tab, auditPageReady(page, true), `${page.name}: populated content`);
   return interactions;
@@ -505,7 +533,8 @@ export function connectionNoticeFailures(evidence) {
   return failures;
 }
 
-export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, cdp, makeTarget, evaluate, ready, capture, delay }) {
+export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, cdp, makeTarget, evaluate, ready, capture, delay,
+  profile = 'reference' }) {
   const waitForValue = async (check, label, timeout = 20000) => {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) { const value = check(); if (value) return value; await delay(75); }
@@ -549,6 +578,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   const theme = async (tab, scheme) => cdp.call('Emulation.setEmulatedMedia', { features: [
     { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
   const tab = await makeTarget();
+  const profileEvidence = await applyAuditProfile(cdp, tab.sessionId, profile);
   await intercept(tab);
   const layout = []; const contrast = []; const focus = [];
   for (const viewport of auditViewports) {
@@ -688,13 +718,17 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     while (Date.now() < deadline) { const value = await check(); if (value) return value; await delay(75); }
     throw new Error(`Timed out waiting for ${label}`);
   } });
+  // Connection qualification restores browser-default network conditions; reapply the requested
+  // measurement profile before taking the cold and route timing samples.
+  await applyAuditProfile(cdp, tab.sessionId, profile);
 
-  // Timing on the reference profile: cold loads use a new target with an empty cache; route
+  // Timing on the selected profile: cold loads use a new target with an empty cache; route
   // changes are in-app link activations measured to heading focus and initial-route metadata.
   // Explicit activity/evidence reads are recorded separately in interactions above.
   const cold = [];
   for (let sample = 0; sample < 20; sample += 1) {
     const probe = await makeTarget();
+    await applyAuditProfile(cdp, probe.sessionId, profile);
     await intercept(probe);
     const started = Date.now();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, probe.sessionId);
@@ -725,14 +759,91 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     })`);
     feedback.push(timing.focused); data.push(timing.populated);
   }
-  return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
+  const interactionTimes = interactions.map(({ elapsedMs }) => elapsedMs);
+  return { profile: profileEvidence, fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
-    timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
+    timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+      interactions: summary(interactionTimes), raw: { cold, feedback, data, interactions: interactionTimes } } };
+}
+
+/** Validate explicit-read records against the trusted fixture preparation contract. */
+export function interactionEvidenceFailures(audit, pages, extraContexts = []) {
+  const failures = [];
+  if (!Array.isArray(pages)) return ['interactions: missing expected fixture contract'];
+  const contextsByPage = new Map(pages.map(page => [page.name, auditViewports.map(viewport => viewport.name)]));
+  for (const extra of extraContexts) {
+    if (!extra || typeof extra.page !== 'string' || typeof extra.context !== 'string' || !contextsByPage.has(extra.page)) {
+      failures.push('interactions: invalid extra context contract');
+      continue;
+    }
+    contextsByPage.get(extra.page).push(extra.context);
+  }
+  const expected = new Map();
+  for (const page of pages) {
+    for (const [stepIndex, step] of (page.preparation ?? []).entries()) {
+      for (const context of contextsByPage.get(page.name) ?? []) {
+        const identity = JSON.stringify([page.name, stepIndex, step.action, context]);
+        if (expected.has(identity)) failures.push(`interactions: duplicate fixture contract ${identity}`);
+        else expected.set(identity, step.reads);
+      }
+    }
+  }
+
+  const records = Array.isArray(audit?.interactions) ? audit.interactions : [];
+  if (!Array.isArray(audit?.interactions)) failures.push('interactions: missing records');
+  const seen = new Set();
+  for (const record of records) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      failures.push('interactions: invalid record');
+      continue;
+    }
+    const identity = JSON.stringify([record.page, record.stepIndex, record.action, record.context]);
+    if (!expected.has(identity)) failures.push(`interactions: unexpected action ${identity}`);
+    else if (seen.has(identity)) failures.push(`interactions: duplicate action ${identity}`);
+    else {
+      seen.add(identity);
+      const expectedReads = expected.get(identity);
+      if (!Array.isArray(record.reads) || record.reads.some(path => typeof path !== 'string') ||
+          JSON.stringify(record.reads) !== JSON.stringify(expectedReads)) {
+        failures.push(`interactions: ${record.page} / ${record.action} (${record.context}) reads do not match fixture`);
+      }
+    }
+    if (!Number.isFinite(record.elapsedMs) || record.elapsedMs < 0) {
+      failures.push(`interactions: ${record.page} / ${record.action} (${record.context}) has invalid elapsed time`);
+    }
+  }
+  for (const identity of expected.keys()) if (!seen.has(identity)) failures.push(`interactions: missing action ${identity}`);
+
+  const timing = audit?.timing?.interactions;
+  const raw = audit?.timing?.raw?.interactions;
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const elapsed = records.map(record => record?.elapsedMs);
+  const expectedSamples = expected.size;
+  if (!timing || timing.samples !== expectedSamples || !validMs(timing.median) || !validMs(timing.p95) ||
+      !Array.isArray(raw) || raw.length !== expectedSamples || !Array.from(raw).every(validMs)) {
+    failures.push(`interaction timing: invalid evidence (requires ${expectedSamples} finite nonnegative samples, median and p95)`);
+  } else {
+    if (raw.length !== elapsed.length || raw.some((value, index) => value !== elapsed[index])) {
+      failures.push('interaction timing: raw samples do not match interaction records');
+    }
+    const calculated = summary(raw);
+    if (timing.median !== calculated.median || timing.p95 !== calculated.p95) {
+      failures.push('interaction timing: summary does not match raw samples');
+    }
+  }
+  return failures;
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
-export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 }, { connectionNotice = true } = {}) {
+export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 },
+  { connectionNotice = true, interactionPages = null, extraInteractionContexts = [], profile = 'reference' } = {}) {
   const failures = [];
+  let expectedProfile;
+  try { expectedProfile = auditProfileEvidence(profile); }
+  catch { failures.push(`audit profile: unknown requested profile ${profile}`); }
+  if (expectedProfile && JSON.stringify(audit?.profile) !== JSON.stringify(expectedProfile)) {
+    failures.push(`audit profile: report does not match requested ${profile} profile`);
+  }
   // Expectations come from the qualification contract, not the report's claimed coverage.
   const schemes = ['light', 'dark'];
   const expected = (viewports) => auditPageNames.flatMap(page => viewports.flatMap(viewport => {
@@ -793,6 +904,7 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   }
   // Chrome-DevTools-only evidence; the Playwright cross-engine runner opts out explicitly.
   if (connectionNotice !== false) failures.push(...connectionNoticeFailures(audit.connectionNotice));
+  failures.push(...interactionEvidenceFailures(audit, interactionPages, extraInteractionContexts));
   if (audit.unmapped.length) failures.push(`unmapped API reads: ${[...new Set(audit.unmapped)].join(', ')}`);
   // Every packaged script, style, worker and font must resolve under the deployment base.
   const assetBase = `${origin}/nested/assets/ui/`;
@@ -826,7 +938,8 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
     const calculated = summary(raw);
     if (timing.median !== calculated.median || timing.p95 !== calculated.p95)
       failures.push(`${label}: timing summary does not match raw samples`);
-    if (timing.p95 > budget) failures.push(`${label} p95 ${timing.p95}ms exceeds ${budget}ms`);
+    if (profile === 'reference' && timing.p95 > budget) failures.push(`${label} p95 ${timing.p95}ms exceeds ${budget}ms`);
   }
-  return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)), budgets };
+  return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)),
+    profile, timingBudgetsEnforced: profile === 'reference', budgets };
 }
