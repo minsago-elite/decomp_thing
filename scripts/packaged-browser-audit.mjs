@@ -15,6 +15,33 @@ export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
 const longFilename = `${'reconstructed-firmware-image-with-an-unbroken-very-long-name-'.repeat(4)}0123456789abcdef.elf`.slice(0, 255);
+export const jobFilterContract = Object.freeze({ label: 'Filename or label search', value: 'audit-filter-match',
+  filteredQuery: 'search=audit-filter-match&limit=50', unfilteredQuery: 'limit=50',
+  filteredRendered: 'audit-filter-match.elf', unfilteredRendered: longFilename,
+  filteredJobId: 'fedcba9876543210fedcba9876543210', unfilteredJobId: '1234567890abcdef1234567890abcdef' });
+
+/** Require an in-viewport layout box plus non-hidden styles through the ancestor chain. */
+export function filterElementVisible(element, computedStyle) {
+  if (!element || typeof element.getClientRects !== 'function') return false;
+  const view = element.ownerDocument?.defaultView;
+  if (!view) return false;
+  const getStyle = typeof computedStyle === 'function' ? computedStyle : node => view.getComputedStyle(node);
+  const rectangles = Array.from(element.getClientRects());
+  if (!rectangles.some(rectangle => rectangle.width > 0 && rectangle.height > 0 && rectangle.right > 0
+    && rectangle.bottom > 0 && rectangle.left < view.innerWidth && rectangle.top < view.innerHeight)) return false;
+  for (let current = element; current; current = current.parentElement) {
+    const style = getStyle(current);
+    if (!style || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    const opacity = Number.parseFloat(style.opacity);
+    if (Number.isFinite(opacity) && opacity <= 0) return false;
+  }
+  return true;
+}
+export function focusFilterSubmitForTiming(document, button) {
+  if (!document || !button || typeof button.focus !== 'function') return false;
+  button.focus();
+  return document.activeElement === button;
+}
 const longLine = `static const unsigned char embedded_table_with_a_long_identifier[] = { ${Array.from({ length: 160 }, (_, index) => `0x${(index * 37 % 256).toString(16).padStart(2, '0')}`).join(', ')} };`;
 const sourceText = ['/* Synthetic audit source: long unbroken lines must stay inside the scroll region. */',
   '#include <stdint.h>', longLine, `const char *path = "${'/very/deep/source/tree'.repeat(24)}";`,
@@ -32,6 +59,11 @@ export function auditFixtures(repo, buildId) {
   job.data.displayFilename = longFilename;
   const jobs = load('jobs-page');
   for (const item of jobs.data.items) if (item.jobId === jobId) item.displayFilename = longFilename;
+  const jobFilter = jobFilterContract;
+  const filteredJobs = structuredClone(jobs);
+  filteredJobs.data.items = [structuredClone(jobs.data.items[0])];
+  Object.assign(filteredJobs.data.items[0], { jobId: jobFilter.filteredJobId, displayFilename: jobFilter.filteredRendered,
+    version: 'job_version_filter_fixture' });
   const run = load('run-completed-unaccepted');
   const runId = run.data.runId;
   const revisionId = 'revision_1';
@@ -81,7 +113,8 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/content$`),
       () => ({ status: 200, bytes, contentType: 'application/octet-stream' })],
     [/^\/recovery$/, () => ok(load('recovery-empty'))],
-    [/^\/jobs$/, () => ok(jobs)],
+    [/^\/jobs$/, (accept, query) => query === jobFilter.filteredQuery ? ok(filteredJobs)
+      : query === null || query === jobFilter.unfilteredQuery ? ok(jobs) : error(404, 'NOT_FOUND')],
     [new RegExp(`^/jobs/${jobId}$`), () => ok(job)],
     [new RegExp(`^/jobs/${jobId}/runs$`), () => ok(load('runs-page'))],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}$`), () => ok(run)],
@@ -142,9 +175,10 @@ export function auditFixtures(repo, buildId) {
   ];
   return {
     pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId,
-    respond(method, pathname, accept) {
+    jobFilter,
+    respond(method, pathname, accept, query = null) {
       const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
-      return route ? route[1](accept) : error(404, 'NOT_FOUND');
+      return route ? route[1](accept, query) : error(404, 'NOT_FOUND');
     },
   };
 }
@@ -524,9 +558,12 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       }
       const pathname = url.pathname.slice('/nested/api/v1'.length);
       const headers = Object.fromEntries(Object.entries(event.request.headers).map(([name, value]) => [name.toLowerCase(), value]));
-      const response = fixtures.respond(event.request.method, pathname, headers.accept ?? '');
+      const query = url.search.slice(1);
+      const response = fixtures.respond(event.request.method, pathname, headers.accept ?? '', pathname === '/jobs' ? query : null);
       if (response.status === 404) unmapped.push(`${event.request.method} ${pathname}`);
       const evidence = { method: event.request.method, path: pathname, status: response.status };
+      if (pathname === '/jobs') Object.assign(evidence, { query,
+        responseJobIds: response.document?.data?.items?.map(item => item.jobId) ?? [], fulfillmentSucceeded: false });
       if (event.request.method === 'POST') Object.assign(evidence, {
         idempotencyKey: headers['idempotency-key'] ?? null, ifMatch: headers['if-match'] ?? null,
         csrf: headers['x-csrf-token'] === fixtures.csrfToken, body: event.request.postData ?? null,
@@ -536,7 +573,9 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       const requestId = response.document?.requestId ?? 'request_audit_download';
       void cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: response.status, body: body.toString('base64'),
         responseHeaders: [{ name: 'Content-Type', value: response.contentType ?? 'application/json; charset=utf-8' }, { name: 'X-Request-ID', value: requestId },
-          { name: 'Cache-Control', value: 'no-store' }] }, tab.sessionId).catch(() => undefined);
+          { name: 'Cache-Control', value: 'no-store' }] }, tab.sessionId).then(() => {
+        if (pathname === '/jobs') evidence.fulfillmentSucceeded = true;
+      }).catch(() => undefined);
     }, tab.sessionId);
     await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/*`, requestStage: 'Request' }] }, tab.sessionId);
   }
@@ -691,7 +730,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
 
   // Timing on the reference profile: cold loads use a new target with an empty cache; route
   // changes are in-app link activations measured to heading focus and initial-route metadata.
-  // Explicit activity/evidence reads are recorded separately in interactions above.
+  // Other explicit activity/evidence reads are recorded separately in interactions above.
   const cold = [];
   for (let sample = 0; sample < 20; sample += 1) {
     const probe = await makeTarget();
@@ -725,13 +764,118 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     })`);
     feedback.push(timing.focused); data.push(timing.populated);
   }
+  await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
+  await ready(tab, populated(fixtures.pages[0]), 'dashboard for job filter timing');
+  // Exercise the documented job-library filter action independently from route changes.
+  // The fixture returns one distinctive row for either query so first visible feedback and
+  // completed rendering can be measured separately without server or data-volume variance.
+  const filterFeedback = []; const filterData = []; const filterSamples = [];
+  for (let sample = 0; sample < 50; sample += 1) {
+    const filtered = sample % 2 === 0;
+    const query = filtered ? fixtures.jobFilter.filteredQuery : fixtures.jobFilter.unfilteredQuery;
+    const expectedJobId = filtered ? fixtures.jobFilter.filteredJobId : fixtures.jobFilter.unfilteredJobId;
+    const pageSearch = filtered ? `?search=${fixtures.jobFilter.value}` : '';
+    const value = filtered ? fixtures.jobFilter.value : '';
+    const rendered = filtered ? fixtures.jobFilter.filteredRendered : fixtures.jobFilter.unfilteredRendered;
+    await evaluate(tab, `(() => {
+      const label = [...document.querySelectorAll('main label')].find(element => element.textContent.trim().startsWith(${JSON.stringify(fixtures.jobFilter.label)}));
+      const input = label?.querySelector('input');
+      if (!input) throw new Error('job filter input is missing');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const before = fulfilled.length;
+    const measured = await evaluate(tab, `(async () => {
+      const expectedPageSearch = ${JSON.stringify(pageSearch)};
+      const expectedRow = ${JSON.stringify(rendered)};
+      const expectedJobId = ${JSON.stringify(expectedJobId)};
+      const section = document.querySelector('main section[aria-labelledby="job-library-title"]');
+      const input = [...(section?.querySelectorAll('label') ?? [])].find(element => element.textContent.trim().startsWith(${JSON.stringify(fixtures.jobFilter.label)}))?.querySelector('input');
+      const button = [...(section?.querySelectorAll('button') ?? [])].find(element => element.textContent.trim() === 'Apply filters');
+      const heading = section?.querySelector('h3');
+      if (!input || !button || !heading) throw new Error('job filter controls are missing');
+      const focusSubmit = ${focusFilterSubmitForTiming.toString()};
+      if (!focusSubmit(document, button)) throw new Error('job filter submit control did not receive focus before timing');
+      const started = performance.now();
+      let feedbackMs = null; let feedbackSignal = null;
+      button.click();
+      return await new Promise((resolve, reject) => {
+        const deadline = started + 10000;
+        const visible = ${filterElementVisible.toString()};
+        let presentationPending = false; let pendingSignal = null; let dataMs = null; let renderedJobId = null;
+        const observe = () => {
+          const status = heading.nextElementSibling?.matches('p[role="status"]') ? heading.nextElementSibling : null;
+          const statusVisible = visible(status);
+          const row = section.querySelector('ul.job-list h4 a');
+          const rowJobId = row ? new URL(row.href, location.href).pathname.split('/').at(-1) : null;
+          const populated = visible(row) && row.textContent.trim() === expectedRow && rowJobId === expectedJobId && document.activeElement === heading
+            && !section.querySelector('[role="alert"]') && statusVisible && status.textContent.includes('1 jobs on this page');
+          const loading = statusVisible && status.textContent.trim() === 'Loading jobs…';
+          return { populated, loading, rowJobId };
+        };
+        const check = () => {
+          if (performance.now() > deadline) { reject(new Error('job filter timing deadline')); return; }
+          const state = observe();
+          const signal = location.search !== expectedPageSearch ? null : state.loading ? 'loading' : state.populated ? 'data' : null;
+          if (!presentationPending && signal !== null) {
+            presentationPending = true;
+            pendingSignal = signal;
+            // requestAnimationFrame runs before paint. Require the same state in the following
+            // frame, proving it survived the intervening presentation before timing it.
+            requestAnimationFrame(() => {
+              const presented = observe();
+              const presentedSignal = location.search !== expectedPageSearch ? null
+                : presented.loading ? 'loading' : presented.populated ? 'data' : null;
+              if (presentedSignal === pendingSignal) {
+                const elapsed = performance.now() - started;
+                if (feedbackMs === null) {
+                  feedbackMs = elapsed;
+                  feedbackSignal = presentedSignal;
+                }
+                if (presentedSignal === 'data' && dataMs === null) {
+                  dataMs = elapsed;
+                  renderedJobId = presented.rowJobId;
+                }
+              }
+              presentationPending = false;
+              pendingSignal = null;
+              if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
+              else if (performance.now() > deadline) reject(new Error('job filter timing deadline'));
+              else requestAnimationFrame(check);
+            });
+            return;
+          }
+          if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
+          else requestAnimationFrame(check);
+        };
+        requestAnimationFrame(check);
+      });
+    })()`);
+    const requests = fulfilled.map((entry, index) => ({ entry, index })).slice(before)
+      .filter(({ entry }) => entry.method === 'GET' && entry.path === '/jobs');
+    const expectedQuery = query;
+    filterFeedback.push(measured.feedbackMs); filterData.push(measured.dataMs);
+    filterSamples.push({ sample, direction: filtered ? 'filtered' : 'cleared', query: expectedQuery, expectedJobId,
+      pageSearch, feedbackMs: measured.feedbackMs, dataMs: measured.dataMs, feedbackSignal: measured.feedbackSignal,
+      renderedJobId: measured.renderedJobId,
+      requestStartIndex: before, requestEndIndex: fulfilled.length,
+      requestIndex: requests.length === 1 ? requests[0].index : null });
+  }
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
-    timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
+    jobFilter: { ...fixtures.jobFilter, samples: filterSamples },
+    timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+      filterFeedback: summary(filterFeedback), filterData: summary(filterData), raw: { cold, feedback, data,
+        filterFeedback, filterData } } };
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
-export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 }, { connectionNotice = true } = {}) {
+export function assertAudit(audit, manifest, responses, origin, budgets = {}, { connectionNotice = true, jobFilter = true } = {}) {
+  const budgetLimits = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500,
+    filterFeedbackP95: 100, filterDataP95: 500, ...budgets };
   const failures = [];
   // Expectations come from the qualification contract, not the report's claimed coverage.
   const schemes = ['light', 'dark'];
@@ -811,9 +955,13 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   const failed = responses.filter((response) => response.url.startsWith(assetBase) && response.status !== 200);
   if (failed.length) failures.push(`asset responses failed: ${JSON.stringify(failed)}`);
   for (const [name, rawName, count, label, budget] of [
-    ['coldLoad', 'cold', 20, 'cold dashboard', budgets.coldLoadP95],
-    ['routeFeedback', 'feedback', 50, 'route feedback', budgets.routeFeedbackP95],
-    ['routeData', 'data', 50, 'route data', budgets.routeDataP95],
+    ['coldLoad', 'cold', 20, 'cold dashboard', budgetLimits.coldLoadP95],
+    ['routeFeedback', 'feedback', 50, 'route feedback', budgetLimits.routeFeedbackP95],
+    ['routeData', 'data', 50, 'route data', budgetLimits.routeDataP95],
+    ...(jobFilter === false ? [] : [
+      ['filterFeedback', 'filterFeedback', 50, 'job filter feedback', budgetLimits.filterFeedbackP95],
+      ['filterData', 'filterData', 50, 'job filter first data', budgetLimits.filterDataP95],
+    ]),
   ]) {
     const timing = audit.timing?.[name];
     const raw = audit.timing?.raw?.[rawName];
@@ -826,7 +974,108 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
     const calculated = summary(raw);
     if (timing.median !== calculated.median || timing.p95 !== calculated.p95)
       failures.push(`${label}: timing summary does not match raw samples`);
-    if (timing.p95 > budget) failures.push(`${label} p95 ${timing.p95}ms exceeds ${budget}ms`);
+    if (!Number.isFinite(budget) || budget < 0) failures.push(`${label}: invalid timing budget ${JSON.stringify(budget)}`);
+    else {
+      const exactP95 = percentile(raw, 0.95);
+      if (exactP95 > budget) failures.push(`${label} p95 ${exactP95}ms exceeds ${budget}ms`);
+    }
   }
-  return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)), budgets };
+  if (jobFilter !== false) failures.push(...jobFilterFailures(audit.jobFilter, audit.timing?.raw, audit.fulfilled));
+  return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)), budgets: budgetLimits };
+}
+
+/** Validate filter sample completeness, workload identity, summaries and request-to-render binding. */
+export function jobFilterFailures(evidence, raw, fulfilled) {
+  const failures = []; const fail = message => failures.push(`job filter: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing workload evidence'); return failures; }
+  for (const key of ['label', 'value', 'filteredQuery', 'unfilteredQuery', 'filteredRendered', 'unfilteredRendered',
+    'filteredJobId', 'unfilteredJobId'])
+    if (evidence[key] !== jobFilterContract[key]) fail(`unexpected ${key} ${JSON.stringify(evidence[key])}`);
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== 50) fail(`requires 50 samples, found ${samples.length}`);
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seenRequests = new Set(); let previousEnd = 0;
+  samples.forEach((sample, index) => {
+    const filtered = index % 2 === 0;
+    const direction = filtered ? 'filtered' : 'cleared';
+    const query = filtered ? jobFilterContract.filteredQuery : jobFilterContract.unfilteredQuery;
+    const expectedJobId = filtered ? jobFilterContract.filteredJobId : jobFilterContract.unfilteredJobId;
+    if (!sample || sample.sample !== index || sample.direction !== direction || sample.query !== query)
+      fail(`sample ${index}: unexpected direction/query binding`);
+    if (sample?.expectedJobId !== expectedJobId || sample?.renderedJobId !== expectedJobId)
+      fail(`sample ${index}: rendered row does not match the expected job identity`);
+    if (!validMs(sample?.feedbackMs) || !validMs(sample?.dataMs) || sample.feedbackMs > sample.dataMs)
+      fail(`sample ${index}: invalid feedback/data timing`);
+    if (sample?.feedbackSignal !== 'loading' && sample?.feedbackSignal !== 'data') fail(`sample ${index}: invalid feedback signal`);
+    if (sample?.feedbackSignal === 'data' && validMs(sample?.feedbackMs) && validMs(sample?.dataMs)
+      && sample.dataMs - sample.feedbackMs > 20) fail(`sample ${index}: data feedback is not coincident with first data`);
+    if (!Number.isInteger(sample?.requestStartIndex) || !Number.isInteger(sample?.requestEndIndex)
+      || sample.requestStartIndex < previousEnd || sample.requestEndIndex < sample.requestStartIndex
+      || !Number.isInteger(sample?.requestIndex) || sample.requestIndex < sample.requestStartIndex
+      || sample.requestIndex >= sample.requestEndIndex || seenRequests.has(sample.requestIndex)) {
+      fail(`sample ${index}: missing or duplicate fulfilled request index`);
+      return;
+    }
+    previousEnd = sample.requestEndIndex;
+    seenRequests.add(sample.requestIndex);
+    const request = fulfilled?.[sample.requestIndex];
+    const expectedRequest = { method: 'GET', path: '/jobs', status: 200, query, fulfillmentSucceeded: true };
+    const pageSearch = filtered ? `?search=${jobFilterContract.value}` : '';
+    if (sample?.pageSearch !== pageSearch) fail(`sample ${index}: unexpected page-search binding`);
+    const requestsInWindow = Array.isArray(fulfilled) ? fulfilled.slice(sample.requestStartIndex, sample.requestEndIndex)
+      .filter(entry => entry?.method === 'GET' && entry?.path === '/jobs') : [];
+    if (!request || Object.keys(expectedRequest).some(key => request[key] !== expectedRequest[key])
+      || !Array.isArray(request.responseJobIds) || request.responseJobIds.length !== 1 || request.responseJobIds[0] !== expectedJobId
+      || requestsInWindow.length !== 1 || requestsInWindow[0] !== request)
+      fail(`sample ${index}: not bound to its fulfilled ${query} request`);
+  });
+  for (const [name, values, label] of [['filterFeedback', raw?.filterFeedback, 'feedback'], ['filterData', raw?.filterData, 'first data']]) {
+    if (!Array.isArray(values) || values.length !== 50 || !values.every(validMs)) {
+      fail(`${label}: requires 50 finite nonnegative raw samples`);
+      continue;
+    }
+    const measured = values;
+    const recorded = samples;
+    const field = name === 'filterFeedback' ? 'feedbackMs' : 'dataMs';
+    if (recorded.length !== 50 || measured.some((value, index) => value !== recorded[index]?.[field]))
+      fail(`${label}: raw samples do not match workload records`);
+  }
+  return failures;
+}
+
+/** Keep the /jobs request windows used by the filter verdict, not every route read. */
+export function compactJobFilterAuditEvidence(audit) {
+  const fulfilled = Array.isArray(audit?.fulfilled) ? audit.fulfilled : null;
+  const samples = Array.isArray(audit?.jobFilter?.samples) ? audit.jobFilter.samples : null;
+  if (!fulfilled || !samples) return audit;
+  const retained = [];
+  const indexes = new Map();
+  const retain = sourceIndex => {
+    if (!indexes.has(sourceIndex)) {
+      indexes.set(sourceIndex, retained.length);
+      retained.push(fulfilled[sourceIndex]);
+    }
+    return indexes.get(sourceIndex);
+  };
+  for (const sample of samples) {
+    const start = sample?.requestStartIndex;
+    const end = sample?.requestEndIndex;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > fulfilled.length) return audit;
+    for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1)
+      if (fulfilled[sourceIndex]?.method === 'GET' && fulfilled[sourceIndex]?.path === '/jobs') retain(sourceIndex);
+  }
+  const compactSamples = samples.map(sample => {
+    const sourceStart = sample.requestStartIndex;
+    const sourceEnd = sample.requestEndIndex;
+    const window = [];
+    for (let sourceIndex = sourceStart; sourceIndex < sourceEnd; sourceIndex += 1) {
+      if (indexes.has(sourceIndex)) window.push(indexes.get(sourceIndex));
+    }
+    const requestIndex = indexes.get(sample.requestIndex) ?? null;
+    return { ...sample, requestStartIndex: window[0] ?? retained.length,
+      requestEndIndex: window.length ? window.at(-1) + 1 : retained.length, requestIndex };
+  });
+  return { ...audit, fulfilled: retained,
+    fulfilledRequestSummary: { observed: fulfilled.length, retained: retained.length, scope: 'job-filter-request-windows' },
+    jobFilter: { ...audit.jobFilter, samples: compactSamples } };
 }

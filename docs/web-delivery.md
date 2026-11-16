@@ -134,18 +134,29 @@ is not evidence/activity readiness: those routes intentionally require explicit 
 each layout/contrast/focus pass, the audit activates the activity/exploration/history/receipt
 controls and requires populated content and successful reads. The source-search form and
 populated results each have independent route coverage, and visible input values and placeholders
-are included in contrast measurements. Each explicit action's
-elapsed time and expected reads are recorded separately in `interactions`, not folded into
-route timing or claimed as a qualified interaction p95. The navigation gate asserts p95 ≤1.5 s
-cold, ≤100 ms feedback and ≤500 ms first route data, the loopback budgets above, and keeps the
-raw navigation samples and median/p95 in `report.json`.
+are included in contrast measurements. The audit also submits the job-library filename filter 50
+times, alternating between `audit-filter-match` and clearing that filter. Each timed action starts
+with focus on the submit button, so a previous sample's focus cannot satisfy the next one. It
+measures local feedback when the applied query and visible status survive a later animation-frame
+observation, then measures first data when the distinctive, in-viewport job row is visible and
+focus reaches the results heading on a later frame. Visibility requires a nonzero viewport box and
+no `display:none`, hidden/collapsed visibility, or zero-opacity ancestor. These are browser
+DOM/layout readiness timings, not a measurement of compositor presentation or pixel scanout. Each
+sample is bound to its exact successfully fulfilled `/jobs` query, the sole job ID in that response,
+and the job ID in the rendered link. The gate compares the raw p95
+against ≤100 ms filter feedback and ≤500 ms first data, using the documented loopback interaction
+budgets. These filter samples are
+reported independently from route timing in `report.json`; other explicit actions remain recorded
+in `interactions` without qualified latency budgets. The report retains raw samples and recomputed
+median/p95 values.
 
 The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
 chunks and worker are real packaged responses. That isolates browser-side navigation and
-rendering work. It is not the constrained 4× CPU / 10 Mbit profile, a fresh browser process per
-cold load, a server-latency measurement or a cross-engine result. A local run on a development
-host measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI
-retains its own numbers.
+rendering work. The filter workload renders one fixture row, so it does not measure scanning a
+large server-side job library. It is not the constrained 4× CPU / 10 Mbit profile, a fresh browser
+process per cold load, a server-latency measurement or a cross-engine filter result. Tabs, dialogs,
+file opening, and the constrained profile remain outside this filter timing qualification. CI
+retains its own raw and summary timing evidence.
 
 Heavy browser work is bounded rather than deferred: source previews read at most one
 64 KiB chunk and mount at most 200 rows, and syntax highlighting is an explicit action that runs
