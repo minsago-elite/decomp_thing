@@ -69,7 +69,12 @@ class OracleSchemasTest {
 
     @Test
     fun `schema resources cannot be selected through paths or unknown names`() {
-        listOf("../full-tree-data-truth", "/full-tree-data-truth", "FullTree", "", "gcc//build-record").forEach {
+        listOf(
+            "../full-tree-data-truth", "/full-tree-data-truth", "FullTree", "", "gcc//build-record",
+            "clang/../build-record", "clang/./build-record", "clang/18..1/build-record",
+            "clang/.18/build-record", "clang/18./build-record",
+            "clang/18.1.3/build-record",
+        ).forEach {
             assertFailsWith<OracleSchemaException>(it) { OracleSchemas.identity(it) }
         }
         assertFailsWith<OracleSchemaException> { OracleSchemas.identity("not-a-schema") }
@@ -123,7 +128,7 @@ class OracleSchemasTest {
             }.map { it.getValue("name").jsonPrimitive.content }.toSet(),
         )
         assertEquals(
-            setOf("llvm-behavior-native-sandbox-policy-v2"),
+            setOf("clang/18.1.3/build-record", "llvm-behavior-native-sandbox-policy-v2"),
             entries.filter {
                 it.getValue("registration").jsonPrimitive.content == "separate-non-authoritative-validator"
             }.map { it.getValue("name").jsonPrimitive.content }.toSet(),
