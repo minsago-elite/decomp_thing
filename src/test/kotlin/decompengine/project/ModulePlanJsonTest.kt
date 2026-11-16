@@ -6,6 +6,11 @@ import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class ModulePlanJsonTest {
     private val layout = GeneratedCMakeReconstructionProfile.descriptor.layout
@@ -15,6 +20,52 @@ class ModulePlanJsonTest {
     ), globals = listOf(RecoveredGlobal("g", "counter", 3u, "int")),
         types = listOf(RecoveredType("t", "typedef int number;")))
     private val plan = DeterministicModulePlanner(1, layout).plan(model)
+
+    @Test
+    fun `module plan renderer preserves canonical bytes while escaping directly`() {
+        val input = ModulePlan(
+            modules = listOf(
+                PlannedModule(
+                    id = "z\"ed",
+                    sourcePath = "src\\\n\t\u0001é.c",
+                    headerPath = "include/core.h",
+                    functionIds = listOf("fn\"1", "fn\\2"),
+                    globalIds = emptyList(),
+                    typeIds = listOf("τ"),
+                    boundaryEvidence = listOf("line\nnext", "tab\tcarriage\r"),
+                ),
+                PlannedModule("a", "a.c", "a.h", emptyList(), listOf("g0"), emptyList(), emptyList()),
+            ),
+            dependencyCycles = listOf(listOf("a", "z\"ed")),
+        )
+
+        val expected = """
+{
+  "schemaVersion": 2,
+  "modules": [    {
+      "id": "a",
+      "sourcePath": "a.c",
+      "headerPath": "a.h",
+      "functionIds": [],
+      "globalIds": ["g0"],
+      "typeIds": [],
+      "boundaryEvidence": []
+    },    {
+      "id": "z\"ed",
+      "sourcePath": "src\\\n\t\u0001é.c",
+      "headerPath": "include/core.h",
+      "functionIds": ["fn\"1", "fn\\2"],
+      "globalIds": [],
+      "typeIds": ["τ"],
+      "boundaryEvidence": ["line\nnext", "tab\tcarriage\r"]
+    }
+  ],
+  "dependencyCycles": [["a","z\"ed"]]
+}
+""".trimIndent() + "\n"
+
+        assertEquals(expected, input.toJson())
+    }
 
     @Test
     fun `canonical planner output preserves ownership cycles and escaped evidence`() {
@@ -43,6 +94,42 @@ class ModulePlanJsonTest {
         val bytes = text.toByteArray()
         assertFails { ModulePlanJson.readCanonical(bytes, bytes.size - 1) }
         assertFails { ModulePlanJson.readCanonical(bytes + byteArrayOf(0xc0.toByte()), 1024 * 1024) }
+    }
+
+    @Test
+    fun `streaming plan reader matches the previous DOM reader on canonical and malformed inputs`() {
+        val rich = plan.copy(modules = plan.modules.map { module ->
+            module.copy(boundaryEvidence = listOf("plain", "café", "supplementary 😀", "control\t\n\u0001", "quoted \" and \\"))
+        })
+        val canonical = rich.toJson()
+        val validBytes = canonical.toByteArray(Charsets.UTF_8)
+        val invalid = listOf(
+            canonical + " ",
+            canonical.replace("\"schemaVersion\": 2", "\"schemaVersion\": \"2\""),
+            canonical.replace("\"schemaVersion\": 2", "\"schemaVersion\": 2.0"),
+            canonical.replace("\"schemaVersion\": 2", "\"schemaVersion\": 2, \"schemaVersion\": 2"),
+            canonical.replace("\"schemaVersion\"", "\"schema\\u0056ersion\""),
+            "{\"schemaVersion\":2}",
+            canonical.replace("\"schemaVersion\": 2,", "\"schemaVersion\": 2, \"unknown\": 0,"),
+            canonical.replace("\"id\": ", "\"id\": null, \"unused\": "),
+            canonical.replace("\"functionIds\": [", "\"functionIds\": [["),
+            canonical.replace("\"plain\"", "\"" + "\\" + "uD800" + "\""),
+            canonical.replace("\"plain\"", "\"" + "\\" + "uDC00" + "\""),
+            "{\"schemaVersion\":2,\"modules\":[],\"dependencyCycles\":[[[[]]]]}",
+            canonical.dropLast(2),
+        )
+        val cases = listOf(validBytes) + invalid.map { it.toByteArray(Charsets.UTF_8) } +
+            listOf(validBytes + byteArrayOf(0xc0.toByte()), byteArrayOf(0xff.toByte()))
+
+        cases.forEachIndexed { index, bytes ->
+            val maximum = 16 * 1024 * 1024
+            val expected = runCatching { legacyReadCanonical(bytes, maximum) }
+            val actual = runCatching { ModulePlanJson.readCanonical(bytes, maximum) }
+            assertEquals(expected.isSuccess, actual.isSuccess, "acceptance mismatch for differential case $index")
+            if (expected.isSuccess) assertEquals(expected.getOrThrow(), actual.getOrThrow())
+        }
+        assertEquals(rich, ModulePlanJson.readCanonical(validBytes, validBytes.size))
+        assertFailsWith<IllegalArgumentException> { ModulePlanJson.readCanonical(validBytes, validBytes.size - 1) }
     }
 
     @Test
@@ -123,6 +210,45 @@ class ModulePlanJsonTest {
         assertEquals(before, plan.toJson()); assertEquals(functions, model.functions)
         ModulePlanJson.requireExactOwnership(plan, model, layout, 1)
     }
+
+    private fun legacyReadCanonical(bytes: ByteArray, maximumBytes: Int): ModulePlan {
+        require(maximumBytes in 1..512 * 1024 * 1024 && bytes.size in 1..maximumBytes)
+        val text = bytes.toString(Charsets.UTF_8)
+        require(bytes.contentEquals(text.toByteArray(Charsets.UTF_8)))
+        var depth = 0
+        var quoted = false
+        var escaped = false
+        text.forEach { char ->
+            if (quoted) {
+                if (escaped) escaped = false
+                else if (char == '\\') escaped = true
+                else if (char == '"') quoted = false
+            } else when (char) {
+                '"' -> quoted = true
+                '{', '[' -> { depth++; require(depth <= 4) }
+                '}', ']' -> { depth--; require(depth >= 0) }
+            }
+        }
+        require(depth == 0 && !quoted)
+        val root = Json.parseToJsonElement(text).jsonObject
+        val version = root.getValue("schemaVersion").jsonPrimitive
+        require(!version.isString && version.content == "2")
+        val parsed = ModulePlan(
+            modules = root.getValue("modules").jsonArray.map { element ->
+                val entry = element.jsonObject
+                PlannedModule(entry.getValue("id").legacyString(), entry.getValue("sourcePath").legacyString(),
+                    entry.getValue("headerPath").legacyString(), entry.getValue("functionIds").legacyStrings(),
+                    entry.getValue("globalIds").legacyStrings(), entry.getValue("typeIds").legacyStrings(),
+                    entry.getValue("boundaryEvidence").legacyStrings())
+            },
+            dependencyCycles = root.getValue("dependencyCycles").jsonArray.map { it.legacyStrings() },
+        )
+        require(bytes.contentEquals(parsed.toJson().toByteArray(Charsets.UTF_8)))
+        return parsed
+    }
+
+    private fun JsonElement.legacyString(): String = jsonPrimitive.let { require(it.isString); it.content }
+    private fun JsonElement.legacyStrings(): List<String> = jsonArray.map { it.legacyString() }
 
     @Test
     fun `reject invalid cycle references and function population ceiling`() {

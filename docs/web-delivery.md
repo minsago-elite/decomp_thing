@@ -105,6 +105,24 @@ round-trip latency. Record 20 cold loads and 50 interactions per workload; repor
 median/p95 and failures. Empty browser cache/storage and a fresh process define
 cold load; warm data is measured separately. Do not hide failing runs as outliers.
 
+For function-inventory qualification (#536), each cold sample uses a new packaged
+JVM and a new Chrome process/profile. The 100,000-function fixture is seeded before
+JVM launch. The normal bootstrap handoff is exchanged before timing; the timed
+interval remains the inventory action through the first 100 rendered rows. This
+measures cold application caches and browser cache/storage, not a cold operating
+system page cache. The 20 per-profile samples retain every child report and gate the
+nearest-rank p95, raw inventory failures, browser heap and incremental JVM RSS. The
+separate full structure journey still supplies the 50 interactions and navigation
+evidence for each profile.
+
+Structure reports bind the files actually read by the qualification driver to Git
+blobs in the declared source commit. Pull-request attribution is accepted only
+when that commit is the declared head or a merge commit whose parents are the
+declared base and head; push runs bind to the checked-out commit and event. The
+browser must be the installed Chrome whose executable digest, version and
+installation lock match the reviewed browser lock. Cold-sample aggregation rejects
+missing or inconsistent source, browser, archive or application identities.
+
 | Metric | Initial acceptance budget and measurement | Fixture / owner |
 | --- | --- | --- |
 | Entry payload | ≤150 KiB gzip-9 combined HTML + initial JS/CSS; ≤500 KiB gzip-9 all UI resources excluding private maps; sum exact shipped bytes and identify lazy chunks | Asset manifest; #151 #157 #219 |

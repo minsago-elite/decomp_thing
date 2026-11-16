@@ -152,6 +152,8 @@ class ProjectLayoutProfile(
 ) {
     val declarations: List<ProjectFileDeclaration>
     private val declarationsById: Map<String, ProjectFileDeclaration>
+    private val declarationsByFirstPathComponent: Map<String, List<ProjectFileDeclaration>>
+    private val declarationsWithDynamicFirstPathComponent: List<ProjectFileDeclaration>
 
     init {
         require(schemaVersion == CURRENT_SCHEMA_VERSION) {
@@ -167,6 +169,17 @@ class ProjectLayoutProfile(
         }
         this.declarations = Collections.unmodifiableList(sorted)
         declarationsById = Collections.unmodifiableMap(sorted.associateByTo(TreeMap(), ProjectFileDeclaration::id))
+        val byFirstComponent = TreeMap<String, MutableList<ProjectFileDeclaration>>()
+        val dynamicFirstComponent = ArrayList<ProjectFileDeclaration>()
+        sorted.forEach { declaration ->
+            val first = declaration.pathTemplate.substringBefore('/')
+            if ('{' in first) dynamicFirstComponent += declaration
+            else byFirstComponent.getOrPut(first) { ArrayList() } += declaration
+        }
+        declarationsByFirstPathComponent = Collections.unmodifiableMap(byFirstComponent.mapValues { (_, values) ->
+            Collections.unmodifiableList(values)
+        })
+        declarationsWithDynamicFirstPathComponent = Collections.unmodifiableList(dynamicFirstComponent)
     }
 
     fun declaration(id: String): ProjectFileDeclaration =
@@ -174,12 +187,25 @@ class ProjectLayoutProfile(
 
     fun declarationForPath(path: String): ProjectFileDeclaration {
         val normalized = requireNormalizedProjectPath(path, "project path")
-        val matching = declarations.filter { it.matches(normalized) }
-        require(matching.size == 1) {
-            if (matching.isEmpty()) "project path is not declared by the layout profile: $normalized"
-            else "project path matches multiple layout declarations: $normalized"
+        return declarationForValidatedPath(normalized)
+    }
+
+    /** Resolve a path already validated by its owning record, avoiding a duplicate normalization pass. */
+    internal fun declarationForValidatedPath(path: String): ProjectFileDeclaration {
+        var matching: ProjectFileDeclaration? = null
+        fun consider(declaration: ProjectFileDeclaration) {
+            if (!declaration.matches(path)) return
+            require(matching == null) { "project path matches multiple layout declarations: $path" }
+            matching = declaration
         }
-        return matching.single()
+        val firstPathComponentEnd = path.indexOf('/').let { if (it < 0) path.length else it }
+        declarationsByFirstPathComponent.forEach { (first, declarations) ->
+            if (first.length == firstPathComponentEnd && path.regionMatches(0, first, 0, firstPathComponentEnd)) {
+                declarations.forEach(::consider)
+            }
+        }
+        declarationsWithDynamicFirstPathComponent.forEach(::consider)
+        return matching ?: throw IllegalArgumentException("project path is not declared by the layout profile: $path")
     }
 
     internal fun canonicalJson(): String = buildString {
@@ -356,10 +382,34 @@ internal fun requireNormalizedProjectPath(value: String, subject: String): Strin
         value.isNotBlank() && value.length <= 4_096 && !value.startsWith('/') && '\\' !in value &&
             value.none { it.code < 0x20 || it.code == 0x7f || it == ':' },
     ) { "$subject is not a normalized relative path: $value" }
-    require(value.split('/').none { it.isBlank() || it == "." || it == ".." || it.length > 255 }) {
-        "$subject is not a normalized relative path: $value"
+    var componentStart = 0
+    var componentHasNonWhitespace = false
+    for (index in value.indices) {
+        val character = value[index]
+        if (character == '/') {
+            requireNormalizedProjectPathComponent(value, componentStart, index, componentHasNonWhitespace, subject)
+            componentStart = index + 1
+            componentHasNonWhitespace = false
+        } else if (!character.isWhitespace()) {
+            componentHasNonWhitespace = true
+        }
     }
+    requireNormalizedProjectPathComponent(value, componentStart, value.length, componentHasNonWhitespace, subject)
     return value
+}
+
+private fun requireNormalizedProjectPathComponent(
+    value: String,
+    start: Int,
+    end: Int,
+    hasNonWhitespace: Boolean,
+    subject: String,
+) {
+    require(
+        hasNonWhitespace && end - start <= 255 &&
+            !(end - start == 1 && value[start] == '.') &&
+            !(end - start == 2 && value[start] == '.' && value[start + 1] == '.'),
+    ) { "$subject is not a normalized relative path: $value" }
 }
 
 private fun compileTemplateMatcher(template: String): Regex {

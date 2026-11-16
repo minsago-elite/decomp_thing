@@ -733,6 +733,49 @@ class WebJobServiceTest {
         }
     }
 
+    @Test fun `listings remain available across retained progress cleanup`() {
+        for (api in listOf(false, true)) for (mode in listOf("recent", "active", "pinned", "protected", "invalid-duration")) withStore { store, _ ->
+        val job = store.createFromUpload("retained.elf", elfFixture())
+        lateinit var owner: WorkflowAttemptStore
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor,
+            attemptStoreFactory = { path -> WorkflowAttemptStore.open(path).also { owner = it } }).use { service ->
+            service.initializeExistingStorage()
+            val version = (service.inspectDurableJob(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot.version
+            val queued = owner.create(job.id, version, decompengine.jobs.NewWorkflowAttempt(
+                decompengine.jobs.WorkflowKind.EXPLORE,
+                decompengine.jobs.WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
+            val running = owner.transition(job.id, queued.runId, queued.version, decompengine.jobs.WorkflowTransition.Start).attempt
+            val finished = if (mode == "active") running else owner.transition(job.id, running.runId, running.version,
+                decompengine.jobs.WorkflowTransition.Finish(decompengine.jobs.WorkflowRunState.COMPLETED,
+                    decompengine.jobs.WorkflowTerminalReason.NO_CHANGES)).attempt
+            if (mode == "pinned") owner.setProgressRetentionPinned(job.id, finished.runId, finished.version, true)
+            var cleanups = 0
+            service.listingReadObserver = { relative ->
+                if (relative == "${job.id}/workflow-state.json") {
+                    if (mode == "invalid-duration") assertFailsWith<decompengine.jobs.WorkflowStoreException> {
+                        owner.expireProgressJournal(job.id, finished.runId, false, java.time.Duration.ZERO)
+                    } else assertEquals(decompengine.jobs.ProgressRetentionResult.RETAINED,
+                        owner.expireProgressJournal(job.id, finished.runId, mode == "protected"))
+                    cleanups++
+                }
+            }
+            if (mode == "invalid-duration") {
+                if (api) assertEquals("JOB_RECORD_UNAVAILABLE", assertFailsWith<WebJobServiceException> {
+                    service.collectionRecords().toList()
+                }.code) else {
+                    val rows = service.dashboardRows()
+                    assertTrue(rows.jobs.isEmpty())
+                    assertEquals(listOf(job.id), rows.unavailable.map { it.jobId })
+                    assertEquals(listOf("JOB_RECORD_UNAVAILABLE"), rows.unavailable.map { it.code })
+                }
+            } else if (api) assertEquals(1, service.collectionRecords().count())
+            else assertEquals(listOf(job.id), service.dashboardRows().jobs.map { it.id })
+            assertEquals(1, cleanups)
+        }
+    }
+
+    }
+
     @Test fun `listings refuse durable commands crossing either workflow or presentation metadata capture`() {
         for (api in listOf(false, true)) for (lastRead in listOf(false, true)) withStore { store, _ ->
             val job = store.createFromUpload("durable.elf", elfFixture())

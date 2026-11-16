@@ -11,10 +11,23 @@ import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
+const structureRoute = vi.hoisted(() => ({ load: vi.fn(() => Promise.resolve({ default: () => null })) }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+vi.mock('../src/routes/loadStructureRoute', () => ({ loadStructureRoute: structureRoute.load }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/run-completed-unaccepted.json'), 'utf8')) as { data: Run }).data;
 const bootstrap = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap }).data;
-beforeEach(() => { transport.get.mockReset(); });
+beforeEach(() => { transport.get.mockReset(); structureRoute.load.mockClear(); });
+
+it('preloads the lazy structure route once a result revision is available', async () => {
+  const auth = await session();
+  transport.get.mockResolvedValue({ data: sample });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}/evidence`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'Browse recovered functions' });
+    await waitFor(() => expect(structureRoute.load).toHaveBeenCalledOnce());
+  } finally { auth.dispose(); }
+});
 
 it('wires explicit validation discovery into the attempt and discards its private data on sign out', async () => {
   const auth = await session();

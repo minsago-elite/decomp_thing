@@ -685,6 +685,38 @@ internal object LinuxFilesystemSyscalls {
         }
     }
 
+    /** Content is present only when the observed EOF agrees with the admitted size. */
+    data class KnownSizeRead(val bytes: ByteArray?, val observedCount: Long)
+
+    fun readKnownSize(
+        descriptor: LinuxDescriptor,
+        expectedBytes: Int,
+        maximumBytes: Int,
+        cancellationCheck: () -> Unit,
+    ): KnownSizeRead {
+        require(expectedBytes >= 0 && expectedBytes <= maximumBytes)
+        cancellationCheck()
+        val bytes = ByteArray(expectedBytes)
+        var total = 0L
+        Memory(64L * 1024).use { buffer ->
+            while (true) {
+                cancellationCheck()
+                val count = retryOnInterrupted("read authorized filesystem entry") {
+                    libc.read(descriptor.fd, buffer,
+                        NativeLong(boundedDescriptorReadRequest(maximumBytes, total, 64 * 1024))).toLong()
+                }
+                if (count == 0L) break
+                if (count < 0L) throw syscallFailure("read authorized filesystem entry")
+                val offset = total
+                total += count
+                if (total > maximumBytes.toLong()) throw LinuxResourceLimitException()
+                val retained = minOf(count, (expectedBytes.toLong() - offset).coerceAtLeast(0)).toInt()
+                if (retained > 0) buffer.read(0, bytes, offset.toInt(), retained)
+            }
+        }
+        return KnownSizeRead(if (total == expectedBytes.toLong()) bytes else null, total)
+    }
+
     fun read(descriptor: LinuxDescriptor, maximumBytes: Int, cancellationCheck: () -> Unit): ByteArray {
         val output = ByteArrayOutputStream(minOf(maximumBytes, BUFFER_BYTES))
         val buffer = Memory(BUFFER_BYTES.toLong())

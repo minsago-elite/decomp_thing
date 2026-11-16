@@ -8,6 +8,8 @@ import { useLocation } from 'preact-iso/router';
 import type { Run as RunData } from '../api/generated';
 import { withApiFailureReference } from '../api/client';
 import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
+import { structureListPath } from '../structure/paths';
+import { structureTitles as structureCopy } from '../copy/structureTitles';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
@@ -25,6 +27,7 @@ import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
+import { loadStructureRoute } from './loadStructureRoute';
 
 function Details({ jobId, runId, basePath, session, view, navigation }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
@@ -37,6 +40,9 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
   const run = observation?.value;
   const [refresh, setRefresh] = useState(0);
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
+  useEffect(() => {
+    if (run?.resultRevisionId) void loadStructureRoute().catch(() => undefined);
+  }, [run?.resultRevisionId]);
   useEffect(() => {
     const controller = new AbortController();
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
@@ -131,8 +137,11 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
           <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
         </PanelBoundary>
       </>}
-      {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
-        : <p>{sourceCopy.noRevision}</p>}
+      {run.resultRevisionId ? <ul class="job-actions" aria-label={structureCopy.revisionViews}>
+        <li><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></li>
+        <li><a href={structureListPath(basePath, { jobId, runId, revisionId: run.resultRevisionId }, 'functions')}>{structureCopy.browseFunctions}</a></li>
+        <li><a href={structureListPath(basePath, { jobId, runId, revisionId: run.resultRevisionId }, 'modules')}>{structureCopy.browseModules}</a></li>
+      </ul> : <p>{sourceCopy.noRevision}</p>}
     </>}
   </>;
 }

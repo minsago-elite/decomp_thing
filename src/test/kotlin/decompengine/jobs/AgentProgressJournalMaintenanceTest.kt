@@ -182,6 +182,34 @@ class AgentProgressJournalMaintenanceTest {
         assertContentEquals(original, Files.readAllBytes(other))
     }
 
+    @Test fun `filesystem retention outcomes and failures invalidate listing captures`() {
+        for (mode in listOf("expired", "later-retained", "absent", "writer", "invalid-duration") +
+            ProgressRetentionFaultPoint.entries.map { it.name }) Fixture().use { f ->
+            if (mode == "later-retained") assertEquals(ProgressRetentionResult.EXPIRED, f.expire())
+            if (mode == "absent") Files.delete(f.journal)
+            val writer = if (mode == "writer") AgentProgressJournal(f.directory, "explore") else null
+            try {
+                val failure = assertFailsWith<WorkflowStoreException>(mode) {
+                    f.owner.inspectForListing(f.job, { relative, _ -> Files.readAllBytes(f.root.resolve(relative)) }) {
+                        when (mode) {
+                            "expired" -> assertEquals(ProgressRetentionResult.EXPIRED, f.expire())
+                            "later-retained" -> assertEquals(ProgressRetentionResult.RETAINED, f.expire())
+                            "absent" -> assertEquals(ProgressRetentionResult.NO_JOURNAL, f.expire())
+                            "writer" -> assertEquals(ProgressRetentionResult.WRITER_ACTIVE, f.expire())
+                            "invalid-duration" -> assertFailsWith<WorkflowStoreException> {
+                                f.owner.expireProgressJournal(f.job, f.run.runId, false, Duration.ZERO)
+                            }
+                            else -> assertFailsWith<SimulatedCrash> {
+                                f.expire { if (it.name == mode) throw SimulatedCrash() }
+                            }
+                        }
+                    }
+                }
+                assertEquals("JOB_RECORD_UNAVAILABLE", failure.code, mode)
+            } finally { writer?.close() }
+        }
+    }
+
     private class SimulatedCrash : Error("synthetic interruption")
 }
 

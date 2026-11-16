@@ -13,6 +13,7 @@ const files = [
   'frontend/src/api/generated.ts',
   'frontend/src/api/generated-schema.ts',
   'frontend/src/api/generated-schema-lazy.ts',
+  'frontend/src/api/generated-schema-structure.ts'
 ];
 
 function check(root, expectedStatus = 0) {
@@ -40,7 +41,7 @@ async function expectedFailure(root, scenario, message) {
   })}`);
 }
 
-test('the generated API drift gate rejects schema and both TypeScript output changes', async () => {
+test('the generated API drift gate rejects schema and all TypeScript output changes', async () => {
   const parent = join(sourceRoot, 'build');
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, 'decomp-api-drift-test-'));
@@ -56,7 +57,7 @@ test('the generated API drift gate rejects schema and both TypeScript output cha
     const schemaModule = join(root, 'frontend/src/api/generated-schema.ts');
     const source = join(root, 'contracts/web/v1/contract.schema.json');
 
-    for (const path of [types, schemaModule]) {
+    for (const path of [types, schemaModule, join(root, 'frontend/src/api/generated-schema-lazy.ts'), join(root, 'frontend/src/api/generated-schema-structure.ts')]) {
       const original = await readFile(path);
       await writeFile(path, Buffer.concat([original, Buffer.from('\n// unintended drift\n')]));
       await expectedFailure(root, path === types ? 'changed-typescript-types' : 'changed-typescript-schema', /Generated contract drift:/);

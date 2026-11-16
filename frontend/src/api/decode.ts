@@ -3,7 +3,7 @@ import type { ContractDocument, RequestData, RequestKind, ResponseKind, Response
 import { ApiClientError } from './errors';
 import { MAX_JSON_BYTES, parseBoundedJson } from './json';
 import { checkSemantics } from './semantics';
-import { isObject, validateSchema } from './validate';
+import { isObject, registerDefinitions, validateSchema } from './validate';
 import type { Schema } from './schema-types';
 
 const variants = new Map<string, Schema>();
@@ -13,13 +13,30 @@ for (const schema of contractSchema.oneOf ?? []) {
 }
 variants.set('event', { $ref: '#/definitions/event' });
 
-/** Lazily loaded routes add their generated contract extension once, before decoding those kinds. */
-export function registerContractExtension(extension: Schema) {
-  Object.assign(contractSchema.definitions ??= {}, extension.definitions);
+const groupChecks = new Map<string, (document: ContractDocument) => void>();
+
+/** Lazily loaded routes add their generated contract extension before decoding those kinds. */
+export function registerContractExtension(
+  extension: Schema,
+  check?: (document: ContractDocument) => void,
+): void {
+  registerDefinitions(extension.definitions ?? {});
   for (const schema of extension.oneOf ?? []) {
     const kind = schema.properties?.kind?.const;
-    if (typeof kind === 'string') variants.set(kind, schema);
+    const existing = typeof kind === 'string' ? variants.get(kind) : undefined;
+    if (typeof kind !== 'string' || (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(schema))) {
+      throw new ApiClientError('unsupported_contract');
+    }
+    const existingCheck = groupChecks.get(kind);
+    if (check && existingCheck !== undefined && existingCheck !== check) throw new ApiClientError('unsupported_contract');
+    variants.set(kind, schema);
+    if (check) groupChecks.set(kind, check);
   }
+}
+
+/** Admit a generated route group and its semantic checks while retaining the shared extension path. */
+export function registerContractGroup(group: Schema, check: (document: ContractDocument) => void): void {
+  registerContractExtension(group, check);
 }
 
 /** Producer mode checks shared closed fixtures; response mode projects additive v1 fields. */
@@ -35,6 +52,7 @@ export function decodeContract(text: string, options: { mode?: 'producer' | 'res
   const additive = options.mode !== 'producer' && !value.kind.endsWith('Request');
   const document = validateSchema(value, schema, additive) as ContractDocument;
   checkSemantics(document, options.basePath ?? '/');
+  groupChecks.get(document.kind)?.(document);
   return document;
 }
 
