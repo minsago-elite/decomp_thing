@@ -4,13 +4,24 @@ import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.JobStore
+import decompengine.jobs.JobOrganization
 import decompengine.jobs.AtomicUploadPublisher
 import decompengine.jobs.JobStoreDirectories
 import decompengine.jobs.WorkflowAttemptStore
 import decompengine.jobs.WorkflowStoreException
+import decompengine.jobs.WorkflowKind
+import decompengine.jobs.WorkflowExecutionLimits
+import decompengine.jobs.NewWorkflowAttempt
+import decompengine.jobs.WorkflowTransition
+import decompengine.jobs.WorkflowRunState
+import decompengine.jobs.WorkflowTerminalReason
+import decompengine.jobs.WorkflowCancellationActor
 import decompengine.jobs.forceJobStoreDirectory
 import decompengine.jobs.prepareJobStoreDirectories
 import decompengine.jobs.elfFixture
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -25,10 +36,226 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebJobServiceTest {
+    @Test fun `startup recovery produces a one-shot cache seed only when it performs no mutation`() = withStore { store, _ ->
+        val completedJob = store.createFromUpload("fixture.elf", elfFixture())
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            // The timestamp guard is tested independently by dashboardStorageStamp; make this
+            // observer-handoff test deterministic without sleeping for filesystem timestamp ticks.
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage()
+            val seed = assertNotNull(service.takeDashboardCollectionSeed())
+            assertEquals(listOf(completedJob.id), seed.rows.map { it.jobId })
+            assertEquals(seed.rows.sumOf { it.bytes.toLong() } + seed.stamp.retainedBytes, seed.bytes)
+            assertEquals(null, service.takeDashboardCollectionSeed(), "Startup observations may be handed off once")
+        } finally { service.close() }
+    }
+
+    @Test fun `startup seed preserves the workflow and organization presentation`() = withStore { store, root ->
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        val completed = WorkflowAttemptStore.open(root).use { attempts ->
+            val current = attempts.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available
+            val queued = attempts.create(job.id, current.snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, WorkflowExecutionLimits(60_000uL, 10_000uL, 1024uL, 10uL))).attempt
+            val running = attempts.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            attempts.transition(job.id, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED)).attempt
+        }
+        Files.writeString(root.resolve(job.id).resolve(JobOrganization.FILE_NAME),
+            JobOrganization("release review", archived = true).toJson().toString())
+
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage()
+            val seed = assertNotNull(service.takeDashboardCollectionSeed())
+            val item = seed.rows.single().item
+            assertEquals(webJob(service.presentation(job.id)), item,
+                "The startup seed must match the ordinary presentation projection")
+            assertEquals("completed", item.getValue("status").jsonPrimitive.content)
+            assertEquals(completed.runId, item.getValue("latestRunId").jsonPrimitive.content)
+            assertEquals("release review", item.getValue("label").jsonPrimitive.content)
+            assertEquals("true", item.getValue("archived").jsonPrimitive.content)
+            assertEquals(kotlinx.serialization.json.JsonNull, item.getValue("acceptedRevisionId"))
+        } finally { service.close() }
+    }
+
+    @Test fun `optional organization seed reads have an independent recovery byte allowance`() = withStore { store, root ->
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        val receipts = (0 until JobOrganization.MAX_RECEIPTS).map { index ->
+            val digest = (index + 1).toString(16).padStart(64, '0')
+            decompengine.jobs.JobOrganizationReceipt(digest, digest.reversed(), java.time.Instant.parse("2026-11-08T00:00:00Z"))
+        }
+        val organization = JobOrganization("organization receipts", archived = true, receipts = receipts).toJson().toString().toByteArray()
+        Files.write(root.resolve(job.id).resolve(JobOrganization.FILE_NAME), organization)
+        val jobBytes = Files.size(root.resolve(job.id).resolve("job.json"))
+        val readLimit = jobBytes + organization.size - 1L
+        assertTrue(readLimit > jobBytes && readLimit > organization.size && jobBytes + organization.size > readLimit)
+
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage(decompengine.jobs.WorkflowStartupRecoveryLimits(maximumReadBytes = readLimit)) { false }
+            val seed = assertNotNull(service.takeDashboardCollectionSeed())
+            assertEquals("organization receipts", seed.rows.single().item.getValue("label").jsonPrimitive.content)
+            assertEquals("true", seed.rows.single().item.getValue("archived").jsonPrimitive.content)
+        } finally { service.close() }
+    }
+
+    @Test fun `startup recovery mutation prevents publishing a pre-recovery collection seed`() = withStore { store, _ ->
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        WorkflowAttemptStore.open(store.storageRoot).use { attempts ->
+            val current = attempts.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available
+            val queued = attempts.create(job.id, current.snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, WorkflowExecutionLimits(60_000uL, 10_000uL, 1024uL, 10uL))).attempt
+            attempts.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start)
+        }
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage()
+            assertEquals(null, service.takeDashboardCollectionSeed(), "The startup scan planned an interruption write")
+            val inspection = service.inspect(job.id) as WebJobInspection.Available
+            assertEquals(WorkflowRunState.INTERRUPTED, inspection.presentation.snapshot?.latestRun?.state)
+        } finally { service.close() }
+    }
+
+    @Test fun `dashboard image revalidates direct job status writes and persisted corruption`() = withStore { store, _ ->
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.initializeExistingStorage()
+            val job = service.upload("fixture.elf", elfFixture())
+            val pages = WebJobPages(service::collectionRecords,
+                checkpointedSource = service::collectionRecordsWithProgress,
+                collectionVersion = service::dashboardCollectionVersion,
+                // A distant freshness watermark makes this deterministic without sleeping for ctime quiet.
+                collectionStamp = { _, checkpoint -> service.dashboardStorageStamp(Long.MAX_VALUE, checkpoint) })
+            fun status(page: kotlinx.serialization.json.JsonObject): String = page.getValue("items").jsonArray.single()
+                .jsonObject.getValue("status").jsonPrimitive.content
+            assertEquals("uploaded", status(pages.page("owner", WebJobQuery(), null)))
+            val externalStore = JobStore(store.storageRoot)
+            externalStore.updateStatus(job.id, "failed", "external update")
+            assertEquals("failed", status(pages.page("owner", WebJobQuery(), null)))
+
+            val jobDirectory = store.storageRoot.resolve(job.id)
+            val statePath = jobDirectory.resolve(WorkflowAttemptStore.LISTING_STATE_FILE)
+            Files.writeString(statePath, "{")
+            val stateFailure = assertFailsWith<WebJobServiceException> { pages.page("owner", WebJobQuery(), null) }
+            assertEquals("CORRUPT_WORKFLOW_STATE", stateFailure.code)
+            Files.delete(statePath)
+
+            val beforePending = service.dashboardStorageStamp(Long.MAX_VALUE) { }
+            val pendingPath = jobDirectory.resolve(WorkflowAttemptStore.LISTING_PENDING_FILE)
+            Files.writeString(pendingPath, "{}")
+            val afterPending = service.dashboardStorageStamp(Long.MAX_VALUE) { }
+            assertTrue(beforePending.digest != afterPending.digest)
+            Files.delete(pendingPath)
+
+            Files.writeString(store.storageRoot.resolve(job.id).resolve("job.json"), "{")
+            val failure = assertFailsWith<WebJobServiceException> { pages.page("owner", WebJobQuery(), null) }
+            assertEquals("CORRUPT_LEGACY_JOB", failure.code)
+        } finally { service.close() }
+    }
+
+    @Test fun `dashboard image revalidates organization changes and corruption`() = withStore { store, _ ->
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage()
+            val job = service.upload("fixture.elf", elfFixture())
+            val pages = WebJobPages(service::collectionRecords,
+                checkpointedSource = service::collectionRecordsWithProgress,
+                collectionVersion = service::dashboardCollectionVersion,
+                collectionStamp = { _, checkpoint -> service.dashboardStorageStamp(Long.MAX_VALUE, checkpoint) })
+            fun items(query: WebJobQuery = WebJobQuery()) = pages.page("owner", query, null).getValue("items").jsonArray
+            assertEquals(1, items().size)
+
+            val organizationPath = store.storageRoot.resolve(job.id).resolve(JobOrganization.FILE_NAME)
+            Files.writeString(organizationPath, JobOrganization("triage", archived = true).toJson().toString())
+            assertTrue(items().isEmpty(), "A direct archive edit must invalidate the cached default view")
+            val archived = items(WebJobQuery(archived = "only")).single().jsonObject
+            assertEquals("triage", archived.getValue("label").jsonPrimitive.content)
+            assertEquals("true", archived.getValue("archived").jsonPrimitive.content)
+
+            Files.writeString(organizationPath, "{")
+            val failure = assertFailsWith<WebJobServiceException> { items() }
+            assertEquals("JOB_RECORD_UNAVAILABLE", failure.code)
+        } finally { service.close() }
+    }
+
+    @Test fun `terminal cancellation receipt invalidates the dashboard generation`() = withStore { store, _ ->
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        val limits = WorkflowExecutionLimits(60_000uL, 10_000uL, 1024uL, 10uL)
+        val terminal = WorkflowAttemptStore.open(store.storageRoot).use { attempts ->
+            val current = attempts.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available
+            val queued = attempts.create(job.id, current.snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, limits)).attempt
+            val running = attempts.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            attempts.transition(job.id, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)).attempt
+        }
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.initializeExistingStorage()
+            val before = checkNotNull(service.dashboardCollectionVersion())
+            val stampBefore = service.dashboardStorageStamp(Long.MAX_VALUE) { }
+            val result = service.requestDurableCancellation(job.id, terminal.runId, terminal.version,
+                WorkflowCancellationActor.browserSession("a".repeat(64)), "terminal-cancel-key-0001")
+            assertEquals(terminal.state, result.attempt.state)
+            assertTrue(checkNotNull(service.dashboardCollectionVersion()) > before)
+            assertTrue(stampBefore.digest != service.dashboardStorageStamp(Long.MAX_VALUE) { }.digest)
+        } finally { service.close() }
+    }
+
+    @Test fun `dashboard collection version changes around uploads and is unavailable during owned workflows`() = withStore { store, _ ->
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val service = WebJobService(store, JobAnalyzer { _, _ ->
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+        }, inertReconstructor, Executor { command -> Thread(command, "dashboard-version-test").start() })
+        try {
+            service.initializeExistingStorage()
+            val beforeUpload = checkNotNull(service.dashboardCollectionVersion())
+            val job = service.upload("fixture.elf", elfFixture())
+            val afterUpload = checkNotNull(service.dashboardCollectionVersion())
+            assertTrue(afterUpload > beforeUpload)
+
+            assertIs<WebWorkflowAdmission.Started>(service.start(job.id, WebWorkflow.EXPLORE))
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertEquals(null, service.dashboardCollectionVersion())
+            release.countDown()
+            await { service.dashboardCollectionVersion() != null }
+            assertTrue(checkNotNull(service.dashboardCollectionVersion()) > afterUpload)
+        } finally {
+            release.countDown()
+            service.close()
+        }
+    }
+
+    @Test fun `listing reuses authenticated job JSON bytes only when the later bound permits it`() {
+        val id = "a".repeat(32)
+        val path = "$id/job.json"
+        val payload = "{\"id\":\"fixture\"}".toByteArray()
+        var reads = 0
+        val reader = memoizeJobJsonListingRead(id) { relative, maximum ->
+            reads++
+            require(payload.size <= maximum)
+            assertEquals(path, relative)
+            payload
+        }
+
+        val first = reader(path, 1024 * 1024)
+        val second = reader(path, 256 * 1024)
+        kotlin.test.assertSame(first, second)
+        assertEquals(1, reads)
+    }
+
     @Test fun `startup durability refusal preserves its public type and the full private recovery context`() {
         val original = UnsupportedOperationException("PRIVATE directory provider")
         val maintenance = WebJobServiceException("STORE_DURABILITY_UNAVAILABLE", "PRIVATE directory failure", original)

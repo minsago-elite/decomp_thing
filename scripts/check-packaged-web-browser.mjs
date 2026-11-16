@@ -7,7 +7,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
-import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
+import { seedScale, qualifyScale, dashboardFiltersWithSnapshot, evaluateBudgetGate, evaluateApiRequestBudgetGate } from './packaged-browser-scale.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
@@ -22,6 +22,7 @@ const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
+  profile: { type: 'string', default: 'loopback' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
@@ -31,9 +32,9 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--profile loopback|constrained (scale only)] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: exactly D0 persisted jobs, full keyboard pagination, 20 fresh-process cold loads and enforced loopback or constrained-profile budgets; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
@@ -45,11 +46,73 @@ if (values.help) {
 const nodeVersion = process.versions.node;
 const expectedNode = readFileSync(join(repo, '.node-version'), 'utf8').trim();
 assert.equal(nodeVersion, expectedNode, `Use the pinned test-driver Node ${expectedNode}`);
+function gitText(args, maxBuffer = 1024 * 1024) {
+  return execFileSync('git', args, { cwd: repo, encoding: 'utf8', maxBuffer }).trim();
+}
+function identifyQualificationSource() {
+  const checkedOutCommit = gitText(['rev-parse', 'HEAD']);
+  const driverCommit = process.env.GITHUB_SHA ?? checkedOutCommit;
+  assert.equal(driverCommit, checkedOutCommit, 'GITHUB_SHA must identify the checked-out qualification source');
+  const treeSha = gitText(['rev-parse', `${driverCommit}^{tree}`]);
+  const status = gitText(['status', '--porcelain=v1', '--untracked-files=all']);
+  assert.equal(status, '', 'the checkout must be clean before packaged qualification');
+
+  const entries = execFileSync('git', ['ls-tree', '-r', '-z', '--full-tree', driverCommit], {
+    cwd: repo,
+    encoding: 'buffer',
+    maxBuffer: 32 * 1024 * 1024,
+  }).toString('utf8').split('\0').filter(Boolean).map((entry) => {
+    const tab = entry.indexOf('\t');
+    assert.ok(tab > 0, 'Git returned a malformed qualification source tree entry');
+    const [mode, type, blob] = entry.slice(0, tab).split(' ');
+    return { mode, type, blob, path: entry.slice(tab + 1) };
+  }).filter((entry) => entry.type === 'blob' || entry.type === 'commit');
+  assert.ok(entries.length > 0, 'the checked-out source tree has no tracked files');
+  const sortedEntries = entries.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const trackedManifest = sortedEntries
+    .map(({ mode, type, blob, path }) => `${mode} ${type} ${blob} ${path}\n`)
+    .join('');
+  const qualificationScripts = sortedEntries.filter((entry) => entry.path.startsWith('scripts/'));
+  assert.ok(qualificationScripts.length > 0, 'the checked-out source tree has no tracked qualification scripts');
+  const scriptManifest = qualificationScripts
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+    .map(({ mode, type, blob, path }) => `${mode} ${type} ${blob} ${path}\n`)
+    .join('');
+
+  let pullRequest = null;
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (eventPath) {
+    const event = JSON.parse(readFileSync(eventPath, 'utf8'));
+    if (event.pull_request) {
+      const baseSha = event.pull_request.base?.sha;
+      const headSha = event.pull_request.head?.sha;
+      assert.match(baseSha ?? '', /^[0-9a-f]{40}$/i, 'pull request event must declare its base commit');
+      assert.match(headSha ?? '', /^[0-9a-f]{40}$/i, 'pull request event must declare its head commit');
+      const commit = gitText(['cat-file', '-p', driverCommit]);
+      const parents = commit.split('\n').filter((line) => line.startsWith('parent ')).map((line) => line.slice(7));
+      const isHeadCheckout = driverCommit === headSha;
+      const isMergeCandidate = parents.length === 2 && parents.includes(baseSha) && parents.includes(headSha);
+      assert.ok(isHeadCheckout || isMergeCandidate,
+        'checked-out qualification commit must be the requested PR head or its two-parent merge candidate');
+      pullRequest = { baseSha, headSha, relation: isHeadCheckout ? 'pull-request-head' : 'pull-request-merge-candidate' };
+    }
+  }
+  return {
+    driverCommit,
+    treeSha,
+    trackedTree: { count: sortedEntries.length, manifestSha256: createHash('sha256').update(trackedManifest).digest('hex'), clean: true },
+    qualificationScripts: { count: qualificationScripts.length, manifestSha256: createHash('sha256').update(scriptManifest).digest('hex') },
+    pullRequest,
+  };
+}
+const qualificationSource = identifyQualificationSource();
 for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
 assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['loopback', 'constrained'].includes(values.profile), '--profile must be loopback or constrained');
+assert.ok(values.mode === 'scale' || values.profile === 'loopback', '--profile is only supported with --mode scale');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -95,8 +158,9 @@ let applicationError = '';
 let applicationOutput = '';
 let browserError = '';
 let viteError = '';
-const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
-  driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
+const report = { status: 'running', mode: values.mode, ...(values.mode === 'scale' ? { profile: values.profile } : {}), testDirectory: root, driverNode: nodeVersion,
+  driverCommit: qualificationSource.driverCommit,
+  sourceIdentity: qualificationSource,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -492,6 +556,75 @@ async function launchApplication(installation, port = '0', frontendOrigin) {
   return origin;
 }
 
+async function restartScaleApplication(installation, { forceScan = false } = {}) {
+  await stop(application);
+  const startupStarted = performance.now();
+  const inheritedJavaOptions = installation.environment.JAVA_TOOL_OPTIONS ?? '';
+  assert.doesNotMatch(inheritedJavaOptions,
+    /-Ddecomp\.web\.(?:dashboardSeedDisabled|diagnosticJobCollectionDeadlineMillis)(?:=|\s|$)/,
+    'Packaged installation must not inherit the forced-scan diagnostic configuration');
+  const diagnosticDeadlineMillis = 1;
+  const environment = forceScan ? { ...installation.environment, JAVA_TOOL_OPTIONS:
+    [inheritedJavaOptions, '-Ddecomp.web.dashboardSeedDisabled=true',
+      `-Ddecomp.web.diagnosticJobCollectionDeadlineMillis=${diagnosticDeadlineMillis}`].filter(Boolean).join(' ') } : installation.environment;
+  const freshOrigin = await launchApplication({ ...installation, environment }, '0');
+  if (forceScan) {
+    await waitFor(() => applicationError.includes(`Web diagnostic job collection deadline: ${diagnosticDeadlineMillis} ms (default 5000 ms, dashboard seed disabled)`),
+      'effective forced-scan deadline diagnostic', 5000);
+  }
+  const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/)
+    .find((part) => part.startsWith(freshOrigin + '/nested/#bootstrap=')), 'fresh-process local bootstrap handoff');
+  const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
+  assert.ok(token, 'Fresh packaged process did not issue a bootstrap token');
+  sensitiveValues.push(token);
+  const response = await fetch(freshOrigin + '/nested/api/v1/session', {
+    method: 'POST',
+    headers: { Origin: freshOrigin, Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  assert.equal(response.status, 200, 'Fresh-process benchmark session exchange failed');
+  const cookieHeader = response.headers.getSetCookie?.().find((value) => value.startsWith('decomp_session_'));
+  assert.ok(cookieHeader, 'Fresh-process session response did not set its HttpOnly cookie');
+  const cookiePair = cookieHeader.split(';', 1)[0];
+  const separator = cookiePair.indexOf('=');
+  assert.ok(separator > 0, 'Fresh-process session cookie is malformed');
+  const sessionCookie = { name: cookiePair.slice(0, separator), value: cookiePair.slice(separator + 1),
+    path: '/nested/', secure: false, httpOnly: true, sameSite: 'Strict' };
+  sensitiveValues.push(sessionCookie.value);
+  assert.ok(sessionCookie.value, 'Fresh-process session cookie is empty');
+  let deadlineConfiguration;
+  if (forceScan) {
+    const expected = new RegExp(`^Web diagnostic job collection deadline: ${diagnosticDeadlineMillis} ms \\(default 5000 ms, dashboard seed disabled\\)$`, 'm');
+    assert.match(applicationError, expected, 'Forced-scan process must report its effective diagnostic deadline configuration');
+    deadlineConfiguration = { diagnostic: true, dashboardSeedDisabled: true,
+      requestedMillis: diagnosticDeadlineMillis, effectiveMillis: diagnosticDeadlineMillis, productionDefaultMillis: 5000 };
+  } else {
+    deadlineConfiguration = { diagnostic: false, dashboardSeedDisabled: false,
+      requestedMillis: null, effectiveMillis: 5000, productionDefaultMillis: 5000,
+      verifiedBy: 'no diagnostic JVM properties inherited; WebJobCollectionDeadline default' };
+  }
+  const observationPrefix = 'Web job-library startup observation: ';
+  const observationLines = applicationError.split(/\r?\n/).filter((line) => line.startsWith(observationPrefix));
+  assert.equal(observationLines.length, 1, 'Fresh scale process must emit exactly one successful startup-seed observation');
+  const seedDiagnostic = observationLines[0].slice(observationPrefix.length);
+  let startupObservation;
+  try { startupObservation = JSON.parse(seedDiagnostic); }
+  catch (error) { throw new Error('Fresh scale process emitted malformed startup-seed observation JSON', { cause: error }); }
+  assert.deepEqual(Object.keys(startupObservation).sort(),
+    ['initializationMs', 'schemaVersion', 'seedBytes', 'seedRows', 'seedStatus'].sort(),
+    'Startup-seed observation must use the bounded version 1 schema');
+  assert.equal(startupObservation.schemaVersion, 1, 'Unsupported startup-seed observation schema');
+  assert.ok(['seeded', 'disabled', 'ineligible', 'no-data'].includes(startupObservation.seedStatus),
+    'Startup-seed observation has an unknown state');
+  for (const field of ['seedRows', 'seedBytes', 'initializationMs']) {
+    assert.ok(Number.isSafeInteger(startupObservation[field]) && startupObservation[field] >= 0,
+      `Startup-seed observation ${field} must be a nonnegative safe integer`);
+  }
+  return { serverPid: application.pid, processId: `${application.pid}:${freshOrigin}`, browserOrigin: freshOrigin,
+    sessionCookie, startupMs: Math.round(performance.now() - startupStarted), seedDiagnostic, startupObservation,
+    forceScan, deadlineConfiguration };
+}
+
 async function removeOwnedWork() {
   if (!work) return;
   if (await fs.stat(join(work, '.packaged-browser-owned')).then(() => true, () => false)) {
@@ -534,9 +667,10 @@ try {
   }
   report.browserDisplayMode = observeNativeVisibility ? 'headful-x11' : 'headless';
 
-  // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
-  // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  // Keep Chrome's per-browser SingletonSocket below AF_UNIX sun_path limits.
+  // --work-parent is already the caller's owned, writable scratch boundary and
+  // can be shorter than a deeply nested source materialization.
+  browserTmp = await fs.mkdtemp(join(values['work-parent'], 'b-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
@@ -1013,7 +1147,6 @@ try {
     assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
-    if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
@@ -1118,6 +1251,18 @@ try {
     report.requests.authenticated = authenticated.requests;
   }
 
+  if (scaleFixture) {
+    report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready,
+      restartServer: (options) => restartScaleApplication(installation, options),
+      profileName: values.profile,
+      onProgress: (progress) => { report.scaleProgress = progress; } });
+    browserOrigin = report.scale.measurementOrigin;
+    report.origin = browserOrigin;
+    console.log('D0 resource and API request budget evaluation: ' + JSON.stringify({
+      resources: report.scale.budgets, coldRequests: report.scale.cold.requestBudgetGate,
+      interactionRequests: report.scale.requestBudgetGate }));
+  }
+
   // Let the final DevTools events drain before taking the evidence snapshot.
   await delay(100);
   report.contentSecurityPolicy = cspEvidence();
@@ -1139,10 +1284,25 @@ try {
   assert.deepEqual(await snapshot(installation.app), installation.before, 'Read-only installation bytes changed');
   report.installationUnchanged = true;
 
-  report.status = 'passed';
+  if (values.mode === 'scale') {
+    const resourceGate = evaluateBudgetGate(report.scale?.budgets, values.profile);
+    const coldRequestGate = report.scale?.cold?.requestBudgetGate ?? evaluateApiRequestBudgetGate([]);
+    const interactionRequestGate = report.scale?.requestBudgetGate ?? evaluateApiRequestBudgetGate([]);
+    report.scaleBudgetGate = { passed: resourceGate.passed && coldRequestGate.passed && interactionRequestGate.passed,
+      resources: resourceGate, coldRequests: coldRequestGate, interactionRequests: interactionRequestGate };
+    if (!report.scaleBudgetGate.passed) {
+      report.status = 'failed';
+      process.exitCode = 1;
+      console.error('D0 scale budgets failed; full measurements are retained in report.json.');
+    } else report.status = 'passed';
+  } else report.status = 'passed';
 
 } catch (error) {
   report.status = 'failed';
+  if (values.mode === 'scale') report.scaleBudgetGate = { passed: false,
+    resources: evaluateBudgetGate(report.scale?.budgets, values.profile),
+    coldRequests: report.scale?.cold?.requestBudgetGate ?? evaluateApiRequestBudgetGate([]),
+    interactionRequests: report.scale?.requestBudgetGate ?? evaluateApiRequestBudgetGate([]) };
   report.contentSecurityPolicy = cspEvidence();
   report.error = safeDiagnostic(error.stack);
   report.applicationError = safeDiagnostic(applicationError);
