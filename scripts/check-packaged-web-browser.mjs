@@ -15,6 +15,7 @@ import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
+import { incompatibleBootstrapEnvelope, assertContractMismatch, manifestAssetRequestPaths, captureScreenshotEvidence } from './packaged-browser-contract-mismatch.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -430,6 +431,10 @@ async function ready(target, expression, label) {
 async function capture(target, name) {
   const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
   await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
+}
+
+async function captureEvidence(target, name) {
+  return captureScreenshotEvidence(target, name, capture, (fileName) => fs.readFile(join(root, fileName)));
 }
 
 async function prepareArchive(archivePath) {
@@ -866,7 +871,154 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), populated, 'Public SPA browsing changed job-root existence');
     report.recovery = { interceptedLazyChunk: runtimeAsset.path, simulatedStatus: 404, warningCount: warning.notices, observationSeconds: 5, automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1, recoveredRuntime: true, mutationRequests: 0, noticeTitleWithinViewport: true };
     report.jobDataCreated = false;
-    report.requests = { normal: home.requests, boundary: boundary.requests, redirect: redirect.requests, recovery: recovery.requests };
+
+    let contractTarget;
+    if (values.mode === 'session') {
+      contractTarget = await makeTarget();
+      report.requests.contractMismatch = contractTarget.requests;
+      const envelope = incompatibleBootstrapEnvelope();
+      const fulfilled = [];
+      const rejected = [];
+      const interceptionErrors = [];
+      const activations = [];
+      const pendingFetchActions = [];
+      let fetchEnabled = false;
+      let fetchDisabled = false;
+      const evidence = { simulatedContract: true, interceptedPath: '/nested/api/v1/bootstrap',
+        advertisedApiVersions: envelope.advertisedApiVersions, fixtureSha256: envelope.fixtureSha256,
+        simulatedEnvelopeSha256: envelope.sha256, uiBuildId: manifest.buildId, metaBuildId: null, observationSeconds: 5,
+        documentsBeforeClick: null, documentsAfterClick: null, documentsAfterQuiet: null,
+        bootstrapReadsBeforeClick: null, bootstrapReadsAfterClick: null, bootstrapReadsAfterQuiet: null,
+        clicksSent: 0, mutationRequests: null, otherApiRequests: null, automaticReloads: null,
+        before: null, after: null, activations, requests: [], exceptions: contractTarget.exceptions,
+        interceptionErrors, fetchDisabled: false, captures: [] };
+      report.contractMismatch = evidence;
+      const contractRequests = () => contractTarget.requests.map(({ method, url, type }) => ({ method, url, type: type ?? null }));
+      const bootstrapReads = () => contractTarget.requests.filter((request) => request.method === 'GET'
+        && new URL(request.url).pathname === '/nested/api/v1/bootstrap').length;
+      cdp.on('Runtime.bindingCalled', (event) => {
+        if (event.name !== '__recordContractMismatchActivation') return;
+        try {
+          const value = JSON.parse(event.payload);
+          if (['keydown', 'click'].includes(value.type) && value.label === 'Reload application') {
+            activations.push({ type: value.type, key: value.key ?? null, label: value.label, trusted: value.trusted === true });
+          }
+        } catch { interceptionErrors.push('malformed activation evidence'); }
+      }, contractTarget.sessionId);
+      cdp.on('Fetch.requestPaused', (event) => {
+        const method = event.request.method;
+        let url;
+        try { url = new URL(event.request.url); }
+        catch {
+          rejected.push({ method, reason: 'invalid-url' });
+          pendingFetchActions.push(cdp.call('Fetch.failRequest', { requestId: event.requestId, errorReason: 'BlockedByClient' }, contractTarget.sessionId)
+            .catch(() => interceptionErrors.push('malformed paused request could not be refused')));
+          return;
+        }
+        if (method !== 'GET' || url.origin !== origin || url.pathname !== '/nested/api/v1/bootstrap') {
+          rejected.push({ method, reason: 'unexpected-request' });
+          pendingFetchActions.push(cdp.call('Fetch.failRequest', { requestId: event.requestId, errorReason: 'BlockedByClient' }, contractTarget.sessionId)
+            .catch(() => interceptionErrors.push('unexpected paused request could not be refused')));
+          return;
+        }
+        fulfilled.push({ method, path: url.pathname });
+        pendingFetchActions.push(cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json; charset=utf-8' },
+            { name: 'X-Request-ID', value: envelope.requestId }], body: Buffer.from(envelope.body).toString('base64') }, contractTarget.sessionId)
+          .catch(() => interceptionErrors.push('bootstrap fixture could not be fulfilled')));
+      }, contractTarget.sessionId);
+      try {
+        await cdp.call('Runtime.addBinding', { name: '__recordContractMismatchActivation' }, contractTarget.sessionId);
+        await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+          const record = (event, type) => {
+            const button = event.target?.closest?.('button');
+            if (button?.textContent.trim() === 'Reload application') {
+              globalThis.__recordContractMismatchActivation(JSON.stringify({ type, key: event.key ?? null,
+                label: button.textContent.trim(), trusted: event.isTrusted }));
+            }
+          };
+          document.addEventListener('keydown', event => record(event, 'keydown'), true);
+          document.addEventListener('click', event => record(event, 'click'), true);
+        })();` }, contractTarget.sessionId);
+        await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/bootstrap*`, requestStage: 'Request' }] }, contractTarget.sessionId);
+        fetchEnabled = true;
+        await cdp.call('Page.navigate', { url: `${origin}/nested/` }, contractTarget.sessionId);
+        await ready(contractTarget, `document.querySelector('#contract-mismatch-title')?.textContent === 'Reload to match the server version'`, 'packaged incompatible-contract notice');
+        await delay(evidence.observationSeconds * 1000);
+        await Promise.all(pendingFetchActions);
+        evidence.documentsBeforeClick = contractTarget.documentRequests.length;
+        evidence.bootstrapReadsBeforeClick = bootstrapReads();
+        evidence.metaBuildId = await evaluate(contractTarget, `document.querySelector('meta[name="decomp-ui-build"]')?.content`);
+        evidence.before = await evaluate(contractTarget, `(() => {
+          const reload = [...document.querySelectorAll('button')].filter(button => button.textContent.trim() === 'Reload application');
+          const check = [...document.querySelectorAll('button')].filter(button => button.textContent.trim() === 'Check session');
+          const session = [...document.querySelectorAll('.session-notice')].some(node => node.textContent.includes('incompatible API formats'));
+          const button = reload[0]; const box = button?.getBoundingClientRect();
+          return { contractHeading: document.querySelector('#contract-mismatch-title')?.textContent === 'Reload to match the server version',
+            reloadButtonCount: reload.length, reloadButtonEnabled: button ? !button.disabled : false,
+            reloadButtonVisible: Boolean(button && box.width > 0 && box.height > 0 && getComputedStyle(button).visibility !== 'hidden'),
+            checkSessionButtonCount: check.length, assetFailureNotice: Boolean(document.querySelector('#asset-notice-title')),
+            incompatibleSessionStatus: session };
+        })()`);
+        assert.equal(evidence.documentsBeforeClick, 1, 'Incompatible-contract page reloaded before activation');
+        assert.equal(evidence.bootstrapReadsBeforeClick, 1, 'Initial incompatible-contract observation was not exactly one bootstrap read');
+        evidence.captures.push(await captureEvidence(contractTarget, 'contract-mismatch-notice.png'));
+        const focused = await evaluate(contractTarget, `(() => {
+          const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === 'Reload application');
+          button?.focus(); return document.activeElement === button;
+        })()`);
+        assert.equal(focused, true, 'Explicit reload button could not receive focus');
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', windowsVirtualKeyCode: 13 }, contractTarget.sessionId);
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, contractTarget.sessionId);
+        await ready(contractTarget, `document.querySelector('#contract-mismatch-title')?.textContent === 'Reload to match the server version'
+          && document.body.innerText.includes('Reloading in this tab did not load a different build.')`, 'same-build manual recovery guidance');
+        await delay(evidence.observationSeconds * 1000);
+        await waitFor(() => activations.length === 2, 'trusted contract-reload Enter activation');
+        evidence.clicksSent = 1;
+        await Promise.all(pendingFetchActions);
+        evidence.documentsAfterClick = contractTarget.documentRequests.length;
+        evidence.bootstrapReadsAfterClick = bootstrapReads();
+        evidence.after = await evaluate(contractTarget, `(() => ({
+          contractHeading: document.querySelector('#contract-mismatch-title')?.textContent === 'Reload to match the server version',
+          manualGuidance: document.body.innerText.includes('Reloading in this tab did not load a different build.'),
+          reloadButtonCount: [...document.querySelectorAll('button')].filter(button => button.textContent.trim() === 'Reload application').length,
+          checkSessionButtonCount: [...document.querySelectorAll('button')].filter(button => button.textContent.trim() === 'Check session').length,
+          metaBuildId: document.querySelector('meta[name="decomp-ui-build"]')?.content,
+        }))()`);
+        evidence.captures.push(await captureEvidence(contractTarget, 'contract-mismatch-after-reload.png'));
+        await delay(500);
+        evidence.documentsAfterQuiet = contractTarget.documentRequests.length;
+        evidence.bootstrapReadsAfterQuiet = bootstrapReads();
+        evidence.activations = [...activations];
+        evidence.requests = contractRequests();
+        evidence.mutationRequests = contractTarget.requests.filter((request) => !['GET', 'HEAD'].includes(request.method)).length;
+        evidence.otherApiRequests = contractTarget.requests.filter((request) => {
+          const path = new URL(request.url).pathname;
+          return path.startsWith('/nested/api/v1/') && path !== '/nested/api/v1/bootstrap';
+        }).length;
+        evidence.automaticReloads = Math.max(0, evidence.documentsBeforeClick - 1);
+      } finally {
+        if (fetchEnabled) {
+          try { await cdp.call('Fetch.disable', {}, contractTarget.sessionId); fetchDisabled = true; }
+          catch { interceptionErrors.push('Fetch interception could not be disabled'); }
+        }
+        evidence.fetchDisabled = fetchDisabled;
+        evidence.activations = [...activations];
+        evidence.requests = contractRequests();
+        evidence.mutationRequests ??= contractTarget.requests.filter((request) => !['GET', 'HEAD'].includes(request.method)).length;
+        evidence.otherApiRequests ??= contractTarget.requests.filter((request) => {
+          const path = new URL(request.url).pathname;
+          return path.startsWith('/nested/api/v1/') && path !== '/nested/api/v1/bootstrap';
+        }).length;
+      }
+      assert.equal(rejected.length, 0, 'The mismatch gate refused an unexpected request');
+      assert.equal(fulfilled.length, 2, 'Expected initial and remount bootstrap fixture responses');
+      evidence.verdict = assertContractMismatch(evidence, { origin, buildId: manifest.buildId,
+        allowedAssetPaths: manifestAssetRequestPaths(manifest.files) });
+    }
+
+    report.requests = { normal: home.requests, boundary: boundary.requests, redirect: redirect.requests,
+      recovery: recovery.requests, ...(contractTarget ? { contractMismatch: contractTarget.requests } : {}) };
   }
 
   if (values.mode === 'proxy') {

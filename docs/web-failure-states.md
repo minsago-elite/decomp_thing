@@ -97,3 +97,40 @@ bounded live reads and the local session-expiry timer are separate from recovery
 `resilience.test.tsx` covers the reload-once-then-guidance sequence, convergence after a
 successful reload, the asset-recovery guard, and six concurrent expiry rejections producing a
 single transition and notice with no automatic bootstrap or exchange request.
+
+## Version recovery and offline limits (#632)
+
+This section records local UI evidence for [#632](https://github.com/minsago-elite/decomp_thing/issues/632)
+under #222. It does not close #632; GitHub owns status.
+
+- **Asset failure** (`AssetRecoveryNotice`): a failed lazy or preloaded application file shows
+  one alert with one explicit "Reload application" action.
+- **Build mismatch** (`BuildMismatchNotice`): an authenticated bootstrap that reports a
+  different UI build offers one explicit reload.
+- **API contract mismatch**: when a response uses a contract this page cannot read, the session
+  becomes `unavailable/incompatible`. The session status keeps its announcement and hides
+  "Check session". `AssetRecoveryNotice` reads the session from `PrivateSessionContext` and
+  adds one guarded "Reload application" action, which is not itself a live region.
+- **Shared guard** (`reloadGuard.ts`): before reloading, all three record the page build they
+  are leaving in `sessionStorage`. A reloaded page that still has the same build sees no further
+  action, only manual hard-reload guidance. If storage throws, the action is still offered and
+  reload still happens only on click. A reload that throws falls back to manual guidance.
+- **No replay**: none of these actions fetches, retries or reloads by itself, and none changes
+  server or session state. A reload drops in-page forms and commands; they are not resent.
+  `frontend/tests/version-recovery-632.test.tsx` uses the real session, gateway and API client
+  over a recorded `fetch`. It checks request methods and counts across an incompatible response,
+  a reload click, repeated clicks and a remount, and checks that an in-flight session POST is
+  sent exactly once.
+- **Packaged contract-mismatch control**: the `session` packaged-browser run fulfills the real
+  browser's bootstrap read with a simulated, unsupported API-version advertisement while keeping
+  the envelope itself valid. It records the initial notice, trusted Enter activation, one
+  same-build reload, manual guidance, request counts and screenshots. This qualifies the packaged
+  frontend response to the simulated mismatch; it does not establish a real two-build deployment
+  or a response from a newer server.
+- **Offline**: there is no service worker, offline cache of private data, or offline command
+  queue. The offline controls and their evidence come from #1793 and are described above.
+
+Limits: the component evidence is local jsdom, and the packaged mismatch stimulus is simulated.
+Neither establishes packaged two-build deployment or response behavior from a newer server. This
+also does not qualify behavior across browser engines or screen readers. Those parts of #632 and
+#222 remain open.
