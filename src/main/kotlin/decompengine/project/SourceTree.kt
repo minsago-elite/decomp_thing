@@ -24,6 +24,7 @@ import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.receiptCommitmentBytes
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
@@ -391,6 +392,9 @@ private class ModuleReconstructionAgentOutcomeException(
 private class ModuleReconstructionEvidencePersistenceException(cause: Exception) :
     IllegalStateException("failed to persist invocation-bound agent execution evidence", cause)
 
+private val MANIFEST_PROFILE_ID_PATTERN = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+private fun String.isManifestSha256(): Boolean = length == 64 && all { it in '0'..'9' || it in 'a'..'f' }
+
 class GeneratedFileEvidence(
     val path: String,
     val sha256: String,
@@ -408,11 +412,11 @@ class GeneratedFileEvidence(
 
     init {
         requireNormalizedProjectPath(path, "source tree manifest path")
-        require(sha256.matches(Regex("[0-9a-f]{64}"))) { "source tree manifest file hash is invalid: $path" }
+        require(sha256.isManifestSha256()) { "source tree manifest file hash is invalid: $path" }
         require(generator.isNotBlank() && generator.length <= 4_096 && '\n' !in generator && '\r' !in generator) {
             "source tree manifest generator is invalid: $path"
         }
-        require(promptSha256 == null || promptSha256.matches(Regex("[0-9a-f]{64}"))) {
+        require(promptSha256 == null || promptSha256.isManifestSha256()) {
             "source tree manifest prompt hash is invalid: $path"
         }
         require(this.roles.isNotEmpty()) { "source tree manifest file roles are empty: $path" }
@@ -447,10 +451,10 @@ class SourceTreeManifest(
 
     init {
         require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
-        require(profileId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
+        require(MANIFEST_PROFILE_ID_PATTERN.matches(profileId)) {
             "source tree manifest profile ID is invalid"
         }
-        require(profileSha256.matches(Regex("[0-9a-f]{64}"))) { "source tree manifest profile digest is invalid" }
+        require(profileSha256.isManifestSha256()) { "source tree manifest profile digest is invalid" }
         require(inputSha256.isNotBlank() && inputSha256.length <= 4_096 && '\n' !in inputSha256 && '\r' !in inputSha256) {
             "source tree manifest input identity is invalid"
         }
@@ -1382,7 +1386,6 @@ object SourceTreeGenerator {
             append("\n  ]\n}\n")
         }
     }
-
     private fun readCheckpoint(path: Path): ModuleCheckpoint? {
         if (!path.exists()) return null
         return runCatching {
@@ -1903,6 +1906,19 @@ object SourceTreeManifestReader {
         "entityIds",
     )
 
+    /** The manifest wire format requires sorted unique lists; validate in place without set/sort copies. */
+    private inline fun <T> List<T>.isStrictlySortedBy(key: (T) -> String): Boolean {
+        var first = true
+        var previous = ""
+        for (item in this) {
+            val current = key(item)
+            if (!first && previous >= current) return false
+            first = false
+            previous = current
+        }
+        return true
+    }
+
     fun read(projectDir: Path, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         val path = projectDir.resolve("source_tree_manifest.json")
         require(path.exists()) { "project is missing source_tree_manifest.json" }
@@ -1915,7 +1931,11 @@ object SourceTreeManifestReader {
 
     fun parse(text: String, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         UniqueJsonObjectKeyValidator(text).validate()
-        val root = Json.parseToJsonElement(text).jsonObject
+        return parse(Json.parseToJsonElement(text).jsonObject, expectedProfile)
+    }
+
+    /** Validate a tree already parsed by the strict bounded JSON reader. */
+    internal fun parse(root: JsonObject, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         require(root.keys == rootKeys) { "source tree manifest fields do not match schema version 3" }
         val schemaPrimitive = root.getValue("schemaVersion").jsonPrimitive
         require(!schemaPrimitive.isString) { "source tree manifest schemaVersion must be an integer" }
@@ -1931,14 +1951,14 @@ object SourceTreeManifestReader {
                 require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
                 ProjectFileRole.fromWireName(role.jsonPrimitive.content)
             }
-            require(roles.map(ProjectFileRole::wireName) == roles.map(ProjectFileRole::wireName).distinct().sorted()) {
+            require(roles.isStrictlySortedBy(ProjectFileRole::wireName)) {
                 "source tree manifest file roles must be unique and sorted"
             }
             val entityIds = item.getValue("entityIds").jsonArray.map {
                 require(it.jsonPrimitive.isString) { "source tree manifest entity IDs must be strings" }
                 it.jsonPrimitive.content
             }
-            require(entityIds == entityIds.distinct().sorted()) {
+            require(entityIds.isStrictlySortedBy { it }) {
                 "source tree manifest entity IDs must be unique and sorted"
             }
             val accepted = item.getValue("acceptedImplementation").let { value ->
@@ -1970,14 +1990,14 @@ object SourceTreeManifestReader {
                 contentKind = ProjectContentKind.fromWireName(requiredManifestString(item, "contentKind")),
             )
         }
-        require(files.map(GeneratedFileEvidence::path) == files.map(GeneratedFileEvidence::path).distinct().sorted()) {
+        require(files.isStrictlySortedBy(GeneratedFileEvidence::path)) {
             "source tree manifest files must be unique and sorted"
         }
         fun sortedIds(name: String): List<String> = root.getValue(name).jsonArray.map {
             require(it.jsonPrimitive.isString) { "source tree manifest $name values must be strings" }
             it.jsonPrimitive.content
         }.also { ids ->
-            require(ids == ids.distinct().sorted()) { "source tree manifest $name must be unique and sorted" }
+            require(ids.isStrictlySortedBy { it }) { "source tree manifest $name must be unique and sorted" }
         }
         val manifest = SourceTreeManifest(
             schemaVersion = schemaVersion,
@@ -2133,7 +2153,7 @@ internal class UniqueJsonObjectKeyValidator(private val source: String) {
         }
         if (cursor < source.length && source[cursor].lowercaseChar() == 'e') {
             cursor++
-            if (cursor < source.length && source[cursor] in setOf('+', '-')) cursor++
+            if (cursor < source.length && (source[cursor] == '+' || source[cursor] == '-')) cursor++
             require(cursor < source.length && source[cursor] in '0'..'9') {
                 "source tree manifest JSON exponent is incomplete"
             }
@@ -2155,7 +2175,8 @@ internal class UniqueJsonObjectKeyValidator(private val source: String) {
     }
 
     private fun skipWhitespace() {
-        while (cursor < source.length && source[cursor] in setOf(' ', '\t', '\n', '\r')) cursor++
+        while (cursor < source.length && (source[cursor] == ' ' || source[cursor] == '\t' ||
+                source[cursor] == '\n' || source[cursor] == '\r')) cursor++
     }
 }
 

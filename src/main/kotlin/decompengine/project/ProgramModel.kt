@@ -6,6 +6,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.security.MessageDigest
+import java.util.HexFormat
 import java.util.Locale
 
 // Historical extraction/completion labels; these are not scored recovery assessments.
@@ -304,7 +305,8 @@ data class ModulePlan(
 }
 
 fun stableFunctionId(address: ULong): String = "fn_${address.toString(16).padStart(16, '0')}"
-fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+private val lowerHex = HexFormat.of()
+fun sha256(bytes: ByteArray): String = lowerHex.formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))
 
 internal fun safeIdentifier(value: String): String = value.lowercase(Locale.ROOT)
     .replace(Regex("[^a-z0-9_]+"), "_")

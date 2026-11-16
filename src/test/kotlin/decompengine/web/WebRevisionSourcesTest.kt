@@ -4,7 +4,9 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
 import decompengine.jobs.*
 import decompengine.project.*
+import decompengine.repair.StableFileDigest
 import decompengine.repair.StableRegularFile
+import java.math.BigInteger
 import java.security.MessageDigest
 import java.time.Instant
 import kotlinx.serialization.json.*
@@ -43,6 +45,7 @@ class WebRevisionSourcesTest {
     private fun captured(bytes: ByteArray, inode: Long): StableRegularFile = StableRegularFile(bytes,
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) },
         LinuxFileIdentity(LinuxFileKey(1, inode), 0x8180, 1000, 1000, 1, 1, true, false, false))
+    private fun digest(file: StableRegularFile) = StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity)
     private fun capture(inputs: List<Input> = small, selected: ReconstructionProfile = profile,
         document: JsonObject = descriptor(inputs)): WebRevisionSourceSnapshot {
         val manifest = manifest(inputs, selected)
@@ -94,7 +97,10 @@ class WebRevisionSourcesTest {
             }
         }).readRevision(reference())
         assertEquals(listOf("input", "reports/runs/run_1/source-tree/source_tree_manifest.json",
-            "reports/runs/run_1/source-tree/reports/build_contract.json", "reports/runs/run_1/source-tree/reports/build_contract.json",
+            "reports/runs/run_1/source-tree/source_tree_manifest.json",
+            "reports/runs/run_1/source-tree/reports/build_contract.json",
+            "reports/runs/run_1/source-tree/reports/build_contract.json",
+            "reports/runs/run_1/source-tree/reports/build_contract.json",
             "reports/runs/run_1/source-tree/source_tree_manifest.json", "input"), reads)
         assertEquals(digest("8:Makefile:0:${"a".repeat(64)}\n18:src/modules/unit.c:8:${"b".repeat(64)}\n"), snapshot.reference.sourceSha256)
         assertEquals(small.map { it.bytes }, snapshot.files.map { it.sizeBytes })
@@ -102,6 +108,71 @@ class WebRevisionSourcesTest {
         assertEquals(revisionId, page.getValue("binding").jsonObject.getValue("revisionId").jsonPrimitive.content)
         assertEquals("source-input-commitments", page.getValue("authority").jsonPrimitive.content)
         assertFalse(page.toString().contains("PRIVATE")); assertFalse(page.containsKey("acceptance"))
+    }
+
+    @Test fun `revision snapshot memo is bound to fresh descriptor digests and the complete candidate reference`() {
+        val manifest = manifest()
+        val descriptor = captured(descriptor().toString().toByteArray(), 3)
+        val reads = mutableListOf<String>()
+        var inputDigests = 0
+        var manifestDigests = 0
+        var descriptorDigests = 0
+        val evidence = WebSourceCatalogEvidence(listOf(profile), { error("digest-backed cache must not reread input bytes") },
+            { _, path, _ ->
+                reads += path
+                when {
+                    path.endsWith("source_tree_manifest.json") -> manifest
+                    path.endsWith("build_contract.json") -> descriptor
+                    else -> error("Unexpected metadata read: $path")
+                }
+            },
+            { inputDigests++; digest(input) },
+            { _, path, _ ->
+                when {
+                    path.endsWith("source_tree_manifest.json") -> { manifestDigests++; digest(manifest) }
+                    path.endsWith("build_contract.json") -> { descriptorDigests++; digest(descriptor) }
+                    else -> error("Unexpected digest: $path")
+                }
+            })
+
+        val first = evidence.readRevision(reference())
+        val second = evidence.readRevision(reference())
+        assertSame(first, second)
+        assertEquals(listOf("reports/runs/run_1/source-tree/source_tree_manifest.json",
+            "reports/runs/run_1/source-tree/reports/build_contract.json"), reads)
+        assertEquals(4, inputDigests)
+        assertEquals(4, manifestDigests)
+        assertEquals(4, descriptorDigests)
+
+        // Attempt identity is part of the memo key even when source bytes and both descriptors are unchanged.
+        val nextAttempt = evidence.readRevision(reference().copy(attemptVersion = "version_2"))
+        assertNotSame(first, nextAttempt)
+        assertEquals("version_2", nextAttempt.reference.attemptVersion)
+        assertEquals(3, reads.size)
+    }
+
+    @Test fun `descriptor mutation during a cached metadata capture is refused without replacing the memo`() {
+        val manifest = manifest()
+        val originalDescriptor = captured(descriptor().toString().toByteArray(), 3)
+        val replacement = captured(descriptor().toString().replace("PRIVATE-build-command", "OTHER-build-command").toByteArray(), 4)
+        var descriptorDigest = 0
+        var mutateEnd = true
+        var selected = originalDescriptor
+        val evidence = WebSourceCatalogEvidence(listOf(profile), { input }, { _, path, _ ->
+            if (path.endsWith("source_tree_manifest.json")) manifest else selected
+        }, { digest(input) }, { _, path, _ ->
+            if (path.endsWith("source_tree_manifest.json")) digest(manifest) else {
+                descriptorDigest++
+                if (mutateEnd && descriptorDigest == 2) digest(replacement) else digest(originalDescriptor)
+            }
+        })
+        assertEquals("SOURCE_REVISION_CHANGED", assertFailsWith<WebAccessDenied> { evidence.readRevision(reference()) }.code)
+        selected = originalDescriptor
+        descriptorDigest = 0
+        mutateEnd = false
+        // A failed observation did not publish its local parsed values into the shared memo.
+        val recovered = evidence.readRevision(reference())
+        assertEquals(reference(), recovered.reference)
     }
 
     @Test fun `descriptor inventory size digest schema and number representation cannot override a registered source`() {
@@ -113,6 +184,9 @@ class WebRevisionSourcesTest {
             JsonObject(original + ("sourceRevisionSha256" to JsonPrimitive("f".repeat(64)))),
             JsonObject(original + ("sourceInputs" to changedRow("bytes", JsonPrimitive(1)))),
             JsonObject(original + ("sourceInputs" to changedRow("bytes", JsonPrimitive("0")))),
+            JsonObject(original + ("sourceInputs" to changedRow("bytes", JsonPrimitive(-1)))),
+            JsonObject(original + ("sourceInputs" to changedRow("bytes", JsonPrimitive(1.5)))),
+            JsonObject(original + ("sourceInputs" to changedRow("bytes", JsonPrimitive(BigInteger("9223372036854775808"))))),
             JsonObject(original + ("sourceInputs" to changedRow("sha256", JsonPrimitive("f".repeat(64))))),
             JsonObject(original + ("sourceInputs" to JsonArray(listOf(rows[0])))),
             JsonObject(original + ("sourceInputs" to JsonArray(listOf(rows[1], rows[0])))),
@@ -130,7 +204,7 @@ class WebRevisionSourcesTest {
                 captures++; if (captures == 1) descriptor else captured(descriptor.bytes, 4)
             }
         })
-        assertEquals("SOURCE_CATALOG_CHANGED", assertFailsWith<WebAccessDenied> { changed.readRevision(reference()) }.code)
+        assertEquals("SOURCE_REVISION_CHANGED", assertFailsWith<WebAccessDenied> { changed.readRevision(reference()) }.code)
         var inputReads = 0
         val changedInput = WebSourceCatalogEvidence(listOf(profile), {
             inputReads++; if (inputReads == 1) input else captured("replacement".toByteArray(), 5)

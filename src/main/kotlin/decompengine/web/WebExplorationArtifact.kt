@@ -3,11 +3,13 @@ package decompengine.web
 import decompengine.jobs.WorkflowJobInspection
 import kotlinx.serialization.json.*
 import java.security.MessageDigest
+import java.util.HexFormat
 
 /** Resolver for one fixed, bounded report family. No browser-supplied path is ever opened. */
 internal object WebExplorationArtifact {
     private val idPattern = Regex("exploration_([a-f0-9]{32})_([a-f0-9]{64})")
-    fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+    private val lowerHex = HexFormat.of()
+    fun sha256(bytes: ByteArray): String = lowerHex.formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))
     private fun binding(jobId: String, runId: String) = sha256("$jobId\u0000$runId".toByteArray()).take(32)
     fun descriptor(jobId: String, runId: String, bytes: ByteArray, basePath: String): JsonObject = buildJsonObject {
         val digest = sha256(bytes)

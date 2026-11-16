@@ -126,6 +126,31 @@ class WebArtifactContainmentTest {
             assertFailsWith<RepairBudgetExceededException> { store.artifactReceipt(job.id, "reports/source-tree/src/a.c", 3) }
             assertFailsWith<JobStoreException> { store.artifactReceipt(job.id, "reports/source-tree/src/missing.c", 1024) }
 
+            // Source-search reads use the sized descriptor path. A resize after observing size
+            // must become an explicit changed-artifact conflict, not a missing-file result.
+            var grewDuringSizedRead = false
+            assertFailsWith<ArtifactChangedException> {
+                containedReadWithHook(root, job.id) {
+                    if (!grewDuringSizedRead) {
+                        grewDuringSizedRead = true
+                        Files.writeString(tree.resolve("a.c"), "changed", java.nio.file.StandardOpenOption.APPEND)
+                    }
+                }
+            }
+            assertTrue(grewDuringSizedRead)
+            Files.writeString(tree.resolve("a.c"), "int a;\n")
+            var shrankDuringSizedRead = false
+            assertFailsWith<ArtifactChangedException> {
+                containedReadWithHook(root, job.id) {
+                    if (!shrankDuringSizedRead) {
+                        shrankDuringSizedRead = true
+                        Files.writeString(tree.resolve("a.c"), "int", java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)
+                    }
+                }
+            }
+            assertTrue(shrankDuringSizedRead)
+            Files.writeString(tree.resolve("a.c"), "int a;\n")
+
             // A writer appending while the receipt is streamed: never a receipt over mixed bytes.
             var appended = false
             assertFailsWith<ArtifactChangedException> {
