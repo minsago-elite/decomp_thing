@@ -69,6 +69,23 @@ Verification adds reservation overlap/release, exact free-space boundaries,
 accounting-error recovery, retained-report refusal before body reads, status reads
 during blocked transfers, and mutual exclusion between uploads and workflows.
 
+`UploadServerTest` also holds the first physical legacy `job.json` read, then
+continues two concurrent real HTTP status clients while a dashboard inventory
+reads eight uploaded jobs with a 250 ms delay at each metadata read. The test
+requires at least 16 status responses, every response under two seconds, a status
+response completing at multiple inventory stages, and the final dashboard to
+contain every job. Status progress is required while the first record is held and
+again at the third and sixth distinct records, so a listing lock cannot defer
+all status work until the scan is nearly finished. In the retained local run,
+151 of 153 responses overlapped the listing; observed p95 was 53 ms and maximum
+was 59 ms. The focused regression and raw per-request timings are retained
+([evidence record](evidence/issue-162-http-status-during-dashboard-listing-2026-11-13.json),
+[JUnit XML](evidence/issue-162-http-status-during-dashboard-listing-2026-11-13.xml)).
+This qualifies bounded HTTP status responsiveness during a deliberately slowed
+in-process metadata scan. It does not measure physical-disk contention or
+deployment throughput, and it does not complete the broader #162 upload/listing
+quota matrix or hosted qualification.
+
 The packaged upload browser qualification passed against `51ff358`, using the
 pinned Chrome driver with test-only `--no-sandbox`. It covered session restoration,
 lost-response reload/retry, invalid and oversized request rejection, and a real
