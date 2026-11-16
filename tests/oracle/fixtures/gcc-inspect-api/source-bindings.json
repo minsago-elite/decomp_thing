@@ -1,0 +1,39 @@
+{
+  "schema": "gcc-inspect-api-source-bindings/v1",
+  "projectHead": "ee177eca53eef3c0cd0757854b326991cb60d48d",
+  "executedMerge": "3802a176dac39500d3af39ae480fcdabc2bffbe2",
+  "upstream": {
+    "mobyCommit": "6a43e3d5afddf4111da0f864bbc7cae5d7e95001",
+    "cliCommit": "a7dcaa6fdb6ed04aacbfdc76357fdae01605609e",
+    "requestedRepairApi": "1.49",
+    "pinnedClient": "29.7.2+a7dcaa6",
+    "pinnedServer": "29.7.2+6a43e3d"
+  },
+  "fixtures": [
+    {
+      "path": "tests/oracle/fixtures/gcc-inspect-api/historical-image-inspect.json",
+      "bytes": 3945,
+      "sha256": "0f65dfe3ab98b2c3fc8ac6d1896264c2f681b7ae99f2a6787427c3cf87cedc23",
+      "classification": "retained observation/control fixture; not a new execution"
+    },
+    {
+      "path": "tests/oracle/fixtures/gcc-inspect-api/current-image-inspect.json",
+      "bytes": 4201,
+      "sha256": "58a1ad6b8cc64e89bc2d63ee62531ba818653c8f7ab682ada7505a9e39ce2fbc",
+      "classification": "retained observation/control fixture; not a new execution"
+    },
+    {
+      "path": "tests/oracle/fixtures/gcc-inspect-api/current-image-config.json",
+      "bytes": 8958,
+      "sha256": "807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511",
+      "classification": "retained observation/control fixture; not a new execution"
+    },
+    {
+      "path": "tests/oracle/fixtures/gcc-inspect-api/current-docker-version.json",
+      "bytes": 1408,
+      "sha256": "014c4a081e8696cde956885d5eb6d6d7b885ca63c853c21af81dbc93490648e2",
+      "classification": "retained observation/control fixture; not a new execution"
+    }
+  ],
+  "controlClassification": "1.49 response behavior is a derived/fake control, never a hosted or wire observation"
+}

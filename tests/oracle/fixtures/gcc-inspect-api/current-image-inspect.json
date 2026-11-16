@@ -1,0 +1,51 @@
+[
+    {
+        "Id": "sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511",
+        "RepoTags": [
+            "decomp-gcc-oracle-toolchain:16.2.0"
+        ],
+        "RepoDigests": [],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-08-07T00:00:00Z",
+        "Config": {
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GPG_KEYS=B215C1633BCA0477615F1B35A5B3A004745C015A \tB3C42148A44E6983B3E4CC0793FA9B1AB75C61B8 \t90AA470469D3965A87A5DCB494D03953902C9419 \t80F98B2E0DAB6C8281BDF541A7C8C3B2F71EDF1C \t7F74F97C103468EE5D750B583AB00996FC26A641 \t33C235A34C46AA3FFB293709A328C3A2C3C45C06 \tD3A93CAD751C2AF4F8C7AD516C35B99309B5FA62",
+                "GCC_MIRRORS=https://ftpmirror.gnu.org/gcc \t\thttps://mirrors.kernel.org/gnu/gcc \t\thttps://bigsearcher.com/mirrors/gcc/releases \t\thttp://www.netgull.com/gcc/releases \t\thttps://ftpmirror.gnu.org/gcc \t\thttps://sourceware.org/pub/gcc/releases \t\tftp://ftp.gnu.org/gnu/gcc",
+                "GCC_VERSION=16.2.0"
+            ],
+            "Cmd": [
+                "bash"
+            ]
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 1561504431,
+        "GraphDriver": {
+            "Data": {
+                "LowerDir": "/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/d5a563aced86f41bb06ec10cb6ee6f97df791f35eec202aa326bc80884ee2995/diff:/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/79db9ee5036443d7606f6291bc5ba30032657454f8a8f11ded7bf28485211bc3/diff:/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/3279742dec16b86f73e2ee2760902333b99865c0f369a3422ac1b874252a52f8/diff:/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/a90a555f9e53286ea94d3c85773d22ffeda8bcb388422f76ea804d84766a8ea5/diff:/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/be38967dca445ce0127deb174e4da1425a92648aba9bfcde6706e2f693802abb/diff:/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/163c82637e8ab20d67cab6dd8d2ae1f09225c00fb673236ad3d1260583669d52/diff:/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/22937e69f8b80a42439d85b47eec07420c47e77eb5540255420072c4d228bfa7/diff:/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/2fd8c73021ac33c34c0ac3f812fda2880ee2bbaea3143d9606f6808baf8b2c1c/diff",
+                "MergedDir": "/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/8d005b90534c11faf2b69d9f6ae605f3d1778a27b9b92eefd38895a6b6e209f9/merged",
+                "UpperDir": "/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/8d005b90534c11faf2b69d9f6ae605f3d1778a27b9b92eefd38895a6b6e209f9/diff",
+                "WorkDir": "/home/runner/work/decomp_thing/decomp_thing/build/g/ffef6cea/v/s/docker-data/overlay2/8d005b90534c11faf2b69d9f6ae605f3d1778a27b9b92eefd38895a6b6e209f9/work"
+            },
+            "Name": "overlay2"
+        },
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:31631a95db7cd650d1c826f269b9e93b57d9f418128bf7c5499b4403be4d44d0",
+                "sha256:7c367ef8c1ea18872336c6bc0672b2ff7fee5dc56c055ce54e62f2ccfde4f847",
+                "sha256:144ea2bdbdf828c7c9867865b4eeffc5ec977e8e686cdfd1e240a890e9d4cf8e",
+                "sha256:758a60093d45fcab0f50466c34253fcdaea5dbb0bacd6495bda7d4e8d90e61d6",
+                "sha256:bd3697430d9c1e3d4cf6044fed4feb40ddfbec5d01420b2fd6d9565779423d99",
+                "sha256:c103436de306bfcb20eb5265f729760010d0c7bfdd10c937664882ecc1d8db5d",
+                "sha256:91b571880d8f2325dfaf81992875cbdaceefe7110cc448ff3271e9ae82606dff",
+                "sha256:13edf68405b45fb51540a7cea394c1b6856ee27cb4fadc2f6738896d1529b0e8",
+                "sha256:fc0f59678a37682ac1b60b253df3dc1383cded10a10f3d83372b13b67a3a7321"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "0001-01-01T00:00:00Z"
+        }
+    }
+]
