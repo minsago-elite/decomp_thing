@@ -1,0 +1,6 @@
+# Comic Code is a licensed font: copy it in with `make fonts`, do not commit it
+fonts/comic-code/
+# generated / local
+.render.py
+.venv/
+__pycache__/

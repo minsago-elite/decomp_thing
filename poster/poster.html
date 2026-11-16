@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8">
+  <title>LLM Binary Patch Poster</title>
+  <style>
+    /* ============ FONTS ============ */
+    @font-face { font-family: 'Nanum Square Round'; src: url('./nanum-square-round/NanumSquareRoundL.ttf') format('truetype'); font-weight: 300; font-display: block }
+    @font-face { font-family: 'Nanum Square Round'; src: url('./nanum-square-round/NanumSquareRoundR.ttf') format('truetype'); font-weight: 400; font-display: block }
+    @font-face { font-family: 'Nanum Square Round'; src: url('./nanum-square-round/NanumSquareRoundR.ttf') format('truetype'); font-weight: 500; font-display: block }
+    @font-face { font-family: 'Nanum Square Round'; src: url('./nanum-square-round/NanumSquareRoundB.ttf') format('truetype'); font-weight: 600; font-display: block }
+    @font-face { font-family: 'Nanum Square Round'; src: url('./nanum-square-round/NanumSquareRoundB.ttf') format('truetype'); font-weight: 700; font-display: block }
+    @font-face { font-family: 'Nanum Square Round'; src: url('./nanum-square-round/NanumSquareRoundEB.ttf') format('truetype'); font-weight: 800; font-display: block }
+    @font-face { font-family: 'Nanum Square Round'; src: url('./nanum-square-round/NanumSquareRoundEB.ttf') format('truetype'); font-weight: 900; font-display: block }
+    @font-face { font-family: 'Comic Code'; src: url('./fonts/comic-code/ComicCode-Light.otf') format('opentype'), local('Comic Code Light'); font-weight: 300; font-display: block }
+    @font-face { font-family: 'Comic Code'; src: url('./fonts/comic-code/ComicCode-Regular.otf') format('opentype'), local('Comic Code Regular'); font-weight: 400; font-display: block }
+    @font-face { font-family: 'Comic Code'; src: url('./fonts/comic-code/ComicCode-Italic.otf') format('opentype'), local('Comic Code Italic'); font-weight: 400; font-style: italic; font-display: block }
+    @font-face { font-family: 'Comic Code'; src: url('./fonts/comic-code/ComicCode-Medium.otf') format('opentype'), local('Comic Code Medium'); font-weight: 500; font-display: block }
+    @font-face { font-family: 'Comic Code'; src: url('./fonts/comic-code/ComicCode-Semibold.otf') format('opentype'), local('Comic Code Semibold'); font-weight: 600; font-display: block }
+    @font-face { font-family: 'Comic Code'; src: url('./fonts/comic-code/ComicCode-Bold.otf') format('opentype'), local('Comic Code Bold'); font-weight: 700; font-display: block }
+    @font-face { font-family: 'Comic Code'; src: url('./fonts/comic-code/ComicCode-Bold.otf') format('opentype'), local('Comic Code Bold'); font-weight: 800; font-display: block }
+
+    /* ============ TOKENS ============ */
+    :root {
+      --ink: #0F1A2B;
+      --ink-soft: #44556C;
+      --ink-faint: #7B889D;
+      --base: #EDF0F4;
+      --panel: #FFFFFF;
+      --panel-2: #F4F6FA;
+      --line: #D3DAE5;
+      --line-soft: #E3E8F0;
+      --blue: #1744C9;        /* primary: reconstruction / analysis */
+      --blue-deep: #0F2A80;
+      --blue-tint: #E6EBFA;
+      --teal: #0E8A86;        /* secondary: verification */
+      --teal-tint: #E1F3F2;
+      --flare: #E8431F;       /* the one risk color: vulnerability */
+      --flare-tint: #FDE7E0;
+      --good: #167A4C;
+      --good-tint: #E2F3EA;
+      --warn: #B26A00;
+      --warn-tint: #FFF1D6;
+      --code-bg: #0E1726;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box }
+    html { -webkit-print-color-adjust: exact; print-color-adjust: exact; background: var(--base) }
+    @page { size: 594mm 841mm; margin: 0 }
+
+    body {
+      position: relative;
+      width: 594mm; height: 841mm; overflow: hidden;
+      background: var(--base); color: var(--ink);
+      font-family: 'Nanum Square Round', sans-serif;
+      font-size: 17pt; line-height: 1.4; letter-spacing: -0.01em;
+      -webkit-font-smoothing: antialiased;
+    }
+    .mono { font-family: 'Comic Code', monospace; font-feature-settings: "tnum" 1; letter-spacing: 0 }
+
+    .page {
+      position: absolute; inset: 0;
+      padding: 13.5mm 18mm 9mm;
+      display: flex; flex-direction: column;
+    }
+    .tick { position: absolute; width: 8mm; height: 8mm; border-color: var(--ink); opacity: .5 }
+    .tick.tl { top: 6mm; left: 6mm; border-left: 1.4pt solid; border-top: 1.4pt solid }
+    .tick.tr { top: 6mm; right: 6mm; border-right: 1.4pt solid; border-top: 1.4pt solid }
+    .tick.bl { bottom: 5mm; left: 6mm; border-left: 1.4pt solid; border-bottom: 1.4pt solid }
+    .tick.br { bottom: 5mm; right: 6mm; border-right: 1.4pt solid; border-bottom: 1.4pt solid }
+
+    /* ============ HEADER (centered, as in the 2026-1 poster) ============ */
+    header { display: flex; flex-direction: column; align-items: center; text-align: center }
+    .kicker { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 3.6mm; margin-bottom: 5.5mm }
+    .kicker .tag {
+      font-family: 'Comic Code', monospace; font-weight: 600; font-size: 12.5pt; letter-spacing: .12em;
+      color: var(--blue); background: var(--blue-tint); padding: 2.6mm 5.6mm; border-radius: 1.2mm; text-transform: uppercase
+    }
+    .kicker .tag.flare { color: var(--flare); background: var(--flare-tint) }
+    .kicker .tag.teal { color: var(--teal); background: var(--teal-tint) }
+    h1.ko { font-weight: 900; font-size: 48pt; line-height: 1.1; letter-spacing: -0.03em; color: var(--ink); word-break: keep-all; text-align: center }
+    h1.ko .hl { color: var(--flare) }
+    h1.ko .hl2 { color: var(--blue) }
+    .title-en {
+      margin-top: 4.5mm; font-family: 'Comic Code', monospace; font-weight: 500; font-size: 18pt; line-height: 1.2;
+      letter-spacing: -0.02em; color: var(--blue-deep); text-align: center
+    }
+    .title-en .ex { color: var(--flare); font-weight: 700 }
+    .header-meta { margin-top: 5mm; display: flex; flex-direction: column; align-items: center; gap: 1.4mm; color: var(--ink) }
+    .header-meta .authors { font-size: 20pt; font-weight: 800; letter-spacing: -0.02em; line-height: 1.2 }
+    .header-meta .details { display: flex; flex-direction: column; gap: .8mm; font-size: 13.5pt; line-height: 1.25; color: var(--ink-soft) }
+
+    /* ============ HERO STATS ============ */
+    .hero {
+      margin-top: 7mm; display: grid; grid-template-columns: repeat(5, 1fr);
+      border-top: 1.4pt solid var(--ink); border-bottom: 1.4pt solid var(--line); padding: 5.5mm 0
+    }
+    .stat { padding: 0 7mm; border-left: 1pt solid var(--line-soft) }
+    .stat:first-child { padding-left: 0; border-left: 0 }
+    .stat .val { font-family: 'Comic Code', monospace; font-size: 36pt; font-weight: 800; line-height: .95; letter-spacing: -0.04em; color: var(--ink) }
+    .stat .val small { font-family: 'Nanum Square Round', sans-serif; font-size: 18pt; font-weight: 800; letter-spacing: -0.02em }
+    .stat .val small.mono { font-family: 'Comic Code', monospace }
+    .stat.flare .val { color: var(--flare) }
+    .stat.blue .val { color: var(--blue) }
+    .stat.teal .val { color: var(--teal) }
+    .stat .lbl { margin-top: 2.8mm; font-size: 14.5pt; font-weight: 700; color: var(--ink); line-height: 1.25 }
+    .stat .sub { margin-top: .8mm; font-size: 12pt; color: var(--ink-faint); line-height: 1.3 }
+
+    /* ============ COLUMNS ============ */
+    .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 9mm; margin-top: 7mm; flex: 1; min-height: 0 }
+    .col { display: flex; flex-direction: column; justify-content: space-between; gap: 5mm; min-height: 0 }
+    .card { background: var(--panel); border: 1pt solid var(--line); border-radius: 3mm; padding: 5.5mm 8mm 6mm }
+    .card.tint { background: var(--panel-2) }
+    .shead { display: flex; align-items: baseline; gap: 4.5mm; margin-bottom: 4.4mm; padding-bottom: 2.4mm; border-bottom: 1.4pt solid var(--ink) }
+    .shead .no { font-family: 'Comic Code', monospace; font-weight: 800; font-size: 17pt; color: var(--blue) }
+    .shead.flare .no { color: var(--flare) }
+    .shead.teal .no { color: var(--teal) }
+    .shead .t { font-weight: 800; font-size: 22pt; letter-spacing: -0.025em; color: var(--ink); line-height: 1.2 }
+    .shead .en { margin-left: auto; font-family: 'Comic Code', monospace; font-size: 11pt; color: var(--ink-faint); letter-spacing: .08em; align-self: center }
+
+    strong { color: var(--ink); font-weight: 700 }
+    .kw { color: var(--blue); font-weight: 700 }
+    .kwf { color: var(--flare); font-weight: 700 }
+    .kwt { color: var(--teal); font-weight: 700 }
+    .subh { font-weight: 800; font-size: 17pt; color: var(--ink); margin: 5.6mm 0 2.6mm; display: flex; align-items: center; gap: 3.5mm; line-height: 1.2 }
+    .subh::before { content: ""; width: 2.4mm; height: 2.4mm; background: var(--blue); border-radius: .5mm; display: inline-block }
+    .subh.first { margin-top: 0 }
+
+    ul.clean { list-style: none }
+    ul.clean li { position: relative; padding-left: 8.5mm; font-size: 16pt; line-height: 1.4; color: var(--ink-soft); margin-top: 2.6mm; word-break: keep-all }
+    ul.clean li:first-child { margin-top: 0 }
+    ul.clean li::before { content: ""; position: absolute; left: 0; top: 2.5mm; width: 2.2mm; height: 2.2mm; border: 1.2pt solid var(--blue); border-radius: 50% }
+    ul.clean li b { color: var(--ink); font-weight: 700 }
+    ul.clean.sm li { font-size: 14pt; line-height: 1.4 }
+    ul.clean.sm li::before { top: 2.1mm }
+
+    .rq { margin-top: 5mm; padding: 4mm 5.5mm; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 5mm;
+      background: var(--panel-2); border: 1pt solid var(--line-soft); border-left: 2.2mm solid var(--flare); border-radius: 2mm }
+    .rq .label { font-weight: 900; font-size: 16pt; letter-spacing: -0.02em; color: var(--flare); white-space: nowrap }
+    .rq .q { font-size: 16pt; line-height: 1.35; font-weight: 700; color: var(--ink); letter-spacing: -0.015em; word-break: keep-all }
+
+    /* ===== tables ===== */
+    table { width: 100%; border-collapse: collapse; font-size: 13pt; line-height: 1.3 }
+    caption { caption-side: top; text-align: left; font-size: 12pt; color: var(--ink-faint); margin-bottom: 1.6mm }
+    th { font-weight: 700; font-size: 12.5pt; color: #fff; background: var(--ink); padding: 1.5mm 2.4mm; text-align: left; letter-spacing: -0.01em }
+    th.r, td.r { text-align: right } th.c, td.c { text-align: center }
+    td { padding: 1.25mm 2.4mm; border-bottom: .7pt solid var(--line-soft); color: var(--ink-soft); vertical-align: middle; word-break: keep-all }
+    td.name { font-weight: 700; color: var(--ink) }
+    td.name span { display: block; font-weight: 500; font-size: 12pt; color: var(--ink-soft) }
+    td.num { font-family: 'Comic Code', monospace; font-weight: 500; color: var(--ink); white-space: nowrap }
+    tr.best td { background: var(--blue-tint) }
+    tr.best td.name, tr.best td.num { color: var(--blue-deep); font-weight: 700 }
+    .cwe { font-family: 'Comic Code', monospace; font-size: 12pt; color: var(--blue-deep); white-space: nowrap }
+    td.todo { color: var(--ink-faint); font-size: 12pt }
+    .pill { display: inline-block; white-space: nowrap; font-size: 11.5pt; font-weight: 800; padding: .5mm 2.4mm; border-radius: 1mm; line-height: 1.35 }
+    .pill.done { background: var(--good-tint); color: var(--good) }
+    .pill.near { background: var(--blue-tint); color: var(--blue-deep) }
+    .pill.wip { background: var(--warn-tint); color: var(--warn) }
+    .pill.risk { background: var(--flare-tint); color: var(--flare) }
+
+    /* ===== stack / tool grid ===== */
+    .tgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3mm }
+    .tcard { background: var(--panel-2); border: 1pt solid var(--line); border-radius: 2mm; padding: 3mm 3.8mm 3.4mm }
+    .tcard h4 { font-size: 14pt; font-weight: 800; color: var(--ink); line-height: 1.25 }
+    .tcard p { font-size: 12.5pt; line-height: 1.35; margin-top: 1mm; color: var(--ink-soft); word-break: keep-all }
+
+    /* ===== pipeline svg ===== */
+    .pipe svg { width: 100%; height: auto; display: block }
+
+    /* ===== code ===== */
+    .code { background: var(--code-bg); color: #D9E2F2; border-radius: 2.4mm; padding: 4.2mm 6mm 4.6mm;
+      font-family: 'Comic Code', monospace; font-size: 12pt; line-height: 1.4; white-space: pre; overflow: hidden; position: relative; tab-size: 2 }
+    .code .fn { display: block; font-size: 11pt; color: #8FA3C4; margin-bottom: 2.4mm; padding-bottom: 1.8mm; border-bottom: .6pt solid #2A3650; white-space: normal }
+    .code .k { color: #8FB8FF; font-weight: 700 } .code .s { color: #FFC78E } .code .c { color: #6F82A3; font-style: italic }
+    .code .f { color: #7FE3D6 }
+    .term { background: #11182A; color: #D5DEEE; border-radius: 2.4mm; padding: 3.6mm 5.5mm 4.2mm; font-family: 'Comic Code', monospace; font-size: 12pt; line-height: 1.38; white-space: pre; overflow: hidden; position: relative; margin-top: 3mm }
+    .term.first { margin-top: 0 }
+    .term .bar { display: flex; gap: 1.6mm; margin-bottom: 2.2mm; align-items: center }
+    .term .bar i { width: 2.6mm; height: 2.6mm; border-radius: 50%; background: #39445C; display: inline-block }
+    .term .bar i:nth-child(1) { background: #FF5F57 } .term .bar i:nth-child(2) { background: #FEBC2E } .term .bar i:nth-child(3) { background: #28C840 }
+    .term .bar span { margin-left: auto; font-size: 11pt; color: #9AADCC; font-family: 'Nanum Square Round', sans-serif; font-weight: 700; white-space: normal; text-align: right }
+    .term .p { color: #8FB8FF } .term .err { color: #FF8A6A; font-weight: 700 } .term .ok { color: #5EE0A2; font-weight: 700 } .term .dim { color: #7F93B5 } .term .w { color: #FFC78E }
+
+    /* ===== result figures ===== */
+    .figs { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm }
+    .fig { border: 1pt solid var(--line); border-radius: 2.4mm; overflow: hidden; background: #fff }
+    .fig .shot { aspect-ratio: 1281 / 547; overflow: hidden; background: #F4F6F3; border-bottom: 1pt solid var(--line-soft) }
+    .fig .shot img { width: 100%; display: block }
+    .fig .cap { padding: 2.6mm 3.8mm 3.2mm; font-size: 12.5pt; line-height: 1.35; color: var(--ink-soft); word-break: keep-all }
+    .fig .cap b { color: var(--ink); font-weight: 700; display: block; font-size: 13.5pt; margin-bottom: .4mm }
+
+    p.note { margin-top: 3.4mm; font-size: 13pt; line-height: 1.4; color: var(--ink); padding-left: 4mm; border-left: 1.6mm solid var(--warn); word-break: keep-all }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 6mm; align-items: start }
+    .two.wide { grid-template-columns: 1.12fr 1fr }
+
+    /* ===== charts ===== */
+    .chart svg { width: 100%; height: auto; display: block }
+    .ctitle { font-weight: 800; font-size: 14pt; color: var(--ink); margin-bottom: 1.6mm; line-height: 1.25 }
+    .ctitle.gap { margin-top: 4.5mm }
+    .legend { display: flex; gap: 4mm; flex-wrap: wrap; margin-top: 1.6mm; font-size: 11.5pt; line-height: 1.35; color: var(--ink-soft) }
+    .legend i { display: inline-block; width: 3.4mm; height: 2.2mm; border-radius: .5mm; margin-right: 1.4mm; vertical-align: middle }
+
+    /* limitations */
+    .lim { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm }
+    .lcard { background: var(--panel-2); border: 1pt solid var(--line); border-left: 2.2mm solid var(--warn); border-radius: 2mm; padding: 3mm 4.2mm 3.4mm }
+    .lcard.next { border-left-color: var(--teal) }
+    .lcard h4 { font-size: 14.5pt; font-weight: 800; color: var(--ink); margin-bottom: .8mm; line-height: 1.25 }
+    .lcard p { font-size: 13pt; line-height: 1.38; color: var(--ink-soft); word-break: keep-all }
+
+    /* conclusion */
+    .conclude { background: var(--ink); color: #fff; border: none }
+    .conclude .shead { border-bottom-color: #3a4a63 } .conclude .shead .t { color: #fff } .conclude .shead .no { color: #8FB8FF } .conclude .shead .en { color: #8A9AB8 }
+    .conclude ul.clean { margin-top: 4mm }
+    .conclude ul.clean li { color: #C7D2E2 } .conclude ul.clean li::before { border-color: #9BB4FF } .conclude ul.clean li b { color: #fff }
+    .conclude .big { font-size: 19.5pt; font-weight: 800; letter-spacing: -0.02em; color: #fff; line-height: 1.38; word-break: keep-all }
+    .conclude .big .hl { color: #FF9C82 } .conclude .big .hl2 { color: #9BB4FF }
+
+    /* references + footer */
+    .refband { margin-top: 5mm; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9mm; align-items: start }
+    .refband .rt { font-weight: 800; font-size: 14pt; color: var(--ink); line-height: 1.35 }
+    .refs { columns: 3; column-gap: 9mm; font-size: 11pt; line-height: 1.38; color: var(--ink-soft) }
+    .refs .r { padding-left: 7mm; text-indent: -7mm; break-inside: avoid; margin-bottom: 1mm }
+    .refs .r b { font-family: 'Comic Code', monospace; font-weight: 600; color: var(--ink) }
+    .footer { margin-top: 4.5mm; display: flex; align-items: center; gap: 6mm; padding-top: 3mm; border-top: 1.4pt solid var(--ink) }
+    .footer .l { font-size: 13pt; color: var(--ink-soft) } .footer .l b { color: var(--ink); font-weight: 700 }
+    .footer .l i { font-style: normal; color: var(--line); margin: 0 3mm }
+    .footer .repo { margin-left: auto; font-size: 12pt; color: var(--ink-soft); text-align: right; line-height: 1.4 }
+    .footer .repo .mono { font-size: 11.5pt; color: var(--blue-deep); font-weight: 700; margin-left: 2mm }
+    .footer .l .phf { color: var(--warn); border-bottom: 1pt dashed var(--warn); font-weight: 700 }
+  </style>
+</head>
+
+<body>
+  <div class="page">
+    <span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+
+    <!-- ================= HEADER ================= -->
+    <header>
+      <div class="kicker">
+        <span class="tag">Reverse Engineering</span>
+        <span class="tag flare">Vulnerability</span>
+        <span class="tag teal">LLM Agent</span>
+      </div>
+      <h1 class="ko">리버싱 도구와 결합된 <span class="hl2">LLM</span>을 활용한<br>바이너리 실행 파일 <span class="hl">취약점 탐색</span> 및 <span class="hl">패치</span></h1>
+      <div class="title-en">decomp_engine: From Stripped ELF to <span class="ex">Patched</span> ELF with Ghidra and an LLM Agent</div>
+      <div class="header-meta" aria-label="저자 및 소속 정보">
+        <div class="authors">박라준</div>
+        <div class="details">
+          <span>단국대학교부속소프트웨어고등학교</span>
+          <span>rjp2030@gmail.com</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ================= HERO STATS ================= -->
+    <div class="hero">
+      <div class="stat blue"><div class="val">7<small>단계</small></div><div class="lbl">자동화 파이프라인</div><div class="sub">ELF 입력에서 패치 ELF까지</div></div>
+      <div class="stat flare"><div class="val">10<small>종</small></div><div class="lbl">CWE 취약 예제 데이터셋</div><div class="sub">직접 제작한 c-vul</div></div>
+      <div class="stat"><div class="val">10<small class="mono">/10</small></div><div class="lbl">참조 패치 검증 통과</div><div class="sub">직접 작성한 수정본, 실제 LLM 미평가</div></div>
+      <div class="stat teal"><div class="val">99.5<small class="mono">%</small></div><div class="lbl">스트립 빌드 함수 경계 재현율</div><div class="sub">GCC 함수 3,284개 중 3,269개</div></div>
+      <div class="stat"><div class="val">3,682</div><div class="lbl">커밋, PR 828건 병합</div><div class="sub">2026년 6월부터 11월까지</div></div>
+    </div>
+
+    <!-- ================= TWO COLUMNS ================= -->
+    <div class="cols">
+
+      <!-- ============ LEFT COLUMN ============ -->
+      <div class="col">
+
+        <!-- rubric 2: 프로젝트 요약 -->
+        <div class="card tint">
+          <div class="shead"><span class="no">§</span><span class="t">프로젝트 요약</span><span class="en">ABSTRACT</span></div>
+          <ul class="clean">
+            <li><b>문제</b> — 소스 없는 바이너리의 취약점은 <strong>사람이 직접</strong> 어셈블리와 디컴파일 코드를 읽어 찾아야 해서 시간과 전문 지식이 많이 든다</li>
+            <li><b>방법</b> — <span class="kw">Ghidra</span>로 구조를 추출하고, <span class="kw">LLM 에이전트</span>가 C 코드를 복원하고 패치하며, <span class="kwt">컴파일러와 새니타이저</span>로 매&nbsp;단계를 실행해 검증한다</li>
+            <li><b>결과</b> — <strong>10종 참조 패치</strong>의 취약점 재현과 수정 후 동작을 CI에서 검증했다. 패치 워크플로는 <strong>10종 선택</strong>을 지원하며 실제 LLM 성공률은 미평가다</li>
+          </ul>
+        </div>
+
+        <!-- rubric 3: 제작 동기 및 필요성 -->
+        <div class="card">
+          <div class="shead"><span class="no">01</span><span class="t">제작 동기 및 필요성</span><span class="en">MOTIVATION</span></div>
+          <ul class="clean">
+            <li><b>배경</b> — 소스가 없는 배포 바이너리의 취약점 점검은 Ghidra나 IDA로 사람이 직접 읽는 수작업이었다</li>
+            <li><b>기회</b> — LLM이 디컴파일 결과를 <strong>다시 컴파일 가능한 C</strong>로 다듬을 수 있음이 보고되었다<span class="mono">[1]</span></li>
+            <li><b>차별성</b> — 기존 연구<span class="mono">[1-3]</span>와 달리 <strong>취약점 위치를 모르는 바이너리 전체</strong>를 대상으로 하고, 패치한 복원 코드로 <strong>실행 파일 전체를 새로 만든다</strong></li>
+            <li><b>필요성</b> — 점검을 자동화하면 더 많은 프로그램을 더 빨리 검사할 수 있고, LLM 출력을 <strong>실행 결과로 검증</strong>하므로 환각을 그대로 믿지 않는다</li>
+          </ul>
+          <div class="rq">
+            <div class="label">연구 질문</div>
+            <div class="q">리버싱 도구와 LLM을 결합하여 디컴파일 → 취약점 탐색 → 패치 → 재컴파일을 <span class="kwf">하나의 자동화된 흐름</span>으로 연결할 수 있는가?</div>
+          </div>
+        </div>
+
+        <!-- rubric 4: 구현 과정 (데이터셋, 모델, 알고리즘, 핵심 코드) -->
+        <div class="card">
+          <div class="shead"><span class="no">02</span><span class="t">구현 과정</span><span class="en">IMPLEMENTATION</span></div>
+
+          <div class="subh first">데이터셋</div>
+          <div class="two wide">
+            <table>
+              <caption>표 1. 취약 예제 데이터셋 c-vul (직접 제작, C11)</caption>
+              <thead><tr><th>#</th><th>취약점 유형</th><th>CWE</th><th class="c">참조 패치</th></tr></thead>
+              <tbody>
+                <tr class="best"><td class="num">01</td><td class="name">Out-of-Bounds Write</td><td class="cwe">CWE-787</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">02</td><td class="name">Out-of-Bounds Read</td><td class="cwe">CWE-125</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">03</td><td class="name">Use-After-Free</td><td class="cwe">CWE-416</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">04</td><td class="name">Double Free</td><td class="cwe">CWE-415</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">05</td><td class="name">Format String</td><td class="cwe">CWE-134</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">06</td><td class="name">Integer Overflow</td><td class="cwe">CWE-190</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">07</td><td class="name">Null Pointer Dereference</td><td class="cwe">CWE-476</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">08</td><td class="name">Uninitialized Memory Use</td><td class="cwe">CWE-908</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">09</td><td class="name">Memory Leak</td><td class="cwe">CWE-401</td><td class="c"><span class="pill done">통과</span></td></tr>
+                <tr><td class="num">10</td><td class="name">Command Injection</td><td class="cwe">CWE-78</td><td class="c"><span class="pill done">통과</span></td></tr>
+              </tbody>
+            </table>
+            <div>
+              <table>
+                <caption>표 2. 규모 확장용 데이터셋</caption>
+                <thead><tr><th>데이터셋</th><th class="r">함수 수</th></tr></thead>
+                <tbody>
+                  <tr><td class="name">합성 ELF 코퍼스<span>심볼 유무 쌍으로 만든 합성 프로그램</span></td><td class="num r">100+</td></tr>
+                  <tr><td class="name">GCC 16.2.0 오라클<span>DWARF 기반 함수 경계와 이름 정답</span></td><td class="num r">12,844</td></tr>
+                  <tr><td class="name">채점 가능 함수<span>스트립 빌드 시작점 재현율 <strong>99.5%</strong></span></td><td class="num r">3,284</td></tr>
+                </tbody>
+              </table>
+              <ul class="clean sm" style="margin-top:4mm">
+                <li><b>직접 만든 이유</b> — 취약점의 <strong>위치와 정답 동작</strong>을 알아야 패치 성공을 채점할 수 있다. GCC는 심볼이 있는 빌드와 없는 빌드를 짝지어 복원 정확도의 정답으로 쓴다</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="subh">모델과 도구</div>
+          <div class="tgrid">
+            <div class="tcard"><h4>Ghidra 12.1.3</h4><p>Java API로 앱에 내장. 함수, 문자열, 호출 관계를 추출하고 디컴파일</p></div>
+            <div class="tcard"><h4>LLM 에이전트</h4><p>ACP v1 규격으로 설계. 이번 검증은 <strong>테스트용 응답기</strong> 사용</p></div>
+            <div class="tcard"><h4>Kotlin/JVM</h4><p>JDK 21. 워크플로, 증거 기록, 웹 서버</p></div>
+            <div class="tcard"><h4>C11 검증</h4><p>ASan, UBSan, LSan과 컴파일 진단. 명령어 삽입은 별도 동작 검사</p></div>
+            <div class="tcard"><h4>격리 실행</h4><p>bwrap과 Docker. 네트워크 없는 읽기 전용 환경에서만 실행</p></div>
+            <div class="tcard"><h4>Web GUI</h4><p>Preact SPA. 업로드, 작업 조회, 소스와 증거 열람</p></div>
+          </div>
+
+          <div class="subh">알고리즘</div>
+          <div class="pipe"><svg id="pipesvg" viewBox="0 0 1000 196"></svg></div>
+          <ul class="clean" style="margin-top:3mm">
+            <li><b>검증 우선</b> — LLM 출력은 컴파일, 실행, 새니타이저 결과를 통과해야만 받아들인다. 실패하면 오류 로그를 되먹여 <span class="kw">수정과 재컴파일</span>을 반복한다</li>
+          </ul>
+
+          <div class="subh">핵심 코드</div>
+          <div class="code"><span class="fn">mvp/MvpPatchWorkflow.kt, 흐름을 보여 주는 의사코드 (10종 분기 중 핵심 단계만 추림)</span><span class="c">// ② Ghidra 추출 → ③ LLM 복원 → ④ ASan 빌드 → ⑤ 취약점 재현</span>
+decompiler.decompile(input, raw)                      <span class="c">// 내장 Ghidra 12.1.3</span>
+<span class="k">val</span> src = agent.request(<span class="f">reconstructionPrompt</span>(original.stdout), raw)
+compile(src, vulnerable, sanitizer = <span class="k">true</span>)            <span class="c">// -fsanitize=address,undefined</span>
+<span class="k">val</span> finding = reproduceCase(case, vulnerable)       <span class="c">// 격리 실행 또는 컴파일 진단</span>
+<span class="k">if</span> (!case.matchesFinding(finding))
+    <span class="k">throw</span> MvpPatchException(<span class="s">"case-specific reproduction failed"</span>)
+<span class="c">// ⑥ LLM 패치 → ⑦ 재컴파일, 보안과 동작 검증 (실패하면 중단, 반복은 repair 워크플로)</span>
+<span class="k">val</span> patched = agent.request(<span class="f">patchPrompt</span>(original.stdout, finding.output), src)
+compile(patched, patchedAsan, sanitizer = <span class="k">true</span>, werror = <span class="k">true</span>)
+verify(patchedAsan, case.safeStdout)                         <span class="c">// 재현 입력에서 Sanitizer 보고 없음</span>
+compile(patched, release, sanitizer = <span class="k">false</span>)          <span class="c">// PIE, RELRO, FORTIFY_SOURCE=2</span>
+verifyHardening(release); verify(release, case.safeStdout)   <span class="c">// 사례별 안전한 stdout과 exit 확인</span>
+publish(release, evidence)                            <span class="c">// 모두 통과해야 patched_binary 공개</span></div>
+        </div>
+
+      </div><!-- /left -->
+
+      <!-- ============ RIGHT COLUMN ============ -->
+      <div class="col">
+
+        <!-- rubric 5: 산출물 결과 화면 -->
+        <div class="card">
+          <div class="shead"><span class="no">03</span><span class="t">산출물 결과</span><span class="en">RESULTS</span></div>
+
+          <div class="subh first">binary_01 (CWE-787) 기존 데모와 최신 검증 범위</div>
+          <div class="term first"><div class="bar"><i></i><i></i><i></i><span>① 원본 실행 → ③ 복원 C → ④ ASan 빌드 → ⑤ 취약점 재현</span></div><span class="p">$</span> ./binary_01 ; echo exit=$?
+[03] Alexandria Stone
+<span class="ok">exit=0</span>                                              <span class="dim"># 패치 후에도 보존해야 할 기준 동작</span>
+<span class="p">$</span> ASAN_OPTIONS=halt_on_error=1 ./reconstructed_asan <span class="dim"># 복원 C의 ASan, UBSan 빌드</span>
+<span class="err">==ERROR: AddressSanitizer: stack-buffer-overflow</span>    <span class="w">→ CWE-787 재현</span>
+<span class="err">WRITE of size 1</span> at offset 72 in frame main
+    #0 main  decompiled.c:7    <span class="w">badge[i] = message[i];</span>
+    [64, 72) <span class="w">'badge'</span> &lt;== overflows this variable
+<span class="dim">SUMMARY: AddressSanitizer: stack-buffer-overflow decompiled.c:7 in main</span></div>
+          <div class="term"><div class="bar"><i></i><i></i><i></i><span>⑥ 패치 → ⑦ 재컴파일과 검증 (테스트용 응답기 응답, 실제 LLM 미사용)</span></div><span class="p">$</span> diff -u decompiled.c patched.c                    <span class="dim"># evidence/approved.patch</span>
+<span class="err">-    char badge[8];</span>
+<span class="err">-    const char *message = "[03] Alexandria Stone";</span>
+<span class="err">-    for (volatile int i = 0; message[i] != '\0'; i++) {</span>
+<span class="err">-        badge[i] = message[i];</span>
+<span class="err">-    }</span>
+     puts("[03] Alexandria Stone");
+<span class="err">-    return badge[0] == 0;</span>
+<span class="ok">+    return 0;</span>
+<span class="p">$</span> ./patched_binary ; echo exit=$?                   <span class="dim"># PIE, RELRO, FORTIFY_SOURCE=2 강화 빌드</span>
+[03] Alexandria Stone
+<span class="ok">exit=0</span>
+<span class="ok">✓ 기본 실행 stdout과 exit 일치   ✓ ASan 보고 없음   ✓ 강화 빌드 통과</span></div>
+          <p class="note">※ 복원과 패치 응답은 수용 검증 스크립트에 든 <strong>테스트용 응답기</strong>의 고정 응답이다. LLM의 능력을 보여 주는 결과가 아니며, 실제 LLM 연결은 진행 중이다. 위 출력은 2026.11.10 데모 발췌다. 최신 CI(11.16)는 별도로 <strong>10종 참조 패치</strong>를 검증하며, 모델 성능을 뜻하지 않는다.</p>
+
+          <div class="subh">실제 산출물 화면</div>
+          <div class="figs">
+            <div class="fig"><div class="shot"><img src="./assets/spa_upload_crop.png" alt="Decomp Workbench 업로드 화면"></div>
+              <div class="cap"><b>바이너리 업로드 (Preact SPA 미리보기)</b>binary_01(18,896바이트)을 선택한 상태. 업로드하면 작업으로 저장되고, 분석은 기존 Workbench에서 시작한다</div></div>
+            <div class="fig"><div class="shot"><img src="./assets/spa_runtime_crop.png" alt="런타임 상태 화면"></div>
+              <div class="cap"><b>Runtime status</b>앱 버전 0.1.0, UI 빌드 해시, 서버 연결 보고를 보여 준다</div></div>
+          </div>
+        </div>
+
+        <!-- Progress -->
+        <div class="card">
+          <div class="shead teal"><span class="no">04</span><span class="t">진행 현황과 완성도</span><span class="en">PROGRESS</span></div>
+          <div class="two">
+            <div>
+              <table>
+                <caption>표 3. 단계별 수행 상태 (2026.11.16 기준)</caption>
+                <thead><tr><th>단계</th><th>내용</th><th class="c">상태</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">A0-5</td><td>Ghidra 추출, LLM 소스 복원</td><td class="c"><span class="pill done">완료</span></td></tr>
+                  <tr><td class="num">L6</td><td>10종 참조 패치 CI 검증</td><td class="c"><span class="pill done">완료</span></td></tr>
+                  <tr><td class="num">L4</td><td>자동 입력 생성, 취약점 탐색</td><td class="c"><span class="pill done">완료</span></td></tr>
+                  <tr><td class="num">L3</td><td>LLM 패치와 회귀 검증 루프</td><td class="c"><span class="pill near">거의 완료</span></td></tr>
+                  <tr><td class="num">B</td><td>실제 LLM 연결 (ACP)</td><td class="c"><span class="pill wip">진행 중</span></td></tr>
+                  <tr><td class="num">C</td><td>내장 LLM 에이전트</td><td class="c"><span class="pill wip">예정</span></td></tr>
+                  <tr><td class="num">D</td><td>Web GUI</td><td class="c"><span class="pill wip">진행 중</span></td></tr>
+                  <tr><td class="num">A6-15</td><td>GCC, LLVM 대규모 복원</td><td class="c"><span class="pill wip">진행 중</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div>
+              <div class="ctitle">마일스톤별 이슈 처리 현황</div>
+              <div class="chart"><svg id="mschart" viewBox="0 0 480 170"></svg></div>
+              <div class="legend"><span><i style="background:#1744C9"></i>닫힌 이슈</span><span><i style="background:#D3DAE5"></i>열린 이슈</span><span>닫힘/전체: 5개 분류 255/966, 저장소 전체 265/982</span></div>
+              <div class="ctitle gap">월별 커밋 수</div>
+              <div class="chart"><svg id="commitchart" viewBox="0 0 480 110"></svg></div>
+            </div>
+          </div>
+          <ul class="clean" style="margin-top:5mm">
+            <li><b>핵심 흐름 연결 확인</b> — 10종 참조 패치와 사례 선택 워크플로를 추가하고, PR마다 필수 CI 검증을 실행한다</li>
+            <li><b>규모 확장은 진행 중</b> — GCC와 LLVM 전체 복원, 실제 LLM 연결, 내장 에이전트, 웹 GUI를 이슈 단위로 추적한다</li>
+          </ul>
+        </div>
+
+        <!-- Limitations and next -->
+        <div class="card">
+          <div class="shead flare"><span class="no">05</span><span class="t">한계 및 향후 과제</span><span class="en">LIMITATIONS</span></div>
+          <div class="lim">
+            <div class="lcard"><h4>검증 범위는 고정 예제</h4><p>10종 참조 패치 통과, 임의 바이너리로의 일반화는 미확인</p></div>
+            <div class="lcard"><h4>LLM 능력은 미평가</h4><p>참조 패치와 테스트 응답은 모델 성능 지표가 아니다</p></div>
+            <div class="lcard"><h4>탐지 범위의 한계</h4><p>명령어 삽입은 별도 검사하며 임의 논리 오류는 보장하지 않는다</p></div>
+            <div class="lcard next"><h4>향후 과제</h4><p>실제 LLM 적용, GCC 오라클로 정확도 측정</p></div>
+          </div>
+        </div>
+
+        <!-- Conclusion -->
+        <div class="card conclude">
+          <div class="shead"><span class="no">06</span><span class="t">결론</span><span class="en">CONCLUSION</span></div>
+          <div class="big">따로 다루던 <span class="hl2">재컴파일 가능한 디컴파일</span>과 <span class="hl">바이너리 패치</span>를 하나의 자동화 흐름으로 연결하고, 10종의 참조 패치를 검증했다.</div>
+          <ul class="clean">
+            <li><b>답할 수 있는 것</b> — 10종의 취약점별 검증 계약과 참조 수정본을 CI에서 확인했다</li>
+            <li><b>아직 답하지 못한 것</b> — 실제 LLM 성공률과 전체 프로그램 동작 동등성. 대규모 복원은 계속 검증 중이다</li>
+          </ul>
+        </div>
+
+      </div><!-- /right -->
+    </div><!-- /cols -->
+
+    <div class="refband">
+      <div class="rt">참고문헌</div>
+      <div class="refs">
+        <div class="r"><b>[1]</b> W. K. Wong et al., "DecLLM: LLM-Augmented Recompilable Decompilation …," Proc. ACM Softw. Eng. (ISSTA), vol. 2, pp. 1841–1864, 2025.</div>
+        <div class="r"><b>[2]</b> P. Reiter et al., "Automatically Mitigating Vulnerabilities in Binary Programs via Partially Recompilable Decompilation," IEEE TDSC 22(3), 2025.</div>
+        <div class="r"><b>[3]</b> H. Dai et al., "Scribe: Practical Static Binary Patching via Binary-Aware Recompilation of Decompiled Code," IEEE EuroS&amp;P, 2026.</div>
+        <div class="r"><b>[4]</b> NSA, "Ghidra Software Reverse Engineering Framework," v12.1.3.</div>
+        <div class="r"><b>[5]</b> K. Serebryany et al., "AddressSanitizer: A Fast Address Sanity Checker," USENIX ATC, 2012.</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="l"><b>박라준</b><i>|</i>인공지능 모델링 2학기 단원진로학술제, 2026.11.24<i>|</i>지도교사 <span>김수민 선생님</span></div>
+      <div class="repo">시스템 소스<span class="mono">github.com/minsago-elite/decomp_thing</span><br>취약 예제 데이터셋<span class="mono">github.com/minsago-elite/c-vul</span></div>
+    </div>
+  </div>
+
+  <script>
+    const SVGNS = "http://www.w3.org/2000/svg";
+    function el(tag, attrs, text) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; }
+    const C = { blue: '#1744C9', blueDeep: '#0F2A80', blueTint: '#E6EBFA', teal: '#0E8A86', tealTint: '#E1F3F2', flare: '#E8431F', flareTint: '#FDE7E0', ink: '#0F1A2B', inkSoft: '#44556C', faint: '#7B889D', line: '#D3DAE5', good: '#167A4C', goodTint: '#E2F3EA' };
+    const KO = "'Nanum Square Round', sans-serif", MONO = "'Comic Code', monospace";
+
+    /* ============ PIPELINE ============ */
+    (function () {
+      const svg = document.getElementById('pipesvg');
+      const steps = [
+        { n: '01', t: 'ELF 입력', s: '해시 기록', fill: '#EEF2FA', stroke: C.line, tc: C.ink },
+        { n: '02', t: 'Ghidra 추출', s: '함수와 문자열', fill: C.blueTint, stroke: '#B9C6F2', tc: C.blueDeep },
+        { n: '03', t: 'LLM 복원', s: 'C11 소스', fill: C.blueTint, stroke: C.blue, tc: C.blueDeep, bold: true },
+        { n: '04', t: '컴파일', s: 'ASan, UBSan', fill: C.tealTint, stroke: '#9ED4D1', tc: C.teal },
+        { n: '05', t: '취약점 재현', s: '격리 실행', fill: C.flareTint, stroke: '#F4B9A8', tc: C.flare },
+        { n: '06', t: 'LLM 패치', s: '최소 수정', fill: C.blueTint, stroke: C.blue, tc: C.blueDeep, bold: true },
+        { n: '07', t: '재컴파일', s: '동작 검증', fill: C.tealTint, stroke: C.teal, tc: C.teal, bold: true },
+        { n: '✓', t: '패치 ELF', s: '증거 기록', fill: C.ink, stroke: C.ink, tc: '#fff' },
+      ];
+      const W = 1000, bw = 106, gap = (W - 8 * bw - 8) / 7, top = 38, bh = 92;
+      steps.forEach((b, i) => {
+        const x = 4 + i * (bw + gap);
+        svg.appendChild(el('rect', { x, y: top, width: bw, height: bh, rx: 9, fill: b.fill, stroke: b.stroke, 'stroke-width': b.bold ? 2.6 : 1.4 }));
+        svg.appendChild(el('text', { x: x + 10, y: top + 21, 'font-family': MONO, 'font-weight': 800, 'font-size': 13, fill: b.tc === '#fff' ? '#9BB4FF' : (b.tc) }, b.n));
+        svg.appendChild(el('text', { x: x + bw / 2, y: top + 52, 'text-anchor': 'middle', 'font-family': KO, 'font-weight': 800, 'font-size': 18, fill: b.tc }, b.t));
+        svg.appendChild(el('text', { x: x + bw / 2, y: top + 75, 'text-anchor': 'middle', 'font-family': KO, 'font-weight': 700, 'font-size': 13, fill: b.tc === '#fff' ? '#C7D2E2' : C.inkSoft }, b.s));
+        if (i < steps.length - 1) {
+          const x0 = x + bw, x1 = x + bw + gap, ym = top + bh / 2;
+          svg.appendChild(el('line', { x1: x0 + 2, y1: ym, x2: x1 - 5, y2: ym, stroke: C.blue, 'stroke-width': 2.2 }));
+          svg.appendChild(el('path', { d: `M ${x1 - 4} ${ym} l -8 -4.5 l 0 9 z`, fill: C.blue }));
+        }
+      });
+      // feedback loops: 07 -> 06 (repair iterations), 04 -> 03 (compile errors)
+      function loop(iFrom, iTo, label, color, dy, anchor) {
+        const xf = 4 + iFrom * (bw + gap) + bw / 2, xt = 4 + iTo * (bw + gap) + bw / 2, yb = top + bh;
+        const y2 = yb + dy;
+        svg.appendChild(el('path', { d: `M ${xf} ${yb} L ${xf} ${y2} L ${xt} ${y2} L ${xt} ${yb + 6}`, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-dasharray': '6 4' }));
+        svg.appendChild(el('path', { d: `M ${xt} ${yb + 2} l -5 9 l 10 0 z`, fill: color }));
+        svg.appendChild(el('text', { x: anchor === 'end' ? xf + bw / 2 : (xf + xt) / 2, y: y2 + 18, 'text-anchor': anchor || 'middle', 'font-family': KO, 'font-weight': 700, 'font-size': 14, fill: color }, label));
+      }
+      loop(6, 5, '검증에 실패하면 오류 로그를 LLM에 되먹여 다시 수정 (기본 5회)', C.flare, 30, 'end');
+      loop(3, 2, '컴파일 오류는 복원 재요청', C.teal, 14);
+      // top group labels
+      [['RECONSTRUCT', 1, C.blueDeep], ['DETECT', 3, C.flare], ['REPAIR', 5, C.teal]].forEach(([label, i, color]) => {
+        const x0 = 4 + i * (bw + gap), x1 = x0 + 2 * bw + gap;
+        svg.appendChild(el('text', { x: (x0 + x1) / 2, y: 17, 'text-anchor': 'middle', 'font-family': MONO, 'font-weight': 600, 'font-size': 12, 'letter-spacing': 1.2, fill: color }, label));
+        svg.appendChild(el('line', { x1: x0, y1: 26, x2: x1, y2: 26, stroke: color, 'stroke-width': 1.2 }));
+      });
+    })();
+
+    /* ============ MILESTONE STACKED BARS ============ */
+    (function () {
+      const svg = document.getElementById('mschart');
+      // closed / open issue counts aggregated from GitHub milestones (2026-11-16)
+      const data = [
+        { l: 'L 핵심 파이프라인', closed: 14, open: 4 },
+        { l: 'A 복원과 아카이브', closed: 116, open: 301 },
+        { l: 'B ACP 에이전트', closed: 29, open: 113 },
+        { l: 'C 내장 에이전트', closed: 0, open: 60 },
+        { l: 'D Web GUI', closed: 96, open: 233 },
+      ];
+      const W = 480, H = 170, PL = 136, PR = 64, PT = 2, PB = 2;
+      const innerW = W - PL - PR, innerH = H - PT - PB, n = data.length, rowH = innerH / n, bh = 19;
+      const max = 430;
+      data.forEach((d, i) => {
+        const cy = PT + rowH * i + rowH / 2;
+        svg.appendChild(el('text', { x: PL - 10, y: cy + 5, 'text-anchor': 'end', 'font-family': KO, 'font-weight': 700, 'font-size': 13.5, fill: C.ink }, d.l));
+        const wc = innerW * d.closed / max, wo = innerW * d.open / max;
+        svg.appendChild(el('rect', { x: PL, y: cy - bh / 2, width: Math.max(wc, 1.5), height: bh, rx: 2, fill: C.blue }));
+        svg.appendChild(el('rect', { x: PL + wc, y: cy - bh / 2, width: wo, height: bh, rx: 2, fill: C.line }));
+        const pct = Math.round(100 * d.closed / (d.closed + d.open));
+        svg.appendChild(el('text', { x: PL + wc + wo + 6, y: cy + 4.5, 'font-family': MONO, 'font-weight': 700, 'font-size': 12.5, fill: C.blueDeep }, `${d.closed}/${d.closed + d.open}`));
+        if (wc > 36) svg.appendChild(el('text', { x: PL + 5, y: cy + 4.5, 'font-family': MONO, 'font-weight': 700, 'font-size': 11.5, fill: '#fff' }, `${pct}%`));
+      });
+    })();
+
+    /* ============ COMMITS PER MONTH ============ */
+    (function () {
+      const svg = document.getElementById('commitchart');
+      const data = [
+        { l: '6월', v: 21 }, { l: '7월', v: 0 }, { l: '8월', v: 313 }, { l: '9월', v: 1751 }, { l: '10월', v: 1443 }, { l: '11월', v: 154, partial: true },
+      ];
+      const W = 480, H = 110, PL = 8, PR = 8, PT = 22, PB = 22, innerW = W - PL - PR, innerH = H - PT - PB;
+      const max = 1800, n = data.length, slot = innerW / n, bw = slot * 0.56;
+      svg.appendChild(el('line', { x1: PL, y1: PT + innerH, x2: W - PR, y2: PT + innerH, stroke: C.line, 'stroke-width': 1 }));
+      data.forEach((d, i) => {
+        const x = PL + slot * i + slot / 2, h = innerH * d.v / max, y = PT + innerH - h;
+        svg.appendChild(el('rect', { x: x - bw / 2, y: y, width: bw, height: Math.max(h, 1.5), rx: 2.5, fill: d.partial ? C.teal : C.blue, opacity: d.v === 0 ? .35 : .95 }));
+        svg.appendChild(el('text', { x, y: y - 6, 'text-anchor': 'middle', 'font-family': MONO, 'font-weight': 700, 'font-size': 13, fill: d.partial ? C.teal : C.blueDeep }, d.v.toLocaleString()));
+        svg.appendChild(el('text', { x, y: H - 5, 'text-anchor': 'middle', 'font-family': KO, 'font-weight': 700, 'font-size': 13, fill: C.ink }, d.l + (d.partial ? ' (16일까지)' : '')));
+      });
+    })();
+  </script>
+</body>
+
+</html>
