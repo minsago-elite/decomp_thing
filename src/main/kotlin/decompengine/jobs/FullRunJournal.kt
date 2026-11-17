@@ -21,6 +21,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
 
+private const val FULL_RUN_JOURNAL_MAXIMUM_BATCH_EVENTS = 64
+private const val FULL_RUN_JOURNAL_MAXIMUM_BATCH_BYTES = 4 * 1024 * 1024
+
 /** A live writer holds the per-run finalization lock while publishing terminal metadata. */
 internal class FullRunJournalFinalizationInProgressException : IllegalStateException(
     "run history finalization is in progress",
@@ -52,26 +55,56 @@ internal class FullRunJournal private constructor(
 
     @Synchronized
     fun append(event: JsonObject) {
+        appendBatch(listOf(event))
+    }
+
+    /**
+     * Writes an ordered bounded batch and synchronizes it once. A process failure before the
+     * final close can lose the most recent batch, but its metadata remains `running`; a closed
+     * history is still published only after close synchronizes all admitted events.
+     */
+    @Synchronized
+    fun appendBatch(batch: List<JsonObject>) {
         check(!closed)
         try {
-            require(event.getValue("runId").jsonPrimitive.content == runId)
-            require(event.getValue("sequence").jsonPrimitive.long == firstSequence + count)
-            val envelope = buildJsonObject {
-                put("schemaVersion", 1)
-                put("previousSha256", previous)
-                put("event", event)
-            }.toString().toByteArray(Charsets.UTF_8)
-            require(envelope.size <= MAXIMUM_RECORD_BYTES) { "run record exceeds its byte limit" }
-            require(bytes + envelope.size + 1 <= maximumBytes) { "complete run journal reached its byte limit" }
-            val buffer = ByteBuffer.wrap(envelope + byteArrayOf(10))
+            require(batch.isNotEmpty() && batch.size <= FULL_RUN_JOURNAL_MAXIMUM_BATCH_EVENTS)
+            val records = ByteArrayOutputStream()
+            var batchBytes = 0
+            var nextCount = count
+            var nextBytes = bytes
+            var nextPrevious = previous
+            var nextPhase = lastPhase
+            for (event in batch) {
+                require(event.getValue("runId").jsonPrimitive.content == runId)
+                require(event.getValue("sequence").jsonPrimitive.long == firstSequence + nextCount)
+                val envelope = buildJsonObject {
+                    put("schemaVersion", 1)
+                    put("previousSha256", nextPrevious)
+                    put("event", event)
+                }.toString().toByteArray(Charsets.UTF_8)
+                require(envelope.size <= MAXIMUM_RECORD_BYTES) { "run record exceeds its byte limit" }
+                val recordBytes = envelope.size + 1
+                require(batchBytes + recordBytes <= FULL_RUN_JOURNAL_MAXIMUM_BATCH_BYTES) {
+                    "run journal batch exceeds its byte limit"
+                }
+                require(nextBytes + recordBytes <= maximumBytes) { "complete run journal reached its byte limit" }
+                records.write(envelope)
+                records.write(10)
+                batchBytes += recordBytes
+                nextBytes += recordBytes
+                nextPrevious = sha256(envelope)
+                nextCount++
+                if (event["kind"]?.jsonPrimitive?.content == "workflow_phase") {
+                    nextPhase = event["phase"]?.jsonPrimitive?.content
+                }
+            }
+            val buffer = ByteBuffer.wrap(records.toByteArray())
             while (buffer.hasRemaining()) events.write(buffer)
             events.force(true)
-            bytes += envelope.size + 1
-            previous = sha256(envelope)
-            count++
-            if (event["kind"]?.jsonPrimitive?.content == "workflow_phase") {
-                lastPhase = event["phase"]?.jsonPrimitive?.content
-            }
+            bytes = nextBytes
+            count = nextCount
+            previous = nextPrevious
+            lastPhase = nextPhase
         } catch (failure: Exception) {
             complete = false
             throw failure
@@ -280,6 +313,7 @@ internal data class FullRunJournalWriterHooks(
     val beforeAppend: () -> Unit = {},
     val beforeFinalize: () -> Unit = {},
     val beforeMetadataDirectoryFsync: () -> Unit = {},
+    val afterBatchWritten: (Int) -> Unit = {},
 )
 
 /** Bounded mailbox that keeps fsync and serialization off agent/progress callback threads. */
@@ -288,6 +322,7 @@ internal class FullRunJournalWriter(
     maximumQueuedEvents: Int = 256,
     private val beforeFinalize: () -> Unit = {},
     private val beforeAppend: () -> Unit = {},
+    private val afterBatchWritten: (Int) -> Unit = {},
 ) : AutoCloseable {
     private sealed interface Item {
         data class Event(val value: JsonObject) : Item
@@ -342,8 +377,11 @@ internal class FullRunJournalWriter(
                 }
                 if (item is Item.Event) {
                     try {
-                        beforeAppend()
-                        journal.append(item.value)
+                        val batch = ArrayList<Item>(FULL_RUN_JOURNAL_MAXIMUM_BATCH_EVENTS).apply { add(item) }
+                        queue.drainTo(batch, FULL_RUN_JOURNAL_MAXIMUM_BATCH_EVENTS - 1)
+                        batch.forEach { beforeAppend() }
+                        journal.appendBatch(batch.map { (it as Item.Event).value })
+                        afterBatchWritten(batch.size)
                     } catch (problem: Throwable) {
                         failure.compareAndSet(null, problem)
                         synchronized(gate) { accepting = false }
@@ -394,6 +432,7 @@ internal class FullRunJournalWriter(
         }
         failure.get()?.let { throw IllegalStateException("full run journal recording failed", it) }
     }
+
 }
 
 /** Streaming reader also supports tailing: incomplete final records wait for their newline. */

@@ -140,6 +140,9 @@ class BundledGhidraTest {
                 public static void diagnosticsGuard() {}
                 public static void diagnosticsExporter(String name) {}
                 public static void diagnosticsFinalization() {}
+                public static void beginTimingPhase(String name) {}
+                public static void endTimingPhase(String name) {}
+                public static void postScriptEntry() {}
             }
         """)
         val nativeStub = source("ExportNativeCallsV1.java", """

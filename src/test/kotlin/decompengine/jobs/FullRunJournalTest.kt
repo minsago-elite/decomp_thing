@@ -21,10 +21,10 @@ class FullRunJournalTest {
         val journal = FullRunJournal.create(root, UUID.randomUUID().toString(), "reconstruction", 0)
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val writer = FullRunJournalWriter(journal, maximumQueuedEvents = 2) {
+        val writer = FullRunJournalWriter(journal, maximumQueuedEvents = 2, beforeAppend = {
             entered.countDown()
             release.await(5, TimeUnit.SECONDS)
-        }
+        })
         val id = journal.directory.fileName.toString()
         try {
             writer.append(event(id, 0))
@@ -46,6 +46,68 @@ class FullRunJournalTest {
             var count = 0
             while (reader.next() != null) count++
             assertEquals(3, count)
+            assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `writer drains a bounded FIFO batch and closes with every admitted event durable`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/run-writer-batch")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "run-writer-")
+        val journal = FullRunJournal.create(root, UUID.randomUUID().toString(), "reconstruction", 0)
+        val id = journal.directory.fileName.toString()
+        val firstAppend = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val blockedOnce = java.util.concurrent.atomic.AtomicBoolean()
+        val batchSizes = java.util.concurrent.CopyOnWriteArrayList<Int>()
+        val writer = FullRunJournalWriter(journal,
+            beforeAppend = {
+                if (blockedOnce.compareAndSet(false, true)) {
+                    firstAppend.countDown()
+                    assertTrue(release.await(5, TimeUnit.SECONDS))
+                }
+            },
+            afterBatchWritten = { batchSizes.add(it) },
+        )
+        assertTrue(writer.append(event(id, 0)))
+        assertTrue(firstAppend.await(5, TimeUnit.SECONDS))
+        repeat(40) { sequence -> assertTrue(writer.append(event(id, sequence.toLong() + 1))) }
+        release.countDown()
+
+        writer.close()
+        assertEquals(41, batchSizes.sum())
+        assertTrue(batchSizes.size < 41, "queued events were not written in batches")
+        assertTrue(batchSizes.all { it in 1..64 })
+        FullRunEventReader(journal.directory).use { reader ->
+            repeat(41) { sequence -> assertEquals(sequence, reader.next()!!.getValue("sequence").jsonPrimitive.int) }
+            assertNull(reader.next())
+            val terminal = reader.verifyEnd()
+            assertEquals("closed", terminal.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonPrimitive(true), terminal.getValue("complete"))
+        }
+    }
+
+    @Test
+    fun `invalid event in a batch writes no prefix and cannot claim completeness`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/run-writer-invalid-batch")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "run-writer-")
+        val id = UUID.randomUUID().toString()
+        val journal = FullRunJournal.create(root, id, "reconstruction", 0)
+
+        assertFailsWith<IllegalArgumentException> {
+            journal.appendBatch(listOf(event(id, 0), event(id, 2)))
+        }
+        journal.close()
+
+        val metadata = FullRunJournal.metadata(journal.directory)
+        assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
+        assertEquals(0L, metadata.getValue("eventCount").jsonPrimitive.long)
+        assertEquals(0, Files.size(journal.directory.resolve("events.jsonl")))
+        FullRunEventReader(journal.directory).use { reader ->
+            assertNull(reader.next())
             assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
         }
     }
