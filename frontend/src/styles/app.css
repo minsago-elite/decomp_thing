@@ -155,10 +155,10 @@ button, .button-link {
   max-width: 100%;
   overflow-wrap: break-word;
 }
-button:hover:not(:disabled), .button-link:hover { border-color: var(--accent); background: var(--selected); }
+button:hover:not(:disabled, [aria-disabled="true"]), .button-link:hover { border-color: var(--accent); background: var(--selected); }
 button[type="submit"], .button-primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
-button[type="submit"]:hover:not(:disabled), .button-primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
-button:disabled { cursor: not-allowed; border-color: var(--line); background: var(--surface-sunken); color: var(--disabled); }
+button[type="submit"]:hover:not(:disabled, [aria-disabled="true"]), .button-primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
+button:disabled, button[aria-disabled="true"] { cursor: not-allowed; border-color: var(--line); background: var(--surface-sunken); color: var(--disabled); }
 input:not([type="checkbox"], [type="radio"], [type="file"], [type="range"]), select, textarea {
   min-width: 0;
   min-height: 2.75rem;

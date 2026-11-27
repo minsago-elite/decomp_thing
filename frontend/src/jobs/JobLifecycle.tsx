@@ -1,7 +1,7 @@
 import { jobDeletionCopy, jobOrganizationCopy } from '../copy/job';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { Fragment } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { createApiClient } from '../api/client';
 import { registerContractExtension } from '../api/decode';
@@ -11,6 +11,9 @@ import type { BrowserSession } from '../session/session';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { formatExactBytes } from './metadataFormat';
 import { notifyLibraryChanged } from './libraryNotify';
+import { pendingDeletion, trackDeletion } from './deletionAcknowledgement';
+import { useDepartingFocus } from '../shared/departingFocus';
+import { isDeletedJob } from '../shared/retainMetadata';
 
 // These contracts are decoded only on this lazily loaded route.
 registerContractExtension(lazyContractSchema);
@@ -22,7 +25,8 @@ const code = (failure: unknown) => failure instanceof ApiClientError ? failure.s
 type Change = { label?: string | null; archived?: boolean };
 const own = <T extends object>(table: T, key: string): key is Extract<keyof T, string> => Object.prototype.hasOwnProperty.call(table, key);
 
-export function jobDeletionStateMessage(state: string): string {
+export function jobDeletionStateMessage({ state, recoveryRequired }: Operation): string {
+  if (state === 'completed' && recoveryRequired) return jobDeletionCopy.operationStates['recovery-required'];
   return own(jobDeletionCopy.operationStates, state) ? jobDeletionCopy.operationStates[state] : jobDeletionCopy.operationStateUnknown;
 }
 
@@ -47,9 +51,10 @@ function confirms(data: Job, jobId: string, before: string, change: Change): Job
  * rewound and a readback that does not confirm the save is never applied; without it the bound read is handed to
  * `onChanged`.
  */
-export function JobOrganization({ job, client, basePath, session, onChanged, readJob }: {
+export function JobOrganization({ job, client, basePath, session, onChanged, readJob, onDeleted }: {
   job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>;
   onChanged?: (job: Job) => void; readJob?: (signal: AbortSignal, accepts?: (job: Job) => boolean) => Promise<Job | null>;
+  onDeleted?: (failure: unknown) => void;
 }) {
   const copy = jobOrganizationCopy;
   const availability = useBrowserAvailability();
@@ -132,6 +137,8 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
       setNotice(copy.saved);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
+      // A verifier-bound deletion tombstone is authoritative even after an acknowledgement (#512).
+      if (isDeletedJob(failure) && onDeleted) { onDeleted(failure); return; }
       const authoritative = failure instanceof ApiClientError && failure.code === 'http_error';
       const success = status(failure) >= 200 && status(failure) < 300;
       if (answered || success) {
@@ -156,7 +163,10 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
           // The next deliberate Save is guarded by this version; edited fields are kept, nothing is resent.
           if (!readJob) onChanged?.(fresh);
           setServerLabel(fresh.label ?? null);
-        } catch { /* The visible conflict notice already asks for a refresh. */ }
+        } catch (readFailure: unknown) {
+          // The visible conflict notice already asks for a refresh; only a deletion tombstone ends the job view.
+          if (!controller.signal.aborted && isDeletedJob(readFailure)) onDeleted?.(readFailure);
+        }
       }
     } finally {
       if (active.current === controller) { active.current = null; setBusy(false); }
@@ -186,11 +196,22 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
   </section>;
 }
 
+function failureNotice(failure: unknown) {
+  const copy = jobDeletionCopy;
+  return status(failure) === 412 ? copy.changed : status(failure) === 409 && code(failure) === 'RETENTION_PROTECTED' ? copy.conflict
+    : isDeletedJob(failure) ? copy.deletedElsewhere
+    : [401, 403].includes(status(failure)) ? copy.denied
+    : code(failure) === 'STORAGE_UNAVAILABLE' ? copy.storage : copy.failed;
+}
+
 const CATEGORIES = ['originalInputs', 'reports', 'sourceSnapshots', 'logs', 'archives', 'metadata', 'temporary', 'other'] as const;
 
 /** Deliberate, reviewed deletion: preview, typed confirmation, one guarded DELETE, then the operation. */
-export function JobDeletion({ job, client, basePath, session, onDeleted }: {
-  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>; onDeleted: (operation: Operation | null) => void;
+export function JobDeletion({ job, client, basePath, session, generation = 0, onDeleted }: {
+  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>;
+  /** The authenticated view generation of `session`; a pending DELETE belongs to exactly one. */
+  generation?: number;
+  onDeleted: (operation: Operation | null, failure?: unknown) => void;
 }) {
   const copy = jobDeletionCopy;
   const availability = useBrowserAvailability();
@@ -201,14 +222,44 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
   const [notice, setNotice] = useState('');
   const [operation, setOperation] = useState<Operation | null>(null);
   const active = useRef<AbortController | null>(null);
+  // The controller identifies the submission even after its optional preview readback is aborted.
+  const mutation = useRef<AbortController | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const section = useRef<HTMLElement>(null);
+  const departingFocus = useDepartingFocus(section);
   // Any newer job version invalidates a reviewed preview and its typed confirmation.
   useEffect(() => { setPreview(null); setConfirm(''); }, [job.jobId, job.version]);
-  // Availability or a newer job version abandons pending observation, including late read responses.
-  // A durable DELETE acceptance is still handed to the page even after its observation is cancelled.
+  // Availability, a newer job version, deployment or session abandons pending observation
+  // (preview and conflict readback), including late read responses.
   useEffect(() => () => {
-    if (active.current) { active.current.abort(); active.current = null; setBusy(false); }
-  }, [job.jobId, job.version, available]);
+    if (active.current) { active.current.abort(); active.current = null; setBusy(mutation.current !== null); }
+  }, [job.jobId, job.version, available, basePath, session]);
+  useLayoutEffect(() => {
+    setPreview(null); setConfirm(''); setNotice(''); setOperation(null); setBusy(false);
+    // A remount of the same form observes the request already in flight; it never sends another.
+    const inFlight = pendingDeletion({ session, generation, basePath, jobId: job.jobId });
+    const observer = new AbortController();
+    if (inFlight) {
+      mutation.current = observer; setBusy(true); setNotice(copy.deleting);
+      const owns = () => mutation.current === observer;
+      inFlight.then(result => {
+        if (!owns()) return;
+        mutation.current = null; setBusy(false);
+        setOperation(result); setNotice(textMessage(copy.accepted, { state: result.state }));
+        onDeleted(result);
+      }, (failure: unknown) => {
+        if (!owns()) return;
+        mutation.current = null; setBusy(false);
+        setNotice(withApiFailureReference(failureNotice(failure), failure));
+        if (isDeletedJob(failure)) onDeleted(null, failure);
+      });
+    }
+    return () => {
+      mutation.current = null;
+      active.current?.abort();
+      active.current = null;
+    };
+  }, [job.jobId, basePath, session, generation]);
   async function review(signal?: AbortSignal) {
     const controller = signal ? null : new AbortController();
     if (controller) { if (active.current) return; active.current = controller; setBusy(true); setNotice(copy.reading); }
@@ -221,7 +272,8 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
     } catch (failure: unknown) {
       if ((signal ?? controller!.signal).aborted) return;
       setPreview(null);
-      if (status(failure) === 410) { onDeleted(null); return; }
+      // Only the shared discriminator proves deletion; a bare or unverified 410 is an ordinary preview failure.
+      if (isDeletedJob(failure)) { onDeleted(null, failure); return; }
       if (controller) setNotice(withApiFailureReference([401, 403].includes(status(failure)) ? copy.denied : copy.previewFailed, failure));
     } finally {
       if (controller && active.current === controller) { active.current = null; setBusy(false); }
@@ -229,16 +281,26 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
   }
   async function remove(event: Event) {
     event.preventDefault();
-    if (!preview || !preview.deletable || confirm !== preview.displayFilename || active.current || !available) return;
+    if (!preview || !preview.deletable || confirm !== preview.displayFilename || active.current || mutation.current || !available) return;
+    if (pendingDeletion({ session, generation, basePath, jobId: job.jobId })) return;
     const csrfToken = session.csrf();
     if (!csrfToken) { setNotice(copy.denied); return; }
     const controller = new AbortController(); active.current = controller;
+    mutation.current = controller;
+    const owns = () => mutation.current === controller;
     setBusy(true); setNotice(copy.deleting);
     try {
-      const result = (await client.put('operation', `/jobs/${job.jobId}`, 'jobDeletionRequest', { confirmJobId: job.jobId }, {
-        csrfToken, ifMatch: `"${preview.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal,
-      }, 'DELETE')).data;
-      if (result.jobId !== job.jobId || result.action !== 'job.delete') throw new ApiClientError('invalid_response');
+      const jobId = job.jobId;
+      const result = await trackDeletion({ session, generation, basePath, jobId }, client.put('operation', `/jobs/${jobId}`, 'jobDeletionRequest', { confirmJobId: jobId }, {
+        csrfToken, ifMatch: `"${preview.version}"`, idempotencyKey: crypto.randomUUID(),
+      }, 'DELETE').then(response => {
+        if (response.data.jobId !== jobId || response.data.action !== 'job.delete') throw new ApiClientError('invalid_response');
+        return response.data;
+      }));
+      if (!owns()) {
+        notifyLibraryChanged(basePath);
+        return;
+      }
       // Acceptance is durable even if visibility, connectivity or navigation cancels observation.
       // Report the accepted state without polling in this soon-to-be-unmounted deletion form.
       setOperation(result); setPreview(null);
@@ -247,23 +309,27 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
       onDeleted(result);
       notifyLibraryChanged(basePath);
     } catch (failure: unknown) {
-      if (controller.signal.aborted) return;
+      if (!owns()) return;
       const conflict = status(failure) === 409 && code(failure) === 'RETENTION_PROTECTED';
-      setNotice(withApiFailureReference(status(failure) === 412 ? copy.changed : conflict ? copy.conflict
-        : status(failure) === 410 ? copy.deletedElsewhere
-        : [401, 403].includes(status(failure)) ? copy.denied
-        : code(failure) === 'STORAGE_UNAVAILABLE' ? copy.storage : copy.failed, failure));
+      setNotice(withApiFailureReference(failureNotice(failure), failure));
       setConfirm('');
-      if (status(failure) === 410) onDeleted(null);
-      else if (conflict) await review(controller.signal);
+      if (isDeletedJob(failure)) onDeleted(null, failure);
+      // The readback is observation: skip it once unavailable, and abort it if availability changes.
+      else if (conflict && !controller.signal.aborted && active.current === controller) await review(controller.signal);
       else setPreview(null);
     } finally {
-      if (active.current === controller) { active.current = null; setBusy(false); }
-      heading.current?.focus();
+      // A previous job's, deployment's or session's outcome never updates or refocuses this form.
+      if (owns()) {
+        mutation.current = null;
+        if (active.current === controller) active.current = null;
+        const restore = section.current?.contains(departingFocus());
+        setBusy(active.current !== null);
+        if (restore && heading.current?.isConnected) heading.current.focus();
+      }
     }
   }
   const sizes = preview?.storage;
-  return <section aria-labelledby="job-delete-title">
+  return <section aria-labelledby="job-delete-title" ref={section}>
     <h3 id="job-delete-title" ref={heading} tabIndex={-1}>{copy.deleteJob}</h3>
     <p>{copy.deletionIsPermanent}</p>
     {!operation && <button type="button" disabled={busy || !available} onClick={() => { void review(); }}>{copy.reviewDeletion}</button>}
@@ -293,7 +359,7 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
       </form>}
     </>}
     {operation && <>
-      <p>{jobDeletionStateMessage(operation.state)}</p>
+      <p>{jobDeletionStateMessage(operation)}</p>
       {operation.state === 'running' && <p>{copy.stillRunning}</p>}
     </>}
     <p role="status">{!available ? copy.paused : notice}</p>

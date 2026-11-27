@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Bootstrap, Snapshot, WebEvent } from '../src/api/generated';
-import { activityCopy, activityHistoryCopy } from '../src/copy/attempt';
+import { activityCopy, activityHistoryCopy, runCopy } from '../src/copy/attempt';
 import { Activity } from '../src/jobs/Activity';
 import { activityWindowSearch } from '../src/jobs/activityNavigation';
 import { PrivateSessionContext } from '../src/session/PrivateTransport';
@@ -100,7 +100,8 @@ it.each([
   ['corrupt body', () => [() => ok(snap), corrupt], () => activityHistoryCopy.unavailable, savedReads],
   ['unsupported version', () => [() => ok({ ...snap, apiVersion: 99 })], () => activityHistoryCopy.unsupported, savedReads.slice(0, 1)],
   ['missing 404', () => [() => fail(404, 'NOT_FOUND')], () => activityHistoryCopy.missing + refText, savedReads.slice(0, 1)],
-  ['deleted 410 RESOURCE_GONE', () => [() => fail(410, 'RESOURCE_GONE')], () => activityHistoryCopy.missing + refText, savedReads.slice(0, 1)],
+  // A verifier-bound RESOURCE_GONE tombstone is a deletion (#512), not a missing attempt.
+  ['deleted 410 RESOURCE_GONE', () => [() => fail(410, 'RESOURCE_GONE')], () => runCopy.thisJobWasDeleted + refText, savedReads.slice(0, 1)],
   ['retention 410 EVENT_GAP', () => [() => ok(snap), gap], () => activityHistoryCopy.expired + refText, savedReads],
   ['invalid cursor', () => [() => ok(snap), () => fail(400, 'INVALID_CURSOR')], () => activityHistoryCopy.expired + refText, savedReads],
   ['session 401', () => [() => fail(401, 'UNAUTHENTICATED')], () => activityHistoryCopy.session + refText, savedReads.slice(0, 1)],
@@ -157,7 +158,7 @@ it('live: pending first read shows no-page receipt; empty page replaces it; exac
 
 it.each([
   ['missing 404', () => fail(404, 'NOT_FOUND'), () => activityCopy.activityRunMissing + refText, 0],
-  ['deleted 410 RESOURCE_GONE', () => fail(410, 'RESOURCE_GONE'), () => activityCopy.activityRunMissing + refText, 0],
+  ['deleted 410 RESOURCE_GONE', () => fail(410, 'RESOURCE_GONE'), () => runCopy.thisJobWasDeleted + refText, 0],
   ['gap 410 EVENT_GAP', gap, () => activityCopy.retainedHistoryHasAGapReadAFreshHistoryTo + refText, 2],
   ['server 500', () => fail(500, 'INTERNAL_ERROR'), () => activityCopy.activityServerFailed + refText, 2],
   ['corrupt body', corrupt, () => activityCopy.activityCouldNotBeVerifiedDisplayedObservationsMayBeStale, 2],

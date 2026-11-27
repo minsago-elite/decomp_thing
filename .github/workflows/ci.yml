@@ -78,6 +78,8 @@ jobs:
           node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
+      - name: Verify packaged deletion verdict controls
+        run: node --test scripts/packaged-browser-deletion-verdict.test.mjs
       - name: Verify packaged real browser zoom controls
         timeout-minutes: 4
         run: |

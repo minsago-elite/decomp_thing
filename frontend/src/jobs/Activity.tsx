@@ -1,4 +1,4 @@
-import { activityCopy as copy, activityHistoryCopy } from '../copy/attempt';
+import { activityCopy as copy, activityHistoryCopy, runCopy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
 import { PrivateSessionContext, usePrivateTransport } from '../session/PrivateTransport';
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
@@ -17,15 +17,19 @@ import { ActivityHistory } from './ActivityHistory';
 import { ActivityStages } from './ActivityStages';
 import { useIdentityDigests } from './activityCorrelation';
 import { activityWindowLocation, activityWindowSearch, type ActivityNavigation } from './activityNavigation';
-import { runViewPath } from '../app/paths';
+import { appPath, runViewPath } from '../app/paths';
+import { isDeletedJob } from '../shared/retainMetadata';
+import { jobCopy } from '../copy/job';
 
 const capacity = 200;
 type ActivityPosition = { initialized: boolean; cursor: string | null; rows: WebEvent[]; last: WebEvent | null };
 type ActivityDisplay = { position: ActivityPosition; receipt: ActivityReceiptTime };
 
 /** Retained journal observations are display evidence, never acceptance receipts. */
-export function Activity({ jobId, runId, basePath, navigation }: {
+export function Activity({ jobId, runId, basePath, navigation, onDeleted }: {
   jobId: string; runId: string; basePath: string; navigation?: ActivityNavigation;
+  /** A confirmed RESOURCE_GONE tombstone (never an ordinary EVENT_GAP) ends the whole routed attempt. */
+  onDeleted?: (failure: unknown) => void;
 }) {
   let window: ReturnType<typeof activityWindowLocation>;
   try { window = activityWindowLocation(navigation?.search ?? ''); }
@@ -36,11 +40,12 @@ export function Activity({ jobId, runId, basePath, navigation }: {
       <a href={runViewPath(basePath, jobId, runId, 'activity')}>{activityHistoryCopy.fresh}</a>
     </section>;
   }
-  return window && navigation ? <ActivityHistory jobId={jobId} runId={runId} basePath={basePath} navigation={navigation} window={window} />
-    : <LiveActivity jobId={jobId} runId={runId} basePath={basePath} windowLinks={navigation !== undefined} />;
+  return window && navigation ? <ActivityHistory jobId={jobId} runId={runId} basePath={basePath} navigation={navigation} window={window} {...(onDeleted ? { onDeleted } : {})} />
+    : <LiveActivity jobId={jobId} runId={runId} basePath={basePath} windowLinks={navigation !== undefined} {...(onDeleted ? { onDeleted } : {})} />;
 }
 
-function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; runId: string; basePath: string; windowLinks: boolean }) {
+function LiveActivity({ jobId, runId, basePath, windowLinks, onDeleted }: { jobId: string; runId: string; basePath: string; windowLinks: boolean; onDeleted?: (failure: unknown) => void }) {
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const session = useContext(PrivateSessionContext);
   const { client, stream } = usePrivateTransport(basePath);
   // Without a readable fetch body the live stream cannot work; poll from the start (#631).
@@ -57,6 +62,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [rows, setRows] = useState<WebEvent[]>([]);
   const [error, setError] = useState('');
+  const [deleted, setDeleted] = useState(false);
   const [group, setGroup] = useState<'all' | ActivityGroup>('all');
   const [taskDigest, setTaskDigest] = useState('');
   const [reset, setReset] = useState(0);
@@ -174,6 +180,13 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           return;
         }
         if (transient && failures.current >= 4) void session?.revalidate();
+        // A deletion tombstone ends this attempt's activity: drop stale rows and never follow or retry again (#512).
+        if (isDeletedJob(failure)) {
+          position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
+          setDeleted(true); setError(withApiFailureReference(runCopy.thisJobWasDeleted, failure)); setFollowing(false);
+          deletedHandler.current?.(failure);
+          return;
+        }
         const gap = failure instanceof ApiClientError && ['EVENT_GAP', 'PROGRESS_GAP'].includes(failure.serverCode ?? '');
         // Fixed categories; a gap is a retention boundary, not a missing attempt, so it is classified before 404/410.
         const kind = failure instanceof ApiClientError ? metadataFailureKind(failure) : 'unverified';
@@ -216,7 +229,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     }}>
       {rows.length === capacity ? copy.continueActivityOnNextPage : following ? copy.pauseActivity : position.current.initialized ? copy.resumeActivity : copy.followActivity}
     </button>{' '}
-    <button type="button" onClick={() => {
+    <button type="button" disabled={deleted} onClick={() => {
       pageAfter.current = null;
       position.current = { initialized: false, cursor: null, rows: [], last: null };
       setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = streamingUnavailable; setPeriodic(streamingUnavailable); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
@@ -244,6 +257,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     })}</p>
     <p>{displayMessage(copy.receipt, { receipt: lastRead ? <ActivityReceiptAge receipt={lastRead} visible={availability.visible} /> : copy.noPage })}</p>
     {error && <p role="alert">{error}</p>}
+    {deleted && <p><a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></p>}
     {rows.length === capacity && <p>{copy.displayLimitReachedContinueActivityOnTheNextPageTo}</p>}
     {snapshot && <>
       <p>{displayMessage(copy.snapshot, { state: snapshot.run.state, acceptance: snapshot.run.acceptance })}</p>

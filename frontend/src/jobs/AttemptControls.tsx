@@ -1,12 +1,14 @@
 import { attemptControlReasonCopy as reasons, attemptControlsCopy as copy } from '../copy/attempt';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { AttemptControls as Controls, Run } from '../api/generated';
 import { runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { message as displayMessage, textMessage } from '../shared/messages';
+import { isDeletedJob } from '../shared/retainMetadata';
+import { restoreSettledFocus, useDepartingFocus } from '../shared/departingFocus';
 import { createAttemptCommandRecovery, type AttemptCommand, type AttemptCommandRecovery } from './attemptCommandRecovery';
 
 const reason = (code: string | null) => textMessage(copy.unavailable, { reason: (code && reasons[code]) || copy.reasonUnknown });
@@ -28,21 +30,43 @@ function definite(failure: unknown): boolean {
  * every command carries that read's run version and a retained request key, and nothing is sent on mount,
  * refresh or reconnect. The reported state after a command is the server's, never an optimistic guess.
  */
-export function AttemptControls({ jobId, runId, basePath, session, run, onChanged }: {
+export function AttemptControls({ jobId, runId, basePath, session, run, onChanged, onDeleted }: {
   jobId: string; runId: string; basePath: string; session: Pick<BrowserSession, 'csrf'>; run: Run; onChanged: () => void;
+  /** A confirmed RESOURCE_GONE tombstone from a read, command reply or follow-up read ends the routed attempt (#512). */
+  onDeleted?: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
+  /** Hands a confirmed tombstone to the route; any other failure stays with this panel. */
+  const escalated = (failure: unknown) => { if (!isDeletedJob(failure) || !deletedHandler.current) return false; deletedHandler.current(failure); return true; };
   const availability = useBrowserAvailability();
   const available = availability.online && availability.visible;
   const recovery = useMemo(() => createAttemptCommandRecovery(basePath), [basePath]);
   const active = useRef<AbortController | null>(null);
   const [controls, setControls] = useState<Controls | null>(null);
+  /** The eligibility read a command was sent from: shown while it is outstanding, never used to send again. */
+  const [spent, setSpent] = useState<Controls | null>(null);
   const [retained, setRetained] = useState<AttemptCommandRecovery>(() => recovery.read());
-  const [busy, setBusy] = useState(false);
+  const [activity, setActivity] = useState<'read' | 'command' | 'replay' | null>(null);
+  const busy = activity !== null;
   const [status, setStatus] = useState<string>(copy.readFirst);
   const [created, setCreated] = useState<string | null>(null);
-  useEffect(() => {
-    setControls(null); setBusy(false); setStatus(copy.readFirst); setCreated(null); setRetained(recovery.read());
+  const section = useRef<HTMLElement>(null);
+  const statusLine = useRef<HTMLParagraphElement>(null);
+  const departingFocus = useDepartingFocus(section);
+  /**
+   * The control focus departed from when this panel's read or command settled. After the settling render a removed
+   * control (Replay once acknowledged, spent eligibility) hands focus to the persistent status line, and a re-enabled
+   * one gets it back, so a later route deletion still departs from an owned element rather than the document.
+   */
+  const settledFrom = useRef<Element | null>(null);
+  const settle = () => { const from = departingFocus(); settledFrom.current = from && section.current?.contains(from) ? from : null; };
+  useLayoutEffect(() => {
+    const from = settledFrom.current; settledFrom.current = null;
+    restoreSettledFocus(from, statusLine.current);
+  });
+  useLayoutEffect(() => {
+    setControls(null); setSpent(null); setActivity(null); setStatus(copy.readFirst); setCreated(null); setRetained(recovery.read());
     return () => { active.current?.abort(); active.current = null; };
   }, [jobId, runId, client, recovery]);
   const pending = retained.kind === 'pending' ? retained.command : null;
@@ -64,14 +88,14 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   async function read() {
     if (active.current || !available) return;
     const controller = new AbortController(); active.current = controller;
-    setBusy(true); setStatus(copy.reading); setControls(null);
+    setActivity('read'); setStatus(copy.reading); setControls(null);
     try {
       await readControls(controller);
       if (!controller.signal.aborted) setStatus(copy.verified);
     } catch (failure: unknown) {
-      if (!controller.signal.aborted) setStatus(withApiFailureReference(copy.unverified, failure));
+      if (!controller.signal.aborted && !escalated(failure)) setStatus(withApiFailureReference(copy.unverified, failure));
     } finally {
-      if (active.current === controller) { active.current = null; setBusy(false); }
+      if (active.current === controller) { settle(); active.current = null; setActivity(null); }
     }
   }
 
@@ -90,7 +114,10 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
     }
     setRetained({ kind: 'pending', command });
     const controller = new AbortController(); active.current = controller;
-    setBusy(true); setControls(null); setCreated(null); setStatus(copy.sending);
+    // The control that sent the command stays focusable but inert until the answer (#512): removing it under focus
+    // would leave the document focused, so a confirmed deletion could not tell it from the user's own blur.
+    const sentFrom = controls;
+    setActivity(replay ? 'replay' : 'command'); setSpent(sentFrom); setCreated(null); setStatus(copy.sending);
     const settings = { csrfToken, ifMatch: `"${command.expectedVersion}"`, idempotencyKey: command.key, signal: controller.signal };
     const path = `/jobs/${command.jobId}/runs/${command.runId}/${command.action === 'cancel' ? 'cancel' : 'recover'}`;
     try {
@@ -109,10 +136,14 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
       } else setStatus(textMessage(result.state === 'cancelled' ? copy.cancelConfirmed : result.state === 'cancelling' || !['completed', 'failed', 'interrupted'].includes(result.state)
         ? copy.cancelRequested : copy.finishedFirst, { runId: result.runId, state: result.state }));
       onChanged();
-      try { await readControls(controller, false); } catch { /* The outcome stands; a fresh read is explicit. */ }
+      try { await readControls(controller, false); } catch (failure: unknown) {
+        // The outcome stands; a fresh read is explicit. Only a confirmed deletion still ends the attempt.
+        if (!controller.signal.aborted) escalated(failure);
+      }
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
       if (definite(failure)) forget();
+      if (escalated(failure)) return;
       const code = failure instanceof ApiClientError ? failure.serverCode : undefined;
       const status = failure instanceof ApiClientError ? failure.status : undefined;
       setStatus(withApiFailureReference(!definite(failure)
@@ -121,33 +152,42 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
         : status === 429 && code !== 'CANCELLATION_RECEIPT_CAPACITY' ? copy.capacity
         : textMessage(copy.refused, { reason: (code && reasons[code === 'CANCELLATION_RECEIPT_CAPACITY' ? 'RECEIPT_CAPACITY' : code]) || copy.reasonUnknown }), failure));
     } finally {
-      if (active.current === controller) { active.current = null; setBusy(false); }
+      if (active.current === controller) {
+        settle(); active.current = null; setActivity(null);
+        // The command consumed that read's eligibility; only a fresh server read shows actions again.
+        if (sentFrom !== null) setControls(current => current === sentFrom ? null : current);
+      }
     }
   }
 
   function start(action: AttemptCommand['action']) {
-    if (!controls || stale) return;
+    if (!controls || !canSend) return;
     void send(recovery.command(action, jobId, runId, controls.runVersion, action === 'cancel' ? null : controls.inputRevisionId), false);
   }
 
   const blocked = retained.kind === 'blocked' || (pending !== null && !pendingHere);
-  const canSend = available && !busy && !blocked && !pending && controls !== null && !stale;
-  const input = (controls?.inputRevisionId ?? run.inputRevisionId) ?? copy.originalInput;
   const describedBy = `attempt-controls-scope-${runId}`;
-  return <section aria-labelledby={`attempt-controls-title-${runId}`}>
+  // While a command or read is outstanding its controls are aria-disabled rather than disabled, so focus stays put.
+  const held = busy || (controls !== null && controls === spent);
+  const canSend = available && !held && !blocked && !pending && controls !== null && !stale;
+  const command = (action: AttemptCommand['action'], label: string) => <button type="button" disabled={!held && !canSend}
+    aria-disabled={held ? 'true' : undefined} aria-describedby={describedBy} onClick={() => { start(action); }}>{label}</button>;
+  const input = (controls?.inputRevisionId ?? run.inputRevisionId) ?? copy.originalInput;
+  return <section aria-labelledby={`attempt-controls-title-${runId}`} ref={section}>
     <h2 id={`attempt-controls-title-${runId}`}>{copy.title}</h2>
     <p id={describedBy}>{textMessage(copy.scope, { runId, version: controls?.runVersion ?? run.version })}</p>
     {run.state === 'cancelling' && <p class="notice">{copy.cancelling}</p>}
     {run.recovery && run.previousRunId && <p>{displayMessage(run.recovery.mode === 'retry' ? copy.retriedFrom
       : run.recovery.restores === 'agent-session' ? copy.resumedAgent : copy.resumedEvidence,
       { runId: <a href={runPath(basePath, jobId, run.previousRunId)}><code>{run.previousRunId}</code></a> })}</p>}
-    <p role="status">{!available ? copy.paused : stale ? copy.stale : status}</p>
+    <p role="status" ref={statusLine} tabIndex={-1}>{!available ? copy.paused : stale ? copy.stale : status}</p>
     {created && <p><a href={runPath(basePath, jobId, created)}>{textMessage(copy.createdLink, { runId: created })}</a></p>}
-    {pendingHere && <div class="notice">
-      <p>{textMessage(copy.unknown, { action: actionName[pending.action], runId: pending.runId })}</p>
+    {(pendingHere || activity === 'replay') && <div class="notice">
+      {pendingHere && <p>{textMessage(copy.unknown, { action: actionName[pending.action], runId: pending.runId })}</p>}
       <div class="job-actions">
-        <button type="button" disabled={busy || !available} aria-describedby={describedBy} onClick={() => { void send(pending, true); }}>{copy.replay}</button>
-        <button type="button" disabled={busy} onClick={() => { forget(); setStatus(copy.discarded); }}>{copy.discard}</button>
+        <button type="button" disabled={!busy && !available} aria-disabled={busy ? 'true' : undefined} aria-describedby={describedBy}
+          onClick={() => { if (!busy && pendingHere) void send(pending, true); }}>{copy.replay}</button>
+        {pendingHere && <button type="button" disabled={busy} onClick={() => { forget(); setStatus(copy.discarded); }}>{copy.discard}</button>}
       </div>
     </div>}
     {pending && !pendingHere && <p class="notice">{copy.otherPending} <a href={runPath(basePath, pending.jobId, pending.runId)}>{copy.openPending}</a></p>}
@@ -158,20 +198,21 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
     <div class="job-actions">
       <button type="button" disabled={busy || !available} onClick={() => { void read(); }}>{copy.read}</button>
     </div>
-    {controls && !stale && <dl class="job-facts">
+    {/* A command's own follow-up observes the attempt changing; its spent controls stay until that read settles. */}
+    {controls && (!stale || held) && <dl class="job-facts">
       <dt>{copy.cancelHeading}</dt>
       <dd>{controls.cancel.available
-        ? <button type="button" disabled={!canSend} aria-describedby={describedBy} onClick={() => { start('cancel'); }}>{copy.cancel}</button>
+        ? command('cancel', copy.cancel)
         : reason(controls.cancel.reason)}</dd>
       <dt>{copy.retryHeading}</dt>
       <dd>{controls.retry.available ? <>
         <p>{textMessage(copy.retryHelp, { input })}</p>
-        <button type="button" disabled={!canSend} aria-describedby={describedBy} onClick={() => { start('retry'); }}>{copy.retry}</button>
+        {command('retry', copy.retry)}
       </> : reason(controls.retry.reason)}</dd>
       <dt>{copy.resumeHeading}</dt>
       <dd>{controls.resume.available ? <>
         <p>{textMessage(controls.resumeRestores === 'agent-session' ? copy.resumeAgent : copy.resumeEvidence, { input })}</p>
-        <button type="button" disabled={!canSend} aria-describedby={describedBy} onClick={() => { start('resume'); }}>{copy.resume}</button>
+        {command('resume', copy.resume)}
       </> : reason(controls.resume.reason)}</dd>
     </dl>}
     {controls?.successorRunId && <p>{textMessage(copy.successor, { runId: controls.successorRunId })} <a href={runPath(basePath, jobId, controls.successorRunId)}>{copy.openSuccessor}</a></p>}

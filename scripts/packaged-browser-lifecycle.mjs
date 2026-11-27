@@ -14,14 +14,69 @@ const setInput = (selector, value) => `(() => {
 const click = (text) => `[...document.querySelectorAll('button')].find(button => button.textContent === ${JSON.stringify(text)}).click()`;
 const status = (section) => `document.querySelector('section[aria-labelledby="${section}"] [role="status"]')?.textContent`;
 const deletion = `document.querySelector('section[aria-labelledby="job-delete-title"]')`;
-const deletedAlert = `[...document.querySelectorAll('[role="alert"]')].find(alert => alert.textContent.includes('This job was deleted.'))`;
+const deletedHeadline = 'This job was deleted from the library and cannot be recovered. Its deletion record is kept for at least 24 hours.';
+const cleanupRunning = 'File cleanup is still running and resumes after a restart if interrupted. Its files are not yet confirmed removed.';
+const cleanupFinished = 'File cleanup finished: its files were removed.';
+const cleanupUnknown = 'This page has not observed whether file cleanup finished.';
+const headlineFor = reference => reference === null ? deletedHeadline : `${deletedHeadline} Reference ID: ${reference}.`;
+const deletedAlert = (reference = null) => `[...document.querySelectorAll('section[aria-labelledby="job-title"] [role="alert"]')]
+  .find(alert => alert.querySelector('p')?.textContent === ${JSON.stringify(headlineFor(reference))})`;
+const deletedControlsGone = `(() => {
+  const route = document.querySelector('section[aria-labelledby="job-title"]');
+  return !!route && [...route.querySelectorAll('button, input, select, textarea, form, a[href], [role="button"], [role="link"]')]
+    .every(control => control.tagName === 'A' && control.getAttribute('href') === '/nested/');
+})()`;
+function deletionParagraphs(acknowledged, reference) {
+  const headline = headlineFor(reference);
+  if (!acknowledged) return [headline, cleanupUnknown];
+  assert.ok(['running', 'completed'].includes(acknowledged.state), 'Unexpected DELETE acknowledgement state');
+  if (acknowledged.state === 'running') return [headline, 'The deletion is running.', cleanupRunning];
+  if (acknowledged.recoveryRequired) return [
+    headline,
+    'The deletion requires storage recovery. Restart the server, then refresh the job.',
+    'File cleanup did not finish (completed). Some files may remain until recovery completes.',
+  ];
+  return [headline, 'The job and its stored files were permanently deleted.', cleanupFinished];
+}
+
+export const deletionVerdict = (acknowledged = null, reference = null) => {
+  const paragraphs = deletionParagraphs(acknowledged, reference);
+  return `(() => {
+    const alert = ${deletedAlert(reference)};
+    if (!alert) return false;
+    const expected = ${JSON.stringify(paragraphs)};
+    const paragraphs = [...alert.children].filter(child => child.tagName === 'P').map(child => child.textContent);
+    return paragraphs.length === expected.length && paragraphs.every((text, index) => text === expected[index])
+      && alert.querySelector('a[href="/nested/"]')?.textContent === 'Return to jobs' && ${deletedControlsGone};
+  })()`;
+};
 const keys = { Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 }, Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' } };
 async function press(cdp, tab, name) {
   await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', ...keys[name] }, tab.sessionId);
   const { text, ...up } = keys[name];
   await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', ...up }, tab.sessionId);
 }
-const deletedNotice = `document.querySelector('[role="alert"]')?.textContent.includes('This job was deleted. Its files were removed and cannot be recovered')`;
+export const deletedNotice = `!!(${deletedAlert()})`;
+
+// Capture only this tab’s next 410 GET of the selected job. Peer and reload use separate requests.
+function observeJobTombstone(cdp, tab, url) {
+  let response;
+  cdp.on('Network.responseReceived', event => {
+    if (response || event.response.status !== 410 || event.response.url !== url) return;
+    if (tab.requests.some(request => request.requestId === event.requestId && request.method === 'GET')) {
+      response = event.response;
+    }
+  }, tab.sessionId);
+  return () => response;
+}
+
+async function tombstoneReference(observation, waitFor) {
+  const response = await waitFor(observation, 'job GET returned 410');
+  const reference = Object.entries(response.headers).find(([name]) => name.toLowerCase() === 'x-request-id')?.[1];
+  assert.match(reference ?? '', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    'The job GET must supply a canonical X-Request-ID');
+  return reference;
+}
 
 // CDP reports the request, response and terminal event separately. Network is only a bounded
 // event and identity observer: it never reads a body (the Fetch stage owns the single read).
@@ -193,16 +248,9 @@ export async function verifyInterceptedDeletion({ intercepted, observed, request
   }
 }
 
-export function assertDeletionAlert(state, rendered) {
-  assert.ok(['running', 'completed'].includes(state));
-  const lines = [
-    'This job was deleted. Its files were removed and cannot be recovered; only a deletion record is kept for at least 24 hours.',
-    ...(state === 'running' ? [
-      'The deletion is running.',
-      'The job is gone from the library. File cleanup is still running and resumes after a restart if interrupted.',
-    ] : ['The job and its stored files were permanently deleted.']),
-    'Return to jobs',
-  ];
+export function assertDeletionAlert(acknowledged, rendered) {
+  assert.ok(['running', 'completed'].includes(acknowledged.state));
+  const lines = [...deletionParagraphs(acknowledged, null), 'Return to jobs'];
   assert.deepEqual(rendered.split(/\n+/), lines, 'Deleting tab must show the exact state acknowledged by DELETE');
 }
 
@@ -308,11 +356,20 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   // A second tab holds the same deep link while the first deletes it.
   const peer = await makeTarget();
+  const peerTombstone = observeJobTombstone(cdp, peer, jobApiUrl);
   await cdp.call('Page.navigate', { url: jobUrl }, peer.sessionId);
-  await ready(peer, `document.querySelector('h2')?.textContent === 'Lifecycle label'`, 'peer tab on lifecycle job');
+  const peerHistoryLink = `[...document.querySelectorAll('a')].find(link => link.textContent === 'Browse attempt history')`;
+  await ready(peer, `document.querySelector('h2')?.textContent === 'Lifecycle label' && ${peerHistoryLink} !== undefined`, 'peer tab on lifecycle job');
+  await evaluate(peer, `${peerHistoryLink}.focus()`);
+  assert.equal(await evaluate(peer, `document.activeElement === ${peerHistoryLink}`), true, 'Peer focus was not on its soon-to-depart job control');
 
   // 3. Deliberate deletion: reviewed preview, typed confirmation gate, one DELETE.
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
+  // bringToFront flips visibilityState before Preact re-renders the availability-gated control;
+  // a click on the still-disabled button is a no-op, so act only once the physical control is enabled.
+  const reviewControl = `[...document.querySelectorAll('button')].find(button => button.textContent === 'Review what would be deleted')`;
+  await ready(tab, `document.visibilityState === 'visible' && ${reviewControl}?.disabled === false`, 'enabled deletion review control');
+  const previewsBefore = tab.requests.filter(request => request.url.includes('/deletion-preview')).length;
   await evaluate(tab, click('Review what would be deleted'));
   await ready(tab, `${deletion}?.innerText.includes('Job to delete') && ${deletion}.innerText.includes('Retained after deletion: a deletion record') && ${deletion}.querySelector('input[name="confirm"]') !== null`, 'deletion preview');
   // The reviewed preview, scoped to the deletion section, names exactly this fixture and its 64-byte input.
@@ -330,13 +387,17 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.equal(await evaluate(tab, deleteDisabled), true, 'Delete accepted the label instead of the file name');
   await evaluate(tab, setInput('input[name="confirm"]', 'lifecycle-fixture.elf'));
   assert.equal(await evaluate(tab, deleteDisabled), false);
-  // Only the exact job resource is paused, only for the click below; nothing is fulfilled or rewritten.
+  // Only the exact job resource is paused during confirmation; nothing is fulfilled or rewritten.
   const interception = createDeletionInterception((method, params) => cdp.call(method, params, tab.sessionId));
   cdp.on('Fetch.requestPaused', event => { void interception.paused(event); }, tab.sessionId);
   const fetchCall = (method, params) => cdp.call(method, params, tab.sessionId);
   const requestId = await withResponseInterception(fetchCall, [{ urlPattern: jobApiUrl, requestStage: 'Response' }], async () => {
-    await evaluate(tab, click('Delete permanently'));
-    await ready(tab, deletedNotice, 'deleted notice in deleting tab');
+    // Continue from the confirmation input with real keyboard events: exactly one submit, then focus handoff.
+    await press(cdp, tab, 'Tab');
+    assert.equal(await evaluate(tab, `document.activeElement === [...document.querySelectorAll('button')].find(button => button.textContent === 'Delete permanently')`), true, 'Tab did not reach the enabled Delete control');
+    await press(cdp, tab, 'Enter');
+    await ready(tab, `${deletedNotice} && document.activeElement === ${deletedAlert()}?.querySelector('p[tabindex="-1"]')`, 'deleted notice and departing-control focus in deleting tab');
+    assert.equal(tab.requests.filter(request => request.url.includes('/deletion-preview')).length - previewsBefore, 1, 'Deletion was not gated by exactly one reviewed preview');
     const deleteRequests = tab.requests.filter(request => request.method === 'DELETE');
     assert.equal(deleteRequests.length, 1);
     const [{ requestId: sent, url }] = deleteRequests;
@@ -354,8 +415,9 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
     intercepted: interception.first(), observed: capture.responseOf(requestId), requestId, jobId: job.id, jobApiUrl, describe: () => capture.describe(requestId) });
   const networkTerminal = capture.describe(requestId);
   const { operationId } = acknowledged;
-  const rendered = await evaluate(tab, `${deletedAlert}?.innerText`);
-  assertDeletionAlert(acknowledged.state, rendered);
+  await ready(tab, deletionVerdict(acknowledged), 'deleting tab displays its own acknowledgement');
+  const rendered = await evaluate(tab, `${deletedAlert()}?.innerText`);
+  assertDeletionAlert(acknowledged, rendered);
   // Disappearance from the library is not completion: await the server's completed operation.
   let operation = null;
   await waitFor(async () => {
@@ -380,19 +442,23 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   // 4. Recovery and consistency: truthful copy, peer tab, deep-link reload, API 410, focusable return.
   // The permanent message itself says "cannot be undone"; what must be absent is any control offering to undo.
+  await ready(tab, deletionVerdict(acknowledged), 'recorded acknowledgement and its observed cleanup state without stale route controls');
   assert.deepEqual(await evaluate(tab, `[...document.querySelectorAll('button, a[href], [role="button"], [role="link"], input, select, textarea')]
     .filter(control => /undo|restore|trash|recover/i.test((control.textContent || '') + ' ' + (control.value || '') + ' ' + (control.getAttribute('aria-label') || '') + ' ' + (control.getAttribute('title') || '')))
     .map(control => control.outerHTML)`), [], 'Deleted job offers an undo, restore or trash control');
   // Headless background targets may report hidden; bring the peer forward so its own re-read runs.
   await cdp.call('Page.bringToFront', {}, peer.sessionId);
-  await ready(peer, deletedNotice, 'peer tab reconciles deletion');
+  const peerReference = await tombstoneReference(peerTombstone, waitFor);
+  await ready(peer, `${deletionVerdict(null, peerReference)} && document.activeElement === ${deletedAlert(peerReference)}?.querySelector('p[tabindex="-1"]')`, 'peer tombstone has unknown cleanup, no stale controls and departing-control focus');
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
+  const reloadTombstone = observeJobTombstone(cdp, tab, jobApiUrl);
   await cdp.call('Page.reload', {}, tab.sessionId);
-  await ready(tab, deletedNotice, 'deleted deep link after reload');
+  const reloadReference = await tombstoneReference(reloadTombstone, waitFor);
+  await ready(tab, deletionVerdict(null, reloadReference), 'deleted deep link has unknown cleanup and no stale route controls after reload');
   assert.equal(await evaluate(tab, `fetch('/nested/api/v1/jobs/${job.id}').then(response => response.status)`), 410);
   assert.equal(await listed(tab, evaluate, job.id, 'all', listingBusy), false, 'Deleted job still listed');
   // Reach the alert's own recovery link by sequential Tab navigation from the top of the document.
-  const recoveryLink = `${deletedAlert}?.querySelector('a[href="/nested/"]')`;
+  const recoveryLink = `${deletedAlert(reloadReference)}?.querySelector('a[href="/nested/"]')`;
   assert.equal(await evaluate(tab, `${recoveryLink}?.textContent`), 'Return to jobs', 'Deleted alert has no recovery link');
   await evaluate(tab, `(() => { document.activeElement?.blur(); window.getSelection()?.removeAllRanges(); })()`);
   let reached = false;
@@ -418,6 +484,8 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
     deletionOperation: { location, operationId, jobId: job.id, action: acknowledged.action, status: 202, bodySha256, bodySource: 'Fetch.getResponseBody@Response', bodyReads: interception.bodyReads(), bodyBytes, networkTerminal, networkTerminalKind: capture.terminalOf(requestId) ?? null,
       requestId: fetchResponse.headers['x-request-id'], interceptedRequests: interception.continued().length,
       acknowledgedState: acknowledged.state, rendered, state: operation.state, message: operation.message }, detachedDataPurged: true, previewInputBytes: 64,
+    peerTombstoneReference: peerReference, reloadTombstoneReference: reloadReference,
+    acknowledgedCleanupPreserved: true, tombstoneCleanupUnknown: true, staleJobControlsCleared: true, departingControlFocus: true,
     peerTabReconciled: true, deepLinkReloadShowsDeleted: true, apiGone: 410, noUndoPromised: true,
     keyboardReturnFocus: landingFocus, mutationRequests: methods.length, listingBusyRetried: listingBusy, executionStarted: false };
 }

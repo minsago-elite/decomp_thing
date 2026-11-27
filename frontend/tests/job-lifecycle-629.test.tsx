@@ -334,7 +334,9 @@ it.each(['running', 'completed', 'recovery-required'] as const)('accepted %s del
   const f = seq(json('jobDeletionPreview', { ...prev, jobId, version: v1 }), json('operation', op(state), 202));
   const deleted = del(f, vi.fn(() => { order.push('deleted'); }));
   fireEvent.input(await screen.findByRole('textbox'), { target: { value: prev.displayFilename } });
-  fireEvent.click(screen.getByRole('button', { name: jobDeletionCopy.deletePermanently }));
+  // Focus returns to the heading only when it departed from inside the form (#512); the submit control had it.
+  const submit = screen.getByRole('button', { name: jobDeletionCopy.deletePermanently }); submit.focus();
+  fireEvent.click(submit);
   expect(await screen.findByText(jobDeletionCopy.operationStates[state])).toBeTruthy();
   expect(Boolean(screen.queryByText(jobDeletionCopy.stillRunning))).toBe(state === 'running');
   expect(log(f)).toEqual([`GET /api/v1/jobs/${jobId}/deletion-preview`, `DELETE /api/v1/jobs/${jobId}`]);
