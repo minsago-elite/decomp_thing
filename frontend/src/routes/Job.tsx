@@ -34,11 +34,16 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
    * Every job observation (Refresh, peer-tab change, organization change, accepted-work Retry) is ordered by when it
    * was issued: one is applied only when nothing issued after it has been applied, so a slower earlier read never
    * rewinds a newer one. JobDetails is remounted per session generation and job, which resets this order.
+   * `applied` also counts a transient failure that kept the earlier job with a warning; `observed` counts only reads
+   * that settled what the overview shows (an observation, a same-version confirmation, a clearing or a deletion).
+   * A read overtaken only by such failures is still answered by its own response, never by the retained job.
    */
-  const order = useRef({ issued: 0, applied: 0, current: null as JobData | null });
+  const order = useRef<{ issued: number; applied: number; observed: number; current: JobData | null; failure: unknown }>(
+    { issued: 0, applied: 0, observed: 0, current: null, failure: undefined });
   const issue = () => ++order.current.issued;
   const apply = (ticket: number, next: JobData) => {
     order.current.applied = ticket;
+    order.current.observed = ticket;
     order.current.current = next;
     setStored({ binding, data: receive(next), observed: ticket, error: '', loading: false });
   };
@@ -48,7 +53,9 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
   const readNotice = useRef<HTMLParagraphElement>(null);
   function clearObservation(ticket: number, error: string) {
     departing.current = document.activeElement;
-    order.current.applied = ticket;
+    // A deletion that only retained failures overtook still ends the overview; it never reopens their order.
+    order.current.applied = Math.max(order.current.applied, ticket);
+    order.current.observed = Math.max(order.current.observed, ticket);
     order.current.current = null;
     setStored({ binding, data: null, observed: ticket, error, loading: false });
   }
@@ -71,6 +78,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     }[metadataFailureKind(failure)], failure);
     if (canRetainMetadata(failure)) {
       order.current.applied = ticket;
+      order.current.failure = failure;
       setStored(previous => ({ ...previous, error: message, loading: false }));
     } else {
       clearObservation(ticket, message);
@@ -78,46 +86,60 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
   }
   /**
    * Overview, Retry, organization and accepted-work confirmation reads share ordering, identity and retention rules.
-   * A stale result returns the newer observation. A current response naming a different job clears the old facts,
-   * and a current failure is shown by the overview: a deletion ends it, a transient failure keeps the earlier
-   * observation with a warning, and any other failure clears it. A `confirm` read only checks that the shown
-   * observation is still current, so a successful one is returned without being applied: applying it would start
-   * another lookup that confirms again. When it is the newest read and matches the shown version, it still supersedes earlier reads.
+   * A result overtaken by a newer observation returns that observation. A current response naming a different job
+   * clears the old facts, and a current failure is shown by the overview: a deletion ends it, a transient failure
+   * keeps the earlier observation with a warning, and any other failure clears it. A `confirm` read only checks that
+   * the shown observation is still current, so a successful one is returned without being applied: applying it would
+   * start another lookup that confirms again. When it is the newest read and matches the shown version, it still
+   * supersedes earlier reads.
+   *
+   * A read overtaken only by newer transient failures keeps their warning and is answered by its own response: its
+   * failure rejects (a deletion still ends the overview), and its job is returned unapplied, except that a `retry`
+   * read, whose caller needs an applied observation, rejects with the newest failure instead. An aborted read rejects.
    */
-  const readJob = async (signal: AbortSignal, mode: 'observe' | 'confirm' = 'observe'): Promise<JobData | null> => {
+  const readJob = async (signal: AbortSignal, mode: 'observe' | 'retry' | 'confirm' = 'observe'): Promise<JobData | null> => {
     const ticket = issue();
+    const replaced = () => ticket < order.current.observed;
     let data: JobData;
     try {
       ({ data } = await client.get('job', `/jobs/${jobId}`, { signal }));
     } catch (failure: unknown) {
-      if (signal.aborted || ticket < order.current.applied) return order.current.current;
-      applyReadFailure(ticket, failure);
+      if (signal.aborted) throw failure;
+      if (ticket >= order.current.applied) applyReadFailure(ticket, failure);
+      else if (replaced()) return order.current.current;
+      else if (isDeletedJob(failure)) confirmDeletion(ticket);
       throw failure;
     }
-    if (signal.aborted || ticket < order.current.applied) return order.current.current;
+    if (signal.aborted) throw signal.reason;
+    if (ticket < order.current.applied) {
+      if (replaced()) return order.current.current;
+      if (mode === 'retry') throw order.current.failure;
+      return data;
+    }
     if (data.jobId !== jobId) {
       clearObservation(ticket, copy.theServerReturnedADifferentJobIdentity);
       return null;
     }
-    if (mode === 'observe') apply(ticket, data);
+    if (mode !== 'confirm') apply(ticket, data);
     else if (ticket === order.current.issued && data.version === order.current.current?.version) {
       // The retained overview is current again. This newest read supersedes every earlier one, such as a held Refresh,
       // so those are dropped when they settle. Its observation is kept, not reapplied, so the lookup can settle.
       order.current.applied = ticket;
+      order.current.observed = ticket;
       setStored(previous => previous.error || previous.loading ? { ...previous, error: '', loading: false } : previous);
     }
     return data;
   };
   /**
-   * An accepted-work history read is ordered like a job read. A current deletion tombstone ends the overview, as a job
-   * read's would; every other history failure is the lookup's own to report.
+   * An accepted-work history read is ordered like a job read. A deletion tombstone that no newer observation replaced
+   * ends the overview, as a job read's would; every other history failure is the lookup's own to report.
    */
   const readHistory = async <T,>(signal: AbortSignal, read: () => Promise<T>): Promise<T> => {
     const ticket = issue();
     try {
       return await read();
     } catch (failure: unknown) {
-      if (!signal.aborted && ticket >= order.current.applied && isDeletedJob(failure)) confirmDeletion(ticket);
+      if (!signal.aborted && ticket >= order.current.observed && isDeletedJob(failure)) confirmDeletion(ticket);
       throw failure;
     }
   };

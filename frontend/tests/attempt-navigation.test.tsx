@@ -1555,3 +1555,194 @@ it('keeps a newer confirmation failure and retained job visible after an older R
   fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
   await waitFor(() => expect(screen.queryByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeNull());
 });
+
+// #1778 round 11: a newer Refresh that fails transiently retains the shown job but observes nothing. A read it overtook
+// is answered by its own response, never by the retained job, and a Retry it overtook still settles.
+const busy = () => new ApiClientError('http_error', { status: 503, serverCode: 'LISTING_BUSY' });
+async function heldBehindFailedRefresh(first: ReturnType<typeof acceptedJob>, held: () => Promise<unknown>, later: Array<() => Promise<unknown>>, retry: boolean) {
+  let jobs = 0;
+  let release: (() => void) | undefined;
+  transport.get.mockImplementation(kind => {
+    if (kind === 'runs') return Promise.resolve(page([accepted('run_b'), accepted('run_a')], null, v('durable')));
+    jobs += 1;
+    if (jobs === 1) return Promise.resolve(first);
+    if (jobs === 2) return new Promise((resolve, reject) => { release = () => { void held().then(resolve, reject); }; });
+    if (jobs === 3) return Promise.reject(busy());
+    return later[jobs - 4]!();
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  heldAuth = await session();
+  render(<App basePath="/nested" session={heldAuth} />);
+  if (retry) {
+    const button = await screen.findByRole('button', { name: acceptedWorkCopy.retry });
+    button.focus();
+    fireEvent.click(button);
+  }
+  await waitFor(() => expect(release).toBeDefined());
+  if (retry) await waitFor(() => expect(document.activeElement).toBe(section().getByRole('status')));
+  expect(section().queryByRole('link', { name: 'Open the accepted attempt run_b' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+  await screen.findByText(jobCopy.previousJobMetadataMayBeOutdated);
+  const focused = document.activeElement;
+  await act(() => { release!(); });
+  await settleReads();
+  return focused;
+}
+const reads = () => transport.get.mock.calls.map(([kind]) => kind);
+const alphaA = acceptedJob({ label: 'Alpha', version: v('a'), latestRunId: 'run_b', status: 'running' });
+const alphaB = acceptedJob({ label: 'Alpha', version: v('b'), latestRunId: 'run_b', status: 'completed' });
+
+it('R11: a confirmation overtaken by a failed Refresh is answered by its own different version, not the retained job', async () => {
+  const focused = await heldBehindFailedRefresh(alphaA, () => Promise.resolve(alphaB), [() => Promise.resolve(alphaB), () => Promise.resolve(alphaB)], false);
+  expect(reads()).toEqual(['job', 'runs', 'job', 'job']);
+  expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+  expect(section().queryByRole('link', { name: 'Open the accepted attempt run_b' })).toBeNull();
+  expect(section().getByText(/attempt history changed after this job was read/)).toBeTruthy();
+  // Focus never moved for a change the person did not ask for.
+  expect(document.activeElement).toBe(focused);
+  // One Retry observes the newer version and binds history to it with one bounded lookup.
+  fireEvent.click(section().getByRole('button', { name: acceptedWorkCopy.retry }));
+  await section().findByRole('link', { name: 'Open the accepted attempt run_b' });
+  await settleReads();
+  expect(reads()).toEqual(['job', 'runs', 'job', 'job', 'job', 'runs', 'job']);
+  expect(screen.queryByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeNull();
+});
+
+it('R11: a confirmation overtaken by a failed Refresh still verifies the shown version with its own response', async () => {
+  await heldBehindFailedRefresh(alphaA, () => Promise.resolve(alphaA), [], false);
+  expect(reads()).toEqual(['job', 'runs', 'job', 'job']);
+  // The genuine bracketing read reported the shown version; the newer failure keeps its warning.
+  expect(section().getByRole('link', { name: 'Open the accepted attempt run_b' }).getAttribute('href')).toBe(runPath('/nested', jobId, 'run_b'));
+  expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+});
+
+it('R11: a failed confirmation overtaken by a failed Refresh withholds the evidence', async () => {
+  await heldBehindFailedRefresh(alphaA, () => Promise.reject(new ApiClientError('http_error', { status: 500 })), [], false);
+  expect(reads()).toEqual(['job', 'runs', 'job', 'job']);
+  expect(section().queryByRole('link', { name: 'Open the accepted attempt run_b' })).toBeNull();
+  expect(section().getByRole('alert')).toBeTruthy();
+  expect(section().getByRole('button', { name: acceptedWorkCopy.retry })).toBeTruthy();
+  expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+});
+
+it.each([
+  ['the shown version', () => acceptedJob({ version: v('a'), latestRunId: 'run_b', status: 'running' })],
+  ['a newer version', () => acceptedJob({ version: v('c'), latestRunId: 'run_b', status: 'completed' })],
+] as const)('R11: a Retry overtaken by a failed Refresh settles on Retry when its read returns %s', async (_name, response) => {
+  const initial = acceptedJob({ version: v('a'), latestRunId: 'run_b', status: 'running' });
+  await heldBehindFailedRefresh(initial, () => Promise.resolve(response()), [() => Promise.resolve(initial)], true);
+  expect(reads()).toEqual(['job', 'runs', 'job', 'job']);
+  expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+  expect(section().queryByText(/Locating the attempt/)).toBeNull();
+  expect(section().queryByRole('link', { name: 'Open the accepted attempt run_b' })).toBeNull();
+  expect(section().getByRole('alert')).toBeTruthy();
+  const retry = section().getByRole('button', { name: acceptedWorkCopy.retry });
+  expect(document.activeElement).toBe(retry);
+  // The next Retry reads the job again and looks up history once for it.
+  fireEvent.click(retry);
+  await waitFor(() => expect(section().queryByText(/Locating the attempt/)).toBeNull());
+  await settleReads();
+  expect(reads()).toEqual(['job', 'runs', 'job', 'job', 'job', 'runs']);
+  expect(screen.queryByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeNull();
+});
+
+it('R11: a Retry overtaken by a failed Refresh still ends the overview when its read confirms deletion', async () => {
+  const initial = acceptedJob({ version: v('a'), latestRunId: 'run_b', status: 'running' });
+  await heldBehindFailedRefresh(initial, () => Promise.reject(gone()), [], true);
+  expect(reads()).toEqual(['job', 'runs', 'job', 'job']);
+  const notice = screen.getByText(jobCopy.thisJobWasDeleted);
+  expect(screen.queryByRole('heading', { name: acceptedWorkCopy.title })).toBeNull();
+  expect(document.activeElement).toBe(notice);
+});
+
+it('R11: an organization save whose reread a failed Refresh overtook is still reported as saved', async () => {
+  const before = acceptedJob({ latestRunId: 'run_b', version: v('A') });
+  const saved = acceptedJob({ label: 'Router firmware', latestRunId: 'run_b', version: v('labelled') });
+  let held: (() => void) | undefined;
+  let saving = false;
+  transport.put.mockImplementation(() => { saving = true; return Promise.resolve({ data: {} }); });
+  transport.get.mockImplementation(kind => {
+    if (kind === 'runs') return Promise.resolve(page([accepted('run_b')], null, v('A')));
+    if (!saving) return Promise.resolve(before);
+    // The save's reread is held; every later read (this tab's library notice, Refresh) fails transiently.
+    if (held === undefined) return new Promise(resolve => { held = () => resolve(saved); });
+    return Promise.reject(busy());
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  heldAuth = await session();
+  render(<App basePath="/nested" session={heldAuth} />);
+  await screen.findByRole('link', { name: 'Open the accepted attempt run_b' });
+  const field = screen.getByRole('textbox', { name: /label/i });
+  fireEvent.input(field, { target: { value: 'Router firmware' } });
+  fireEvent.submit(field.closest('form')!);
+  await waitFor(() => expect(held).toBeDefined());
+  fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+  await screen.findByText(jobCopy.previousJobMetadataMayBeOutdated);
+  await settleReads();
+  await act(() => { held!(); });
+  await settleReads();
+  expect(screen.getByText(jobOrganizationCopy.saved)).toBeTruthy();
+  expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+  expect(reads().filter(kind => kind === 'runs')).toHaveLength(1);
+});
+
+it('independent R11: a newer transient Refresh cannot confirm an older in-flight history binding', async () => {
+  const auth = await session();
+  const previous = acceptedJob({ label: 'Alpha', version: v('a'), latestRunId: 'run_b', status: 'running' });
+  const next = acceptedJob({ label: 'Alpha', version: v('b'), latestRunId: 'run_b', status: 'completed' });
+  let jobs = 0;
+  let release: (() => void) | undefined;
+  transport.get.mockImplementation(kind => {
+    if (kind === 'runs') return Promise.resolve(page([accepted('run_b'), accepted('run_a')], null, v('durable')));
+    if (++jobs === 1) return Promise.resolve(previous);
+    if (jobs === 2) return new Promise(resolve => { release = () => resolve(next); });
+    if (jobs === 3) return Promise.reject(new ApiClientError('http_error', { status: 503, serverCode: 'LISTING_BUSY' }));
+    return Promise.resolve(next);
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(release).toBeDefined());
+    expect(section().queryByRole('link', { name: 'Open the accepted attempt run_b' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await screen.findByText(jobCopy.previousJobMetadataMayBeOutdated);
+    await act(() => { release!(); });
+    await settleReads();
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job', 'job']);
+    expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+    // The newer GET failed. The only actual confirmation returned a different job version.
+    expect(section().queryByRole('link', { name: 'Open the accepted attempt run_b' })?.getAttribute('href') ?? null).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('independent R11: a newer transient Refresh cannot leave an overtaken Retry loading forever', async () => {
+  const auth = await session();
+  const initial = acceptedJob({ version: v('a'), latestRunId: 'run_b', status: 'running' });
+  let jobs = 0;
+  let release: (() => void) | undefined;
+  transport.get.mockImplementation(kind => {
+    if (kind === 'runs') return Promise.resolve(page([accepted('run_b'), accepted('run_a')], null, v('b')));
+    if (++jobs === 1) return Promise.resolve(initial);
+    if (jobs === 2) return new Promise(resolve => { release = () => resolve(initial); });
+    if (jobs === 3) return Promise.reject(new ApiClientError('http_error', { status: 503, serverCode: 'LISTING_BUSY' }));
+    return Promise.resolve(initial);
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const retry = await screen.findByRole('button', { name: acceptedWorkCopy.retry });
+    retry.focus();
+    fireEvent.click(retry);
+    await waitFor(() => expect(release).toBeDefined());
+    const status = section().getByRole('status');
+    await waitFor(() => expect(document.activeElement).toBe(status));
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await screen.findByText(jobCopy.previousJobMetadataMayBeOutdated);
+    await act(() => { release!(); });
+    await settleReads();
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job', 'job']);
+    expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+    expect(section().queryByText(/Locating the attempt/)?.textContent ?? null).toBeNull();
+    expect(document.activeElement).toBe(section().getByRole('button', { name: acceptedWorkCopy.retry }));
+  } finally { auth.dispose(); }
+});

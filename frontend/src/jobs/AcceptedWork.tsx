@@ -36,8 +36,12 @@ function failureMessage(failure: unknown) {
  */
 export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory }: {
   job: Job; observed?: number; basePath: string;
-  /** The owning route's ordered job read; a `confirm` read is shown by the route only when it fails or names another job. */
-  readJob?: (signal: AbortSignal, mode?: 'observe' | 'confirm') => Promise<Job | null>;
+  /**
+   * The owning route's ordered job read. A `retry` read resolves only once it or a newer read is applied as the shown
+   * observation. A `confirm` read resolves with this read's own job or a newer applied observation, never a job kept
+   * through a failure; the route shows it only when it fails or names another job.
+   */
+  readJob?: (signal: AbortSignal, mode: 'retry' | 'confirm') => Promise<Job | null>;
   /** The owning route's ordering of a history read, so a current deletion tombstone ends the route too. */
   readHistory?: <T>(signal: AbortSignal, read: () => Promise<T>) => Promise<T>;
 }) {
@@ -75,8 +79,9 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory
   /**
    * Retry from an unbound history reads the job once. Its outcome is an observation like any other the parent applies
    * (the parent orders it against every other job read, so a later observation always wins), and that observation
-   * gets one history lookup by the rule below, whether or not its version changed. A failed read settles as a
-   * failure, with no history read, and the next Retry repeats this job read, unless a lookup started meanwhile.
+   * gets one history lookup by the rule below, whether or not its version changed. A failed read, or one that only a
+   * newer failed read overtook so that no observation was applied, settles as a failure, with no history read, and
+   * the next Retry repeats this job read, unless a lookup started meanwhile.
    */
   const retryUnbound = () => {
     if (readJob === undefined) { setRetry(value => value + 1); return; }
@@ -85,7 +90,7 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory
     refreshing.current = controller;
     const operation = ++owner.current;
     setOwnLookup({ status: 'loading' }, observed, true);
-    void readJob(controller.signal).then(current => {
+    void readJob(controller.signal, 'retry').then(current => {
       if (current === null) throw new ApiClientError('invalid_response');
     }).catch((failure: unknown) => {
       if (controller.signal.aborted || owner.current !== operation) return;
