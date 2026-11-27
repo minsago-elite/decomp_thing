@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests, MAX_REPORT_BYTES } from './packaged-browser-restart.mjs';
+import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, publishBoundReport, scrubTokens, summarizeRequests, MAX_REPORT_BYTES } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
 
@@ -112,6 +112,73 @@ test('does not apply CSP policy encoding to oversized non-audit reports', () => 
 test('still rejects an oversized report after duplicate CSP policy encoding', () => {
   const report = { ...generatedAuditReport(), blob: 'x'.repeat(5000) };
   assert.throws(() => boundReport(report, 1000), /exceeds its byte bound/);
+});
+
+test('does not publish when non-diagnostic evidence cannot fit the byte bound', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'unrepresentable-report-'));
+  const path = join(directory, 'report.json');
+  try {
+    await assert.rejects(publishBoundReport(path, { status: 'failed', evidence: 'x'.repeat(5000), error: 'diagnostic' }, [], 1000), /exceeds its byte bound/);
+    assert.equal(await readFile(path).then(() => true, () => false), false);
+    assert.equal(await readFile(path + '.browser-publication').then(() => true, () => false), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('publishes a scrubbed, byte-bounded failure with large UTF-8 diagnostics and intact verdicts', async () => {
+  const token = 'secret-access-token-123';
+  const bootstrap = '#bootstrap=bootSecret_123';
+  const diagnostic = (targetBytes, prefix, suffix) => {
+    const fillerBytes = targetBytes - Buffer.byteLength(prefix + suffix, 'utf8');
+    assert.ok(fillerBytes >= 0);
+    return `${prefix}${'é'.repeat(Math.floor(fillerBytes / 2))}${fillerBytes % 2 ? 'x' : ''}${suffix}`;
+  };
+  const report = {
+    status: 'failed', mode: 'audit',
+    gates: { timing: 'failed', memory: 'failed', requests: 'failed' },
+    budgetFailures: ['timing p95 exceeded its existing budget', 'peak JVM memory exceeded its existing budget'],
+    requestFailures: ['required source request failed'],
+    applicationError: diagnostic(1_062_019, `Structure diagnostic ${token} ${bootstrap} START `, ' APPLICATION-END'),
+    error: diagnostic(206_263, 'Structure driver diagnostic START ', ' DRIVER-END'),
+    requests: { browser: Array.from({ length: 1000 }, (_, index) => ({ method: 'GET', url: `/route/${index}?detail=${'x'.repeat(90)}` })) },
+    shutdownConfirmed: true, workCleanupConfirmed: true, workRetained: false,
+  };
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'failure-report-'));
+  const path = join(directory, 'report.json');
+  try {
+    const retained = await publishBoundReport(path, report, [token]);
+    const bytes = await readFile(path);
+    const parsed = JSON.parse(bytes.toString('utf8'));
+    assert.ok((await stat(path)).size <= MAX_REPORT_BYTES, `actual report file exceeded ${MAX_REPORT_BYTES} bytes`);
+    assert.ok(bytes.length <= MAX_REPORT_BYTES);
+    assert.equal(retained.status, 'failed');
+    assert.deepEqual(parsed.gates, report.gates);
+    assert.deepEqual(parsed.budgetFailures, report.budgetFailures);
+    assert.deepEqual(parsed.requestFailures, report.requestFailures);
+    assert.equal(parsed.shutdownConfirmed, true);
+    assert.equal(parsed.workCleanupConfirmed, true);
+    assert.equal(parsed.workRetained, false);
+    assert.deepEqual(parsed.requests.browser, { count: 1000, truncated: true });
+    assert.ok(parsed.applicationError.includes('Structure diagnostic [redacted] #bootstrap=[redacted] START'));
+    assert.ok(parsed.applicationError.includes('APPLICATION-END'));
+    assert.ok(parsed.error.includes('Structure driver diagnostic START'));
+    assert.ok(parsed.error.includes('DRIVER-END'));
+    assert.equal(parsed.diagnosticTruncation.applicationError.originalBytes, Buffer.byteLength(report.applicationError.replace(token, '[redacted]').replace(bootstrap, '#bootstrap=[redacted]')));
+    assert.equal(parsed.diagnosticTruncation.error.originalBytes, Buffer.byteLength(report.error));
+    assert.ok(parsed.diagnosticTruncation.applicationError.omittedBytes > 0);
+    assert.ok(parsed.diagnosticTruncation.error.omittedBytes > 0);
+    assert.match(parsed.diagnosticTruncation.applicationError.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(bytes.toString('utf8').includes(token), false);
+    assert.equal(bytes.toString('utf8').includes(bootstrap), false);
+    assert.equal(await readFile(path + '.browser-publication').then(() => true, () => false), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('only pin PUTs to the selected attempt are accepted mutations', () => {

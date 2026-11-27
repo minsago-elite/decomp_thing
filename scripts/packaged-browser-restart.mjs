@@ -76,8 +76,67 @@ export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
   const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
   const largestFields = Object.entries(bounded).map(([name, value]) => [name, Buffer.byteLength(JSON.stringify(value), 'utf8')])
     .sort((left, right) => right[1] - left[1]).slice(0, 5);
+  if (boundedBytes > maxBytes) {
+    const diagnostics = [];
+    for (const name of ['error', 'applicationError', 'browserError', 'viteError', 'workCleanupError']) {
+      if (typeof bounded[name] === 'string' && bounded[name].length) diagnostics.push({ name, value: bounded[name] });
+    }
+    if (Array.isArray(bounded.cleanupErrors)) bounded.cleanupErrors.forEach((value, index) => {
+      if (typeof value === 'string' && value.length) diagnostics.push({ name: `cleanupErrors[${index}]`, value });
+    });
+    if (diagnostics.length) {
+      const buildCandidate = fraction => {
+        const candidate = structuredClone(bounded);
+        const truncation = {};
+        for (const { name, value } of diagnostics) {
+          const characters = Array.from(value);
+          const keep = Math.floor(characters.length * fraction);
+          if (keep >= characters.length) continue;
+          const prefixCount = Math.ceil(keep / 2);
+          const suffixCount = keep - prefixCount;
+          const prefix = characters.slice(0, prefixCount).join('');
+          const suffix = suffixCount ? characters.slice(-suffixCount).join('') : '';
+          const originalBytes = Buffer.byteLength(value, 'utf8');
+          const retainedBytes = Buffer.byteLength(prefix + suffix, 'utf8');
+          const sha256 = createHash('sha256').update(value, 'utf8').digest('hex');
+          const marker = `\n...[diagnostic excerpt; omitted ${originalBytes - retainedBytes} of ${originalBytes} UTF-8 bytes; sha256=${sha256}]...\n`;
+          const excerpt = `${prefix}${marker}${suffix}`;
+          if (name.startsWith('cleanupErrors[')) candidate.cleanupErrors[Number(name.match(/\[(\d+)\]/)[1])] = excerpt;
+          else candidate[name] = excerpt;
+          truncation[name] = { originalBytes, retainedBytes, omittedBytes: originalBytes - retainedBytes, sha256 };
+        }
+        candidate.diagnosticTruncation = truncation;
+        return candidate;
+      };
+      let low = 0;
+      let high = 1;
+      let best = buildCandidate(0);
+      if (Buffer.byteLength(JSON.stringify(best), 'utf8') <= maxBytes) {
+        for (let iteration = 0; iteration < 48; iteration++) {
+          const middle = (low + high) / 2;
+          const candidate = buildCandidate(middle);
+          if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= maxBytes) {
+            best = candidate;
+            low = middle;
+          } else high = middle;
+        }
+        const bestBytes = Buffer.byteLength(JSON.stringify(best), 'utf8');
+        assert.ok(bestBytes <= maxBytes, `Report exceeds its byte bound after diagnostic compaction (${bestBytes}/${maxBytes} bytes)`);
+        return best;
+      }
+    }
+  }
   assert.ok(boundedBytes <= maxBytes, `Report exceeds its byte bound after truncation (${boundedBytes}/${maxBytes} bytes; largest fields ${JSON.stringify(largestFields)})`);
   return bounded;
+}
+
+/** Scrubs, bounds, and atomically publishes the primary browser report. */
+export async function publishBoundReport(path, report, sensitiveValues = [], maxBytes = MAX_REPORT_BYTES) {
+  const retained = boundReport(scrubTokens(report, sensitiveValues), maxBytes);
+  const text = JSON.stringify(retained);
+  assert.ok(Buffer.byteLength(text, 'utf8') <= maxBytes, 'Serialized report exceeds its byte bound');
+  await publishAtomically(path, text);
+  return retained;
 }
 
 export function summarizeRequests(requests) {
