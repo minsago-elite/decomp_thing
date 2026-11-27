@@ -13,6 +13,25 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class GitReadsTest {
+    @Test fun `intent-to-add selected patch works for SHA-1 and SHA-256 object formats`(): Unit = GitTestRepositories().use { f ->
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) {
+            val (gitDir, workTree) = f.managed("intent-to-add-${format.wireName}", format = format.wireName)
+            f.write(workTree, "new.c", "int intent_added = 42;\n")
+            f.raw(gitDir, workTree, "add", "-N", "--", "new.c")
+
+            val listing = GitReads.diff(f.runner, gitDir, workTree, format, GitDiffScope.UNSTAGED, null, null)
+            val selected = listing.files.single()
+            assertEquals("new.c", selected.path.exact)
+            assertNull(selected.oldObjectId)
+            assertNull(selected.newObjectId)
+
+            val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.UNSTAGED, null, null, selected)
+            assertTrue(patch.text.contains("+int intent_added = 42;"), "${format.wireName}: ${patch.text}")
+            assertFalse(patch.binary)
+            assertFalse(patch.truncated)
+        }
+    }
+
     @Test fun `every read invocation enforces hard and soft child memory limits and fails closed without a limiter`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("read-memory")
         f.write(workTree, "main.c", "int base;\n")

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { boundReport } from './packaged-browser-restart.mjs';
 import { assertBoundedExchange, assertDiffPage, assertDiffPaths, assertHistoryEntries, buildInertElfUploadExpression,
   GIT_SCALE_DECLARED_REQUEST_BYTES, GIT_SCALE_RESPONSE_BYTES, summarizeDiffPaths } from './packaged-browser-git-scale.mjs';
+import { qualifyGitScale } from './packaged-browser-git-scale.mjs';
 
 function exchange(overrides = {}) {
   return { status: 200, declaredRequestBytes: 200, responseBytes: 300, elapsedMs: 15,
@@ -65,4 +66,69 @@ test('retains a bounded ordered-path commitment instead of full large diff pages
     'Report bounding must preserve the validated ordered-path commitment');
   assert.ok(Buffer.byteLength(JSON.stringify(report), 'utf8') <= 512 * 1024,
     'The compact Git scale report must fit the retained-report budget');
+});
+
+test('keeps selected root diff IDs through compact paginated summaries and reads both patches', async () => {
+  const commits = Array.from({ length: 10000 }, (_, index) => (index + 1).toString(16).padStart(40, '0'));
+  const largePaths = Array.from({ length: 2001 }, (_, index) => `generated/${String(index).padStart(5, '0')}.c`);
+  const rootPaths = ['README.txt', 'large/patch.txt', 'large/payload.bin'];
+  const file = (path, index) => ({ path, fileId: `file_${index.toString(16).padStart(32, '0')}` });
+  const textId = file('', 1).fileId;
+  const binaryId = file('', 2).fileId;
+  const patchCalls = [];
+  const evaluate = async (_tab, expression) => {
+    let status = 200;
+    let data;
+    if (expression.includes('new FormData()')) {
+      status = 201;
+      data = { jobId: 'a'.repeat(32), version: 'v1' };
+    } else {
+      const requestPath = JSON.parse(expression.match(/fetch\(("(?:[^"\\]|\\.)*")/)[1]);
+      const url = new URL(requestPath, 'http://fixture');
+      if (url.pathname.endsWith('/bootstrap')) data = { csrfToken: 'csrf' };
+      else if (url.pathname.endsWith('/repositories')) {
+        status = 202;
+        data = { repositoryId: 'repo', operationId: 'op' };
+      } else if (url.pathname.includes('/operations/')) data = { state: 'completed' };
+      else if (url.pathname.endsWith('/history')) {
+        const start = Number(url.searchParams.get('cursor') || 0);
+        const limit = Number(url.searchParams.get('limit'));
+        data = { entries: commits.slice().reverse().slice(start, start + limit)
+          .map(objectId => ({ objectId, subject: 'bounded', subjectTruncated: true })),
+        nextCursor: start + limit < commits.length ? String(start + limit) : null };
+      } else if (url.pathname.endsWith('/diff')) {
+        const selected = url.searchParams.get('file');
+        if (selected) {
+          patchCalls.push(selected);
+          data = { patch: selected === textId
+            ? { text: '+large UTF-8 é', truncated: true, binary: false }
+            : { text: '', truncated: false, binary: true } };
+        } else {
+          const isRoot = url.searchParams.get('commit') === commits[0];
+          const total = isRoot ? rootPaths.length : 2000;
+          const paths = isRoot ? rootPaths : largePaths.slice(0, 2000);
+          const start = Number(url.searchParams.get('cursor') || 0);
+          const files = paths.slice(start, start + 200).map((path, offset) => file(path, start + offset));
+          data = { files, complete: isRoot || url.searchParams.get('commit') === commits[99],
+            nextCursor: start + 200 < total ? String(start + 200) : null };
+        }
+      } else data = { headObjectId: commits.at(-1) };
+    }
+    const text = JSON.stringify({ apiVersion: 1, requestId: 'regression', data });
+    const length = Buffer.byteLength(text);
+    return { status, elapsedMs: 1, contentType: 'application/json; charset=utf-8', contentLength: String(length),
+      responseBytes: length, overflowed: false, text };
+  };
+
+  const report = await qualifyGitScale({ evaluate, tab: null, fixture: { sourceName: 'history.git', manifest: {
+    commitIds: commits, tip: commits.at(-1), firstCommit: commits[0], commitCount: commits.length,
+    pathSets: { 100: largePaths.slice(0, 2000), 200: largePaths },
+  } } });
+
+  assert.deepEqual(patchCalls, [textId, binaryId]);
+  assert.equal(report.patches.utf8Truncated, true);
+  assert.equal(report.patches.binaryWithheld, true);
+  assert.equal('files' in report.diff.exactTwoThousand, false);
+  assert.equal('files' in report.diff.boundedTwoThousandOne, false);
+  assert.ok(Buffer.byteLength(JSON.stringify(report), 'utf8') < 512 * 1024);
 });
