@@ -34,8 +34,12 @@ function failureMessage(failure: unknown) {
  * `observed` numbers each job observation the parent applies, in order. A version can recur (a label set and then
  * reverted restores it), so the number, not the version, says whether an answer or an in-flight read is still current.
  */
-export function AcceptedWork({ job, observed = 0, basePath, readJob }: {
-  job: Job; observed?: number; basePath: string; readJob?: (signal: AbortSignal) => Promise<Job | null>;
+export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory }: {
+  job: Job; observed?: number; basePath: string;
+  /** The owning route's ordered job read; a `confirm` read is shown by the route only when it fails or names another job. */
+  readJob?: (signal: AbortSignal, mode?: 'observe' | 'confirm') => Promise<Job | null>;
+  /** The owning route's ordering of a history read, so a current deletion tombstone ends the route too. */
+  readHistory?: <T>(signal: AbortSignal, read: () => Promise<T>) => Promise<T>;
 }) {
   const { client } = usePrivateTransport(basePath);
   const { jobId, acceptedRevisionId, latestRunId, version } = job;
@@ -153,9 +157,11 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob }: {
       const settle = async (result: Lookup) => {
         if (result.status !== 'unbound' && snapshot !== null && snapshot !== version) {
           if (!organized) { setLookup({ status: 'unbound' }); return; }
-          const { data: fresh } = await client.get('job', `/jobs/${jobId}`, { signal: controller.signal });
+          const fresh = readJob === undefined
+            ? (await client.get('job', `/jobs/${jobId}`, { signal: controller.signal })).data
+            : await readJob(controller.signal, 'confirm');
           if (controller.signal.aborted) return;
-          if (fresh.jobId !== jobId) throw new ApiClientError('invalid_response');
+          if (fresh === null || fresh.jobId !== jobId) throw new ApiClientError('invalid_response');
           if (fresh.version !== version) { setLookup({ status: 'unbound' }); return; }
         }
         setLookup(result);
@@ -163,7 +169,8 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob }: {
       for (let page = 0; page < acceptedLookupPages; page += 1) {
         const query = new URLSearchParams({ limit: String(pageLimit) });
         if (cursor !== null) query.set('cursor', cursor);
-        const { data } = await client.get('runs', `/jobs/${jobId}/runs?${query}`, { signal: controller.signal });
+        const readPage = () => client.get('runs', `/jobs/${jobId}/runs?${query}`, { signal: controller.signal });
+        const { data } = await (readHistory === undefined ? readPage() : readHistory(controller.signal, readPage));
         if (controller.signal.aborted) return;
         if (data.jobId !== jobId || data.items.some(run => run.jobId !== jobId)) throw new ApiClientError('invalid_response');
         // The contract requires each page's snapshot; without it no history can be bound, so none is shown.

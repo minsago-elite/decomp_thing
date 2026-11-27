@@ -477,27 +477,173 @@ it.each([
   } finally { auth.dispose(); }
 });
 
+const gone = () => new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' });
+
 it.each([
-  ['fails', () => Promise.reject(new ApiClientError('http_error', { status: 500 }))],
-  ['names another job', () => Promise.resolve(acceptedJob({ archived: true, version: v('archived'), jobId: 'f'.repeat(32) }))],
-] as const)('fails honestly when the bracketing job read %s', async (_name, bracket) => {
+  ['a deletion tombstone', 'label', () => Promise.reject(gone()), jobCopy.thisJobWasDeleted, false],
+  ['a missing record', 'archived', () => Promise.reject(new ApiClientError('http_error', { status: 404, serverCode: 'NOT_FOUND' })),
+    jobCopy.thisJobIsUnavailableItMayHaveBeenRemoved, false],
+  ['corrupt workflow state', 'label', () => Promise.reject(new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_WORKFLOW_STATE' })),
+    jobCopy.storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts, false],
+  ['another job', 'archived', () => Promise.resolve(acceptedJob({ archived: true, version: v('organized'), jobId: 'f'.repeat(32) })),
+    jobCopy.theServerReturnedADifferentJobIdentity, false],
+  ['a transient failure', 'label', () => Promise.reject(new ApiClientError('http_error', { status: 500 })),
+    jobCopy.jobMetadataCouldNotBeLoadedCheckTheLocalSession, true],
+] as const)('applies the overview retention policy when the bracketing job read returns %s', async (_name, organization, bracket, notice, retain) => {
+  const auth = await session();
+  let reads = 0;
+  // An organized job masks its storage version, so its history is checked by exactly one bracketing read.
+  const initial = acceptedJob({ ...(organization === 'label' ? { label: 'Router firmware' } : { archived: true }), version: v('organized') });
+  const heading = initial.data.label ?? initial.data.displayFilename;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') return ++reads === 1 ? Promise.resolve(initial) : bracket();
+    return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const latest = await screen.findByRole('link', { name: acceptedWorkCopy.latestEvidence });
+    latest.focus();
+    await waitFor(() => expect(reads).toBe(2));
+    await settleReads();
+    expect(screen.getByText(notice)).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /run_accepted/ })).toBeNull();
+    expect(Boolean(screen.queryByRole('heading', { name: heading }))).toBe(retain);
+    expect(Boolean(screen.queryByRole('link', { name: acceptedWorkCopy.latestEvidence }))).toBe(retain);
+    expect(Boolean(screen.queryByText(jobCopy.previousJobMetadataMayBeOutdated))).toBe(retain);
+    if (retain) {
+      // The kept observation's own lookup reports the failed confirmation and keeps focus where the reader left it.
+      expect(section().getByRole('alert').textContent).toContain(acceptedWorkCopy.lookupFailed);
+      expect(document.activeElement).toBe(latest);
+    } else {
+      // Focus on a removed overview control moves to the route's notice.
+      expect(document.activeElement?.textContent).toBe(notice);
+    }
+    expect(Boolean(screen.queryByText(jobCopy.thisJobWasDeleted))).toBe(notice === jobCopy.thisJobWasDeleted);
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job']);
+  } finally { auth.dispose(); }
+});
+
+it('recovers a transiently failed bracketing read with one Retry that confirms again', async () => {
   const auth = await session();
   let reads = 0;
   transport.get.mockImplementation((kind) => {
     if (kind === 'job') {
       reads += 1;
-      // The archived job masks its storage version, so its history is checked by exactly one bracketing read.
-      return reads === 1 ? Promise.resolve(acceptedJob({ archived: true, version: v('archived') })) : bracket();
+      if (reads === 2) return Promise.reject(new ApiClientError('http_error', { status: 500 }));
+      return Promise.resolve(acceptedJob({ label: 'Router firmware', version: v('organized') }));
     }
     return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {
     render(<App basePath="/nested" session={auth} />);
-    await waitFor(() => expect(section().getByRole('alert')).toBeTruthy());
-    expect(section().queryByRole('link', { name: /run_accepted/ })).toBeNull();
-    expect(reads).toBe(2);
-    expect(transport.get.mock.calls.filter(([kind]) => kind === 'runs')).toHaveLength(1);
+    const retry = await screen.findByRole('button', { name: acceptedWorkCopy.retry });
+    expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+    retry.focus();
+    fireEvent.click(retry);
+    const link = await screen.findByRole('link', { name: 'Open the accepted attempt run_accepted' });
+    await waitFor(() => expect(document.activeElement?.textContent).toContain('was recorded by attempt'));
+    await settleReads();
+    expect(link.isConnected).toBe(true);
+    expect(screen.getByRole('heading', { name: 'Router firmware' })).toBeTruthy();
+    expect(screen.queryByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeNull();
+    // A confirmation is not applied as an observation, so it never starts a lookup that confirms again.
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job', 'runs', 'job']);
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  ['the first history page', false],
+  ['a continuation history page', true],
+])('ends the overview when %s returns a deletion tombstone', async (_name, continued) => {
+  const auth = await session();
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob());
+    if (continued && !path.includes('cursor=')) return Promise.resolve(page([latestRunning], 'cursor_2'));
+    return Promise.reject(gone());
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const notice = await screen.findByText(jobCopy.thisJobWasDeleted);
+    await settleReads();
+    expect(screen.queryByRole('heading', { name: sampleJob.displayFilename })).toBeNull();
+    expect(screen.queryByRole('link', { name: acceptedWorkCopy.latestEvidence })).toBeNull();
+    expect(screen.queryByRole('heading', { name: acceptedWorkCopy.title })).toBeNull();
+    expect(notice.closest('[role="alert"]')).toBeTruthy();
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(continued ? ['job', 'runs', 'runs'] : ['job', 'runs']);
+  } finally { auth.dispose(); }
+});
+
+it('keeps the overview when a history page is missing rather than deleted', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind) => kind === 'job' ? Promise.resolve(acceptedJob())
+    : Promise.reject(new ApiClientError('http_error', { status: 404, serverCode: 'NOT_FOUND' })));
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('heading', { name: acceptedWorkCopy.title });
+    expect((await section().findByRole('alert')).textContent).toContain(acceptedWorkCopy.lookupFailed);
+    await settleReads();
+    expect(screen.getByRole('heading', { name: sampleJob.displayFilename })).toBeTruthy();
+    expect(screen.getByRole('link', { name: acceptedWorkCopy.latestEvidence })).toBeTruthy();
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs']);
+  } finally { auth.dispose(); }
+});
+
+it('ignores a history tombstone issued before a later Refresh applied the same observation', async () => {
+  const auth = await session();
+  let rejectHistory: ((error: unknown) => void) | undefined;
+  let historyReads = 0;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob());
+    if (++historyReads === 1) return new Promise((_resolve, reject) => { rejectHistory = reject; });
+    return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(rejectHistory).toBeDefined());
+    // The same version keeps the lookup in flight; the Refresh is issued after it, so its answer is newer.
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await waitFor(() => expect(transport.get.mock.calls.filter(([kind]) => kind === 'job')).toHaveLength(2));
+    await settleReads();
+    await act(async () => { rejectHistory!(gone()); await Promise.resolve(); });
+    await settleReads();
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+    expect(screen.getByRole('heading', { name: sampleJob.displayFilename })).toBeTruthy();
+    // The failed lookup belonged to the earlier observation, so the newer one reads history once of its own.
+    await section().findByRole('link', { name: 'Open the accepted attempt run_accepted' });
+    await settleReads();
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job', 'runs']);
+  } finally { auth.dispose(); }
+});
+
+it('answers a stale bracketing tombstone with the newer same-version observation that superseded it', async () => {
+  const auth = await session();
+  const organized = acceptedJob({ label: 'Router firmware', version: v('organized') });
+  let reads = 0;
+  let rejectBracket: ((error: unknown) => void) | undefined;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'runs') return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
+    if (++reads === 2) return new Promise((_resolve, reject) => { rejectBracket = reject; });
+    return Promise.resolve(organized);
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(rejectBracket).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await waitFor(() => expect(reads).toBe(3));
+    await settleReads();
+    await act(async () => { rejectBracket!(gone()); await Promise.resolve(); });
+    // The Refresh was issued after the history read, so its unchanged version confirms that history instead.
+    await section().findByRole('link', { name: 'Open the accepted attempt run_accepted' });
+    await settleReads();
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job', 'job']);
   } finally { auth.dispose(); }
 });
 

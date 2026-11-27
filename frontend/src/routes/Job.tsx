@@ -76,10 +76,14 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     }
   }
   /**
-   * Overview, Retry and organization reads share ordering, identity and retention rules. A stale result
-   * returns the newer observation. A current response naming a different job clears the old facts.
+   * Overview, Retry, organization and accepted-work confirmation reads share ordering, identity and retention rules.
+   * A stale result returns the newer observation. A current response naming a different job clears the old facts,
+   * and a current failure is shown by the overview: a deletion ends it, a transient failure keeps the earlier
+   * observation with a warning, and any other failure clears it. A `confirm` read only checks that the shown
+   * observation is still current, so a successful one is returned without being applied: applying it would start
+   * another lookup that confirms again.
    */
-  const readJob = async (signal: AbortSignal): Promise<JobData | null> => {
+  const readJob = async (signal: AbortSignal, mode: 'observe' | 'confirm' = 'observe'): Promise<JobData | null> => {
     const ticket = issue();
     let data: JobData;
     try {
@@ -94,8 +98,25 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       clearObservation(ticket, copy.theServerReturnedADifferentJobIdentity);
       return null;
     }
-    apply(ticket, data);
+    if (mode === 'observe') apply(ticket, data);
+    else if (ticket === order.current.issued && data.version === order.current.current?.version) {
+      // The retained overview is current again. Preserve its observation so the lookup can settle.
+      setStored(previous => previous.error ? { ...previous, error: '' } : previous);
+    }
     return data;
+  };
+  /**
+   * An accepted-work history read is ordered like a job read. A current deletion tombstone ends the overview, as a job
+   * read's would; every other history failure is the lookup's own to report.
+   */
+  const readHistory = async <T,>(signal: AbortSignal, read: () => Promise<T>): Promise<T> => {
+    const ticket = issue();
+    try {
+      return await read();
+    } catch (failure: unknown) {
+      if (!signal.aborted && ticket >= order.current.applied && isDeletedJob(failure)) confirmDeletion(ticket);
+      throw failure;
+    }
   };
   // Another tab deleted or reorganized a job: read this one again so a deletion shows here too.
   useEffect(() => deleted ? undefined : onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath, deleted]);
@@ -128,7 +149,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
       {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>{copy.openLatestRecordedAttempt}</a>}
       {/* Kept mounted across acceptances so focus on a replaced accepted link can follow to its replacement. */}
-      <AcceptedWork key={job.jobId} job={job} observed={observed} basePath={basePath} readJob={readJob} />
+      <AcceptedWork key={job.jobId} job={job} observed={observed} basePath={basePath} readJob={readJob} readHistory={readHistory} />
       <h3>{copy.binaryMetadata}</h3>
       <dl class="job-facts">
         <dt>{copy.format}</dt><dd>{job.binary.format}</dd><dt>{copy.machine}</dt><dd>{job.binary.machine}</dd>
