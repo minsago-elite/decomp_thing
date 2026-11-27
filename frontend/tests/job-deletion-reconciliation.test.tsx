@@ -52,7 +52,16 @@ it('an open job tab reconciles a deletion made in another tab into an explicit d
     expect(await screen.findByText(jobCopy.thisJobWasDeleted)).toBeTruthy();
     expect(screen.queryByRole('heading', { name: sample.displayFilename })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Review what would be deleted' })).toBeNull();
-    expect(transport.get).toHaveBeenCalledTimes(2);
+    // Witness delivery to another subscriber after the overview has removed its controls.
+    const received = vi.fn();
+    const stop = onLibraryChange('/nested', received);
+    try {
+      for (const count of [1, 2]) {
+        notifyLibraryChanged('/nested');
+        await waitFor(() => expect(received).toHaveBeenCalledTimes(count));
+        expect(transport.get).toHaveBeenCalledTimes(2);
+      }
+    } finally { stop(); }
   } finally { auth.dispose(); }
 });
 

@@ -16,7 +16,7 @@ import type { ReceiptTime } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
-import { JobDeletion, JobOrganization, focusFollowsForm } from '../jobs/JobLifecycle';
+import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
 import { pendingDeletion } from '../jobs/deletionAcknowledgement';
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { PanelBoundary } from '../shared/PanelBoundary';
@@ -31,13 +31,18 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
   const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const job = observation?.value;
   const [refresh, setRefresh] = useState(0);
-  const [deleted, setDeleted] = useState(false);
+  const [deletionMessage, setDeletionMessage] = useState<string | null>(null);
+  const deleted = deletionMessage !== null;
   const [operation, setOperation] = useState<Operation | null>(null);
-  const [restoreFocus, setRestoreFocus] = useState(false);
   const notice = useRef<HTMLParagraphElement>(null);
-  const deletionForm = useRef<HTMLDivElement>(null);
   const departing = useRef<Element | null>(null);
   const departingFocus = useDepartingFocus(route);
+  function markDeleted(failure?: unknown) {
+    departing.current = departingFocus();
+    const message = withApiFailureReference(copy.thisJobWasDeleted, failure);
+    // A later acknowledgement supplies cleanup details but carries no tombstone reference.
+    setDeletionMessage(previous => message === copy.thisJobWasDeleted ? previous ?? message : message);
+  }
   // This authenticated view's own DELETE may still be unacknowledged when the page mounts, including before
   // its first job read settles or after a tombstone read lands first: observe that one request from mount (#512).
   useLayoutEffect(() => {
@@ -47,12 +52,12 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
     let current = true;
     inFlight.then(result => {
       if (!current || result.jobId !== jobId) return;
-      setOperation(result); departing.current = departingFocus(); setDeleted(true);
+      setOperation(result); markDeleted();
     }, (failure: unknown) => {
       // The request's own confirmed tombstone proves the deletion even while this view's first read is held;
       // a later failed read cannot replace it. Any other rejection leaves the page to its own reads.
       if (!current || !isDeletedJob(failure)) return;
-      departing.current = departingFocus(); setDeleted(true);
+      markDeleted(failure);
     });
     return () => { current = false; };
     // Re-subscribe on a tombstone, so an acknowledgement settling after it still arrives.
@@ -62,12 +67,14 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
   useLayoutEffect(() => {
     if (!deleted) return;
     const from = departing.current; departing.current = null;
-    if (restoreFocus) notice.current?.focus(); else focusSurvivingNotice(from, notice.current);
-    if (restoreFocus) setRestoreFocus(false);
-  }, [deleted, restoreFocus]);
+    focusSurvivingNotice(from, notice.current);
+  }, [deleted]);
   // Another tab deleted or reorganized a job: read this one again so a deletion shows here too.
-  useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
+    if (!deleted) return onLibraryChange(basePath, () => setRefresh(value => value + 1));
+  }, [basePath, deleted]);
+  useEffect(() => {
+    if (deleted) return;
     const controller = new AbortController();
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
     if (!/^[0-9a-f]{32}$/.test(jobId)) {
@@ -81,7 +88,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
         setStored({ binding, data: receive(response.data), error: '', loading: false });
       }
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted && isDeletedJob(failure)) { departing.current = departingFocus(); setDeleted(true); setStored({ binding, data: null, error: '', loading: false }); return; }
+      if (!controller.signal.aborted && isDeletedJob(failure)) { markDeleted(failure); setStored({ binding, data: null, error: '', loading: false }); return; }
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
         error: withApiFailureReference({
@@ -92,8 +99,8 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
         }[metadataFailureKind(failure)], failure), loading: false }));
     });
     return () => { controller.abort(); };
-  }, [binding, client, jobId, refresh]);
-  if (deleted) return <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{copy.thisJobWasDeleted}</p>
+  }, [binding, client, jobId, refresh, deleted]);
+  if (deleted) return <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{deletionMessage}</p>
     {operation && <p>{operation.message}</p>}
     <p>{cleanupNotice(operation)}</p>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
@@ -126,10 +133,10 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
-        onDeleted={() => { departing.current = departingFocus(); setDeleted(true); }}
+        onDeleted={markDeleted}
         onChanged={next => setStored({ binding, data: receive(next), error: '', loading: false })} />
-      <div ref={deletionForm}><JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
-        onDeleted={result => { if (result) setOperation(result); departing.current = departingFocus(); setRestoreFocus(focusFollowsForm(deletionForm.current)); setDeleted(true); }} /></div>
+      <JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
+        onDeleted={(result, failure) => { if (result) setOperation(result); markDeleted(failure); }} />
     </>}
   </>;
 }

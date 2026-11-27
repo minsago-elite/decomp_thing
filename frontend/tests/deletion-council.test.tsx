@@ -148,14 +148,16 @@ async function jobRoute(del: ReturnType<typeof deferred<Operation>>) {
 }
 
 it('keeps the original acknowledgement when a job refresh returns the tombstone first', async () => {
-  const del = deferred<Operation>(); const { auth, tombstone } = await jobRoute(del);
+  const del = deferred<Operation>(); const { auth } = await jobRoute(del);
   try {
     await arm();
-    tombstone(); fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
-    await screen.findByText(jobCopy.thisJobWasDeleted);
+    transport.get.mockRejectedValue(goneWith(canonicalId));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    const notice = await screen.findByText(`${jobCopy.thisJobWasDeleted} Reference ID: ${canonicalId}.`);
     expect(screen.queryByText(operation().message!)).toBeNull();
     await del.settle({ ok: operation() });
     expect(screen.getByText(operation().message!)).toBeTruthy();
+    expect(notice.textContent).toContain(canonicalId);
     expect(transport.put).toHaveBeenCalledOnce();
   } finally { auth.dispose(); }
 });
@@ -613,9 +615,10 @@ it('a remounted form reports the confirmed DELETE tombstone it observes exactly 
   const first = vi.fn(), second = vi.fn();
   const view = render(form('a', first)); await arm();
   view.rerender(form('b', second));
-  await del.settle({ err: gone('RESOURCE_GONE') });
+  const failure = goneWith(canonicalId);
+  await del.settle({ err: failure });
   expect(first).not.toHaveBeenCalled();
-  expect(second).toHaveBeenCalledExactlyOnceWith(null);
+  expect(second).toHaveBeenCalledExactlyOnceWith(null, failure);
   expect(transport.put).toHaveBeenCalledOnce();
 });
 
@@ -678,10 +681,10 @@ it.each(['save', 'read after save', 'read after conflict', 'ordinary 410'] as co
     const auth = await session();
     let reads = 0;
     transport.get.mockImplementation((kind: string) => kind !== 'job' ? Promise.reject(unavailable())
-      : ++reads === 1 ? Promise.resolve({ data: job }) : Promise.reject(gone('RESOURCE_GONE')));
+      : ++reads === 1 ? Promise.resolve({ data: job }) : Promise.reject(goneWith(canonicalId)));
     if (stage === 'read after save') transport.put.mockResolvedValue({ data: job });
     else if (stage === 'read after conflict') transport.put.mockRejectedValue(new ApiClientError('http_error', { status: 412 }));
-    else transport.put.mockRejectedValue(gone(stage === 'save' ? 'RESOURCE_GONE' : 'EVENT_GAP'));
+    else transport.put.mockRejectedValue(stage === 'save' ? goneWith(canonicalId) : gone('EVENT_GAP'));
     history.replaceState(null, '', `/nested/jobs/${job.jobId}`);
     try {
       await act(async () => { render(<App basePath="/nested" session={auth} />); await Promise.resolve(); });
@@ -698,7 +701,7 @@ it.each(['save', 'read after save', 'read after conflict', 'ordinary 410'] as co
         expect(save.isConnected).toBe(true);
         expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
       } else {
-        const notice = await screen.findByText(jobCopy.thisJobWasDeleted);
+        const notice = await screen.findByText(`${jobCopy.thisJobWasDeleted} Reference ID: ${canonicalId}.`);
         expect(save.isConnected).toBe(false);
         expect(screen.queryByRole('link', { name: /Browse attempt history/ })).toBeNull();
         expect(document.activeElement).toBe(notice);
@@ -707,3 +710,42 @@ it.each(['save', 'read after save', 'read after conflict', 'ordinary 410'] as co
     } finally { auth.dispose(); }
   }
 );
+
+it('keeps deliberate document focus when the held DELETE acknowledgement arrives', async () => {
+  const del = deferred<Operation>();
+  const { auth } = await jobRoute(del);
+  try {
+    await arm();
+    const elsewhere = screen.getByRole('button', { name: 'Sign out' });
+    elsewhere.focus();
+    elsewhere.blur();
+    expect(document.activeElement).toBe(document.body);
+    await del.settle({ ok: operation() });
+    await screen.findByText(jobCopy.thisJobWasDeleted);
+    expect(transport.put).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(document.body);
+  } finally { auth.dispose(); }
+});
+
+it('aborts the outstanding job read after the DELETE confirms deletion', async () => {
+  const del = deferred<Operation>();
+  const { auth } = await jobRoute(del);
+  try {
+    await arm();
+    const read = deferred<Job>();
+    let signal: AbortSignal | undefined;
+    transport.get.mockImplementation((kind: string, _path: string, options: { signal: AbortSignal }) => {
+      if (kind !== 'job') return Promise.reject(unavailable());
+      signal = options.signal;
+      return read.promise;
+    });
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await waitFor(() => expect(signal?.aborted).toBe(false));
+    await del.settle({ err: goneWith(canonicalId) });
+    const notice = await screen.findByText(`${jobCopy.thisJobWasDeleted} Reference ID: ${canonicalId}.`);
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    await read.settle({ ok: job });
+    expect(notice.isConnected).toBe(true);
+    expect(screen.queryByRole('button', { name: jobCopy.refreshJob })).toBeNull();
+  } finally { auth.dispose(); }
+});

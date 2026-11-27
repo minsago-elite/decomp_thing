@@ -12,6 +12,7 @@ import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { formatExactBytes } from './metadataFormat';
 import { notifyLibraryChanged } from './libraryNotify';
 import { pendingDeletion, trackDeletion } from './deletionAcknowledgement';
+import { useDepartingFocus } from '../shared/departingFocus';
 import { isDeletedJob } from '../shared/retainMetadata';
 
 // These contracts are decoded only on this lazily loaded route.
@@ -23,7 +24,7 @@ const code = (failure: unknown) => failure instanceof ApiClientError ? failure.s
 
 /** Display label and archive flag. A fresh GET after each mutation becomes the next editable job. */
 export function JobOrganization({ job, client, basePath, session, onChanged, onDeleted }: {
-  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>; onChanged: (job: Job) => void; onDeleted?: () => void;
+  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>; onChanged: (job: Job) => void; onDeleted?: (failure: unknown) => void;
 }) {
   const copy = jobOrganizationCopy;
   const availability = useBrowserAvailability();
@@ -60,7 +61,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged, onD
       setNotice(copy.saved);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
-      if (isDeletedJob(failure) && onDeleted) { onDeleted(); return; }
+      if (isDeletedJob(failure) && onDeleted) { onDeleted(failure); return; }
       setNotice(withApiFailureReference(status(failure) === 412 ? copy.changed
         : status(failure) === 422 ? copy.invalidLabel
         : [401, 403].includes(status(failure)) ? copy.denied
@@ -71,7 +72,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged, onD
           const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal: controller.signal });
           if (!controller.signal.aborted && fresh.data.jobId === job.jobId) onChanged(fresh.data);
         } catch (readFailure: unknown) {
-          if (!controller.signal.aborted && isDeletedJob(readFailure)) onDeleted?.();
+          if (!controller.signal.aborted && isDeletedJob(readFailure)) onDeleted?.(readFailure);
         }
       }
     } finally {
@@ -107,17 +108,11 @@ function failureNotice(failure: unknown) {
 const CATEGORIES = ['originalInputs', 'reports', 'sourceSnapshots', 'logs', 'archives', 'metadata', 'temporary', 'other'] as const;
 
 /** Deliberate, reviewed deletion: preview, typed confirmation, one guarded DELETE, then the operation. */
-/** Focus may move only when it was on this form or was dropped to the document by a disabled control. */
-export function focusFollowsForm(section: HTMLElement | null) {
-  const focused = document.activeElement;
-  return !focused || focused === document.body || (section?.contains(focused) ?? false);
-}
-
 export function JobDeletion({ job, client, basePath, session, generation = 0, onDeleted }: {
   job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>;
   /** The authenticated view generation of `session`; a pending DELETE belongs to exactly one. */
   generation?: number;
-  onDeleted: (operation: Operation | null) => void;
+  onDeleted: (operation: Operation | null, failure?: unknown) => void;
 }) {
   const copy = jobDeletionCopy;
   const availability = useBrowserAvailability();
@@ -132,6 +127,7 @@ export function JobDeletion({ job, client, basePath, session, generation = 0, on
   const mutation = useRef<AbortController | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const section = useRef<HTMLElement>(null);
+  const departingFocus = useDepartingFocus(section);
   // Any newer job version invalidates a reviewed preview and its typed confirmation.
   useEffect(() => { setPreview(null); setConfirm(''); }, [job.jobId, job.version]);
   // Availability, a newer job version, deployment or session abandons pending observation
@@ -156,7 +152,7 @@ export function JobDeletion({ job, client, basePath, session, generation = 0, on
         if (!owns()) return;
         mutation.current = null; setBusy(false);
         setNotice(withApiFailureReference(failureNotice(failure), failure));
-        if (isDeletedJob(failure)) onDeleted(null);
+        if (isDeletedJob(failure)) onDeleted(null, failure);
       });
     }
     return () => {
@@ -178,7 +174,7 @@ export function JobDeletion({ job, client, basePath, session, generation = 0, on
       if ((signal ?? controller!.signal).aborted) return;
       setPreview(null);
       // Only the shared discriminator proves deletion; a bare or unverified 410 is an ordinary preview failure.
-      if (isDeletedJob(failure)) { onDeleted(null); return; }
+      if (isDeletedJob(failure)) { onDeleted(null, failure); return; }
       if (controller) setNotice(withApiFailureReference([401, 403].includes(status(failure)) ? copy.denied : copy.previewFailed, failure));
     } finally {
       if (controller && active.current === controller) { active.current = null; setBusy(false); }
@@ -218,7 +214,7 @@ export function JobDeletion({ job, client, basePath, session, generation = 0, on
       const conflict = status(failure) === 409 && code(failure) === 'RETENTION_PROTECTED';
       setNotice(withApiFailureReference(failureNotice(failure), failure));
       setConfirm('');
-      if (isDeletedJob(failure)) onDeleted(null);
+      if (isDeletedJob(failure)) onDeleted(null, failure);
       // The readback is observation: skip it once unavailable, and abort it if availability changes.
       else if (conflict && !controller.signal.aborted && active.current === controller) await review(controller.signal);
       else setPreview(null);
@@ -227,7 +223,7 @@ export function JobDeletion({ job, client, basePath, session, generation = 0, on
       if (owns()) {
         mutation.current = null;
         if (active.current === controller) active.current = null;
-        const restore = focusFollowsForm(section.current);
+        const restore = section.current?.contains(departingFocus());
         setBusy(active.current !== null);
         if (restore && heading.current?.isConnected) heading.current.focus();
       }
