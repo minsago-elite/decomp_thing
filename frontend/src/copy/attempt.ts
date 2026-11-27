@@ -151,7 +151,16 @@ export const activityRowCopy = {
   "permissionDigest": "Permission request digest",
   "messageChunkDigest": "Message chunk SHA-256",
   "changedFileDigest": "Reported changed-file SHA-256",
-  "toolCallDigest": "Tool call digest"
+  "toolCallDigest": "Tool call digest",
+  permissionRecorded: 'Recorded permission decision',
+  permissionDecisions: {
+    allow_once: 'allowed once',
+    allow_session: 'allowed for the agent session',
+    deny: 'denied',
+    cancelled: 'cancelled',
+  },
+  permissionNotRecorded: 'not recorded',
+  permissionReadOnly: 'Operator decisions are unavailable in this view.',
 } as const;
 
 export const observedUsageCopy = {
