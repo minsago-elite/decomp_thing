@@ -40,6 +40,10 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   // only for that read, while nothing else took focus, and only if the reread advertises the same attachment.
   const link = useRef<HTMLAnchorElement>(null);
   const heldLink = useRef<{ key: string; href: string } | null>(null);
+  // True from this panel's render until its commit has finished, so a blur caused by that commit is never the reader's.
+  const committing = useRef(false);
+  committing.current = true;
+  useLayoutEffect(() => { committing.current = false; });
   useEffect(() => {
     const release = (event: FocusEvent) => {
       if (awaiting.current && event.target !== awaiting.current.control) {
@@ -48,8 +52,25 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
       }
       if (heldLink.current && event.target !== link.current) heldLink.current = null;
     };
+    // A blur to nothing from the activated control is a deliberate end of the wait only if, once the current task's
+    // DOM work is done, the control is still mounted and no longer the active element. A browser may dispatch blur
+    // while this panel removes the control (before the node leaves the document); a window blur leaves the control
+    // active. Neither releases the claim.
+    const blurred = (event: FocusEvent) => {
+      const claim = awaiting.current;
+      const target = event.target;
+      if (!claim || committing.current || event.relatedTarget !== null || !(target instanceof Element)
+        || (target !== claim.control && target !== claim.origin)) return;
+      queueMicrotask(() => {
+        const active = document.activeElement;
+        if (awaiting.current !== claim || !target.isConnected || (active !== null && active !== document.body)) return;
+        awaiting.current = null;
+        focusResult.current = null;
+      });
+    };
     document.addEventListener('focusin', release);
-    return () => { document.removeEventListener('focusin', release); };
+    document.addEventListener('focusout', blurred);
+    return () => { document.removeEventListener('focusin', release); document.removeEventListener('focusout', blurred); };
   }, []);
   useEffect(() => () => { stop.current?.(); stop.current = null; }, []);
   // A verification belongs to the selected revision and session; changing either abandons it and its feedback.
@@ -90,7 +111,8 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
     focusResult.current = null;
     const claim = awaiting.current;
     awaiting.current = null;
-    // Focus follows only while the reader still waits where they activated Verify (or on nothing after it unmounted).
+    // Focus follows only while the reader still waits where they activated Verify (or on nothing after it unmounted);
+    // a deliberate blur while it stayed mounted already released the claim.
     const active = document.activeElement;
     const waiting = claim !== null && (active === null || active === document.body || active === claim.control || active === claim.origin);
     if (data && waiting) result.current?.focus();

@@ -44,10 +44,14 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const bufferRef = useRef<LogBuffer | null>(null);
   const pendingScroll = useRef<'end' | bigint | null>(null);
   const mounted = useRef(true);
-  // A held retry owns the initial read until it settles; same-turn activations cannot supersede it.
-  const retrying = useRef(false);
+  // Generation of the deliberate recovery read (Check again or Retry) in flight. It owns that read until it settles or
+  // another intent supersedes it; the ref ignores same-turn repeat activations before any render.
+  const recovery = useRef<number | null>(null);
+  const [recovering, setRecovering] = useState(false);
   const focusedRecoveryGeneration = useRef<number | null>(null);
-  const recoveryButton = useRef<HTMLButtonElement>(null);
+  // Each recovery control stays mounted (aria-disabled) while its read runs, so keyboard position survives the wait.
+  const checkButton = useRef<HTMLButtonElement>(null);
+  const retryButton = useRef<HTMLButtonElement>(null);
   const oversizedNotice = useRef<HTMLParagraphElement>(null);
   const [attemptState, setAttemptState] = useState<string | null>(null);
   // Each completed follow read schedules the next one, including consecutive missing responses.
@@ -62,6 +66,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     for (const controller of requests.current) controller.abort();
     requests.current.clear();
     pendingScroll.current = null;
+    if (recovery.current !== null) { recovery.current = null; setRecovering(false); }
   }, []);
   const pause = (value: Follow = 'off') => {
     cancelReads();
@@ -123,11 +128,14 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       return null;
     } finally {
       requests.current.delete(controller);
-      // Check again stays mounted during its read. Claim focus only if the reader still has
-      // that button focused just before the result replaces it.
-      if (current() && recoveryButton.current && document.activeElement === recoveryButton.current) {
+      // Recovery controls stay mounted during their read. Claim focus only if the reader still has one focused just
+      // before the result replaces it. This runs before that commit, so a browser blur dispatched while removing the
+      // control cannot mislead it, and a deliberate blur or move during the wait is respected.
+      const active = document.activeElement;
+      if (current() && active !== null && (active === checkButton.current || active === retryButton.current)) {
         focusedRecoveryGeneration.current = ownGeneration;
       }
+      if (recovery.current === ownGeneration) { recovery.current = null; if (mounted.current) setRecovering(false); }
     }
   }, [client, jobId, runId, cancelReads]);
 
@@ -183,7 +191,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     focusedRecoveryGeneration.current = null;
     const active = document.activeElement;
     if (!ownsRead || (active !== null && active !== document.body)) return;
-    const target = viewport.current ?? recoveryButton.current ?? oversizedNotice.current;
+    const target = viewport.current ?? checkButton.current ?? oversizedNotice.current ?? retryButton.current;
     target?.focus();
   }, [status]);
 
@@ -208,30 +216,34 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const search = searchObservation?.sourceSha256 === buffer?.sourceSha256 ? searchObservation?.result : null;
   const rows = visibleWindow(scrollTop, LOG_VIEWPORT_PX, LOG_ROW_PX, displayed.length);
   const meta = buffer?.meta;
-  return <section aria-labelledby="log-title" aria-busy={status.state === 'loading'}>
+  // One deliberate recovery read per activation: a repeat while it is held neither starts nor supersedes a read.
+  const recover = (before?: () => void) => {
+    if (recovery.current !== null) return;
+    before?.();
+    void read({ tail: 'true', limit: '200' }, 'end', () => 'end');
+    recovery.current = generation.current;
+    setRecovering(true);
+  };
+  return <section aria-labelledby="log-title" aria-busy={status.state === 'loading' || recovering}>
     <h2 id="log-title">{copy.title}</h2>
     <p>{displayMessage(copy.boundary, { policy: <code>{copy.redactionPolicy}</code> })}</p>
     {status.state === 'loading' && <p role="status">{copy.loading}</p>}
     {status.state === 'missing' && <>
       <p role="status">{copy.missing}</p>
       <div class="job-actions">
-        <button type="button" ref={recoveryButton} onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.checkAgain}</button>
+        <button type="button" ref={checkButton} aria-disabled={recovering || undefined} onClick={() => { recover(); }}>{copy.checkAgain}</button>
         {!finished && <button type="button" onClick={() => { pause(follow === 'on' ? 'off' : 'on'); }}>{follow === 'on' ? copy.pause : copy.follow}</button>}
       </div>
+      {recovering && <p role="status">{copy.loading}</p>}
       {follow === 'on' && !finished && <p>{copy.waitingForLog}</p>}
     </>}
     {status.state === 'oversized' && <p role="status" tabIndex={-1} ref={oversizedNotice}>{displayMessage(copy.oversized, { limit: status.limit })}</p>}
     {error && <p role="alert">{error}</p>}
-    {status.state === 'error' && <div class="job-actions">
-      <button type="button" ref={recoveryButton} onClick={event => {
-        // One deliberate read per activation; a failure leaves this action in place, never replays.
-        if (retrying.current) return;
-        retrying.current = true;
-        const focused = document.activeElement === event.currentTarget;
-        setError(''); setStatus({ state: 'loading' });
-        const request = read({ tail: 'true', limit: '200' }, 'end', () => 'end');
-        focusedRecoveryGeneration.current = focused ? generation.current : null;
-        void request.finally(() => { retrying.current = false; });
+    {(status.state === 'error' || (status.state === 'loading' && recovering)) && <div key="retry" class="job-actions">
+      {/* A failure leaves this action in place and never replays; while its read runs it stays mounted and focusable.
+          The key keeps this one element across the loading/error status siblings that appear and disappear around it. */}
+      <button type="button" ref={retryButton} aria-disabled={recovering || undefined} onClick={() => {
+        recover(() => { setError(''); setStatus({ state: 'loading' }); });
       }}>{copy.retry}</button>
     </div>}
     {buffer && meta && <>

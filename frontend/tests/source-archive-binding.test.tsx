@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { options } from 'preact';
+import { options, type VNode } from 'preact';
 import { render, within } from '@testing-library/preact';
 import { LocationProvider } from 'preact-iso/router';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -9,6 +9,7 @@ import type { Operation, SourceArchive as Status } from '../src/api/generated';
 import { decodeResponse } from '../src/api/decode';
 import { archiveCopy as copy } from '../src/copy/archive';
 import { SourceArchive } from '../src/sources/SourceArchive';
+import { blurBeforeRemoval } from './blur-before-removal';
 
 // Passive effects run after a paint the browser may deliver late (#1880). Held frames model that: the verified result
 // commits while passive effects stay queued, so focus must already be on the result at that commit.
@@ -202,4 +203,95 @@ it('keeps Refresh focusable during a held status read and ignores repeat activat
   await settle(verified);
   expect(refresh.getAttribute('aria-disabled')).not.toBe('true');
   expect(document.activeElement).toBe(refresh);
+});
+
+/** Starts a verification from the focused Verify control and returns it while its operation is still running. */
+async function startVerify(panel: HTMLElement) {
+  const control = button(panel, copy.verify);
+  control.focus();
+  control.click(); await microtasks();
+  await settle(operation('running'));
+  expect(document.activeElement).toBe(control);
+  expect(control.getAttribute('aria-disabled')).toBe('true');
+  return control;
+}
+async function finishVerify(panel: HTMLElement) {
+  await vi.advanceTimersByTimeAsync(1000); await microtasks();
+  await settle(operation('completed'));
+  paint(); await microtasks();
+  await settle(verified);
+  expect(result(panel)?.dataset.archiveState).toBe('verified');
+}
+
+// #1805 round 9: a deliberate blur to the document while Verify is still mounted ends the reader's wait.
+it('does not reclaim focus after the reader deliberately blurs Verify', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  const control = await startVerify(panel!);
+  control.blur();
+  expect(document.activeElement).toBe(document.body);
+  await finishVerify(panel!);
+  expect(document.activeElement).toBe(document.body);
+});
+
+it('still focuses the result when the browser blurs Verify before removing it during the reread', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  const control = await startVerify(panel!);
+  const restore = blurBeforeRemoval();
+  try {
+    await finishVerify(panel!);
+    expect(control.isConnected).toBe(false);
+    expect(document.activeElement).toBe(result(panel!));
+  } finally { restore(); }
+});
+
+it('keeps the claim when the window, not the reader, takes focus from Verify', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  const control = await startVerify(panel!);
+  // A window blur dispatches blur/focusout while the control stays the document's active element.
+  control.dispatchEvent(new FocusEvent('blur', { relatedTarget: null }));
+  control.dispatchEvent(new FocusEvent('focusout', { relatedTarget: null, bubbles: true }));
+  await microtasks();
+  expect(document.activeElement).toBe(control);
+  await finishVerify(panel!);
+  expect(document.activeElement).toBe(result(panel!));
+});
+
+it('keeps the claim when a rerender of the panel, not the reader, blurs a still-mounted Verify', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  const control = await startVerify(panel!);
+  // Model a browser that drops focus from a control while committing an update to it (the node stays connected).
+  const previous = Object.getOwnPropertyDescriptor(options, 'diffed');
+  const prior = previous?.value as ((vnode: VNode) => void) | undefined;
+  let blurredInCommit = false;
+  options.diffed = vnode => {
+    if (!blurredInCommit && vnode.type === 'button' && document.activeElement === control && Reflect.get(vnode, '__e') === control) {
+      blurredInCommit = true; control.blur();
+    }
+    prior?.(vnode);
+  };
+  try {
+    await vi.advanceTimersByTimeAsync(1000); await microtasks();
+    await settle(operation('running'));
+    expect(blurredInCommit).toBe(true);
+    expect(control.isConnected).toBe(true);
+    expect(document.activeElement).toBe(document.body);
+  } finally { if (previous) Object.defineProperty(options, 'diffed', previous); else Reflect.deleteProperty(options, 'diffed'); }
+  await finishVerify(panel!);
+  expect(document.activeElement).toBe(result(panel!));
+});
+
+it('recovers after a deliberate blur: the next focused activation lands on its result again', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  (await startVerify(panel!)).blur();
+  await finishVerify(panel!);
+  expect(document.activeElement).toBe(document.body);
+  paint(); await microtasks();
+  button(panel!, copy.verify).focus();
+  const committed = await verify(panel!, 'completed', verified);
+  expect(document.activeElement).toBe(committed);
 });

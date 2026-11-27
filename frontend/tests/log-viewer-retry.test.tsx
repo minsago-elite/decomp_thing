@@ -8,6 +8,7 @@ import { ApiClientError } from '../src/api/errors';
 import type { LogLine } from '../src/api/generated';
 import { LogViewer } from '../src/jobs/LogViewer';
 import type { AvailableLog } from '../src/jobs/logBuffer';
+import { blurBeforeRemoval } from './blur-before-removal';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
@@ -57,10 +58,12 @@ it('a keyboard reader retains a focus target when a retry fails again', async ()
   retry.focus();
   expect(document.activeElement).toBe(retry);
   retry.click();
-  await waitFor(() => expect(screen.queryByRole('button', {name: 'Try reading the log again'})).toBeNull());
+  // The action stays mounted and focusable while its read is held (#1805 round 9).
+  await waitFor(() => expect(retry.getAttribute('aria-disabled')).toBe('true'));
   reject(new ApiClientError('http_error', {status: 503}));
-  await screen.findByRole('button', {name: 'Try reading the log again'});
-  expect(document.activeElement?.tagName).toBe('BUTTON');
+  await waitFor(() => expect(retry.hasAttribute('aria-disabled')).toBe(false));
+  expect(screen.getByRole('button', {name: 'Try reading the log again'})).toBe(retry);
+  expect(document.activeElement).toBe(retry);
 });
 
 it('does not take focus back from a reader who moved away during a failing retry', async () => {
@@ -71,12 +74,13 @@ it('does not take focus back from a reader who moved away during a failing retry
   transport.get.mockReturnValueOnce(new Promise((_, fail) => { reject = fail; }));
   retry.focus();
   retry.click();
-  await waitFor(() => expect(screen.queryByRole('button', {name: 'Try reading the log again'})).toBeNull());
+  // The action stays mounted and focusable while its read is held (#1805 round 9).
+  await waitFor(() => expect(retry.getAttribute('aria-disabled')).toBe('true'));
   const elsewhere = document.createElement('button');
   document.body.append(elsewhere);
   elsewhere.focus();
   reject(new ApiClientError('http_error', {status: 503}));
-  await screen.findByRole('button', {name: 'Try reading the log again'});
+  await waitFor(() => expect(retry.hasAttribute('aria-disabled')).toBe(false));
   expect(document.activeElement).toBe(elsewhere);
   elsewhere.remove();
 });
@@ -139,4 +143,121 @@ it.each(['stay', 'move', 'blur'] as const)('handles focus from Check again when 
   const lines = await screen.findByRole('region', { name: 'Build log lines' });
   expect(document.activeElement).toBe(choice === 'stay' ? lines : choice === 'move' ? elsewhere : document.body);
   expect(transport.get).toHaveBeenCalledTimes(2);
+});
+
+// #1805 round 9: a held Check again read owns its recovery; repeats neither start nor supersede a read.
+it('does not interrupt a held Check again read on repeat activation', async () => {
+  transport.get.mockResolvedValueOnce({ data: { ...fixture, state: 'missing' } });
+  let complete!: (response: unknown) => void;
+  transport.get.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  transport.get.mockReturnValueOnce(new Promise(() => {}));
+  mount();
+  const check = await screen.findByRole('button', { name: 'Check again' });
+  check.focus();
+  check.click();
+  check.click();
+  await flush();
+  expect(check.getAttribute('aria-disabled')).toBe('true');
+  expect(check.hasAttribute('disabled')).toBe(false);
+  expect(screen.getByText('Reading the build log.').getAttribute('role')).toBe('status');
+  // A keyboard repeat on the still-focused control is ignored too.
+  expect(document.activeElement).toBe(check);
+  fireEvent.click(check); await flush();
+  const firstAborted = transport.get.mock.calls[1]![2].signal.aborted;
+  complete({ data: fixture });
+  await flush();
+  expect({
+    requests: transport.get.mock.calls.length,
+    firstAborted,
+    showingLog: screen.queryByRole('region', { name: 'Build log lines' }) !== null,
+    focusOnLog: document.activeElement === screen.queryByRole('region', { name: 'Build log lines' }),
+  }).toEqual({ requests: 2, firstAborted: false, showingLog: true, focusOnLog: true });
+});
+
+it('releases Check again after a still-missing reply so the next activation reads once more', async () => {
+  const missing = { data: { ...fixture, state: 'missing' } };
+  transport.get.mockResolvedValueOnce(missing);
+  let complete!: (response: unknown) => void;
+  transport.get.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  mount();
+  const check = await screen.findByRole('button', { name: 'Check again' });
+  check.focus(); check.click(); await flush();
+  expect(check.getAttribute('aria-disabled')).toBe('true');
+  complete(missing); await flush();
+  const again = screen.getByRole('button', { name: 'Check again' });
+  expect(again).toBe(check);
+  expect(again.hasAttribute('aria-disabled')).toBe(false);
+  expect(screen.queryByText('Reading the build log.')).toBeNull();
+  expect(document.activeElement).toBe(check);
+  transport.get.mockResolvedValueOnce({ data: fixture });
+  check.click(); await flush();
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Build log lines' }));
+});
+
+it('lets a deliberate Follow toggle supersede a held Check again read and re-enables it', async () => {
+  transport.get.mockResolvedValueOnce({ data: { ...fixture, state: 'missing', attempt: { ...fixture.attempt, state: 'running', endedAt: null } } });
+  transport.get.mockReturnValueOnce(new Promise(() => {}));
+  mount();
+  const check = await screen.findByRole('button', { name: 'Check again' });
+  check.click(); await flush();
+  expect(check.getAttribute('aria-disabled')).toBe('true');
+  fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' })); await flush();
+  expect(transport.get.mock.calls[1]![2].signal.aborted).toBe(true);
+  expect(check.hasAttribute('aria-disabled')).toBe(false);
+});
+
+// #1805 round 9: a focused failed-log Retry keeps the reader's keyboard position while its read is held.
+it('keeps a focused activation target while a deliberate failed-log Retry is pending', async () => {
+  transport.get.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503 }));
+  let complete!: (response: unknown) => void;
+  transport.get.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  mount();
+  const retry = await screen.findByRole('button', { name: 'Try reading the log again' });
+  retry.focus();
+  retry.click();
+  await screen.findByText('Reading the build log.');
+  const focusDuringRead = (document.activeElement?.tagName ?? '') + ':' + String(document.activeElement === retry);
+  expect(retry.getAttribute('aria-disabled')).toBe('true');
+  expect(retry.hasAttribute('disabled')).toBe(false);
+  // The duplicate guard still holds for the focused, mounted control.
+  fireEvent.click(retry); retry.click(); await flush();
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  expect(transport.get.mock.calls[1]![2].signal.aborted).toBe(false);
+  complete({ data: fixture });
+  const region = await screen.findByRole('region', { name: 'Build log lines' });
+  expect(document.activeElement).toBe(region);
+  expect(focusDuringRead).toBe('BUTTON:true');
+});
+
+it('respects a deliberate blur from a pending Retry', async () => {
+  transport.get.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503 }));
+  let complete!: (response: unknown) => void;
+  transport.get.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  mount();
+  const retry = await screen.findByRole('button', { name: 'Try reading the log again' });
+  retry.focus(); retry.click();
+  await screen.findByText('Reading the build log.');
+  retry.blur();
+  expect(document.activeElement).toBe(document.body);
+  complete({ data: fixture });
+  await screen.findByRole('region', { name: 'Build log lines' });
+  expect(document.activeElement).toBe(document.body);
+});
+
+it('still moves a waiting Retry reader to the log when the browser blurs the control before removing it', async () => {
+  transport.get.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503 }));
+  let complete!: (response: unknown) => void;
+  transport.get.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  mount();
+  const retry = await screen.findByRole('button', { name: 'Try reading the log again' });
+  retry.focus(); retry.click();
+  await screen.findByText('Reading the build log.');
+  const restore = blurBeforeRemoval();
+  try {
+    complete({ data: fixture });
+    const region = await screen.findByRole('region', { name: 'Build log lines' });
+    expect(retry.isConnected).toBe(false);
+    expect(document.activeElement).toBe(region);
+  } finally { restore(); }
 });
