@@ -121,6 +121,47 @@ class WebProgramStructureTest {
     private fun JsonObject.text(name: String) = getValue(name).jsonPrimitive.contentOrNull
     private fun next(page: JsonObject) = page.getValue("page").jsonObject.text("nextCursor")
 
+    @Test fun `private entity ids stay distinct after redaction and agree across inventory and references`() {
+        val first = functions[1].copy(id = "/tmp/a", name = "first")
+        val second = functions[2].copy(id = "/tmp/b", name = "second")
+        val missing = "/tmp/missing"
+        val caller = functions.first().copy(calls = setOf(first.id, second.id, missing), referencedGlobals = emptySet())
+        val aliasLookalike = functions[3].copy(id = "function:" + sha(first.id.toByteArray(Charsets.UTF_16BE)), name = "lookalike")
+        val harmless = functions[4].copy(id = "local:entry", name = "local")
+        val revision = Revision(model(listOf(caller, first, second, aliasLookalike, harmless)),
+            plan(planned("core", listOf(caller.id, first.id, second.id, missing))), listOf("core"))
+        val policy = WebRedactionPolicy.BASELINE
+        fun publicData(kind: String, raw: JsonObject): JsonObject = policy.json(raw).jsonObject.also { data ->
+            assertContract(kind, data)
+            assertFalse(data.toString().contains("/tmp/"))
+        }
+        val inventory = publicData("functionInventory", revision.pages.functions("owner", jobId, runId, revisionId, null))
+        val byName = inventory.items().associateBy { it.text("name") }
+        val firstId = byName.getValue("first").text("entityId")
+        val secondId = byName.getValue("second").text("entityId")
+        assertNotEquals(firstId, secondId)
+        assertEquals(inventory.items().size, inventory.items().map { it.text("entityId") }.distinct().size)
+        assertEquals(harmless.id, byName.getValue("local").text("entityId"))
+        for (name in listOf("first", "second")) assertEquals(JsonNull, byName.getValue(name)["selector"])
+        assertEquals(caller.id, byName.getValue("main").text("selector"))
+
+        val module = publicData("moduleDetail", revision.pages.module("owner", jobId, runId, revisionId, "core", null))
+        val owned = module.getValue("owned").jsonObject.items()
+        val missingId = owned.single { it.getValue("recorded").jsonPrimitive.boolean == false }.text("entityId")
+        val privateIds = setOf(firstId, secondId, missingId)
+        assertEquals(3, privateIds.size)
+        assertEquals(privateIds, owned.filter { it["selector"] == JsonNull }.map { it.text("entityId") }.toSet())
+        val detail = publicData("entityDetail", revision.pages.entity(WebStructureKind.FUNCTION,
+            jobId, runId, revisionId, caller.id, null))
+        val calls = detail.getValue("entity").jsonObject.getValue("calls").jsonObject.items()
+        assertEquals(missingId, calls.single { it.text("resolution") == "no-record" }.text("entityId"))
+        for (call in calls.filter { it.text("resolution") == "recorded" }) {
+            assertEquals(byName.getValue(call.text("name")).text("entityId"), call.text("entityId"))
+        }
+        assertEquals(privateIds, calls.map { it.text("entityId") }.toSet())
+        assertTrue(calls.all { it["selector"] == JsonNull })
+    }
+
     @Test fun `redacted structure responses preserve recorded module selectors across inventories and details`() {
         val moduleId = "sk-abcdefghijklmnop"
         val function = functions.first().copy(calls = emptySet(), referencedGlobals = emptySet())

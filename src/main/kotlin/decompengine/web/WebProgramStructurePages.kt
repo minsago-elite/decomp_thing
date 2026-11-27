@@ -1,9 +1,11 @@
 package decompengine.web
 
 import java.net.URLDecoder
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.HexFormat
 import java.util.Locale
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -195,7 +197,7 @@ internal class WebProgramStructurePages(
                 var bytes = utf8Bytes(JsonObject(this))
                 for (id in ids.subList(start, minOf(ids.size, start + query.limit))) {
                     val item = table.index[id]?.let { entityItem(index, table, it, policy) } ?: buildJsonObject {
-                        put("kind", kind.wire); put("entityId", id); put("selector", JsonNull); put("recorded", false)
+                        put("kind", kind.wire); put("entityId", publicEntityId(kind, id, policy)); put("selector", JsonNull); put("recorded", false)
                     }
                     val size = utf8Bytes(item) + if (items.isEmpty()) 0 else 1
                     if (bytes + size > MAXIMUM_ITEM_BYTES) break
@@ -262,12 +264,12 @@ internal class WebProgramStructurePages(
 
     private fun references(ids: List<String>, target: WebStructureTable, policy: WebRedactionPolicy): JsonObject = bounded(ids, 50) { id ->
         target.index[id]?.let { reference(target, it, policy) } ?: buildJsonObject {
-            put("kind", target.kind.wire); put("entityId", id); put("selector", JsonNull); put("name", JsonNull); put("resolution", "no-record")
+            put("kind", target.kind.wire); put("entityId", publicEntityId(target.kind, id, policy)); put("selector", JsonNull); put("name", JsonNull); put("resolution", "no-record")
         }
     }
 
     private fun reference(table: WebStructureTable, row: Int, policy: WebRedactionPolicy): JsonObject = buildJsonObject {
-        put("kind", table.kind.wire); put("entityId", table.ids[row])
+        put("kind", table.kind.wire); put("entityId", publicEntityId(table.kind, table.ids[row], policy))
         put("selector", table.ids[row].takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
         put("name", publicName(table.names[row], policy)); put("resolution", "recorded")
     }
@@ -296,6 +298,18 @@ internal class WebProgramStructurePages(
         put("total", values.size); put("items", JsonArray(values.take(limit).map(render)))
     }
 
+    private fun publicEntityId(kind: WebStructureKind, id: String, policy: WebRedactionPolicy): String {
+        if (addressable(id)) return id
+        // Reserve the emitted format so a recorded ID cannot impersonate another row's alias.
+        if (!PUBLIC_ID_ALIAS.matches(id) && !policy.leaks(id)) return id
+        // ':' is outside the selector grammar. Hash the original UTF-16 code units so even
+        // distinct unpaired surrogates accepted by the model reader keep distinct identities.
+        val bytes = ByteBuffer.allocate(id.length * Char.SIZE_BYTES)
+        for (character in id) bytes.putChar(character)
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes.array())
+        return "${kind.wire}:${HexFormat.of().formatHex(digest)}"
+    }
+
     private fun publicName(value: String?, policy: WebRedactionPolicy): JsonElement {
         val redacted = value?.let(policy::text) ?: return JsonNull
         return redacted.takeIf { it.length <= MAXIMUM_PUBLIC_NAME_CHARACTERS }?.let(::JsonPrimitive) ?: JsonNull
@@ -307,7 +321,7 @@ internal class WebProgramStructurePages(
 
     private fun entityItem(index: WebProgramStructureIndex, table: WebStructureTable, row: Int,
         policy: WebRedactionPolicy): JsonObject = buildJsonObject {
-        put("kind", table.kind.wire); put("entityId", table.ids[row])
+        put("kind", table.kind.wire); put("entityId", publicEntityId(table.kind, table.ids[row], policy))
         put("selector", table.ids[row].takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
         put("recorded", true)
         put("name", publicName(table.names[row], policy))
@@ -422,6 +436,7 @@ internal class WebProgramStructurePages(
         private const val MAXIMUM_ITEM_BYTES = 1_000_000
         private const val MAXIMUM_PUBLIC_NAME_CHARACTERS = 4_096
         private const val MAXIMUM_PUBLIC_SEARCH_CHARACTERS = 256
+        private val PUBLIC_ID_ALIAS = Regex("(?:function|global|type):[0-9a-f]{64}")
         private val SELECTOR = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
         /** Only identifiers that match the URL selector grammar are addressable; others remain listed without a link. */
         fun addressable(value: String): Boolean = SELECTOR.matches(value)
