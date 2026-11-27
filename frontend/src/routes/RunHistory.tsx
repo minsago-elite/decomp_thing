@@ -48,7 +48,7 @@ function History({ jobId, basePath, session, onDeleted }: { jobId: string; baseP
     const controller = new AbortController();
     const current = () => !controller.signal.aborted && window.location.pathname === binding.pathname && window.location.search === binding.search;
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null,
-      loading: true, error: '', retryable: false }));
+      loading: true, error: '', retryable: previous.binding === binding && previous.retryable }));
     if (!validQuery) {
       setStored({ binding, data: null, error: copy.theSavedHistoryPageIsInvalidRefreshHistoryToReturn, loading: false, retryable: false });
       return () => { controller.abort(); };
@@ -87,7 +87,7 @@ function History({ jobId, basePath, session, onDeleted }: { jobId: string; baseP
     <button type="button" disabled={loading} onClick={first}>{copy.refreshHistory}</button>
     {error && <p role="alert">{error}</p>}
     {error && data && <p>{copy.previouslyLoadedAttemptsMayBeOutdated}</p>}
-    {error && retryable && <button type="button" disabled={loading} onClick={() => {
+    {retryable && <button type="button" disabled={loading} onClick={() => {
       moveFocus.current = true; setRefresh(value => value + 1);
     }}>{copy.retryHistoryPage}</button>}
     <h2 ref={heading} tabIndex={-1}>{copy.recordedAttempts}</h2>

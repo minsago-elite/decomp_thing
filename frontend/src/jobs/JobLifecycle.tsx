@@ -22,8 +22,8 @@ const status = (failure: unknown) => failure instanceof ApiClientError ? failure
 const code = (failure: unknown) => failure instanceof ApiClientError ? failure.serverCode ?? '' : '';
 
 /** Display label and archive flag. A fresh GET after each mutation becomes the next editable job. */
-export function JobOrganization({ job, client, basePath, session, onChanged }: {
-  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>; onChanged: (job: Job) => void;
+export function JobOrganization({ job, client, basePath, session, onChanged, onDeleted }: {
+  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>; onChanged: (job: Job) => void; onDeleted?: () => void;
 }) {
   const copy = jobOrganizationCopy;
   const availability = useBrowserAvailability();
@@ -60,6 +60,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
       setNotice(copy.saved);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
+      if (isDeletedJob(failure) && onDeleted) { onDeleted(); return; }
       setNotice(withApiFailureReference(status(failure) === 412 ? copy.changed
         : status(failure) === 422 ? copy.invalidLabel
         : [401, 403].includes(status(failure)) ? copy.denied
@@ -69,7 +70,9 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
         try {
           const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal: controller.signal });
           if (!controller.signal.aborted && fresh.data.jobId === job.jobId) onChanged(fresh.data);
-        } catch { /* The visible conflict notice already asks for a refresh. */ }
+        } catch (readFailure: unknown) {
+          if (!controller.signal.aborted && isDeletedJob(readFailure)) onDeleted?.();
+        }
       }
     } finally {
       if (active.current === controller) { active.current = null; setBusy(false); }

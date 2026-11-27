@@ -126,6 +126,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
+        onDeleted={() => { departing.current = departingFocus(); setDeleted(true); }}
         onChanged={next => setStored({ binding, data: receive(next), error: '', loading: false })} />
       <div ref={deletionForm}><JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
         onDeleted={result => { if (result) setOperation(result); departing.current = departingFocus(); setRestoreFocus(focusFollowsForm(deletionForm.current)); setDeleted(true); }} /></div>

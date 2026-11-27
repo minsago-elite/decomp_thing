@@ -8,7 +8,7 @@ import { ApiClientError } from '../src/api/client';
 import type { Bootstrap, Job, JobDeletionPreview, Operation, Run, Snapshot } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { runCopy } from '../src/copy/attempt';
-import { jobCopy, jobDeletionCopy } from '../src/copy/job';
+import { jobCopy, jobDeletionCopy, jobOrganizationCopy } from '../src/copy/job';
 import { JobDeletion } from '../src/jobs/JobLifecycle';
 import { activityWindowSearch } from '../src/jobs/activityNavigation';
 import { createBrowserSession } from '../src/session/session';
@@ -672,3 +672,38 @@ for (const [name, search] of [['live', ''], ['saved window', savedSearch]] as co
     } finally { auth.dispose(); }
   });
 }
+
+it.each(['save', 'read after save', 'read after conflict', 'ordinary 410'] as const)(
+  'handles a deletion response during organization %s', async stage => {
+    const auth = await session();
+    let reads = 0;
+    transport.get.mockImplementation((kind: string) => kind !== 'job' ? Promise.reject(unavailable())
+      : ++reads === 1 ? Promise.resolve({ data: job }) : Promise.reject(gone('RESOURCE_GONE')));
+    if (stage === 'read after save') transport.put.mockResolvedValue({ data: job });
+    else if (stage === 'read after conflict') transport.put.mockRejectedValue(new ApiClientError('http_error', { status: 412 }));
+    else transport.put.mockRejectedValue(gone(stage === 'save' ? 'RESOURCE_GONE' : 'EVENT_GAP'));
+    history.replaceState(null, '', `/nested/jobs/${job.jobId}`);
+    try {
+      await act(async () => { render(<App basePath="/nested" session={auth} />); await Promise.resolve(); });
+      const label = await screen.findByLabelText(jobOrganizationCopy.displayLabel);
+      fireEvent.input(label, { target: { value: 'Updated label' } });
+      const archive = screen.getByLabelText(jobOrganizationCopy.archived);
+      fireEvent.click(archive);
+      const save = screen.getByRole('button', { name: jobOrganizationCopy.save });
+      save.focus();
+      fireEvent.click(save);
+      await waitFor(() => expect(transport.put).toHaveBeenCalledTimes(1));
+      if (stage === 'ordinary 410') {
+        await screen.findByText(jobOrganizationCopy.failed);
+        expect(save.isConnected).toBe(true);
+        expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+      } else {
+        const notice = await screen.findByText(jobCopy.thisJobWasDeleted);
+        expect(save.isConnected).toBe(false);
+        expect(screen.queryByRole('link', { name: /Browse attempt history/ })).toBeNull();
+        expect(document.activeElement).toBe(notice);
+      }
+      expect(transport.put).toHaveBeenCalledTimes(1);
+    } finally { auth.dispose(); }
+  }
+);

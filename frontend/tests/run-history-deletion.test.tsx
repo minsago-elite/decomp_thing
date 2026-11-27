@@ -106,14 +106,16 @@ function chromeBlurDisabled(control: HTMLElement) {
   control.dispatchEvent(new FocusEvent('blur'));
 }
 afterEach(() => { Reflect.deleteProperty(document, 'activeElement'); });
-async function heldHistoryRefresh() {
+async function heldHistoryRefresh(retry = false) {
   const auth = await session();
   let settle!: (error: unknown) => void;
-  transport.get.mockResolvedValueOnce(page).mockImplementation(() => new Promise((_ok, fail) => { settle = fail; }));
+  if (retry) transport.get.mockRejectedValueOnce(failure(503));
+  else transport.get.mockResolvedValueOnce(page);
+  transport.get.mockImplementation(() => new Promise((_ok, fail) => { settle = fail; }));
   history.replaceState(null, '', historyPath);
   render(<App basePath="/nested" session={auth} />);
-  await screen.findByRole('link', { name: new RegExp(run.runId) });
-  const refresh = screen.getByRole('button', { name: runHistoryCopy.refreshHistory });
+  if (!retry) await screen.findByRole('link', { name: new RegExp(run.runId) });
+  const refresh = await screen.findByRole('button', { name: retry ? runHistoryCopy.retryHistoryPage : runHistoryCopy.refreshHistory });
   refresh.focus(); fireEvent.click(refresh);
   await waitFor(() => expect(refresh.matches(':disabled')).toBe(true));
   chromeBlurDisabled(refresh);
@@ -121,8 +123,8 @@ async function heldHistoryRefresh() {
   return { auth, gone: (error: unknown) => act(async () => { settle(error); await Promise.resolve(); await Promise.resolve(); }) };
 }
 
-it('hands focus from Refresh history, blurred when the read disabled it, to the deletion notice', async () => {
-  const { auth, gone } = await heldHistoryRefresh();
+it.each([false, true])('hands focus from the disabled history control to the deletion notice (retry %s)', async retry => {
+  const { auth, gone } = await heldHistoryRefresh(retry);
   try {
     await gone(failure(410, 'RESOURCE_GONE'));
     await screen.findByText(runHistoryCopy.thisJobWasDeleted);
@@ -131,8 +133,8 @@ it('hands focus from Refresh history, blurred when the read disabled it, to the 
   } finally { auth.dispose(); }
 });
 
-it('never steals focus the user moved elsewhere while the disabled Refresh history read is held', async () => {
-  const { auth, gone } = await heldHistoryRefresh();
+it.each([false, true])('keeps focus the person moved during the held history read (retry %s)', async retry => {
+  const { auth, gone } = await heldHistoryRefresh(retry);
   try {
     const surviving = screen.getByRole('button', { name: 'Sign out' });
     surviving.focus();
