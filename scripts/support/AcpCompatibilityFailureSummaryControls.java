@@ -87,6 +87,24 @@ public final class AcpCompatibilityFailureSummaryControls {
             if (constructing.equals(admission) || admitted.equals(admission)) require(bounded.contains(admission));
             else require(!bounded.contains("mount-admission-v1"));
         }
+        var timingConstructor = type.getDeclaredConstructor(phase, outcome, Integer.class, Integer.class,
+            Integer.class, String.class, String.class);
+        timingConstructor.setAccessible(true);
+        var timing = "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=-9223372036854775808 " +
+            "admittedNs=NA lastCleanNs=-1 firstObservedNs=0 cleanPolls=9223372036854775807";
+        for (var value : new String[] { null, timing, "PRIVATE", timing + " PRIVATE", "x".repeat(513),
+            timing.replace("System.nanoTime", "SystemXnanoTime"),
+            timing.replace("unspecified", "shared"), timing.replace("cleanPolls=9223372036854775807", "cleanPolls=-1"),
+            timing.replace("firstObservedNs=0", "firstObservedNs=9223372036854775808"),
+            timing.replace("firstObservedNs=0", "firstObservedNs=-0") }) {
+            var diagnostic = (Throwable) timingConstructor.newInstance(enumValue(phase, "CHECKPOINT"),
+                enumValue(outcome, "EVENT"), 1, 10, null, constructing, value);
+            var bounded = summary(null, diagnostic);
+            require(closedWitness.equals(diagnostic.getMessage()));
+            require(bounded.contains(constructing));
+            require(timing.equals(value) == bounded.contains("mount-timing-v1"));
+        }
+        require(!summary(null, new Throwable(timing)).contains("mount-timing-v1"));
         results.put("attestedClosedMountWitnessPreserved", "PASS");
         var chain = new java.io.IOException("PRIVATE-long-chain");
         for (var index = 0; index < 100; index++) chain = new java.io.IOException("PRIVATE-long-chain", chain);
