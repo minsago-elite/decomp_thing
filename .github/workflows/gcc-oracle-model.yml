@@ -127,6 +127,107 @@ jobs:
           name: cc1-analysis-${{ matrix.variant.name }}-${{ github.run_id }}
           path: build/analysis-experiment/headless.log
 
+  gcc-vfs-final-layer-probe:
+    name: GCC VFS candidate final-layer diagnostic (#87)
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 1967 && contains(github.event.pull_request.labels.*.name, 'qualify:gcc-vfs')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up pinned VFS candidate engine
+        id: gcc-vfs-docker
+        uses: docker/setup-docker-action@v5
+        with:
+          version: v29.7.2
+          set-host: true
+          daemon-config: '{"features":{"containerd-snapshotter":false},"storage-driver":"vfs"}'
+          runtime-basedir: ${{ github.workspace }}/.d
+      - name: Require explicit VFS endpoint and capture build identity
+        env:
+          DOCKER_HOST: ${{ steps.gcc-vfs-docker.outputs.sock }}
+          DOCKER_CONTEXT: ''
+        run: |
+          set -euo pipefail
+          test -n "$DOCKER_HOST"
+          mkdir -p build/87-vfs-probe
+          diagnostics=build/87-vfs-probe
+          docker --host "$DOCKER_HOST" info --format '{{json .}}' | \
+            { head -c 262144; cat >/dev/null; } > "$diagnostics/docker-info.json"
+          python3 - "$diagnostics/docker-info.json" <<'PY'
+          import json, sys
+          info = json.load(open(sys.argv[1]))
+          if info.get("ServerVersion") != "29.7.2" or info.get("Driver") != "vfs":
+              raise SystemExit("identity failure: selected endpoint is not Docker 29.7.2 with actual vfs store")
+          PY
+          {
+            printf 'sourceRevision=%s\nsourceTree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+            printf 'runner.os=%s\nrunner.arch=%s\nrunner.name=%s\nImageOS=%s\nImageVersion=%s\n' \
+              '${{ runner.os }}' '${{ runner.arch }}' '${{ runner.name }}' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            sha256sum .github/workflows/gcc-oracle-model.yml oracle/gcc/16.2.0/build-toolchain.Dockerfile \
+              oracle/gcc/16.2.0/toolchain-reproduction.json oracle/gcc/16.2.0/build-record.json \
+              oracle/gcc/16.2.0/source-lock.json
+            docker --host "$DOCKER_HOST" version --format '{{json .}}'
+            docker --host "$DOCKER_HOST" info --format 'server={{.ServerVersion}} driver={{.Driver}} status={{json .DriverStatus}} os={{.OperatingSystem}} kernel={{.KernelVersion}} arch={{.Architecture}} name={{.Name}}'
+          } 2>&1 | { head -c 262144; cat >/dev/null; } > "$diagnostics/identity.txt"
+      - name: Build locked GCC image without cache
+        env:
+          DOCKER_HOST: ${{ steps.gcc-vfs-docker.outputs.sock }}
+          DOCKER_CONTEXT: ''
+        run: |
+          set -euo pipefail
+          diagnostics=build/87-vfs-probe
+          echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' | sha256sum --check --strict
+          docker buildx build --no-cache --platform linux/amd64 --build-arg SOURCE_DATE_EPOCH=1786060800 \
+            --load --tag decomp-gcc-oracle-toolchain:16.2.0 \
+            --file oracle/gcc/16.2.0/build-toolchain.Dockerfile --progress=plain oracle/gcc/16.2.0 2>&1 | \
+            { head -c 262144; cat >/dev/null; } > "$diagnostics/build.log"
+      - name: Compare built image and retain bounded facts
+        if: success()
+        env:
+          DOCKER_HOST: ${{ steps.gcc-vfs-docker.outputs.sock }}
+          DOCKER_CONTEXT: ''
+        run: |
+          set -euo pipefail
+          diagnostics=build/87-vfs-probe
+          docker --host "$DOCKER_HOST" image inspect decomp-gcc-oracle-toolchain:16.2.0 | \
+            { head -c 262144; cat >/dev/null; } > "$diagnostics/image-inspect.json"
+          docker --host "$DOCKER_HOST" history --no-trunc --format '{{json .}}' decomp-gcc-oracle-toolchain:16.2.0 | \
+            { head -c 262144; cat >/dev/null; } > "$diagnostics/image-history.jsonl"
+          if timeout --kill-after=5s 300s bash -o pipefail -c '
+            docker --host "$DOCKER_HOST" image save decomp-gcc-oracle-toolchain:16.2.0 2>/dev/null |
+              (ulimit -v 524288 && exec python3 -IB scripts/diagnose-gcc-final-layer.py)
+          ' > "$diagnostics/final-layer.json"; then
+            echo 'Captured GCC final-layer inventory'
+          else
+            rm -f "$diagnostics/final-layer.json"
+            echo 'Final-layer diagnostic unavailable; continuing to strict image identity comparison'
+          fi
+          python3 -B scripts/verify-gcc-toolchain-reproduction.py \
+            --lock oracle/gcc/16.2.0/toolchain-reproduction.json \
+            --build-record oracle/gcc/16.2.0/build-record.json \
+            --inspect-json "$diagnostics/image-inspect.json" 2>&1 | \
+            { head -c 262144; cat >/dev/null; } > "$diagnostics/lock-verification.log"
+      - name: Retain bounded VFS probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gcc-vfs-final-layer-probe-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            build/87-vfs-probe/docker-info.json
+            build/87-vfs-probe/identity.txt
+            build/87-vfs-probe/build.log
+            build/87-vfs-probe/image-inspect.json
+            build/87-vfs-probe/image-history.jsonl
+            build/87-vfs-probe/final-layer.json
+            build/87-vfs-probe/lock-verification.log
+
   provenance-and-elf-verifier:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
