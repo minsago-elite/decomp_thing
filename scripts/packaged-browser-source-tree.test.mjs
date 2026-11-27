@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { promises as ownerFs } from 'node:fs';
+import { dirname as ownerDirname, join as ownerJoin, relative as ownerRelative, isAbsolute as ownerIsAbsolute } from 'node:path';
+import vm from 'node:vm';
+import { allocateSourceTreeBrowserTemp, requireSourceTreeBrowserTemp, removeSourceTreeBrowserTemp, SOURCE_TREE_BROWSER_TEMP_OWNER } from './packaged-browser-temp-owner.mjs';
 import { maximumFirstSearchPageMs, nearestRankPercentile, sourceSearchResponsePause, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
 
 test('cancelled navigation only qualifies a dispatched successful bounded search response', () => {
@@ -76,4 +80,119 @@ test('constrained source-tree profile applies the documented one-second first-pa
   assert.equal(sourceTreeBudgetsForProfile('loopback').firstDataPageP95Ms, 500);
   assert.equal(sourceTreeBudgetsForProfile('constrained').firstDataPageP95Ms, 1_000);
   assert.throws(() => sourceTreeBudgetsForProfile('unbounded'));
+});
+
+
+async function tempOwnerFixture(t) {
+  const build = new URL('../build/', import.meta.url);
+  await ownerFs.mkdir(build, { recursive: true });
+  const scratch = await ownerFs.mkdtemp(new URL('browser-temp-owner-test-', build));
+  t.after(() => ownerFs.rm(scratch, { recursive: true, force: true }));
+  const repo = ownerJoin(scratch, 'repo');
+  const buildRoot = ownerJoin(repo, 'build');
+  await ownerFs.mkdir(buildRoot, { recursive: true });
+  return { repo, buildRoot };
+}
+
+test('source browser temp allocation and cleanup preserve a concurrent launch', async t => {
+  const { repo, buildRoot } = await tempOwnerFixture(t);
+  const first = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  const second = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  assert.notEqual(first.directory, second.directory);
+  assert.notEqual(first.token, second.token);
+  await ownerFs.writeFile(ownerJoin(second.directory, 'other-run-sentinel'), 'other launch');
+  assert.equal(await requireSourceTreeBrowserTemp(repo, buildRoot, first, first.directory), first.directory);
+  await removeSourceTreeBrowserTemp(repo, buildRoot, first, first.directory);
+  await assert.rejects(ownerFs.lstat(first.directory), { code: 'ENOENT' });
+  assert.equal(await ownerFs.readFile(ownerJoin(second.directory, 'other-run-sentinel'), 'utf8'), 'other launch');
+  await removeSourceTreeBrowserTemp(repo, buildRoot, second, second.directory);
+});
+
+test('source cleanup refuses a foreign root path and another launch report without deleting either', async t => {
+  const { repo, buildRoot } = await tempOwnerFixture(t);
+  const owner = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  const other = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  const foreign = await ownerFs.mkdtemp(ownerJoin(repo, '.ct-'));
+  for (const path of [owner.directory, other.directory, foreign]) await ownerFs.writeFile(ownerJoin(path, 'sentinel'), path);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, owner, other.directory), /another launch/u);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, owner, foreign), /another launch/u);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, { ...owner, directory: foreign }, foreign), /allocated build root/u);
+  for (const path of [owner.directory, other.directory, foreign]) assert.equal(await ownerFs.readFile(ownerJoin(path, 'sentinel'), 'utf8'), path);
+});
+
+test('source cleanup refuses an inode replacement containing another run', async t => {
+  const { repo, buildRoot } = await tempOwnerFixture(t);
+  const owner = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  const other = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  await ownerFs.writeFile(ownerJoin(other.directory, 'sentinel'), 'another run');
+  const retained = owner.directory + '-retained';
+  await ownerFs.rename(owner.directory, retained);
+  await ownerFs.rename(other.directory, owner.directory);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, owner, owner.directory), /inode changed/u);
+  assert.equal(await ownerFs.readFile(ownerJoin(owner.directory, 'sentinel'), 'utf8'), 'another run');
+  await ownerFs.rename(owner.directory, other.directory);
+  await ownerFs.rename(retained, owner.directory);
+  assert.equal(await requireSourceTreeBrowserTemp(repo, buildRoot, other, other.directory), other.directory);
+});
+
+test('source cleanup rejects a changed owner marker and a symlink replacement', async t => {
+  const { repo, buildRoot } = await tempOwnerFixture(t);
+  const owner = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  const other = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  const marker = ownerJoin(owner.directory, '.decomp-browser-temp-owner');
+  await ownerFs.writeFile(marker, other.token);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, owner, owner.directory), /owner changed/u);
+  await ownerFs.writeFile(marker, owner.token);
+  await ownerFs.unlink(marker);
+  await ownerFs.symlink(ownerJoin(other.directory, '.decomp-browser-temp-owner'), marker);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, owner, owner.directory), { code: 'ELOOP' });
+  assert.equal(await requireSourceTreeBrowserTemp(repo, buildRoot, other, other.directory), other.directory);
+  await ownerFs.unlink(marker);
+  await ownerFs.mkdir(marker);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, owner, owner.directory), /regular file/u);
+  await ownerFs.rmdir(marker);
+  await ownerFs.writeFile(marker, owner.token, { flag: 'wx', mode: 0o600 });
+  const retained = owner.directory + '-retained';
+  await ownerFs.rename(owner.directory, retained);
+  await ownerFs.symlink(other.directory, owner.directory);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, owner, owner.directory), /real directory/u);
+  assert.equal(await requireSourceTreeBrowserTemp(repo, buildRoot, other, other.directory), other.directory);
+  await ownerFs.unlink(owner.directory);
+  await ownerFs.rename(retained, owner.directory);
+});
+
+test('source cleanup rejects replacement of its allocated build root', async t => {
+  const { repo, buildRoot } = await tempOwnerFixture(t);
+  const owner = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  await ownerFs.rename(buildRoot, buildRoot + '-retained');
+  await ownerFs.mkdir(buildRoot);
+  await assert.rejects(removeSourceTreeBrowserTemp(repo, buildRoot, owner, owner.directory), /build inode changed/u);
+  assert.ok((await ownerFs.stat(ownerJoin(buildRoot + '-retained', owner.directory.slice(buildRoot.length + 1)))).isDirectory());
+});
+
+test('actual driver claims its source lease with a short relative TMPDIR and preserves standalone allocation', async t => {
+  const { repo, buildRoot } = await tempOwnerFixture(t);
+  const text = await ownerFs.readFile(new URL('./check-packaged-web-browser.mjs', import.meta.url), 'utf8');
+  const start = text.indexOf("  if (['source-tree', 'source-tree-cold-worker'].includes(values.mode)) {", text.indexOf('// Chrome places SingletonSocket'));
+  const end = text.indexOf('  report.browserTempDirectory = browserTmp;', start);
+  assert.ok(start >= 0 && end > start);
+  const block = text.slice(start, end);
+  const owner = await allocateSourceTreeBrowserTemp(repo, buildRoot);
+  for (const mode of ['source-tree', 'source-tree-cold-worker', 'public']) {
+    const context = { assert, repo, buildRoot, browserTmp: null,
+      values: { mode, 'keep-workdir': true }, fs: ownerFs, join: ownerJoin, relative: ownerRelative, isAbsolute: ownerIsAbsolute,
+      process: { env: { [SOURCE_TREE_BROWSER_TEMP_OWNER]: JSON.stringify(owner) }, platform: process.platform },
+      SOURCE_TREE_BROWSER_TEMP_OWNER, requireSourceTreeBrowserTemp };
+    const result = await vm.runInNewContext('(async()=>{' + block + ';return { directory: browserTmp, relative: browserTmpForProcess };})()', context);
+    assert.ok(!ownerIsAbsolute(result.relative));
+    if (mode === 'public') {
+      assert.equal(ownerDirname(result.directory), repo);
+      assert.match(result.relative, /^\.ct-[A-Za-z0-9]+$/u);
+    } else {
+      assert.equal(result.directory, owner.directory);
+      assert.match(result.relative, /^build[/\\]\.ct-[A-Za-z0-9]+$/u);
+    }
+  }
+  const missing = { assert, repo, buildRoot, values: { mode: 'source-tree', 'keep-workdir': true }, process: { env: {} }, SOURCE_TREE_BROWSER_TEMP_OWNER, requireSourceTreeBrowserTemp };
+  await assert.rejects(vm.runInNewContext('(async()=>{' + block + '})()', missing), /Missing browser temp allocation/u);
 });

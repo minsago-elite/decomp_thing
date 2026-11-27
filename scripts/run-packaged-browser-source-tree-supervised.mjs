@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { allocateSourceTreeBrowserTemp, requireSourceTreeBrowserTemp, removeSourceTreeBrowserTemp, SOURCE_TREE_BROWSER_TEMP_OWNER } from './packaged-browser-temp-owner.mjs';
 
 const repo = await fs.realpath(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
 const driver = join(repo, 'scripts/check-packaged-web-browser.mjs');
@@ -49,6 +50,7 @@ await fs.mkdir(runDirectory, { recursive: false });
 const receiptPath = join(runDirectory, 'process-tree-receipt.json');
 const reportPath = join(runDirectory, 'report.json');
 const driverReportPath = join(internalRunDirectory, 'driver-report.json');
+const browserTempOwner = await allocateSourceTreeBrowserTemp(repo, buildRoot);
 const childArgs = args.filter((argument, index) => {
   if (argument === '--keep-workdir') return false;
   if (argument === '--cold-report') return false;
@@ -77,6 +79,7 @@ try {
   child = spawn(python, command, { cwd: repo, env: {
     ...process.env,
     DECOMP_PACKAGED_SOURCE_TREE_SUPERVISED: '1',
+    [SOURCE_TREE_BROWSER_TEMP_OWNER]: JSON.stringify(browserTempOwner),
   }, stdio: 'inherit' });
   const exit = await new Promise((resolveExit, reject) => {
     child.once('error', reject);
@@ -105,11 +108,8 @@ try {
       const expectedProfile = join(testDirectory, 'browser profile');
       assert.equal(resolve(driverReport.browserProfileDirectory), expectedProfile,
         'Browser profile path does not match the supervised driver directory');
-      const browserTempDirectory = resolve(driverReport.browserTempDirectory);
-      assert.equal(await fs.realpath(dirname(browserTempDirectory)), buildRoot,
-        'Chromium temp directory escaped the short build path');
-      assert.match(basename(browserTempDirectory), /^\.ct-[A-Za-z0-9]+$/u,
-        'Chromium temp directory lacks its unique owner name');
+      const browserTempDirectory = await requireSourceTreeBrowserTemp(
+        repo, buildRoot, browserTempOwner, driverReport.browserTempDirectory);
       ownedDriverPaths = { testDirectory, expectedProfile, browserTempDirectory };
     } catch (error) {
       ownedTempCleanup.error = `${error?.name ?? 'Error'}: ${error?.message ?? String(error)}`;
@@ -179,7 +179,7 @@ try {
     ownedTempCleanup.attempted = true;
     try {
       await fs.rm(ownedDriverPaths.expectedProfile, { recursive: true, force: true });
-      await fs.rm(ownedDriverPaths.browserTempDirectory, { recursive: true, force: true });
+      await removeSourceTreeBrowserTemp(repo, buildRoot, browserTempOwner, ownedDriverPaths.browserTempDirectory);
       ownedTempCleanup.confirmed = true;
     } catch (error) {
       ownedTempCleanup.error = `${error?.name ?? 'Error'}: ${error?.message ?? String(error)}`;

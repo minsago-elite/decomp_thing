@@ -6,6 +6,7 @@ import { join, basename, dirname, isAbsolute, relative, resolve, sep } from 'nod
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { allocateSourceTreeBrowserTemp, requireSourceTreeBrowserTemp, removeSourceTreeBrowserTemp, SOURCE_TREE_BROWSER_TEMP_OWNER } from './packaged-browser-temp-owner.mjs';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedSourceTreeFixture } from './packaged-source-tree-fixture.mjs';
@@ -140,6 +141,7 @@ const sourceTreeDriverFiles = [
   'scripts/packaged-browser-cdp-diagnostics.mjs',
   'scripts/packaged-browser-process-supervisor.py',
   'scripts/run-packaged-browser-source-tree-supervised.mjs',
+  'scripts/packaged-browser-temp-owner.mjs',
   'scripts/packaged-browser-install.py',
 ];
 let sourceTreeColdSummary = null;
@@ -404,6 +406,7 @@ async function runSourceTreeColdSamples(expected) {
     const workerWorkParent = join(sampleDirectory, 'worker-owned-files');
     await fs.mkdir(workerWorkParent);
     const workerReport = join(sampleDirectory, 'worker-report.json');
+    const workerBrowserTempOwner = await allocateSourceTreeBrowserTemp(repo, buildRoot);
     const receiptPath = join(sampleDirectory, 'supervisor-receipt.json');
     const supervisorDiagnosticPath = join(sampleDirectory, 'supervisor-diagnostic.log');
     const supervisorPath = join(repo, 'scripts/packaged-browser-process-supervisor.py');
@@ -417,7 +420,8 @@ async function runSourceTreeColdSamples(expected) {
     let diagnosticCloseError = null;
     try {
       diagnosticHandle = await fs.open(supervisorDiagnosticPath, 'wx', 0o600);
-      child = spawn(values.python, commandArgs, { cwd: repo, env: process.env,
+      child = spawn(values.python, commandArgs, { cwd: repo, env: { ...process.env,
+        [SOURCE_TREE_BROWSER_TEMP_OWNER]: JSON.stringify(workerBrowserTempOwner) },
         stdio: ['ignore', 'ignore', diagnosticHandle.fd] });
     } catch (error) {
       await diagnosticHandle?.close().catch(() => {});
@@ -528,10 +532,7 @@ async function runSourceTreeColdSamples(expected) {
     }
     // The worker retained all process-owned files. Remove them only after its
     // subreaper receipt proves that every owned descendant has exited.
-    const workerBrowserTmp = resolve(worker?.browserTempDirectory ?? '');
-    assert.equal(await fs.realpath(dirname(workerBrowserTmp)), buildRoot, 'Cold worker temp directory escaped the short owned build path');
-    assert.match(basename(workerBrowserTmp), /^\.ct-[A-Za-z0-9]+$/u, 'Cold worker temp directory is not an owned Chromium socket directory');
-    await fs.rm(workerBrowserTmp, { recursive: true, force: true });
+    await removeSourceTreeBrowserTemp(repo, buildRoot, workerBrowserTempOwner, worker?.browserTempDirectory);
     assert.equal(await fs.realpath(dirname(workerWorkParent)), await fs.realpath(sampleDirectory),
       'Cold worker files escaped their unique sample owner');
     await makeOwnedDirectoriesRemovable(workerWorkParent);
@@ -1001,7 +1002,13 @@ try {
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  if (['source-tree', 'source-tree-cold-worker'].includes(values.mode)) {
+    assert.ok(values['keep-workdir'], 'Source-tree browser temp cleanup belongs to its supervisor');
+    const owner = JSON.parse(process.env[SOURCE_TREE_BROWSER_TEMP_OWNER] ?? 'null');
+    browserTmp = await requireSourceTreeBrowserTemp(repo, buildRoot, owner, owner?.directory);
+  } else {
+    browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  }
   const browserTmpForProcess = relative(repo, browserTmp);
   assert(!isAbsolute(browserTmpForProcess) && browserTmpForProcess !== '..' && !browserTmpForProcess.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`),
     'Browser temporary directory must remain inside the repository');
