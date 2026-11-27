@@ -36,6 +36,9 @@ it('admits the producer comparisons: compatible, incompatible, a different input
   const input = load('scorecard-comparison-incompatible');
   check(input, 'model-schema').state = 'match';
   check(input, 'model-schema').baseline = check(input, 'model-schema').current;
+  // The baseline's own model record and scope state the schema its check now names.
+  input.data.baseline.model.schemaVersion = 2;
+  input.data.baseline.scope!.modelSchemaVersion = 2;
   Object.assign(check(input, 'input-binary'), { state: 'differs', baseline: other });
   input.data.baseline.scope!.inputSha256 = other;
   expect(decode(input).data.compatibility.state).toBe('incompatible');
@@ -91,4 +94,66 @@ it('refuses an unavailable comparison that binds a recorded scope to another inp
   const missing = unavailable('baseline');
   missing.data.compatibility.checks = missing.data.compatibility.checks.filter(item => item.id !== 'input-binary');
   expect(() => decode(missing)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+});
+
+const notRecorded = { state: 'not-recorded', stateReason: 'CONFIDENCE_NOT_RECORDED', path: null, sha256: null, sizeBytes: null, schemaVersion: null } as const;
+
+it.each<[string, string, (document: Envelope) => void]>([
+  ['states a model-schema match against v1 baseline records', 'scorecard-comparison', document => {
+    document.data.baseline.scope!.modelSchemaVersion = 1; document.data.baseline.model.schemaVersion = 1;
+  }],
+  ['names a foreign model digest in the baseline scope', 'scorecard-comparison', document => { document.data.baseline.scope!.modelSha256 = other; }],
+  ['names a foreign model digest in the current scope', 'scorecard-comparison', document => { document.data.current.scope!.modelSha256 = other; }],
+  ['keeps a scope and confidence check for an unrecorded confidence report', 'scorecard-comparison', document => {
+    document.data.baseline.confidence = { ...notRecorded };
+  }],
+  ['keeps a confidence-schema value for an unavailable side', 'scorecard-comparison-unavailable', document => {
+    const id = document.data.current.scope === null ? 'current' : 'baseline';
+    Object.assign(check(document, 'confidence-schema'), { [id]: '2' });
+  }],
+  ['shows a score delta its operands do not produce', 'scorecard-comparison', document => { document.data.metrics[0]!.delta.value = '0.1234'; }],
+  ['writes a zero numerator delta with trailing scale', 'scorecard-comparison', document => {
+    const metric = document.data.metrics[0]!;
+    metric.baseline = { ...metric.current }; metric.delta = { ...metric.delta, value: '0.0000', numerator: '0', denominator: '0' };
+  }],
+  ['flips the sign of a module delta', 'scorecard-comparison', document => { document.data.modules.items[0]!.delta.value = '-0.2000'; }],
+  ['drops a computed denominator difference', 'scorecard-comparison', document => { document.data.modules.items[0]!.delta.denominator = null; }],
+  ['binds the module page to another snapshot', 'scorecard-comparison', document => { document.data.modules.page.snapshotVersion = other; }],
+  ['pairs modules although a scorecard is unavailable', 'scorecard-comparison-unavailable', document => {
+    document.data.modules = load('scorecard-comparison-incompatible').data.modules;
+  }],
+  ['counts modules although a scorecard is unavailable', 'scorecard-comparison-unavailable', document => { document.data.modules.total = 1; }],
+  ['disguises a withheld paired delta as not comparable', 'scorecard-comparison-incompatible', document => {
+    Object.assign(document.data.metrics[0]!.delta, { state: 'not-comparable', reason: 'CURRENT_UNMEASURED' });
+  }],
+  ['names the wrong side of an unmeasured comparison', 'scorecard-comparison', document => {
+    document.data.metrics[1]!.delta.reason = 'BASELINE_UNMEASURED';
+  }],
+])('refuses a comparison that %s', (_, name, change) => {
+  const document = load(name);
+  expect(decode(document).data.compatibility.state).toBeDefined();
+  change(document);
+  expect(() => decode(document)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+});
+
+it('admits exact differences at the producer\'s scale, zero, negative and unpaired module rows', () => {
+  const document = load('scorecard-comparison');
+  const [core, util] = document.data.modules.items;
+  // Equal operands write zero plainly; a negative difference keeps the wider operand scale.
+  core!.baseline = { ...core!.current! };
+  core!.delta = { state: 'computed', reason: null, value: '0', numerator: '0', denominator: '0' };
+  util!.current = { state: 'measured', reason: null, value: '0.0000', numerator: '0', denominator: '1' };
+  util!.baseline = { state: 'measured', reason: null, value: '0.2500', numerator: '0.25', denominator: '1' };
+  util!.delta = { state: 'computed', reason: null, value: '-0.2500', numerator: '-0.25', denominator: '0' };
+  document.data.modules.items.push({ moduleId: 'gone', selector: null, presence: 'baseline-only', current: null,
+    baseline: { state: 'unmeasured', reason: 'EMPTY_POPULATION', value: null, numerator: '0', denominator: '0' },
+    delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } });
+  document.data.modules.total = 3;
+  expect(decode(document).data.modules.items).toHaveLength(3);
+  const incompatible = load('scorecard-comparison-incompatible');
+  incompatible.data.modules.items.push({ moduleId: 'new', selector: null, presence: 'current-only',
+    current: { state: 'measured', reason: null, value: '1.0000', numerator: '1', denominator: '1' }, baseline: null,
+    delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } });
+  incompatible.data.modules.total += 1;
+  expect(decode(incompatible).data.compatibility.state).toBe('incompatible');
 });

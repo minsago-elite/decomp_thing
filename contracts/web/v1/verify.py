@@ -468,8 +468,63 @@ BLOCKING_COMPARISON_CHECKS = frozenset(("input-binary", "reconstruction-profile"
                                         "score-interpretation", "score-formula", "model-schema"))
 
 
+def exact_difference(current: str, baseline: str) -> str:
+    """The producer's exact difference: the wider operand scale, written plainly, with zero written as 0."""
+    def scaled(text: str):
+        match = re.fullmatch(r"(-?)([0-9]+)(?:\.([0-9]+))?", text)
+        if match is None:
+            raise ValueError("a measured operand must be exact decimal text")
+        fraction = match.group(3) or ""
+        units = int(match.group(2) + fraction)
+        return (-units if match.group(1) else units), len(fraction)
+    (a, a_scale), (b, b_scale) = scaled(current), scaled(baseline)
+    scale = max(a_scale, b_scale)
+    units = a * 10 ** (scale - a_scale) - b * 10 ** (scale - b_scale)
+    if units == 0:
+        return "0"
+    digits = str(abs(units)).rjust(scale + 1, "0")
+    text = digits if scale == 0 else digits[:-scale] + "." + digits[-scale:]
+    return "-" + text if units < 0 else text
+
+
+def expected_delta(state: str, current, baseline) -> dict:
+    """The delta the producer derives from two measures of one row."""
+    empty = {"value": None, "numerator": None, "denominator": None}
+    if current is None or baseline is None:
+        return {"state": "not-comparable", "reason": "MODULE_NOT_IN_BOTH_PLANS", **empty}
+    if state != "compatible":
+        return {"state": "withheld", "reason": "INCOMPATIBLE_BASELINE", **empty}
+    for side, measure in (("CURRENT", current), ("BASELINE", baseline)):
+        if measure["state"] != "measured":
+            return {"state": "not-comparable", "reason": side + "_" + measure["state"].upper().replace("-", "_"), **empty}
+    exact = lambda key: None if current[key] is None or baseline[key] is None else exact_difference(current[key], baseline[key])
+    return {"state": "computed", "reason": None, "value": exact("value"), "numerator": exact("numerator"),
+            "denominator": exact("denominator")}
+
+
+def check_comparison_side(side: dict, values: dict) -> None:
+    """A side's identity check values are the ones its own model, plan and confidence records state."""
+    available = side["confidence"]["state"] == "available"
+    scope, model = side["scope"], side["model"]
+    if (scope is not None) != available or (side["confidence"]["schemaVersion"] is not None) != available:
+        raise ValueError("a side carries a scorecard scope and confidence schema exactly when its scorecard is available")
+    if scope is not None:
+        if scope["modelSha256"] != model["sha256"] or scope["modelSchemaVersion"] != (model["schemaVersion"] or 1):
+            raise ValueError("a side's scorecard scope must name its own model record")
+        if values.get("input-binary") != scope["inputSha256"]:
+            raise ValueError("the input-binary check must state each recorded scope's input")
+    if values.get("model-schema") != (None if model["schemaVersion"] is None else str(model["schemaVersion"])):
+        raise ValueError("the model-schema check must state each side's model record schema")
+    if values.get("confidence-schema") != (str(side["confidence"]["schemaVersion"]) if available else None):
+        raise ValueError("the confidence-schema check must state each side's confidence record schema")
+    if any((values.get(key) is not None) != available for key in ("score-interpretation", "score-formula")):
+        raise ValueError("score identities are recorded exactly when a side's scorecard is available")
+    if "module-plan" in values and values["module-plan"] != (side["plan"]["sha256"] if side["plan"]["state"] == "available" else None):
+        raise ValueError("the module-plan check must state each side's available plan record")
+
+
 def check_comparison_identities(data: dict) -> None:
-    """Each blocking identity is checked exactly once and the input-binary check states each recorded scope's input."""
+    """Each blocking identity is checked exactly once and every check states the values each side's records carry."""
     checks, state = data["compatibility"]["checks"], data["compatibility"]["state"]
     ids = [check["id"] for check in checks]
     if len(set(ids)) != len(ids) or not BLOCKING_COMPARISON_CHECKS <= set(ids):
@@ -480,15 +535,12 @@ def check_comparison_identities(data: dict) -> None:
         recorded = check["current"] is not None and check["baseline"] is not None
         if (check["state"] == "not-recorded") == recorded:
             raise ValueError("an identity check is not recorded exactly when a side records no value")
-        if check["blocking"] and recorded and (check["state"] == "match") != (check["current"] == check["baseline"]):
-            raise ValueError("a blocking identity check matches exactly when its recorded values are equal")
-    current, baseline = data["current"]["scope"], data["baseline"]["scope"]
-    if (state == "unavailable") != (current is None or baseline is None):
+        if check["id"] != "entity-population" and recorded and (check["state"] == "match") != (check["current"] == check["baseline"]):
+            raise ValueError("an identity check matches exactly when its recorded values are equal")
+    for side in ("current", "baseline"):
+        check_comparison_side(data[side], {check["id"]: check[side] for check in checks})
+    if (state == "unavailable") != (data["current"]["scope"] is None or data["baseline"]["scope"] is None):
         raise ValueError("a comparison is unavailable exactly when a side has no scorecard scope")
-    check = next(check for check in checks if check["id"] == "input-binary")
-    if (current is not None and check["current"] != current["inputSha256"]) or \
-            (baseline is not None and check["baseline"] != baseline["inputSha256"]):
-        raise ValueError("the input-binary check must state each recorded scope's input")
 
 
 def check_comparison(data: dict) -> None:
@@ -497,22 +549,29 @@ def check_comparison(data: dict) -> None:
     blocked = any(check["blocking"] and check["state"] != "match" for check in data["compatibility"]["checks"])
     if (state == "incompatible") != (blocked and state != "unavailable"):
         raise ValueError("compatibility must follow the blocking identity checks")
-    if state == "unavailable" and data["metrics"]:
+    modules, page = data["modules"], data["modules"]["page"]
+    items = modules["items"]
+    if data["current"]["structureVersion"] != data["structureVersion"] or page["snapshotVersion"] != data["structureVersion"]:
+        raise ValueError("comparison module pages must be bound to the current structure version")
+    if len(items) > page["limit"] or len(items) > modules["total"] or (page["nextCursor"] is not None and not items):
+        raise ValueError("a comparison module page exceeds its bound or continues without rows")
+    if state == "unavailable" and (data["metrics"] or modules["total"] or page["nextCursor"] is not None):
         raise ValueError("an unavailable scorecard cannot be compared")
+    if len({item["id"] for item in data["metrics"]}) != len(data["metrics"]) or len({item["moduleId"] for item in items}) != len(items):
+        raise ValueError("a comparison lists each measure and module once")
+    for item in items:
+        presence = "both" if item["current"] and item["baseline"] else "current-only" if item["current"] else \
+            "baseline-only" if item["baseline"] else None
+        if item["presence"] != presence or (item["selector"] is not None and item["selector"] != item["moduleId"]):
+            raise ValueError("a module row's presence and selector follow its recorded sides")
     rows = [(item["current"], item["baseline"], item["delta"], item["unit"]) for item in data["metrics"]] + [
-        (item["current"], item["baseline"], item["delta"], "ratio") for item in data["modules"]["items"]]
+        (item["current"], item["baseline"], item["delta"], "ratio") for item in items]
     for current, baseline, delta, unit in rows:
         for measure in (current, baseline):
             if measure is not None:
                 check_measure(measure, unit)
-        computed = delta["state"] == "computed"
-        if computed and (state != "compatible" or current is None or baseline is None
-                         or current["state"] != "measured" or baseline["state"] != "measured"):
-            raise ValueError("deltas are computed only between measured results of compatible attempts")
-        if state != "compatible" and delta["state"] == "not-comparable" and current is not None and baseline is not None:
-            raise ValueError("an incompatible baseline withholds its deltas")
-        if not computed and any(delta[key] is not None for key in ("value", "numerator", "denominator")):
-            raise ValueError("a delta that is not computed cannot present a difference")
+        if delta != expected_delta(state, current, baseline):
+            raise ValueError("a delta must be the producer's exact difference, withholding or reason for its measures")
 
 
 def check_job_label(label) -> None:

@@ -1277,6 +1277,34 @@
     {
       "file": "fixtures/invalid-scorecard-comparison-compatible-without-scope.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-model-schema-check-contradicts-record.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-scope-names-foreign-model.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-confidence-check-without-record.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-delta-disagrees-with-operands.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-foreign-page-snapshot.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-unavailable-with-module-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-incompatible-unwithheld-delta.json",
+      "valid": false
     }
   ]
 }

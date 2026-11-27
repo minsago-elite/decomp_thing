@@ -245,6 +245,18 @@ the union of both plans with `presence`, paged by a cursor bound to both structu
 versions. Each side carries its own reconciliation. The browser offers the job's other
 attempts that have a result revision as baselines.
 
+The browser decoder (`frontend/src/structure/contract.ts`) and the shared verifier
+(`contracts/web/v1/verify.py`) hold a reply to the rules the producer follows. Each
+side's scope names that side's own model record digest and schema. The model-schema and
+confidence-schema checks state those records' schemas. A side has a scope and
+confidence identities exactly when its confidence report is available. Every delta is
+recomputed from its operands: the exact difference at the wider operand scale, with zero
+written as `0`, or `withheld`/`INCOMPATIBLE_BASELINE` for a paired row of an
+incompatible baseline, `MODULE_NOT_IN_BOTH_PLANS` for an unpaired module, and otherwise
+`CURRENT_`/`BASELINE_` followed by the first unmeasured side's state. An unavailable
+reply has no measures, a module total of zero and no continuation. The module page must
+be bound to the current structure version.
+
 ## Scale
 
 The packaged qualification separates cold first-page samples from the full interaction

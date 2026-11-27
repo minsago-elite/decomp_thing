@@ -81,9 +81,50 @@ type Comparison = Extract<ContractDocument, { kind: 'scorecardComparison' }>['da
 const BLOCKING_CHECKS = new Set(['input-binary', 'reconstruction-profile', 'confidence-schema', 'score-interpretation',
   'score-formula', 'model-schema']);
 
+/** A recorded decimal as an integer scaled by its fractional digits; the wire pattern admits only plain decimals. */
+function decimal(text: string): { units: bigint; scale: number } {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(text);
+  requireValue(match !== null);
+  const fraction = match![3] ?? '';
+  const units = BigInt(match![2] + fraction);
+  return { units: match![1] ? -units : units, scale: fraction.length };
+}
+
+/** The producer's exact difference: the wider scale of its operands, written plainly, with zero written as 0. */
+function difference(current: string, baseline: string): string {
+  const a = decimal(current), b = decimal(baseline);
+  const scale = Math.max(a.scale, b.scale);
+  const units = a.units * 10n ** BigInt(scale - a.scale) - b.units * 10n ** BigInt(scale - b.scale);
+  if (units === 0n) return '0';
+  const digits = (units < 0n ? -units : units).toString().padStart(scale + 1, '0');
+  const text = scale === 0 ? digits : `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
+  return units < 0n ? `-${text}` : text;
+}
+
+type Side = Comparison['current'];
+type Delta = Comparison['metrics'][number]['delta'];
+
 /**
- * Every blocking identity is checked exactly once, so a reply cannot be compatible by leaving one out. A side carries a
- * scope exactly when its scorecard is available, and the input-binary check states the input each recorded scope names.
+ * Each side's identity values are the ones its own records state: its scope names its model record, the model-schema
+ * check states that record's schema, and the confidence checks state a value exactly when its scorecard is available.
+ */
+function checkSide(side: Side, value: (id: string) => string | null | undefined): void {
+  const available = side.confidence.state === 'available';
+  requireValue((side.scope !== null) === available && (side.confidence.schemaVersion !== null) === available);
+  if (side.scope) {
+    requireValue(side.scope.modelSha256 === side.model.sha256 && side.scope.modelSchemaVersion === (side.model.schemaVersion ?? 1));
+    requireValue(value('input-binary') === side.scope.inputSha256);
+  }
+  requireValue(value('model-schema') === (side.model.schemaVersion === null ? null : String(side.model.schemaVersion)));
+  requireValue(value('confidence-schema') === (available ? String(side.confidence.schemaVersion) : null));
+  for (const id of ['score-interpretation', 'score-formula']) requireValue((value(id) !== null) === available);
+  const plan = value('module-plan');
+  if (plan !== undefined) requireValue(plan === (side.plan.state === 'available' ? side.plan.sha256 : null));
+}
+
+/**
+ * Every blocking identity is checked exactly once, so a reply cannot be compatible by leaving one out, and each check
+ * states the values the two sides' own records carry. A comparison is unavailable exactly when a side has no scope.
  */
 function checkIdentityChecks(data: Comparison): void {
   const { checks, state } = data.compatibility;
@@ -93,12 +134,28 @@ function checkIdentityChecks(data: Comparison): void {
     requireValue(check.blocking === BLOCKING_CHECKS.has(check.id));
     const recorded = check.current !== null && check.baseline !== null;
     requireValue((check.state === 'not-recorded') === !recorded);
-    if (check.blocking && recorded) requireValue((check.state === 'match') === (check.current === check.baseline));
+    if (check.id !== 'entity-population' && recorded) requireValue((check.state === 'match') === (check.current === check.baseline));
   }
-  const input = checks.find(check => check.id === 'input-binary')!;
+  const find = (id: string) => checks.find(check => check.id === id);
+  checkSide(data.current, id => find(id)?.current);
+  checkSide(data.baseline, id => find(id)?.baseline);
   requireValue((state === 'unavailable') === (data.current.scope === null || data.baseline.scope === null));
-  if (data.current.scope) requireValue(input.current === data.current.scope.inputSha256);
-  if (data.baseline.scope) requireValue(input.baseline === data.baseline.scope.inputSha256);
+}
+
+/**
+ * The delta the producer derives from two measures: withheld for an incompatible baseline, not comparable when a side is
+ * missing or not measured (naming the first such side), and otherwise the exact differences of the recorded operands.
+ */
+function expectedDelta(state: Comparison['compatibility']['state'], current: Measure | null, baseline: Measure | null): Delta {
+  const empty = { value: null, numerator: null, denominator: null };
+  if (current === null || baseline === null) return { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', ...empty };
+  if (state !== 'compatible') return { state: 'withheld', reason: 'INCOMPATIBLE_BASELINE', ...empty };
+  const name = (measure: Measure) => measure.state.toUpperCase().replace(/-/g, '_');
+  if (current.state !== 'measured') return { state: 'not-comparable', reason: `CURRENT_${name(current)}`, ...empty };
+  if (baseline.state !== 'measured') return { state: 'not-comparable', reason: `BASELINE_${name(baseline)}`, ...empty };
+  const exact = (a: string | null, b: string | null) => a === null || b === null ? null : difference(a, b);
+  return { state: 'computed', reason: null, value: exact(current.value, baseline.value),
+    numerator: exact(current.numerator, baseline.numerator), denominator: exact(current.denominator, baseline.denominator) };
 }
 
 /** Mirrors the shared verifier's structure rules for the lazily admitted response kinds. */
@@ -119,17 +176,26 @@ function checkStructureDocument(document: ContractDocument): void {
       break;
     }
     case 'scorecardComparison': {
-      const { compatibility, metrics, modules } = document.data;
+      const { compatibility, metrics, modules, structureVersion, current } = document.data;
       checkIdentityChecks(document.data);
       const blocked = compatibility.checks.some(check => check.blocking && check.state !== 'match');
       requireValue((compatibility.state === 'incompatible') === (blocked && compatibility.state !== 'unavailable'));
-      requireValue(compatibility.state !== 'unavailable' || metrics.length === 0);
-      const rows = [...metrics.map(item => ({ ...item })), ...modules.items.map(item => ({ ...item, unit: 'ratio' as const }))];
+      // The module page is the selected comparison's: signed against the current structure version it names.
+      requireValue(current.structureVersion === structureVersion);
+      checkStructurePage(modules.page, structureVersion, modules.items.length);
+      requireValue(modules.items.length <= modules.total && (modules.page.nextCursor === null || modules.items.length > 0));
+      // Nothing is paired when either scorecard is unavailable.
+      if (compatibility.state === 'unavailable') requireValue(metrics.length === 0 && modules.total === 0 && modules.page.nextCursor === null);
+      requireValue(new Set(metrics.map(item => item.id)).size === metrics.length && new Set(modules.items.map(item => item.moduleId)).size === modules.items.length);
+      for (const item of modules.items) {
+        requireValue(item.selector === null || item.selector === item.moduleId);
+        requireValue(item.presence === (item.current && item.baseline ? 'both' : item.current ? 'current-only' : item.baseline ? 'baseline-only' : 'none'));
+      }
+      const rows = [...metrics, ...modules.items.map(item => ({ ...item, unit: 'ratio' as const }))];
       for (const row of rows) {
         for (const side of [row.current, row.baseline]) if (side) checkMeasure(side, row.unit);
-        const computed = row.delta.state === 'computed';
-        if (computed) requireValue(compatibility.state === 'compatible' && row.current?.state === 'measured' && row.baseline?.state === 'measured');
-        else requireValue(row.delta.value === null && row.delta.numerator === null && row.delta.denominator === null);
+        const expected = expectedDelta(compatibility.state, row.current, row.baseline);
+        requireValue((['state', 'reason', 'value', 'numerator', 'denominator'] as const).every(key => row.delta[key] === expected[key]));
       }
       break;
     }
