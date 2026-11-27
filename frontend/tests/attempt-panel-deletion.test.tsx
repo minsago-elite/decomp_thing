@@ -346,6 +346,36 @@ it('lands on the notice when the read after an accepted retry confirms RESOURCE_
   } finally { auth.dispose(); }
 });
 
+it.each(['stay', 'move', 'blur'] as const)('keeps acknowledged Replay inert until its follow-up confirms deletion (focus: %s)', async (focus) => {
+  const auth = await commandRoute();
+  chromeBlurOnRemoval();
+  try {
+    transport.post.mockRejectedValueOnce(new ApiClientError('network_error'));
+    fireEvent.click(screen.getByRole('button', { name: attemptControlsCopy.retry }));
+    const replay = await screen.findByRole('button', { name: attemptControlsCopy.replay });
+    const created: Run = { ...fixture<Run>('run-retry'), jobId: run.jobId, previousRunId: run.runId };
+    const held = deferred<never>();
+    transport.post.mockResolvedValue({ data: created });
+    transport.get.mockImplementation((kind: string) => kind === 'attemptControls' ? held.promise : Promise.resolve({ data: run }));
+    replay.focus();
+    fireEvent.click(replay);
+    await screen.findByRole('link', { name: `Open new attempt ${created.runId}` });
+    expect(sessionStorage.getItem(slot)).toBeNull();
+    expect(document.activeElement).toBe(replay);
+    expect(replay.getAttribute('aria-disabled')).toBe('true');
+    expect(screen.queryByRole('button', { name: attemptControlsCopy.discard })).toBeNull();
+    fireEvent.click(replay);
+    const other = screen.getByRole('button', { name: 'Sign out' });
+    if (focus === 'move') other.focus();
+    if (focus === 'blur') replay.blur();
+    await held.settle({ err: gone() });
+    await screen.findByText(runCopy.thisJobWasDeleted, { exact: false });
+    if (focus === 'stay') expect(document.activeElement?.closest('[role="alert"]')).toBe(screen.getByRole('alert'));
+    else expect(document.activeElement).toBe(focus === 'move' ? other : document.body);
+    expect(transport.post).toHaveBeenCalledTimes(2);
+  } finally { auth.dispose(); }
+});
+
 it('ends the Evidence view when the retained exploration artifact confirms deletion', async () => {
   const auth = await session();
   const report = fixture<Report>('report-exploration');

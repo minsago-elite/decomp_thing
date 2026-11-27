@@ -46,11 +46,12 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   /** The eligibility read a command was sent from: shown while it is outstanding, never used to send again. */
   const [spent, setSpent] = useState<Controls | null>(null);
   const [retained, setRetained] = useState<AttemptCommandRecovery>(() => recovery.read());
-  const [busy, setBusy] = useState(false);
+  const [activity, setActivity] = useState<'read' | 'command' | 'replay' | null>(null);
+  const busy = activity !== null;
   const [status, setStatus] = useState<string>(copy.readFirst);
   const [created, setCreated] = useState<string | null>(null);
   useEffect(() => {
-    setControls(null); setSpent(null); setBusy(false); setStatus(copy.readFirst); setCreated(null); setRetained(recovery.read());
+    setControls(null); setSpent(null); setActivity(null); setStatus(copy.readFirst); setCreated(null); setRetained(recovery.read());
     return () => { active.current?.abort(); active.current = null; };
   }, [jobId, runId, client, recovery]);
   const pending = retained.kind === 'pending' ? retained.command : null;
@@ -72,14 +73,14 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   async function read() {
     if (active.current || !available) return;
     const controller = new AbortController(); active.current = controller;
-    setBusy(true); setStatus(copy.reading); setControls(null);
+    setActivity('read'); setStatus(copy.reading); setControls(null);
     try {
       await readControls(controller);
       if (!controller.signal.aborted) setStatus(copy.verified);
     } catch (failure: unknown) {
       if (!controller.signal.aborted && !escalated(failure)) setStatus(withApiFailureReference(copy.unverified, failure));
     } finally {
-      if (active.current === controller) { active.current = null; setBusy(false); }
+      if (active.current === controller) { active.current = null; setActivity(null); }
     }
   }
 
@@ -101,7 +102,7 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
     // The control that sent the command stays focusable but inert until the answer (#512): removing it under focus
     // would leave the document focused, so a confirmed deletion could not tell it from the user's own blur.
     const sentFrom = controls;
-    setBusy(true); setSpent(sentFrom); setCreated(null); setStatus(copy.sending);
+    setActivity(replay ? 'replay' : 'command'); setSpent(sentFrom); setCreated(null); setStatus(copy.sending);
     const settings = { csrfToken, ifMatch: `"${command.expectedVersion}"`, idempotencyKey: command.key, signal: controller.signal };
     const path = `/jobs/${command.jobId}/runs/${command.runId}/${command.action === 'cancel' ? 'cancel' : 'recover'}`;
     try {
@@ -137,7 +138,7 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
         : textMessage(copy.refused, { reason: (code && reasons[code === 'CANCELLATION_RECEIPT_CAPACITY' ? 'RECEIPT_CAPACITY' : code]) || copy.reasonUnknown }), failure));
     } finally {
       if (active.current === controller) {
-        active.current = null; setBusy(false);
+        active.current = null; setActivity(null);
         // The command consumed that read's eligibility; only a fresh server read shows actions again.
         if (sentFrom !== null) setControls(current => current === sentFrom ? null : current);
       }
@@ -166,12 +167,12 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
       { runId: <a href={runPath(basePath, jobId, run.previousRunId)}><code>{run.previousRunId}</code></a> })}</p>}
     <p role="status">{!available ? copy.paused : stale ? copy.stale : status}</p>
     {created && <p><a href={runPath(basePath, jobId, created)}>{textMessage(copy.createdLink, { runId: created })}</a></p>}
-    {pendingHere && <div class="notice">
-      <p>{textMessage(copy.unknown, { action: actionName[pending.action], runId: pending.runId })}</p>
+    {(pendingHere || activity === 'replay') && <div class="notice">
+      {pendingHere && <p>{textMessage(copy.unknown, { action: actionName[pending.action], runId: pending.runId })}</p>}
       <div class="job-actions">
         <button type="button" disabled={!busy && !available} aria-disabled={busy ? 'true' : undefined} aria-describedby={describedBy}
-          onClick={() => { if (!busy) void send(pending, true); }}>{copy.replay}</button>
-        <button type="button" disabled={busy} onClick={() => { forget(); setStatus(copy.discarded); }}>{copy.discard}</button>
+          onClick={() => { if (!busy && pendingHere) void send(pending, true); }}>{copy.replay}</button>
+        {pendingHere && <button type="button" disabled={busy} onClick={() => { forget(); setStatus(copy.discarded); }}>{copy.discard}</button>}
       </div>
     </div>}
     {pending && !pendingHere && <p class="notice">{copy.otherPending} <a href={runPath(basePath, pending.jobId, pending.runId)}>{copy.openPending}</a></p>}
