@@ -8,7 +8,7 @@ import { sourceCopy as copy } from '../copy/sources';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { formatExactBytes } from '../jobs/metadataFormat';
-import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
+import { beginSourceRead, currentSourceRead, sourceDownloadName, sourceReadMessage } from './navigation';
 import type { SourceReadState } from './navigation';
 import { bindSourceDiff, bindSourceFileDiff, jobRunsRoute, sourceDiffParent, sourceDiffPath, sourceDiffRoute, sourceDiffSelection,
   sourceFileDiffPath, sourceFileDiffSelection, sourcePatchRoute } from './diff';
@@ -348,7 +348,8 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
       {data.representation !== 'text' && data.representation !== 'identical' && <p>{copy.diffEvidence}</p>}
       {data.representation === 'text' && data.totalHunks === 0 && <p>{copy.diffEmptyExistence}</p>}
       {data.patchAvailable && <p><a href={apiPath(basePath, sourcePatchRoute(selected, { ...chosen,
-        pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } }))} download="">{copy.diffPatch}</a> {copy.diffPatchNotice}</p>}
+        pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } }))}
+        download={`${sourceDownloadName(name ?? '')}.diff`}>{copy.diffPatch}</a> {copy.diffPatchNotice}</p>}
       {data.hunks.map((item, index) => <div class="source-diff-hunk" key={`${data.hunkOffset + index}`}>
         {item.unchangedBefore > 0 && <p class="source-diff-omitted">{message(copy.diffOmitted, { count: item.unchangedBefore })}</p>}
         <p class="source-diff-header"><code>{textMessage(copy.diffHunkHeader, { baseStart: item.baseStart, baseCount: item.baseCount, headStart: item.headStart, headCount: item.headCount })}</code></p>

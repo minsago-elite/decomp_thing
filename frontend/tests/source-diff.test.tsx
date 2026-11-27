@@ -33,7 +33,7 @@ function run(runId: string, revision: string | null, extra: Partial<Run> = {}): 
 function mount(component: 'list' | 'file', search: string) {
   history.replaceState(null, '', `${root}/source-diff${component === 'file' ? '/file' : ''}${search}`);
   const View = component === 'list' ? SourceDiff : SourceFileDiff;
-  return render(<LocationProvider scope="/"><View selected={selected} basePath="/nested" search={search} /></LocationProvider>);
+  return render(<LocationProvider scope="/nested/"><View selected={selected} basePath="/nested" search={search} /></LocationProvider>);
 }
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -171,7 +171,10 @@ it('renders bounded hunks as inert text with line numbers, omitted ranges and a 
   // The patch and later hunk pages are pinned to the two metadata versions this page observed.
   const pin = `metadataVersion=${document.data.metadataVersion}&baseMetadataVersion=${document.data.baseMetadataVersion}`;
   expect(patch.getAttribute('href')).toBe(`/nested/api/v1/jobs/${jobId}/runs/run_2/revisions/revision_2/source-diff/patch${search}&${pin}`);
-  expect(patch.hasAttribute('download')).toBe(true);
+  const workbenchUrl = window.location.href;
+  expect(fireEvent.click(patch)).toBe(true);
+  expect(window.location.href).toBe(workbenchUrl);
+  expect(patch.getAttribute('download')).toBe('main.c.diff');
   const head = screen.getByRole('link', { name: 'Open the compared file' });
   expect(head.getAttribute('href')).toContain(`/runs/run_2/revisions/revision_2/source-files/${document.data.headFile!.fileId}?sourceSha256=`);
   const baseLink = screen.getByRole('link', { name: 'Open the base file' });

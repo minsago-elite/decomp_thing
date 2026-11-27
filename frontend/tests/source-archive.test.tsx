@@ -57,7 +57,10 @@ it('reads nothing until asked, then shows revision, recorded build, acceptance a
   expect(facts.textContent).toContain(copy.gitUnavailable['not-recorded']);
   const link = screen.getByRole('link', { name: copy.downloadVerified });
   expect(link.getAttribute('href')).toBe(`/api/v1/jobs/${jobId}/artifacts/archive_${'1'.repeat(32)}_${'a'.repeat(64)}/content`);
-  expect(link.hasAttribute('download')).toBe(true);
+  const workbenchUrl = window.location.href;
+  expect(fireEvent.click(link)).toBe(true);
+  expect(window.location.href).toBe(workbenchUrl);
+  expect(link.getAttribute('download')).toBe('source-tree.zip');
   expect(screen.getByText(copy.boundary)).toBeTruthy();
 });
 

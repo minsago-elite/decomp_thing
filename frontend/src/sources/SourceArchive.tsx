@@ -35,12 +35,17 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   const focusResult = useRef<string | null>(null);
   // The control whose activation is still awaiting its result. Any intervening focus elsewhere releases the claim.
   const awaiting = useRef<{ control: HTMLElement | null; origin: Element | null } | null>(null);
+  // The digest-bound download link that held focus when a reread replaced the panel's data. Focus returns to the link
+  // only for that read, while nothing else took focus, and only if the reread advertises the same attachment.
+  const link = useRef<HTMLAnchorElement>(null);
+  const heldLink = useRef<{ key: string; href: string } | null>(null);
   useEffect(() => {
     const release = (event: FocusEvent) => {
       if (awaiting.current && event.target !== awaiting.current.control) {
         awaiting.current = null;
         focusResult.current = null;
       }
+      if (heldLink.current && event.target !== link.current) heldLink.current = null;
     };
     document.addEventListener('focusin', release);
     return () => { document.removeEventListener('focusin', release); };
@@ -52,13 +57,27 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   useEffect(() => {
     if (owner.current.binding === binding && owner.current.session === session) return;
     owner.current = { binding, session };
-    stop.current?.(); stop.current = null; busy.current = false; awaiting.current = null; focusResult.current = null;
+    stop.current?.(); stop.current = null; busy.current = false; awaiting.current = null; focusResult.current = null; heldLink.current = null;
     setProgress(null);
   }, [binding, session]);
   useEffect(() => refresh === 0 ? undefined : beginSourceRead(key, async signal => bindSourceArchive(
     (await client.get('sourceArchive', archiveStatusRoute(selected), { signal })).data, selected, basePath), setRead), [client, key]);
   const current = refresh > 0 && read ? currentSourceRead(read, key) : refresh > 0 ? { key, state: 'loading' as const } : null;
   const data = current?.state === 'ready' ? current.value : null;
+  function holdLink(nextKey: string) {
+    const anchor = link.current;
+    heldLink.current = anchor && anchor.isConnected && document.activeElement === anchor
+      ? { key: nextKey, href: anchor.getAttribute('href') ?? '' } : null;
+  }
+  useLayoutEffect(() => {
+    const held = heldLink.current;
+    if (!held || !current || current.state === 'loading' || current.key !== held.key) return;
+    heldLink.current = null;
+    const active = document.activeElement;
+    const anchor = link.current;
+    if (current.state === 'ready' && anchor && anchor.getAttribute('href') === held.href && held.href !== ''
+      && (active === null || active === document.body || active === anchor)) anchor.focus();
+  }, [current?.key, current?.state, data]);
   // Layout timing: focus lands in the same commit that renders the verified result, not after a later paint.
   useLayoutEffect(() => {
     if (!current || current.state === 'loading' || current.key !== focusResult.current) return;
@@ -102,6 +121,7 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
         setProgress({ state: 'done', value });
         setRefresh(count => {
           focusResult.current = [selected.jobId, selected.runId, selected.revisionId, count + 1].join('/');
+          holdLink(focusResult.current);
           return count + 1;
         });
       } catch (failure) {
@@ -113,7 +133,7 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   return <section class="source-archive" aria-labelledby="source-archive-title">
     <h2 id="source-archive-title">{copy.title}</h2>
     <p>{copy.distinction}</p>
-    <button type="button" disabled={current?.state === 'loading' || running} onClick={() => setRefresh(value => value + 1)}>
+    <button type="button" disabled={current?.state === 'loading' || running} onClick={() => setRefresh(value => { holdLink([binding, value + 1].join('/')); return value + 1; })}>
       {refresh === 0 ? copy.inspect : copy.refresh}</button>
     {current?.state === 'loading' && <p role="status">{copy.loading}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
@@ -140,7 +160,7 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
       <p>{copy.boundary}</p>
       {data.archive.sha256 !== null && <button type="button" aria-disabled={running ? 'true' : undefined}
         aria-describedby="source-archive-operation" onClick={event => { if (!running) verify(data.archive.sha256!, event.currentTarget); }}>{copy.verify}</button>}
-      {data.archive.contentHref !== null && <p><a href={data.archive.contentHref} download="">
+      {data.archive.contentHref !== null && <p><a ref={link} href={data.archive.contentHref} download="source-tree.zip">
         {verification.state === 'verified' ? copy.downloadVerified : copy.downloadUnverified}</a></p>}
     </>}
     <p id="source-archive-operation" role="status">{progress?.state === 'submitting' ? copy.submitting : progress?.state === 'running' ? message(copy.operation, { state: copy.operationStates[progress.value.state] })

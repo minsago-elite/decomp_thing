@@ -184,3 +184,62 @@ it('does not let a failed verification reread steal focus on the next manual ref
   expect(document.activeElement).toBe(refresh);
   expect(document.activeElement?.hasAttribute('data-archive-state')).toBe(false);
 });
+
+const download = (scope: HTMLElement) => scope.querySelector<HTMLAnchorElement>('a[href]');
+const otherArchive: Status = decodeResponse(read('source-archive-verified').replaceAll('a'.repeat(64), 'b'.repeat(64)), 'sourceArchive').data;
+const noArchive = status('source-archive-missing');
+it.each([
+  ['restores focus to the same digest-bound download', verified, 'none', true],
+  ['does not focus a changed attachment', otherArchive, 'none', false],
+  ['does not focus when the attachment disappears', noArchive, 'none', false],
+  ['respects focus moved to another panel control during the reread', verified, 'refresh', false],
+  ['respects focus moved outside the panel during the reread', verified, 'outside', false],
+] as const)('download focused during verification: %s', async (_name, after, intervene, restored) => {
+  const outside = document.body.appendChild(document.createElement('button'));
+  try {
+    const { panels: [first, second] } = mount(2);
+    await inspect(second!, before);
+    await inspect(first!, before);
+    button(first!, copy.verify).click(); await microtasks();
+    await settle(operation('running'));
+    const href = download(first!)!.getAttribute('href');
+    download(first!)!.focus();
+    await vi.advanceTimersByTimeAsync(1000); await microtasks();
+    await settle(operation('completed'));
+    paint(); await microtasks();
+    expect(download(first!)).toBeNull();
+    if (intervene === 'refresh') button(second!, copy.refresh).focus();
+    if (intervene === 'outside') outside.focus();
+    const moved = document.activeElement;
+    await settle(after); paint();
+    expect(result(first!)?.dataset.archiveState).toBe(after.verification.state);
+    if (restored) {
+      expect(document.activeElement).toBe(download(first!));
+      expect(download(first!)!.getAttribute('href')).toBe(href);
+    } else {
+      expect(document.activeElement).not.toBe(download(first!));
+      if (intervene !== 'none') expect(document.activeElement).toBe(moved);
+    }
+    expect(second!.contains(document.activeElement)).toBe(intervene === 'refresh');
+  } finally { outside.remove(); }
+});
+
+it('does not restore download focus after a failed reread, an earlier move, or unmount', async () => {
+  const { view, panels: [panel] } = mount();
+  await inspect(panel!, before);
+  download(panel!)!.focus();
+  button(panel!, copy.verify).click(); await microtasks();
+  await settle(operation('completed'));
+  paint(); await microtasks();
+  await settle({}); paint();
+  expect(within(panel!).getByRole('alert')).toBeDefined();
+  button(panel!, copy.refresh).focus();
+  await inspect(panel!, verified, copy.refresh);
+  expect(document.activeElement).toBe(button(panel!, copy.refresh));
+  download(panel!)!.focus();
+  button(panel!, copy.refresh).click(); await microtasks();
+  paint(); await microtasks();
+  view.unmount();
+  await settle(verified); paint();
+  expect(document.activeElement).toBe(document.body);
+});
