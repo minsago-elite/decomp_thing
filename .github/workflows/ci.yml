@@ -171,13 +171,11 @@ jobs:
         env:
           DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
         run: |
+          python3 scripts/test-ci-install-acp-host-prerequisites.py
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
           python3 scripts/install-web-test-browser.py "$RUNNER_TEMP/web-test-browser"
-          sudo apt-get update
-          mapfile -t web_browser_dependencies < "$RUNNER_TEMP/web-test-browser/deb.deps"
-          sudo apt-get satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
-          sudo apt-get install -y --no-install-recommends xvfb
+          bash scripts/ci-install-acp-host-prerequisites.sh browser "$RUNNER_TEMP/web-test-browser/deb.deps"
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Record browser pin and check driver lifecycle
         run: |
