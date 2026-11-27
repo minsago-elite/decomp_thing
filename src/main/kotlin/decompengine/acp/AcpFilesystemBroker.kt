@@ -279,6 +279,16 @@ internal class AcpFilesystemBroker private constructor(
             openParent(resolved).use { parent ->
                 parent.openFinalOrNull(resolved.fileName).use { original ->
                     requireWritableIdentity(original?.identity, canCreate, canWrite)
+                    val operation = if (original == null) AgentOperation.CREATE_FILE else AgentOperation.WRITE_FILE
+                    if (!request.accessPolicy.allowsMutation(
+                            resolved.policyPath,
+                            operation,
+                            encoded.size.toLong(),
+                            validUtf8 = true,
+                        )) {
+                        reject(AcpFilesystemAuditReason.POLICY_DENIED,
+                            "filesystem write is outside the workflow mutation authority")
+                    }
                     raceHook?.run(AcpFilesystemRaceStage.AFTER_PARENT_OPENED, resolved.absolutePath)
                     parent.verifyBindings()
                     parent.requireCurrentOptionalIdentity(resolved.fileName, original?.identity)
