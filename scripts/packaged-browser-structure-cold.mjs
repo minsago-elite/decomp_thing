@@ -25,6 +25,7 @@ export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
   'scripts/packaged-browser-scale.mjs',
   'scripts/packaged-browser-contrast.mjs',
   'scripts/packaged-browser-live.mjs',
+  'scripts/packaged-browser-lifecycle.mjs',
   'scripts/packaged-browser-history.mjs',
   'scripts/packaged-browser-legacy.mjs',
   'scripts/packaged-browser-restart.mjs',
