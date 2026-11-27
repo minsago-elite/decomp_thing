@@ -1,3 +1,5 @@
+# Docker runtime created by the hosted setup action
+/.d/
 .gradle/
 .kotlin/
 .env

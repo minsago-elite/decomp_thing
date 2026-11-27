@@ -451,6 +451,27 @@ class RecipeAndSanitizerTest(unittest.TestCase):
 
 
 class ProcessBoundsTest(unittest.TestCase):
+    def test_clean_source_excludes_only_root_managed_docker_directory(self):
+        (ROOT / "build").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "build") as scratch:
+            repo = Path(scratch)
+            shutil.copyfile(ROOT / ".gitignore", repo / ".gitignore")
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+            subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                            "commit", "-qm", "fixture"], cwd=repo, check=True)
+            runtime = repo / ".d"
+            runtime.mkdir()
+            (runtime / "daemon.json").write_text("{}")
+            with patch.object(diagnostic, "ROOT", repo):
+                self.assertEqual("", diagnostic._git_value("status", "--porcelain", empty_ok=True))
+                nested = repo / "source" / ".d"
+                nested.mkdir(parents=True)
+                (nested / "input").touch()
+                (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "\n")
+                status = diagnostic._git_value("status", "--porcelain", "--untracked-files=all")
+                self.assertEqual(["M .gitignore", "?? source/.d/input"], status.splitlines())
+
     def test_empty_successful_git_status_is_recorded_as_clean(self):
         completed = subprocess.CompletedProcess(["git", "status", "--porcelain"], 0, b"", b"")
         with patch.object(diagnostic.subprocess, "run", return_value=completed):
