@@ -823,8 +823,61 @@ public final class OwnedExporterPrototypeProbe {
             "nonlocal refusal stops before later valid data: " + detail);
         collectorStatuses(metadata, false);
     }
+    static void missingSignatureType(DataType root, String detail) throws Exception {
+        var fixture = new CollectorFixture();
+        fixture.returnType = root;
+        var exporter = fixture.prepare();
+        Object sink = evidence(new TreeSet<>());
+        Object metadata = collect(exporter, fixture.function(0x1000), sink);
+        Object failure = OwnedExporterReferencedBytesProbe.get(metadata, "failure");
+        check(("type recovery refused: metadataRefusal=NULL_TYPE;detail=" + detail).equals(failure), failure);
+        check(coverage(metadata).byPath.isEmpty() && records(sink, "types").isEmpty() &&
+            catalog(exporter).definitions.isEmpty(), "incomplete signature type published");
+        collectorStatuses(metadata, false);
+    }
+    static void nullConstructorControls() throws Exception {
+        var untyped = pointer(null, 8);
+        var explicitVoid = pointer(new VoidDataType(manager), 8);
+        check(untyped.getDataType() == null && explicitVoid.getDataType() instanceof VoidDataType,
+            "bundled null-target and explicit void pointers");
+        var admitted = extract(new Prototype(explicitVoid));
+        check(admitted.typed != null && admitted.typed.declaration.equals("void * probe(void)"), "explicit void pointer declaration");
+        missingSignatureType(null, "MISSING_DATA_TYPE_ROOT_DEPTH_0");
+        missingSignatureType(OwnedExporterReferencedBytesProbe.proxy(ghidra.program.model.data.Array.class, (m,a) -> null),
+            "MISSING_DATA_TYPE_ARRAY_ELEMENT_DEPTH_1");
+        var valid = OwnedExporterReferencedBytesProbe.proxy(DataTypeComponent.class,
+            (m,a) -> m.getName().equals("getDataType") ? I : null);
+        var missing = OwnedExporterReferencedBytesProbe.proxy(DataTypeComponent.class, (m,a) -> null);
+        var aggregate = OwnedExporterReferencedBytesProbe.proxy(Structure.class, (m,a) -> {
+            switch (m.getName()) {
+                case "getNumDefinedComponents": return 2;
+                case "getDefinedComponents": return new DataTypeComponent[]{valid, missing};
+                default: return null;
+            }
+        });
+        var wrapper = OwnedExporterReferencedBytesProbe.proxy(TypeDef.class,
+            (m,a) -> m.getName().equals("getDataType") ? aggregate : null);
+        missingSignatureType(wrapper, "MISSING_DATA_TYPE_MEMBER_1_DEPTH_2");
+
+        var fixture = new CollectorFixture();
+        fixture.reference(0x10000, alias("Before", I), 1);
+        fixture.reference(0x10100, untyped, 1);
+        fixture.reference(0x10200, alias("After", I), 1);
+        var exporter = fixture.prepare();
+        Object sink = evidence(new TreeSet<>());
+        Object metadata = collect(exporter, fixture.function(0x1000), sink);
+        Object failure = OwnedExporterReferencedBytesProbe.get(metadata, "failure");
+        check("data-reference recovery refused: metadataRefusal=NULL_TYPE;detail=MISSING_DATA_TYPE_POINTER_TARGET_DEPTH_1".equals(failure), failure);
+        check(records(sink, "globals").keySet().equals(Set.of("global_0000000000010000", "global_0000000000010100")) &&
+            !fixture.selections.containsKey(0x10200L), "null target stops the data collector after its raw observation");
+        check(coverage(metadata).byPath.keySet().equals(Set.of("/Before")) &&
+            catalog(exporter).definitions.keySet().equals(Set.of("/Before")) && records(sink, "types").size() == 1,
+            "only the preceding supported closure is published");
+        collectorStatuses(metadata, false);
+    }
     static void collectorHardBoundaryControls(Path root) throws Exception {
         Files.createDirectories(root);
+        nullConstructorControls();
         // A null child reaches the graph (the raw typedef observation itself remains valid).
         TypeDef nullChild = OwnedExporterReferencedBytesProbe.proxy(TypeDef.class, (m,a) -> {
             switch (m.getName()) {
@@ -837,7 +890,7 @@ public final class OwnedExporterPrototypeProbe {
         DataType deep = I; for (int depth = 0; depth < 33; depth++) deep = pointer(deep, 8);
         var otherShape = pointer(I, 4);
         List<DataType> refused = List.of(nullChild, alias("bad-name", I), otherShape, deep);
-        String[] details = {"MISSING_DATA_TYPE", "TYPE_NAME", "POINTER_TARGET_LAYOUT", "TYPE_GRAPH"};
+        String[] details = {"MISSING_DATA_TYPE_TYPEDEF_BASE_DEPTH_1", "TYPE_NAME", "POINTER_TARGET_LAYOUT", "TYPE_GRAPH"};
         for (int index = 0; index < refused.size(); index++) {
             var fixture = mixedCollector(); fixture.dataTypes.put(0x10000L, refused.get(index));
             var exporter = fixture.prepare(); stoppedCollector(fixture, exporter, details[index]);

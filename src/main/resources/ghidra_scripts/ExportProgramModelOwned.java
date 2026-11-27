@@ -1996,10 +1996,18 @@ public class ExportProgramModelOwned extends GhidraScript {
             if (index != count) throw unsupported("ENUM_VALUES");
             return boundedEnumNames(names, count, depth, budget, () -> prototypeCancellation(taskMonitor));
         }
-        String describe(DataType type, int depth, java.util.IdentityHashMap<DataType, Boolean> active,
-                        Map<String, DataType> activeNames, boolean pointerTarget) throws Exception {
+        enum TypeEdge { ROOT, POINTER_TARGET, TYPEDEF_BASE, ARRAY_ELEMENT, MEMBER }
+
+        private void enterNode(DataType type, int depth, TypeEdge edge, int memberIndex) throws Exception {
             prototypeCancellation(taskMonitor); budget.node(depth);
-            if (type == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "MISSING_DATA_TYPE");
+            if (type == null) {
+                String location = edge == TypeEdge.MEMBER ? "MEMBER_" + memberIndex : edge.name();
+                throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "MISSING_DATA_TYPE_" + location + "_DEPTH_" + depth);
+            }
+        }
+        String describe(DataType type, int depth, TypeEdge edge, int memberIndex, java.util.IdentityHashMap<DataType, Boolean> active,
+                        Map<String, DataType> activeNames, boolean pointerTarget) throws Exception {
+            enterNode(type, depth, edge, memberIndex);
             boolean namedType = isNamed(type);
             String path = type instanceof Pointer ? "<pointer>" : type instanceof Array ? "<array>" : budget.text(type.getPathName());
             if (namedType && activeNames.containsKey(path)) {
@@ -2027,17 +2035,17 @@ public class ExportProgramModelOwned extends GhidraScript {
             }
             if (type instanceof Pointer) {
                 if (type.getLength() != target.pointerSize || type.getAlignment() != target.pointerSize) throw unsupported("POINTER_TARGET_LAYOUT");
-                append(descriptor, describe(((Pointer)type).getDataType(), depth + 1, active, activeNames, true));
+                append(descriptor, describe(((Pointer)type).getDataType(), depth + 1, TypeEdge.POINTER_TARGET, -1, active, activeNames, true));
             } else if (type instanceof TypeDef) {
                 DataType underlying = ((TypeDef)type).getDataType();
-                append(descriptor, describe(underlying, depth + 1, active, activeNames, pointerTarget));
+                append(descriptor, describe(underlying, depth + 1, TypeEdge.TYPEDEF_BASE, -1, active, activeNames, pointerTarget));
                 if (type.getLength() != underlying.getLength() || type.getAlignment() != underlying.getAlignment()) throw unsupported("TYPEDEF_LAYOUT");
             } else if (type instanceof Array) {
                 Array array = (Array)type;
                 if (array.getNumElements() <= 0 || array.getElementLength() <= 0 ||
                     (long)array.getNumElements() * array.getElementLength() != array.getLength()) throw unsupported("UNSIZED_ARRAY");
                 append(descriptor, array.getNumElements() + ";" + array.getElementLength() + ";");
-                append(descriptor, describe(array.getDataType(), depth + 1, active, activeNames, false));
+                append(descriptor, describe(array.getDataType(), depth + 1, TypeEdge.ARRAY_ELEMENT, -1, active, activeNames, false));
                 if (array.getElementLength() != array.getDataType().getLength() || array.getAlignment() != array.getDataType().getAlignment())
                     throw unsupported("ARRAY_LAYOUT");
             } else if (type instanceof Composite) {
@@ -2060,7 +2068,7 @@ public class ExportProgramModelOwned extends GhidraScript {
                     if (!validCName(member) || !names.add(member)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "MEMBER_NAME");
                     DataType memberType = component.getDataType();
                     append(descriptor, i + ";" + field(member) + ";" + component.getOffset() + ";" + component.getLength() + ";");
-                    append(descriptor, describe(memberType, depth + 1, active, activeNames, false));
+                    append(descriptor, describe(memberType, depth + 1, TypeEdge.MEMBER, i, active, activeNames, false));
                     int memberAlignment = memberType.getAlignment();
                     if (memberAlignment <= 0 || component.getLength() != memberType.getLength()) throw unsupported("MEMBER_LAYOUT");
                     long offset = aggregate instanceof Union ? 0 : aligned(size, memberAlignment);
@@ -2101,27 +2109,30 @@ public class ExportProgramModelOwned extends GhidraScript {
             if (alignment <= 0 || alignment > 16 || (alignment & (alignment - 1)) != 0) throw unsupported("ALIGNMENT_UNPROVEN");
             return (size + alignment - 1) & -(long)alignment;
         }
-        void precheck(DataType type, int depth, java.util.IdentityHashMap<DataType, Boolean> active, boolean pointerTarget) throws Exception {
-            prototypeCancellation(taskMonitor); budget.node(depth);
-            if (type == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "MISSING_DATA_TYPE");
+        void precheck(DataType type, int depth, TypeEdge edge, int memberIndex, java.util.IdentityHashMap<DataType, Boolean> active, boolean pointerTarget) throws Exception {
+            enterNode(type, depth, edge, memberIndex);
             if (active.put(type, Boolean.TRUE) != null) {
                 if (type instanceof Composite && pointerTarget) return;
                 throw unsupported(type instanceof Composite ? "BY_VALUE_TYPE_CYCLE" : "WRAPPER_CYCLE");
             }
             // Wrapper length/alignment getters recurse in Ghidra. Check constructor depth/cycles
             // before calling any of them, not merely before our own declaration rendering.
-            if (type instanceof Pointer) precheck(((Pointer)type).getDataType(), depth + 1, active, true);
-            else if (type instanceof TypeDef) precheck(((TypeDef)type).getDataType(), depth + 1, active, pointerTarget);
-            else if (type instanceof Array) precheck(((Array)type).getDataType(), depth + 1, active, false);
-            else if (type instanceof Composite) for (DataTypeComponent member : components((Composite)type)) {
-                if (member == null || member.isBitFieldComponent()) throw unsupported("AGGREGATE_COMPONENT");
-                precheck(member.getDataType(), depth + 1, active, false);
+            if (type instanceof Pointer) precheck(((Pointer)type).getDataType(), depth + 1, TypeEdge.POINTER_TARGET, -1, active, true);
+            else if (type instanceof TypeDef) precheck(((TypeDef)type).getDataType(), depth + 1, TypeEdge.TYPEDEF_BASE, -1, active, pointerTarget);
+            else if (type instanceof Array) precheck(((Array)type).getDataType(), depth + 1, TypeEdge.ARRAY_ELEMENT, -1, active, false);
+            else if (type instanceof Composite) {
+                DataTypeComponent[] members = components((Composite)type);
+                for (int i = 0; i < members.length; i++) {
+                    DataTypeComponent member = members[i];
+                    if (member == null || member.isBitFieldComponent()) throw unsupported("AGGREGATE_COMPONENT");
+                    precheck(member.getDataType(), depth + 1, TypeEdge.MEMBER, i, active, false);
+                }
             }
             active.remove(type);
         }
         void validate(DataType type) throws Exception {
-            precheck(type, 0, new java.util.IdentityHashMap<>(), false);
-            String descriptor = describe(type, 0, new java.util.IdentityHashMap<>(), new TreeMap<>(), false);
+            precheck(type, 0, TypeEdge.ROOT, -1, new java.util.IdentityHashMap<>(), false);
+            String descriptor = describe(type, 0, TypeEdge.ROOT, -1, new java.util.IdentityHashMap<>(), new TreeMap<>(), false);
             rootObservations.add(descriptor);
         }
         String surface(DataType type, boolean canonicalInteger, int depth) throws Exception {
@@ -2199,7 +2210,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             for (DataType definition : definitions) {
                 prototypeCancellation(taskMonitor);
                 budget.total(target.identity.getBytes(StandardCharsets.UTF_8).length + 1);
-                String descriptor = target.identity + ";" + describe(definition, 0, new java.util.IdentityHashMap<>(), new TreeMap<>(), false);
+                String descriptor = target.identity + ";" + describe(definition, 0, TypeEdge.ROOT, -1, new java.util.IdentityHashMap<>(), new TreeMap<>(), false);
                 Set<String> deps = new TreeSet<>(), exports = new TreeSet<>();
                 dependencies(definition, deps, 0, true);
                 String path = budget.text(definition.getPathName()), id = budget.text(typeId(path));
