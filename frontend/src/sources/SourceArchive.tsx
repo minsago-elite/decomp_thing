@@ -29,14 +29,19 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   const [progress, setProgress] = useState<Progress | null>(null);
   const stop = useRef<(() => void) | null>(null);
   const result = useRef<HTMLParagraphElement>(null);
-  const focusResult = useRef(false);
+  // Key of the one verification-triggered read whose result takes focus; manual and other reads never match it.
+  const focusResult = useRef<string | null>(null);
   useEffect(() => () => { stop.current?.(); stop.current = null; }, []);
   useEffect(() => refresh === 0 ? undefined : beginSourceRead(key, async signal => bindSourceArchive(
     (await client.get('sourceArchive', archiveStatusRoute(selected), { signal })).data, selected, basePath), setRead), [client, key]);
   const current = refresh > 0 && read ? currentSourceRead(read, key) : refresh > 0 ? { key, state: 'loading' as const } : null;
   const data = current?.state === 'ready' ? current.value : null;
   // Layout timing: focus lands in the same commit that renders the verified result, not after a later paint.
-  useLayoutEffect(() => { if (data && focusResult.current) { focusResult.current = false; result.current?.focus(); } }, [data]);
+  useLayoutEffect(() => {
+    if (!current || current.state === 'loading' || current.key !== focusResult.current) return;
+    focusResult.current = null;
+    if (data) result.current?.focus();
+  }, [current?.key, current?.state, data]);
   const running = progress?.state === 'running';
   function verify(archiveSha256: string) {
     const csrfToken = session.csrf();
@@ -58,8 +63,10 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
         }
         if (controller.signal.aborted) return;
         setProgress({ state: 'done', value });
-        focusResult.current = true;
-        setRefresh(count => count + 1);
+        setRefresh(count => {
+          focusResult.current = [selected.jobId, selected.runId, selected.revisionId, count + 1].join('/');
+          return count + 1;
+        });
       } catch (failure) {
         if (!controller.signal.aborted) setProgress({ state: 'failed', failure });
       }

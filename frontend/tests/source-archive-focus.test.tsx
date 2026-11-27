@@ -165,3 +165,22 @@ it('aborts the pending reread on unmount and ignores its late result', async () 
   expect(document.activeElement).toBe(document.body);
   expect(document.querySelector('[data-archive-state]')).toBeNull();
 });
+
+it('does not let a failed verification reread steal focus on the next manual refresh', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  button(panel!, copy.verify).click(); await microtasks();
+  await settle(operation('running'));
+  await vi.advanceTimersByTimeAsync(1000); await microtasks();
+  await settle(operation('completed'));
+  paint(); await microtasks();
+  expect(pending.map(call => call.path)).toEqual([`${root}/source-archive`]);
+  await settle({}); paint();
+  expect(within(panel!).getByRole('alert')).toBeDefined();
+  expect(result(panel!)).toBeNull();
+  const refresh = button(panel!, copy.refresh);
+  refresh.focus();
+  await inspect(panel!, verified, copy.refresh);
+  expect(document.activeElement).toBe(refresh);
+  expect(document.activeElement?.hasAttribute('data-archive-state')).toBe(false);
+});
