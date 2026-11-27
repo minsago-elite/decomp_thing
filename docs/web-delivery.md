@@ -134,7 +134,12 @@ is not evidence/activity readiness: those routes intentionally require explicit 
 each layout/contrast/focus pass, the audit activates the activity/exploration/history/receipt
 controls and requires populated content and successful reads. The source-search form and
 populated results each have independent route coverage, and visible input values and placeholders
-are included in contrast measurements. The audit also submits the job-library filename filter 50
+are included in contrast measurements. Each explicit action's page, action, context, elapsed time
+and ordered fixture reads are validated against the trusted fixture contract. The finite,
+nonnegative raw interaction samples are tied to those records and their samples/median/p95 summary
+is recomputed into `report.json`; they have no interaction budget, so that summary is not a qualified
+interaction p95 threshold. The navigation gate asserts p95 ≤1.5 s cold, ≤100 ms feedback and ≤500 ms
+first route data. The audit also submits the job-library filename filter 50
 times, alternating between `audit-filter-match` and clearing that filter. Each timed action starts
 with focus on the submit button, so a previous sample's focus cannot satisfy the next one. It
 measures local feedback when the applied query and visible status survive a later animation-frame
@@ -161,8 +166,8 @@ contract's job, run, revision, file, source digest and metadata version. Each ph
 raw p95 at exactly ≤100 ms feedback and ≤500 ms first data (metadata or chunk). The report keeps the
 raw samples and recomputed summaries, and compaction retains every request in the filter and
 source-open windows so an unexpected request is still rejected. Fixture API responses are
-loopback contract fixtures, so these timings exclude server latency and storage. They do not
-measure the constrained 4× CPU / 10 Mbit profile, cross-engine source-open timing (Playwright
+loopback contract fixtures, so these timings exclude server latency and storage. Under the opt-in constrained profile they are recorded
+without budgets; they do not measure cross-engine source-open timing (Playwright
 engines opt out of this Chromium DevTools measurement) or compositor presentation and pixel
 scanout. A phase is "ready" when Chromium's DOM state is unchanged across two consecutive
 `requestAnimationFrame` observations (10 s hard deadline); that is DOM readiness, not a
@@ -172,10 +177,23 @@ median/p95 values.
 
 The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
 chunks and worker are real packaged responses. That isolates browser-side navigation and
+rendering work. The default `--profile reference` preserves browser defaults and applies the
+documented navigation budgets. An opt-in `--profile constrained` applies 4× CPU throttling and
+symmetric 10 Mbit/s throughput to each audit page target. It records and validates the same timing
+evidence (navigation, filter and source-open) but does not apply the reference timing thresholds; it creates no new interaction budget
+or CI gate. The profile does not create a fresh browser process per cold load, measure server
+latency or establish a cross-engine result. A local reference-profile run on a development host
+measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI retains its
+own numbers.
+
+
+The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
+chunks and worker are real packaged responses. That isolates browser-side navigation and
 rendering work. The filter workload renders one fixture row, so it does not measure scanning a
-large server-side job library. It is not the constrained 4× CPU / 10 Mbit profile, a fresh browser
+large server-side job library. It is not a fresh browser
 process per cold load, a server-latency measurement or a cross-engine filter result. Tabs and
-dialogs remain outside this timing qualification; the constrained profile also remains unmeasured. CI
+dialogs remain outside this timing qualification; constrained-profile filter and source-open samples are recorded
+but not gated. CI
 retains its own raw and summary timing evidence.
 
 Heavy browser work is bounded rather than deferred: source previews read at most one

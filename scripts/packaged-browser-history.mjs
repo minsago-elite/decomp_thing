@@ -16,7 +16,7 @@ export async function seedHistory(root) {
   const at = new Date(Date.now() - 300_000).toISOString();
   const job = { id: jobId, filename: 'synthetic-history.elf', status: 'uploaded', created_at: at, updated_at: at,
     size_bytes: 64, binary_path: join(directory, 'input.elf'), metadata: { format: 'ELF64', endianness: 'little',
-      elf_version: 1, os_abi: 'System V', object_type: 'EXEC', machine: 'x86-64', entry_point: 0,
+      elf_version: 1, os_abi: 'System V', object_type: 'executable', machine: 'x86-64', entry_point: 0,
       elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
   const jobBytes = JSON.stringify(job);
   const attempts = Array.from({ length: 55 }, (_, index) => {
@@ -31,7 +31,8 @@ export async function seedHistory(root) {
       candidate: state === 'completed' ? { revisionId: `revision_fixture_${index}`, sourceSha256: 'e'.repeat(64) } : null,
       acceptedRevision: null };
   });
-  const state = { schemaVersion: 1, jobId, version: 'version_fixture_history',
+  // Durable snapshot versions are validated as version_<32 lowercase hex> (#472).
+  const state = { schemaVersion: 1, jobId, version: `version_${'f'.repeat(32)}`,
     legacy: { originalJobSha256: createHash('sha256').update(jobBytes).digest('hex'), status: 'uploaded', recoveredInterrupted: false },
     attempts, acceptedRevision: null };
   const retained = { 'input.elf': input, 'job.json': jobBytes, 'workflow-state.json': JSON.stringify(state) };
@@ -115,7 +116,9 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(polling.first.items[0].payload.fields.inputTokens, '18446744073709551615');
   assert.equal(polling.first.items[0].runId, 'run_fixture_3');
   assert.equal(polling.first.items[0].payload.writerId, 'writer_fixture_progress');
+  // The raw taskId is a private label (#472): every fixture event withholds it besides its own private fields.
   for (const event of [...polling.first.items, ...polling.second.items]) {
+    assert.equal(event.payload.fields.taskId, undefined);
     assert.equal(event.payload.fields.text, undefined);
     assert.equal(event.payload.fields.entries, undefined);
     assert.equal(event.payload.fields.path, undefined);
@@ -124,16 +127,16 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
       assert.equal(event.payload.fields.entriesTruncated, false);
       assert.equal(event.payload.fields.entryCount, '1');
       assert.equal(event.payload.fields.textOmitted, undefined);
-      assert.equal(event.payload.omittedFieldCount, '1');
+      assert.equal(event.payload.omittedFieldCount, '2');
     } else if (event.sequence === '2') {
       assert.equal(event.payload.observationKind, 'file_change');
       assert.equal(event.payload.fields.change, 'modified');
       assert.equal(event.payload.fields.afterSha256, 'c'.repeat(64));
       assert.equal(event.payload.fields.textOmitted, undefined);
-      assert.equal(event.payload.omittedFieldCount, '1');
+      assert.equal(event.payload.omittedFieldCount, '2');
     } else {
       assert.equal(event.payload.fields.textOmitted, true);
-      assert.equal(event.payload.omittedFieldCount, '2');
+      assert.equal(event.payload.omittedFieldCount, '3');
     }
   }
   assert.ok(!JSON.stringify(polling).includes('Synthetic private'));
@@ -325,8 +328,48 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.ok(accessibility.nodes.some(node => node.role?.value === 'status' && node.properties?.some(property => property.name === 'live' && property.value.value === 'polite')));
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read exploration evidence').click()`);
-  await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
-  assert.ok(await evaluate(tab, `document.body.innerText.includes('not proof of equivalence')`));
+  await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Uncalibrated exploration breadth heuristic')`, 'bound exploration summary');
+  // The producer score is an uncalibrated heuristic (f118b1e34), never a calibrated or equivalence claim.
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('This producer heuristic has no calibrated probability or recovery accuracy interpretation.')`));
+  const chartEvidence = await evaluate(tab, `(() => {
+    const section = document.getElementById('output-signature-breadth-title')?.parentElement;
+    const chart = section?.querySelector('[role="img"][aria-labelledby="output-signature-chart-title"]');
+    const describedBy = (chart?.getAttribute('aria-describedby') ?? '').split(/\\s+/).filter(Boolean);
+    const table = section?.querySelector('#output-signature-counts-caption')?.closest('table');
+    const rows = table ? [...table.querySelectorAll('tbody tr')].map(row => [...row.cells].map(cell => cell.innerText.trim())) : [];
+    const binding = document.getElementById('exploration-report-binding');
+    const accessibleIds = ['exploration-report-binding', 'output-signature-chart-counts', 'output-signature-counts-caption', 'output-signature-chart-note'];
+    return {
+      chartName: document.getElementById(chart?.getAttribute('aria-labelledby') ?? '')?.textContent.trim() ?? null,
+      descriptionNames: describedBy,
+      descriptionsResolve: describedBy.length === accessibleIds.length && accessibleIds.every(id => describedBy.includes(id) && document.getElementById(id)?.textContent.trim()),
+      binding: Object.fromEntries([...(binding?.querySelectorAll('dt') ?? [])].map(term =>
+        [term.textContent.trim(), term.nextElementSibling?.textContent.trim()])),
+      tableCaption: table?.querySelector('caption')?.innerText.trim() ?? null,
+      rows,
+      text: section?.innerText ?? '',
+    };
+  })()`);
+  assert.equal(chartEvidence.chartName, 'Observed output signature counts');
+  assert.equal(chartEvidence.descriptionsResolve, true);
+  const reportDigest = createHash('sha256').update(fixture.exploration).digest('hex').slice(0, 32);
+  assert.deepEqual(chartEvidence.binding, {
+    'Report identity': `exploration_${reportDigest}`,
+    'Report job': fixture.jobId,
+    'Report attempt': 'run_fixture_3',
+    'Recorded report revision': 'Not recorded',
+  });
+  assert.equal(chartEvidence.tableCaption, 'Output signature counts reported by the producer');
+  assert.deepEqual(chartEvidence.rows, [
+    ['Expanded distinct exit/output signatures', '1', 'The producer’s expanded observation sample'],
+    ['New distinct exit/output signatures', '1', 'Expanded observed signatures: 1'],
+  ]);
+  assert.ok(chartEvidence.text.includes('A signature combines the observed exit code')
+    && chartEvidence.text.includes('No branch, statement, function or complete-behavior coverage denominator'));
+  assert.ok(!/%/.test(chartEvidence.text), 'Observed signature counts must not be presented as program-coverage percentages');
+  const chartAccessibility = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
+  assert.ok(chartAccessibility.nodes.some(node => ['img', 'image'].includes(node.role?.value)
+    && node.name?.value === 'Observed output signature counts'), 'The chart must have its accessible image name in the browser accessibility tree');
   assert.equal(await fs.readFile(fixture.reportPath, 'utf8'), fixture.exploration);
   const downloads = join(fixture.directory, '..', '..', 'browser downloads');
   await fs.mkdir(downloads, { mode: 0o700 });
@@ -378,5 +421,9 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
-    unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, readPhaseRetainedBytesUnchanged: true, pinUi: { readBeforeChange: true, pinAndUnpinReconciled: true, auditedBrowserActor: true, otherAttemptDataPreserved: true }, mutationRequests: 2, executionStarted: false };
+    unacceptedCandidate: true, explorationSummary: true, explorationChart: { accessibleName: true, reportAndRunIdentityDescribed: true,
+      measurementAndDenominatorTable: true, noProgramCoverageClaim: true, accessibilityTreeRole: true },
+    nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, readPhaseRetainedBytesUnchanged: true,
+    pinUi: { readBeforeChange: true, pinAndUnpinReconciled: true, auditedBrowserActor: true, otherAttemptDataPreserved: true },
+    mutationRequests: 2, executionStarted: false };
 }
