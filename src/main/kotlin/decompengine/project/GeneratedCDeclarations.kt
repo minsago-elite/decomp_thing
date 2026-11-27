@@ -1679,7 +1679,7 @@ private class COrderInventoryBuilder(val types: List<RecoveredType>, val work: C
                 }
                 is CDerived.Array -> if (derived.end > derived.start) {
                     expression(decl.source.cOrderSlice(derived.start + 1, derived.end - 1, work = work), owner,
-                        original(derived.start + 1), scope, depth + 1)
+                        original(derived.start + 1), scope, depth + 1, arrayBound = true)
                 }
                 is CDerived.Pointer -> Unit
             }
@@ -1692,7 +1692,7 @@ private class COrderInventoryBuilder(val types: List<RecoveredType>, val work: C
         return shape
     }
 
-    private fun expression(source: String, owner: String, start: Int, scope: Int, depth: Int, typeOperand: Boolean = false) {
+    private fun expression(source: String, owner: String, start: Int, scope: Int, depth: Int, typeOperand: Boolean = false, arrayBound: Boolean = false) {
         work.step()
         require(depth < 64) { "type operand nesting exceeds 64" }
         val parser = DirectExpressionParser(source, owner, start, scope, depth)
@@ -1700,7 +1700,8 @@ private class COrderInventoryBuilder(val types: List<RecoveredType>, val work: C
             objects += Triple(shape, site(owner, start + source.length, scope), true)
             return
         }
-        if (parser.tokens.isEmpty() || parser.tokens.map { work.step(); it.text } == listOf("*")) return
+        if (parser.tokens.isEmpty() || parser.tokens.singleOrNull()?.text == "*") return
+        if (arrayBound && parser.unspecifiedArrayBound()) return
         expressions += parser.parse() to site(owner, start + source.length, scope)
     }
 
@@ -1732,6 +1733,11 @@ private class COrderInventoryBuilder(val types: List<RecoveredType>, val work: C
             }, depth + 1)
             objects += Triple(shape, site(owner, start + tokens[end - 1].end, scope), false)
             return shape
+        }
+
+        fun unspecifiedArrayBound(): Boolean {
+            val first = tokens.indexOfFirst { work.step(); it.text !in qualifiers }
+            return first == -1 || (first == tokens.lastIndex && tokens[first].text == "*")
         }
 
         fun parse(): COrderExpression {
