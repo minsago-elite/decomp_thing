@@ -30,7 +30,7 @@ import { jobCopy } from '../copy/job';
 function Details({ jobId, runId, basePath, session, view, navigation, onDeleted }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
   /** A confirmed RESOURCE_GONE tombstone from the attempt read or any panel ends the whole routed attempt (#512). */
-  onDeleted: () => void;
+  onDeleted: (failure?: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
@@ -51,7 +51,7 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
       }
       setStored({ binding, data: receive(response.data), error: '', loading: false });
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted && isDeletedJob(failure)) { deletedHandler.current(); return; }
+      if (!controller.signal.aborted && isDeletedJob(failure)) { deletedHandler.current(failure); return; }
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
         error: withApiFailureReference({
@@ -125,7 +125,7 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
           <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.activity}>
-          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={() => { onDeleted(); }} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
         </PanelBoundary>
       </>}
       {view !== 'activity' && <>
@@ -162,10 +162,11 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
   const valid = /^[0-9a-f]{32}$/.test(jobId) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId);
   // A tombstone belongs to one authenticated view of one attempt; every view of that attempt then shows only recovery (#512).
   const viewKey = state?.status === 'authenticated' ? `${state.generation}/${jobId}/${runId}` : null;
-  const [gone, setGone] = useState<string | null>(null);
+  // The notice keeps a vetted reference ID only when the route's own read supplied one; a panel callback supplies none.
+  const [gone, setGone] = useState<{ key: string; message: string } | null>(null);
   const departing = useRef<Element | null>(null);
   const notice = useRef<HTMLParagraphElement>(null);
-  const deleted = viewKey !== null && gone === viewKey;
+  const deleted = viewKey !== null && gone?.key === viewKey;
   // When the transition removed the focused control, land on the surviving notice; leave surviving focus alone.
   useLayoutEffect(() => {
     if (!deleted) return;
@@ -174,10 +175,14 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
   }, [deleted]);
   const title = <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>;
   if (deleted) return <section aria-labelledby="attempt-title">{title}
-    <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{copy.thisJobWasDeleted}</p>
+    <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{gone.message}</p>
       <a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></div>
   </section>;
-  const markDeleted = () => { if (viewKey !== null && gone !== viewKey) { departing.current = document.activeElement; setGone(viewKey); } };
+  const markDeleted = (failure?: unknown) => {
+    if (viewKey === null || gone?.key === viewKey) return;
+    departing.current = document.activeElement;
+    setGone({ key: viewKey, message: failure === undefined ? copy.thisJobWasDeleted : withApiFailureReference(copy.thisJobWasDeleted, failure) });
+  };
   return <section aria-labelledby="attempt-title">
     {title}
     {valid ? <>

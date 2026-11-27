@@ -3,11 +3,12 @@ import { message as displayMessage, textMessage } from '../shared/messages';
 import { commonCopy } from '../copy/common';
 import { formatExactTimestamp } from '../copy/format';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Runs } from '../api/generated';
-import { jobPath, runPath } from '../app/paths';
+import { appPath, jobPath, runPath } from '../app/paths';
+import { jobCopy } from '../copy/job';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
@@ -16,7 +17,8 @@ import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
 
-function History({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession }) {
+function History({ jobId, basePath, session, onDeleted }: { jobId: string; basePath: string; session: BrowserSession; onDeleted: (failure: unknown) => void }) {
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const location = useLocation();
   // The router's query object cannot preserve duplicate fields. Validate the full
   // bounded search before choosing any opaque server cursor.
@@ -61,9 +63,11 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
       if (moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
     }).catch((failure: unknown) => {
       if (!current()) return;
+      // A confirmed deletion tombstone ends this routed history; the route shows only recovery (#512).
+      if (isDeletedJob(failure)) { deletedHandler.current(failure); return; }
       const expired = failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '');
       const kind = metadataFailureKind(failure);
-      const message = expired ? copy.attemptHistoryChangedOrThisPageExpiredRefreshHistoryTo : isDeletedJob(failure) ? copy.thisJobWasDeleted : {
+      const message = expired ? copy.attemptHistoryChangedOrThisPageExpiredRefreshHistoryTo : {
         session: copy.reconnectToReadAttemptHistory, denied: copy.attemptHistoryAccessDenied,
         missing: copy.attemptHistoryIsUnavailableCheckTheJobAndLocalSession,
         unsupported: copy.incompatibleHistoryResponse, unverified: copy.attemptHistoryCouldNotBeVerified,
@@ -106,11 +110,34 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
 export default function RunHistory({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession | null }) {
   const state = useSession(session);
   const valid = /^[0-9a-f]{32}$/.test(jobId);
+  // A tombstone belongs to one authenticated view of one job, matching the Job and Run routes.
+  const viewKey = state?.status === 'authenticated' ? `${state.generation}/${jobId}` : null;
+  // The notice keeps a vetted reference ID only when the route's own read supplied one; a panel callback supplies none.
+  const [gone, setGone] = useState<{ key: string; message: string } | null>(null);
+  const departing = useRef<Element | null>(null);
+  const notice = useRef<HTMLParagraphElement>(null);
+  const deleted = viewKey !== null && gone?.key === viewKey;
+  // When the transition removed the focused control, land on the surviving notice; leave surviving focus alone.
+  useLayoutEffect(() => {
+    if (!deleted) return;
+    const from = departing.current; departing.current = null;
+    if (from && from !== document.body && !from.isConnected) notice.current?.focus();
+  }, [deleted]);
+  const title = <h1 id="history-title">{copy.attemptHistory}</h1>;
+  if (deleted) return <section aria-labelledby="history-title">{title}
+    <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{gone.message}</p>
+      <a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></div>
+  </section>;
+  const markDeleted = (failure?: unknown) => {
+    if (viewKey === null || gone?.key === viewKey) return;
+    departing.current = document.activeElement;
+    setGone({ key: viewKey, message: failure === undefined ? copy.thisJobWasDeleted : withApiFailureReference(copy.thisJobWasDeleted, failure) });
+  };
   return <section aria-labelledby="history-title">
-    <h1 id="history-title">{copy.attemptHistory}</h1>
+    {title}
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>{copy.returnToJobOverview}</a>
-      {session && state?.status === 'authenticated' ? <History key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} session={session} /> : <p>{copy.connectALocalSessionToViewAttemptHistory}</p>}
+      {session && state?.status === 'authenticated' ? <History key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} session={session} onDeleted={markDeleted} /> : <p>{copy.connectALocalSessionToViewAttemptHistory}</p>}
     </> : <p role="alert">{copy.theRequestedJobIdentityIsInvalid}</p>}
   </section>;
 }
