@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { useLocation } from 'preact-iso/router';
 import { sourceCopy as copy } from '../copy/sources';
 import { message } from '../shared/messages';
-import { ApiClientError } from '../api/errors';
+import { ApiClientError, withApiFailureReference } from '../api/errors';
 import type { RevisionDirectory, RevisionFile } from '../api/generated';
 import { apiPath, appPath, runPath, sourceDirectoryPath, sourceDownloadRoute, sourceFilePath, sourceReadRoute } from '../app/paths';
 import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
@@ -20,15 +20,14 @@ import { sourceSearchPath } from '../sources/search';
 
 import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
-import { isDeletedJob } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
+import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
+import { focusSurvivingNotice, useDepartingFocus } from '../shared/departingFocus';
 
-function DeletedSource({ failure, basePath }: { failure: unknown; basePath: string }) {
-  return <div class="notice" role="alert"><p>{sourceReadMessage(failure)}</p>
-    <a href={appPath(basePath, '/')}>{copy.returnJobs}</a></div>;
-}
+/** Reports a confirmed tombstone from one of this view's own reads to the route (#512); other failures stay in place. */
+type OnDeleted = (failure: unknown) => void;
 
 function Context({ selected, sourceSha256 }: { selected: SourceSelection; sourceSha256?: string }) {
   return <dl class="job-facts" aria-label={copy.context}>
@@ -39,7 +38,7 @@ function Context({ selected, sourceSha256 }: { selected: SourceSelection; source
   </dl>;
 }
 
-function Directory({ selected, basePath, pin, search, historyEntry }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string; historyEntry: SourceHistoryEntry }) {
+function Directory({ selected, basePath, pin, search, historyEntry, onDeleted }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string; historyEntry: SourceHistoryEntry; onDeleted: OnDeleted }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -66,7 +65,8 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
     }
     expected.current = { metadataVersion: page.metadataVersion, sourceSha256: page.sourceSha256 };
     return acceptReceipt(page);
-  }, value => { if (isCurrent()) setRead({ binding, value }); }), [binding, selected.jobId, selected.runId, selected.revisionId, selected.directoryId, cursor, invalid]);
+  }, value => { if (isCurrent()) setRead({ binding, value }); },
+    failure => { if (isCurrent()) onDeleted(failure); }), [binding, selected.jobId, selected.runId, selected.revisionId, selected.directoryId, cursor, invalid]);
   const current: SourceReadState<RevisionDirectory> = read.binding === binding ? currentSourceRead(read.value, key) : { key, state: 'loading' };
   const effectivePin = historyEntry.snapshot.pin;
   const data = current.state === 'ready' ? current.value : null;
@@ -81,7 +81,6 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
     location.route(sourceDirectoryPath(basePath, selected, selected.directoryId, undefined, effectivePin ?? undefined));
     setRefresh(value => value + 1);
   }
-  if (current.state === 'failed' && isDeletedJob(current.failure)) return <DeletedSource failure={current.failure} basePath={basePath} />;
   return <>
     <Context selected={selected} {...(data ? { sourceSha256: data.sourceSha256 } : {})} />
     <p>{copy.metadataNotice}</p><p>{copy.browseLimitation}</p><p>{copy.emptyDirectories}</p>
@@ -125,7 +124,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
   </>;
 }
 
-function File({ selected, basePath, runtime, search, pin, historyEntry }: { selected: FileSelection; basePath: string; runtime: RuntimeSnapshot; search: string; pin: SourceSnapshotPin | null; historyEntry: SourceHistoryEntry }) {
+function File({ selected, basePath, runtime, search, pin, historyEntry, onDeleted }: { selected: FileSelection; basePath: string; runtime: RuntimeSnapshot; search: string; pin: SourceSnapshotPin | null; historyEntry: SourceHistoryEntry; onDeleted: OnDeleted }) {
   const { client } = usePrivateTransport(basePath);
   const [refresh, setRefresh] = useState(0);
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
@@ -158,7 +157,8 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
         throw new ApiClientError('aborted');
       }
       return acceptReceipt(file);
-    }, value => { if (isCurrent()) setRead({ binding, value }); });
+    }, value => { if (isCurrent()) setRead({ binding, value }); },
+      failure => { if (isCurrent()) onDeleted(failure); });
   }, [binding, selected.jobId, selected.runId, selected.revisionId, selected.fileId]);
   const current: SourceReadState<RevisionFile> = read.binding === binding ? currentSourceRead(read.value, key)
     : reusable && isCurrent() ? { key, state: 'ready', value: reusable } : { key, state: 'loading' };
@@ -168,7 +168,6 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
   const policy = data ? sourceFilePolicy(data.item, runtime.limits.maxSourceChunkBytes) : null;
   const previewNotice = { 'not-viewable': copy.notViewable, 'too-large': copy.tooLarge,
     'runtime-disabled': copy.previewDisabled, available: copy.previewAvailable };
-  if (current.state === 'failed' && isDeletedJob(current.failure)) return <DeletedSource failure={current.failure} basePath={basePath} />;
   return <>
     <Context selected={selected} {...(data ? { sourceSha256: data.sourceSha256 } : {})} />
     <p>{copy.metadataNotice}</p>
@@ -212,7 +211,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
       <p>{previewNotice[policy.preview]}</p>
       {policy.preview === 'available' && ((previewOpened !== null && previewOpened.sourceSha256 === data.sourceSha256 && previewOpened.metadataVersion === data.metadataVersion) || search !== ''
         ? <PanelBoundary name={panelBoundaryCopy.names.sourcePreview}><SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
-            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} {...(effectivePin ? { snapshotPin: effectivePin } : {})} /></PanelBoundary>
+            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} onDeleted={onDeleted} {...(effectivePin ? { snapshotPin: effectivePin } : {})} /></PanelBoundary>
         : <button type="button" onClick={() => setPreviewOpened({ sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion })}>{copy.openPreview}</button>)}
       {policy.download && <PanelBoundary name={panelBoundaryCopy.names.digestCheck}><SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} /></PanelBoundary>}
       {policy.download
@@ -262,18 +261,46 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
     [location.url, jobId, runId, revisionId, resource, directoryId, fileId]);
   const historyEntry = useMemo<SourceHistoryEntry>(() => ({ pathname: uri.pathname, search: rawSearch, hash, snapshot }),
     [snapshot, hash]);
-  return <section class="source-navigation" aria-labelledby="source-title">
-    <h1 id="source-title">{resource === 'directory' ? copy.title : resource === 'search' ? copy.searchTitle : copy.fileTitle}</h1>
+  // A tombstone belongs to one authenticated view of one source location; that view then shows only recovery (#512).
+  const generation = state?.status === 'authenticated' ? state.generation : null;
+  const [gone, setGone] = useState<{ entry: SourceHistoryEntry; generation: number; message: string } | null>(null);
+  const deleted = gone !== null && gone.entry === historyEntry && gone.generation === generation;
+  const routeRoot = useRef<HTMLElement>(null);
+  const notice = useRef<HTMLParagraphElement>(null);
+  const departing = useRef<Element | null>(null);
+  const departingFocus = useDepartingFocus(routeRoot);
+  useLayoutEffect(() => {
+    if (!deleted) return;
+    const from = departing.current; departing.current = null;
+    focusSurvivingNotice(from, notice.current);
+  }, [deleted]);
+  const title = <h1 id="source-title">{resource === 'directory' ? copy.title : resource === 'search' ? copy.searchTitle : copy.fileTitle}</h1>;
+  if (deleted) return <section class="source-navigation" aria-labelledby="source-title" ref={routeRoot}>{title}
+    <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{gone.message}</p>
+      <a href={appPath(basePath, '/')}>{copy.returnJobs}</a></div>
+  </section>;
+  const markDeleted = (failure: unknown) => {
+    const liveSession = session?.snapshot();
+    if (liveSession?.status !== 'authenticated' || liveSession.generation !== generation
+      || !sourceEntryCurrent(historyEntry, window.location)) return;
+    departing.current = departingFocus();
+    forgetAttemptCommandForDeletedJob(basePath, jobId);
+    const message = withApiFailureReference(copy.jobDeleted, failure);
+    setGone(current => current?.entry === historyEntry && current.generation === generation
+      ? current : { entry: historyEntry, generation, message });
+  };
+  return <section class="source-navigation" aria-labelledby="source-title" ref={routeRoot}>
+    {title}
     {valid ? <>
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>
       {session && state?.status === 'authenticated'
         ? resource === 'search'
-          ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} />
+          ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} onDeleted={markDeleted} />
           : resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
-              selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} />
+              selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} onDeleted={markDeleted} />
           : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}`}
-              selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} search={search} pin={pin} historyEntry={historyEntry} />
+              selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} search={search} pin={pin} historyEntry={historyEntry} onDeleted={markDeleted} />
         : <p>{copy.connect}</p>}
     </> : <><p role="alert">{copy.invalid}</p><a href={appPath(basePath, '/')}>{copy.returnJobs}</a></>}
   </section>;

@@ -7,6 +7,7 @@ export const sourceCopy = {
   noRevision: 'No recorded result revision is available for source browsing.',
   returnAttempt: 'Return to this attempt',
   returnJobs: 'Return to jobs',
+  jobDeleted: 'This source’s job was deleted from the library and cannot be recovered. This page has not observed whether file cleanup finished.',
   returnDirectory: 'Return to source directory',
   root: 'Input root',
   breadcrumbs: 'Source directory breadcrumbs',

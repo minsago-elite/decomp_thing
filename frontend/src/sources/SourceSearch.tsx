@@ -44,7 +44,7 @@ function SearchStatus({ data, continued }: { data: SourceSearchPage; continued: 
 }
 
 /** One explicit bounded search page. Continuation is user-initiated; no page is fetched in the background. */
-export function SourceSearch({ selected, basePath, search }: { selected: SourceSelection; basePath: string; search: string }) {
+export function SourceSearch({ selected, basePath, search, onDeleted }: { selected: SourceSelection; basePath: string; search: string; onDeleted?: (failure: unknown) => void }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -77,7 +77,7 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
       const response = await client.get('sourceSearch', sourceSearchRoute(selected, directory, request), { signal });
       if (signal.aborted) throw new ApiClientError('aborted');
       return bindSourceSearch(response.data, selected, directory, request);
-    }, setRead);
+    }, setRead, onDeleted);
   }, [client, key]);
   const current = request && !tooLong ? currentSourceRead(read, key) : null;
   const data = current?.state === 'ready' ? current.value : null;

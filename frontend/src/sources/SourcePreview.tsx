@@ -19,8 +19,8 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 
 /** One deliberately opened range. Highlighting separately requires an explicit local action. */
-export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search, snapshotPin }: {
-  selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string; snapshotPin?: SourceSnapshotPin;
+export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search, snapshotPin, onDeleted }: {
+  selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string; snapshotPin?: SourceSnapshotPin; onDeleted?: (failure: unknown) => void;
 }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
@@ -51,7 +51,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
   useEffect(() => () => { stopCopy.current?.(); stopCopy.current = null; }, [copyKey]);
   useEffect(() => beginSourceRead(key, async signal => receive(bindSourceChunk(
     (await client.get('sourceChunk', sourceChunkRoute(selected, metadata, position, maximum), { signal })).data,
-    selected, metadata, position, maximum)), setRead), [client, key]);
+    selected, metadata, position, maximum)), setRead, onDeleted), [client, key]);
   const current = currentSourceRead(read, key);
   const observation = current.state === 'ready' ? current.value : null;
   const chunk = observation?.value;
