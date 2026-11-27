@@ -43,13 +43,27 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   // Keep DELETE response headers so the test follows the server's own operation Location.
   const responseHeaders = new Map();
   cdp.on('Network.responseReceived', event => responseHeaders.set(event.requestId, event.response.headers), tab.sessionId);
-  // Read each DELETE body as soon as it finishes loading; Chrome may evict it before a later read.
-  const deleteIds = new Set(); const deleteBodies = new Map();
-  cdp.on('Network.requestWillBeSent', event => { if (event.request.method === 'DELETE') deleteIds.add(event.requestId); }, tab.sessionId);
-  cdp.on('Network.loadingFinished', event => {
-    if (deleteIds.has(event.requestId)) deleteBodies.set(event.requestId, cdp.call('Network.getResponseBody', { requestId: event.requestId }, tab.sessionId)
-      .catch(error => ({ error: String(error.message ?? error) })));
+  // Network.loadingFinished for the DELETE was not observed on hosted Chrome 149 (#512) even though the
+  // page itself parsed the body, so the body is captured deterministically at the Fetch response stage,
+  // scoped to this job's own resource URL. Paused responses are continued unchanged; nothing is re-sent.
+  const deleteBodies = new Map(); const fetchErrors = [];
+  const deleteEvents = []; const deleteIds = new Set();
+  const note = (kind, requestId, extra = {}) => { if (deleteEvents.length < 64) deleteEvents.push({ kind, requestId, at: Date.now(), ...extra }); };
+  cdp.on('Fetch.requestPaused', event => {
+    const resume = () => cdp.call('Fetch.continueResponse', { requestId: event.requestId }, tab.sessionId).catch(error => fetchErrors.push(String(error.message ?? error)));
+    if (event.request.method !== 'DELETE' || event.responseStatusCode === undefined) return void resume();
+    note('fetch-paused', event.networkId, { status: event.responseStatusCode });
+    deleteBodies.set(event.networkId, cdp.call('Fetch.getResponseBody', { requestId: event.requestId }, tab.sessionId)
+      .then(({ body, base64Encoded }) => ({ body: base64Encoded ? Buffer.from(body, 'base64').toString('utf8') : body }))
+      .catch(error => ({ error: String(error.message ?? error) }))
+      .finally(resume));
   }, tab.sessionId);
+  // Correlated Network timeline for every DELETE, reported only if the body cannot be qualified.
+  cdp.on('Network.requestWillBeSent', event => { if (event.request.method === 'DELETE') { deleteIds.add(event.requestId); note('requestWillBeSent', event.requestId, { url: event.request.url }); } }, tab.sessionId);
+  cdp.on('Network.responseReceived', event => { if (deleteIds.has(event.requestId)) note('responseReceived', event.requestId, { status: event.response.status }); }, tab.sessionId);
+  cdp.on('Network.loadingFinished', event => { if (deleteIds.has(event.requestId)) note('loadingFinished', event.requestId, { bytes: event.encodedDataLength }); }, tab.sessionId);
+  cdp.on('Network.loadingFailed', event => { if (deleteIds.has(event.requestId)) note('loadingFailed', event.requestId, { errorText: event.errorText, canceled: event.canceled ?? null }); }, tab.sessionId);
+  await cdp.call('Fetch.enable', { patterns: [{ urlPattern: browserOrigin + '/nested/api/v1/jobs/' + job.id, requestStage: 'Response' }] }, tab.sessionId);
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
   await cdp.call('Page.navigate', { url: jobUrl }, tab.sessionId);
   await ready(tab, `document.querySelector('h2')?.textContent === 'lifecycle-fixture.elf' && document.querySelector('input[name="label"]:not(:disabled)') !== null`, 'lifecycle job route');
@@ -116,9 +130,13 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   const operationId = location.split('/').pop();
   // The page reports the operation DELETE actually acknowledged. When a background resumer already
   // owns the purge, that acknowledgment is truthfully still running even though completion follows.
-  await waitFor(async () => deleteBodies.has(deleteRequests[0].requestId), 'DELETE response body', 10_000);
+  const diagnostics = () => JSON.stringify({ requestId: deleteRequests[0].requestId, captured: [...deleteBodies.keys()], fetchErrors, events: deleteEvents });
+  await waitFor(async () => deleteBodies.has(deleteRequests[0].requestId), 'DELETE response body', 10_000)
+    .catch(error => { throw new Error(error.message + ' ' + diagnostics()); });
   const deleteBody = await deleteBodies.get(deleteRequests[0].requestId);
-  assert.ok(!deleteBody.error, 'DELETE response body unavailable: ' + deleteBody.error);
+  assert.ok(!deleteBody.error, 'DELETE response body unavailable: ' + deleteBody.error + ' ' + diagnostics());
+  assert.deepEqual(fetchErrors, [], 'Fetch interception failed to continue a response');
+  await cdp.call('Fetch.disable', {}, tab.sessionId);
   const acknowledged = JSON.parse(deleteBody.body).data;
   assert.equal(acknowledged.operationId, operationId, 'DELETE body and Location name different operations');
   assert.ok(['running', 'completed'].includes(acknowledged.state), 'DELETE acknowledged an unexpected state ' + acknowledged.state);
