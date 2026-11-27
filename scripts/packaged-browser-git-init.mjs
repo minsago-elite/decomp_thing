@@ -189,7 +189,7 @@ export function assessGitInitReport(section) {
     need(!requests.some((x) => x.path === `${BASE}/session` || x.path.endsWith('/session') || x.path.toLowerCase().includes('csrf')), `${expected.id} exposed a credential exchange`);
     const mismatch = expected.id === 'G3' || expected.id === 'G4' || expected.id === 'G5' || expected.id === 'G6' || expected.id === 'G7' || expected.id === 'G8';
     if (mismatch) {
-      need(c.state?.text === GIT_INIT_COPY.unverified, `${expected.id} fixed unverified copy`);
+      need(c.state?.text === unverifiedStatusFor(expected.id), `${expected.id} fixed unverified copy`);
       need(c.state?.reference === canonicalReferenceFor(expected.id), `${expected.id} canonical reference`);
       need(c.state?.rawRequestIdAbsent === true, `${expected.id} withheld opaque ID`);
       need(polls.length === (expected.id === 'G6' || expected.id === 'G7' || expected.id === 'G8' ? 1 : 0), `${expected.id} poll count`);
@@ -215,6 +215,8 @@ export function assessGitInitReport(section) {
   return failures.slice(0, 64);
 }
 
+// The packaged panel appends only the vetted canonical X-Request-ID with the shared failureReference copy.
+export const unverifiedStatusFor = (id) => `${GIT_INIT_COPY.unverified} Reference ID: ${canonicalReferenceFor(id)}.`;
 const canonicalReferenceFor = (id) => ({ G3: '62800000-0000-4000-8000-000000000630', G4: '62800000-0000-4000-8000-000000000631', G5: '62800000-0000-4000-8000-000000000632', G6: '62800000-0000-4000-8000-000000000633', G7: '62800000-0000-4000-8000-000000000634', G8: '62800000-0000-4000-8000-000000000635' })[id] ?? null;
 
 export async function verifyGitInitPng(root, screenshot) {
@@ -245,7 +247,7 @@ export async function qualifyGitInitialization({ cdp, makeTarget, evaluate, dela
     const record = { id: spec.id, status: 'failed', requests: [], nonGetCount: 0, readbackCount: 0, errors: [] };
     section.cases.push(record);
     let target = null; let handler = null; let loadFailedHandler = null; let phase = 'running'; let posts = 0; let repositoryReads = 0; let postSent = false;
-    const held = new Map(); const pending = new Set(); let heldPollId = null;
+    const held = new Map(); const pending = new Set(); let heldPollId = null; let heldPollNetworkId = null;
     let resolvePollHeld; const pollHeldPromise = new Promise((resolve) => { resolvePollHeld = resolve; });
     const stillLive = () => { if (now() >= deadline) throw new Error(`${spec.id} case deadline`); };
     const addError = (message) => { if (record.errors.length < 8) record.errors.push(String(message).slice(0, CAP)); };
@@ -271,9 +273,10 @@ export async function qualifyGitInitialization({ cdp, makeTarget, evaluate, dela
         pending.add(work); void work.finally(() => pending.delete(work));
       };
       loadFailedHandler = (event) => {
-        if (event.requestId === heldPollId) {
+        // Network.loadingFailed is keyed by the Network request ID, which Fetch.requestPaused reports as networkId.
+        if (heldPollNetworkId !== null && event.requestId === heldPollNetworkId) {
           record.pollCancelled = event.canceled === true;
-          if (record.pollCancelled) held.delete(event.requestId);
+          if (record.pollCancelled) held.delete(heldPollId);
         }
       };
       cdp.on('Network.loadingFailed', loadFailedHandler, target.sessionId);
@@ -329,7 +332,7 @@ export async function qualifyGitInitialization({ cdp, makeTarget, evaluate, dela
         record.requests.push(item);
         if (record.requests.length > 32 || response.unknown || !response.entry) { refuse(event.requestId, 'Failed'); addError(`unmapped request ${method} ${path}`); return; }
         if (spec.id === 'G9' && method === 'GET' && path === fixtures.pollPath) {
-          item.held = true; record.pollHeld = true; heldPollId = event.requestId;
+          item.held = true; record.pollHeld = true; heldPollId = event.requestId; heldPollNetworkId = typeof event.networkId === 'string' ? event.networkId : null;
           held.set(event.requestId, { entry: item }); resolvePollHeld(event.requestId); return;
         }
         const work = Promise.resolve().then(() => {
@@ -371,7 +374,7 @@ export async function qualifyGitInitialization({ cdp, makeTarget, evaluate, dela
         while (!record.pollCancelled && now() < cancelUntil) await delay(Math.min(20, Math.max(1, cancelUntil - now())));
         if (record.pollCancelled !== true) throw new Error('G9 did not observe the browser cancelling the held poll');
       }
-      const expectedText = spec.id === 'G1' ? GIT_INIT_COPY.repositoryRead : spec.id === 'G2' ? GIT_INIT_COPY.interrupted : spec.id === 'G9' ? GIT_INIT_COPY.noJobs : GIT_INIT_COPY.unverified;
+      const expectedText = spec.id === 'G1' ? GIT_INIT_COPY.repositoryRead : spec.id === 'G2' ? GIT_INIT_COPY.interrupted : spec.id === 'G9' ? GIT_INIT_COPY.noJobs : unverifiedStatusFor(spec.id);
       if (spec.id !== 'G9') await waitCase(`document.querySelector('.git-repository [role="status"]')?.textContent.trim() === ${JSON.stringify(expectedText)}`, 'outcome');
       await bounded(Promise.allSettled([...pending]), `${spec.id} request settlement`);
       const opaque = fixtures.identity.opaqueRequestIds;

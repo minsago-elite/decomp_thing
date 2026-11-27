@@ -21,7 +21,8 @@ class FakeCdp {
   async issue(sessionId, id, method, path, extra = {}) {
     const handler = this.handlers.get(`Fetch.requestPaused:${sessionId}`);
     assert.ok(handler, 'Fetch handler is installed before any page request');
-    await handler({ requestId: id, request: { url: `http://127.0.0.1${path}`, method, headers: {}, ...extra } });
+    // Real Chrome: Fetch interception IDs differ from Network request IDs; networkId links them.
+    await handler({ requestId: `interception-${id}`, networkId: id, request: { url: `http://127.0.0.1${path}`, method, headers: {}, ...extra } });
   }
   async call(method, params = {}, sessionId) {
     if (method === 'Network.setCookie') return { success: true };
@@ -44,7 +45,7 @@ class FakeCdp {
         await this.issue(sessionId, `${id}-dashboard-recovery`, 'GET', '/nested/api/v1/recovery');
         const loadFailed = this.handlers.get(`Network.loadingFailed:${sessionId}`);
         assert.ok(loadFailed, 'network cancellation observer is installed before navigation');
-        loadFailed({ requestId: `${id}-poll`, canceled: true });
+        loadFailed({ requestId: this.cancelByInterceptionId ? `interception-${id}-poll` : `${id}-poll`, canceled: true });
         return {};
       }
       await this.issue(sessionId, `${id}-post`, 'POST', f.repositoriesPath, { postData: JSON.stringify({ action: 'git.init', runId: f.runId, revisionId: f.revisionId, initialBranch: null }), headers: {
@@ -104,25 +105,52 @@ test('assessor rejects missing command binding, extra writes, missing reference,
   assert.ok(assessGitInitReport(section).some((x) => x.includes('cleanup')));
 });
 
+// Mirrors the packaged panel: G3-G8 append the vetted reference through common failureReference copy.
+const renderedStatus = (id, { bareUnverified = false } = {}) => id === 'G1' ? GIT_INIT_COPY.repositoryRead : id === 'G2' ? GIT_INIT_COPY.interrupted
+  : id === 'G9' ? GIT_INIT_COPY.noJobs : bareUnverified ? GIT_INIT_COPY.unverified
+  : `${GIT_INIT_COPY.unverified} Reference ID: ${({ G3:'62800000-0000-4000-8000-000000000630', G4:'62800000-0000-4000-8000-000000000631',
+    G5:'62800000-0000-4000-8000-000000000632', G6:'62800000-0000-4000-8000-000000000633', G7:'62800000-0000-4000-8000-000000000634',
+    G8:'62800000-0000-4000-8000-000000000635' })[id]}.`;
+const referenceIn = (text) => (text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/) || [])[0] ?? null;
+const makeEvaluate = (cdp, render = {}) => async (_target, expression) => {
+    if (expression.includes('location.pathname ===')) return true;
+    if (expression.includes('window.__gitInitClickLog=[]')) return true;
+    if (expression.includes("document.querySelectorAll('button')")) return true;
+    if (expression.includes('performance.getEntriesByType')) return { status: '', button: true, sessionRequests: 0 };
+    if (expression.includes('getBoundingClientRect')) return { x: 200, y: 400, visible: true };
+    const text = renderedStatus(cdp.currentCase, render);
+    if (expression.includes('rawRequestIdAbsent')) return { text, rawRequestIdAbsent: true, clickTrusted: true, rebindClickTrusted: cdp.currentCase === 'G9', reference: referenceIn(text) };
+    // Outcome wait: true only when the driver expects exactly what the page renders.
+    if (expression.includes('.git-repository [role="status"]')) return expression.includes(`=== ${JSON.stringify(text)}`);
+    throw new Error(`unexpected expression ${expression.slice(0, 80)}`);
+};
+const driveCases = async (f, cdp, evaluate, temp, now) => {
+  let targetId = 0; cdp.currentFixtures = f; const section = createGitInitSection();
+  const makeTarget = async () => { cdp.currentCase = GIT_INIT_CASES[targetId].id; return { targetId: `target-${++targetId}`, sessionId: `session-${targetId}` }; };
+  return qualifyGitInitialization({ cdp, makeTarget, evaluate, ready: async () => true, delay: async () => {}, root: temp, ...(now ? { now } : {}),
+    origin: 'http://127.0.0.1', fixtures: f, cookie: { name: 'git_init_session', value: 'synthetic_cookie_value' }, section });
+};
+
+test('red controls: outcome wait and G9 cancellation bind to what real Chrome emits', async () => {
+  const { gitInit: f } = fixtureBundle();
+  // A page without the vetted reference suffix (the prior driver expectation) must not satisfy G3-G8.
+  { const cdp = new FakeCdp(); const temp = mkdtempSync(join(repo, 'build', 'git-init-controls-')); let clock = 0;
+    try { const result = await driveCases(f, cdp, makeEvaluate(cdp, { bareUnverified: true }), temp, () => (clock += 50));
+      for (const id of ['G3', 'G4', 'G5', 'G6', 'G7', 'G8']) assert.ok(result.cases.find((x) => x.id === id).errors.some((e) => / outcome (deadline|after cutoff|completed after cutoff)$/.test(e)), JSON.stringify([id, result.cases.find((x) => x.id === id).errors, result.failures]));
+      assert.ok(assessGitInitReport(result).includes('G3 fixed unverified copy'));
+    } finally { rmSync(temp, { recursive: true, force: true }); } }
+  // loadingFailed keyed by the Fetch interception ID is not the held poll's Network request and must not count as cancellation.
+  { const cdp = new FakeCdp(); cdp.cancelByInterceptionId = true; const temp = mkdtempSync(join(repo, 'build', 'git-init-controls-'));
+    try { const result = await driveCases(f, cdp, makeEvaluate(cdp), temp);
+      const g9 = result.cases.find((x) => x.id === 'G9');
+      assert.notEqual(g9.pollCancelled, true); assert.ok(assessGitInitReport(result).includes('G9 pending poll cancellation'));
+    } finally { rmSync(temp, { recursive: true, force: true }); } }
+});
+
 test('scripted CDP drive keeps every API request intercepted and records the fixed nine cases', async () => {
   const { readStates, gitInit: f } = fixtureBundle(); const cdp = new FakeCdp(); const temp = mkdtempSync(join(repo, 'build', 'git-init-controls-'));
   let targetId = 0;
-  const evaluate = async (_target, expression) => {
-    if (expression.includes('location.pathname ===')) return true;
-    if (expression.includes('window.__gitInitClickLog=[]')) return true;
-    if (expression.includes('document.querySelectorAll(\'button\')')) return true;
-    if (expression.includes('performance.getEntriesByType')) return { status: '', button: true, sessionRequests: 0 };
-    if (expression.includes('getBoundingClientRect')) return { x: 200, y: 400, visible: true };
-    if (expression.includes('rawRequestIdAbsent')) {
-      const expected = cdp.currentCase === 'G1' ? GIT_INIT_COPY.repositoryRead : cdp.currentCase === 'G2' ? GIT_INIT_COPY.interrupted : cdp.currentCase === 'G9' ? GIT_INIT_COPY.noJobs : GIT_INIT_COPY.unverified;
-      const ref = ({ G3:'62800000-0000-4000-8000-000000000630', G4:'62800000-0000-4000-8000-000000000631',
-        G5:'62800000-0000-4000-8000-000000000632', G6:'62800000-0000-4000-8000-000000000633',
-        G7:'62800000-0000-4000-8000-000000000634', G8:'62800000-0000-4000-8000-000000000635' })[cdp.currentCase] ?? null;
-      return { text: expected, rawRequestIdAbsent: true, clickTrusted: true, rebindClickTrusted: cdp.currentCase === 'G9', reference: ref };
-    }
-    if (expression.includes('.git-repository [role="status"]')) return true;
-    throw new Error(`unexpected expression ${expression.slice(0, 80)}`);
-  };
+  const evaluate = makeEvaluate(cdp);
   cdp.currentFixtures = f;
   const section = createGitInitSection();
   try {
