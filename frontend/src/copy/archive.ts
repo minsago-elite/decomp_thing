@@ -4,6 +4,7 @@ export const archiveCopy = {
   distinction: 'This is the generated source archive of this revision: a ZIP of the reconstructed source tree for independent extraction and rebuild. It is not the application JAR that runs this workbench.',
   inspect: 'Show source archive status',
   refresh: 'Refresh source archive status',
+  changed: 'The archive changed. Refresh source archive status to see the current digest.',
   loading: 'Reading source archive status…',
   identity: 'Source archive identity',
   revision: 'Revision', sourceCommitment: 'Source commitment',

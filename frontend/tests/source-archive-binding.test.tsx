@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Operation, SourceArchive as Status } from '../src/api/generated';
 import { decodeResponse } from '../src/api/decode';
+import { ApiClientError } from '../src/api/errors';
 import { archiveCopy as copy } from '../src/copy/archive';
 import { SourceArchive } from '../src/sources/SourceArchive';
 import { blurBeforeRemoval } from './blur-before-removal';
@@ -96,6 +97,40 @@ it('focuses the verified result when the reader still waits on the activated Ver
   button(panel!, copy.verify).focus();
   const committed = await verify(panel!, 'completed', verified);
   expect(document.activeElement).toBe(committed);
+});
+
+it.each(['verify', 'elsewhere', 'blur'] as const)('withdraws the rejected digest and offers a fresh read with focus on %s', async placement => {
+  const { panels: [panel, peer] } = mount(2);
+  await inspect(panel!, verified);
+  let reject!: (reason: Error) => void;
+  transport.post.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+  const action = button(panel!, copy.verify), refresh = button(panel!, copy.refresh);
+  action.focus();
+  action.click();
+  await microtasks();
+  const elsewhere = button(peer!, copy.inspect);
+  if (placement === 'elsewhere') elsewhere.focus();
+  if (placement === 'blur') { action.blur(); await microtasks(); }
+  reject(new ApiClientError('http_error', { status: 409, serverCode: 'ARCHIVE_CHANGED' }));
+  await microtasks();
+  expect(result(panel!)).toBeNull();
+  expect(within(panel!).queryByRole('link')).toBeNull();
+  expect(within(panel!).getByRole('alert').textContent).toContain('The archive changed');
+  expect(document.activeElement).toBe({ blur: document.body, elsewhere, verify: refresh }[placement]);
+  expect(transport.get).toHaveBeenCalledTimes(1);
+  await inspect(panel!, status('source-archive-stale'), copy.refresh);
+  expect(within(panel!).queryByRole('alert')).toBeNull();
+  expect(within(panel!).getByRole('link', { name: copy.downloadUnverified })).toBeTruthy();
+  expect(transport.post).toHaveBeenCalledTimes(1);
+});
+
+it('keeps the last status when a verification request encounters an unrelated conflict', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, verified);
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409, serverCode: 'OPERATION_IN_PROGRESS' }));
+  button(panel!, copy.verify).click(); await microtasks();
+  expect(result(panel!)?.dataset.archiveState).toBe('verified');
+  expect(within(panel!).getByRole('alert')).toBeTruthy();
 });
 
 it('keeps keyboard focus when the reader moves elsewhere during verification, and recovers on the next activation', async () => {
