@@ -62,7 +62,7 @@ internal fun canonicalSpaDocumentPath(base: String, path: String): String? {
         "${base}runtime/" -> "${base}runtime"
         "${base}upload/" -> "${base}upload"
         else -> path.takeIf { it.startsWith("${base}jobs/") &&
-            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence)|/revisions/$id/(?:(?:sources|source-files|globals|types)/$id|(?:functions|modules)(?:/$id)?|graph|scorecard))?)?)?/?")) }?.removeSuffix("/")
+            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence)|/revisions/$id/(?:(?:sources|source-files|globals|types)/$id|(?:functions|modules)(?:/$id)?|graph|scorecard|source-search))?)?)?/?")) }?.removeSuffix("/")
     }
 }
 
@@ -213,6 +213,10 @@ class UploadServer(
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
     private val startupCancellation: () -> Boolean = { false },
+    // Operator-admitted directory whose immediate children may be imported by name; never browser-selected.
+    gitImportRoot: Path? = null,
+    // Null selects the production registrations for the SPA; admission still follows runtime readiness.
+    durableAdapters: List<DurableWebWorkflowAdapter>? = null,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -267,8 +271,19 @@ class UploadServer(
             WorkflowAttemptStore.open(root)
         },
         progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
+        durableAdapters = durableAdapters ?: if (uiMode == WebUiMode.SPA) productionDurableWebWorkflows(sensitiveValues = sensitiveValues) else emptyList(),
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") },
         sourceProfiles = admittedSourceProfiles)
+    /** Test seam for holding a physical dashboard metadata read while exercising the HTTP routes. */
+    @Volatile internal var listingReadObserver: (String) -> Unit = {}
+        set(value) {
+            field = value
+            jobs.listingReadObserver = value
+        }
+    /** Test seam for synchronizing an active quota scan with status and listing requests. */
+    internal var uploadStorageMeasureObserver: () -> Unit
+        get() = jobs.uploadStorageMeasureObserver
+        set(value) { jobs.uploadStorageMeasureObserver = value }
     private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
@@ -276,7 +291,16 @@ class UploadServer(
         requestDiagnosticOutput = requestDiagnosticOutput)
     private val jobMutations = WebJobMutationBoundary(access, jobs)
     private val legacySessions = WebSessionController(access)
-    internal val streamResources = WebStreamResources()
+    // A stream that outlives stop's bounded wait releases store ownership when it finally ends.
+    // Before stop has finished its own shutdown sequence, stop alone decides when ownership is released.
+    private val stopSequenceFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+    internal val streamResources = WebStreamResources(onDrained = {
+        try {
+            if (stopSequenceFinished.get()) releaseOwnershipIfIdle()
+        } catch (_: Exception) {
+            System.err.println("Event stream cleanup did not release store ownership; recovery is required")
+        }
+    })
     private val harnessReadiness = WebHarnessReadinessProjector()
     private val agentPreflight = WebAgentPreflight(configurationIdentity = {
         (authenticationInspector as? WebObservedAuthenticationInspector)?.configurationIdentity()
@@ -292,8 +316,14 @@ class UploadServer(
             }
         }) { "Server is stopping" }
     }
+    private val gitAvailability = decompengine.git.GitRuntime.detect()
+    private val gitRepositories = decompengine.git.ManagedGitRepositories(store.storageRoot, gitAvailability,
+        jobs::gitSourceSnapshot, gitImportRoot)
+    // Deletion and maintenance retain jobs whose Git work is in progress, uncommitted or unpushed (#509).
+    private val gitRetention = jobs.registerRetentionHold(WebGitRetentionHold(gitRepositories))
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
-        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
+        git = WebGitCapability(gitAvailability, gitRepositories)) }
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
@@ -320,6 +350,17 @@ class UploadServer(
     private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
+
+    /** Approximate admission occupancy; test evidence helper for overload and release qualification. */
+    internal data class AdmissionSnapshot(val workers: Int, val queued: Int, val responders: Int)
+    internal fun admissionSnapshot() = AdmissionSnapshot(requestExecutor.activeCount, requestExecutor.queue.size, overloadResponders.activeCount)
+    /** Test-only quota seam, available before listener startup and upload admission. */
+    internal fun configureUploadStorageLimitForTests(maximumBytes: Long) {
+        synchronized(lifecycleLock) {
+            check(!started && !stopping) { "Upload storage limit must be configured before listener startup." }
+            jobs.configureUploadStorageLimitForTests(maximumBytes)
+        }
+    }
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
@@ -337,6 +378,8 @@ class UploadServer(
         }
         try {
             jobs.initializeExistingStorage(startupRecoveryLimitsForWeb(uiMode)) { stopRequested.get() || startupCancellation() }
+            // Interrupted repository operations become explicit outcomes before any request is served.
+            gitRepositories.recover(store.jobIds())
         } catch (failure: Throwable) {
             stopRequested.set(true)
             stopping = true
@@ -449,6 +492,7 @@ class UploadServer(
         harnessReadiness.close()
         agentPreflight.close()
         access.close()
+        gitRepositories.close()
         jobs.close()
         var inspectionWaitInterrupted = false
         try {
@@ -472,6 +516,7 @@ class UploadServer(
             catch (_: InterruptedException) { requestWaitInterrupted = true }
         }
         if (callerWasInterrupted || inspectionWaitInterrupted || requestWaitInterrupted) Thread.currentThread().interrupt()
+        stopSequenceFinished.set(true)
         if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 
@@ -507,8 +552,10 @@ class UploadServer(
     private fun releaseOwnershipIfIdle(): Boolean {
         // Sample service quiescence before taking the lifecycle lock; stopping closes the service to new work.
         val jobsIdle = jobs.isIdle()
+        // A Git worker that outlived its shutdown wait may still be writing staging; keep ownership.
+        val gitIdle = gitRepositories.terminated
         return synchronized(lifecycleLock) {
-            if (stopping && activeRequests == 0 && jobsIdle && streamResources.snapshot().active == 0) {
+            if (stopping && activeRequests == 0 && jobsIdle && gitIdle && streamResources.snapshot().active == 0) {
                 ownership.close()
                 true
             } else false
@@ -690,19 +737,19 @@ class UploadServer(
                     handleAuthenticationInspection(exchange)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 2 && segments[0] == "jobs" ->
-                    handleJob(exchange, decode(segments[1]))
+                    handleJob(exchange, publicSegment(exchange, segments, 1))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, segments[1])
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
                     handleReconstruct(exchange, segments[1])
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
-                    handleSource(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
+                    handleSource(exchange, publicSegment(exchange, segments, 1), publicTail(exchange, segments, 3))
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
-                    handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
+                    handleArtifact(exchange, publicSegment(exchange, segments, 1), publicTail(exchange, segments, 3))
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
-                    exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
+                    exchange.sendJson(200, encodeJob(jobs.get(publicSegment(exchange, segments, 2))))
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
-                    val job = jobs.get(decode(segments[2]))
+                    val job = jobs.get(publicSegment(exchange, segments, 2))
                     val runId = exchange.requestURI.rawQuery?.let {
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
@@ -730,15 +777,20 @@ class UploadServer(
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
+            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "UPLOAD_STORAGE", "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
             legacyError(exchange, status, code, when (code) {
                 "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
                 "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
+                "UPLOAD_STORAGE" -> publicWebDiagnosticMessage(code)
                 "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY" -> publicWebDiagnosticMessage(code)
                 "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
                 else -> "The requested job or attempt is unavailable."
             }, requestDiagnosticOutput) {
                 renderErrorPage(status, "Job storage unavailable", "${publicWebDiagnosticCode(exception.code)}: ${publicWebDiagnosticMessage(exception.code)}")
+            }
+        } catch (exception: decompengine.jobs.ArtifactChangedException) {
+            legacyError(exchange, 409, "ARTIFACT_CHANGED", publicWebDiagnosticMessage("ARTIFACT_CHANGED"), requestDiagnosticOutput) {
+                renderErrorPage(409, "Artifact changed", publicWebDiagnosticMessage("ARTIFACT_CHANGED"))
             }
         } catch (exception: JobStoreException) {
             legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.", requestDiagnosticOutput) {
@@ -1116,6 +1168,22 @@ class UploadServer(
     }
 
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
+
+    /**
+     * Legacy routes name jobs and report files by URL path. The raw path is decoded exactly once, per
+     * segment, by WebPublicIdentity; an encoded separator changes the segment count and is refused.
+     */
+    private fun rawSegments(exchange: HttpExchange, decoded: List<String>): List<String> {
+        val raw = exchange.requestURI.rawPath.removePrefix("/").removeSuffix("/").split('/')
+        if (raw.size != decoded.size) throw WebAccessDenied(400, "INVALID_REQUEST", "The requested artifact identity is not a canonical contained name.")
+        return raw
+    }
+
+    private fun publicSegment(exchange: HttpExchange, decoded: List<String>, index: Int): String =
+        WebPublicIdentity.segment(rawSegments(exchange, decoded)[index])
+
+    private fun publicTail(exchange: HttpExchange, decoded: List<String>, from: Int): String =
+        WebPublicIdentity.relativePath(rawSegments(exchange, decoded).drop(from))
 
     private companion object {
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024

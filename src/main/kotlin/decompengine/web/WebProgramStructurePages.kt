@@ -96,25 +96,29 @@ internal class WebProgramStructurePages(
                 val table = index.table(WebStructureKind.FUNCTION)
                 val module = query.fields["module"]?.let { selector -> index.moduleIndex[selector] ?: -100 }
                 val orderRows = when (sort) { "name" -> table.byName; "id" -> table.byId; else -> table.byAddress }
-                val lowered = search?.lowercase(Locale.ROOT)
-                val addressPrefix = lowered?.takeIf { it.matches(Regex("0x[0-9a-f]{1,16}")) }
-                val matches = IntArray(table.size)
-                var matched = 0
-                for (position in orderRows.indices) {
-                    val row = orderRows[if (order == "asc") position else orderRows.size - 1 - position]
-                    if (status != null && table.status[row] != status) continue
-                    if (evidence != null && table.evidence(row) != evidence) continue
-                    if (ownership != null && table.ownership(row) != ownership) continue
-                    if (module != null && table.owners[row] != module) continue
-                    if (lowered != null && !(table.ids[row].contains(lowered, true) || table.names[row]?.contains(lowered, true) == true ||
-                            (addressPrefix != null && table.address(row)?.startsWith(addressPrefix) == true))) continue
-                    matches[matched++] = row
+                val addressPrefix = search?.lowercase(Locale.ROOT)?.takeIf { it.matches(Regex("0x[0-9a-f]{1,16}")) }
+                val unfiltered = status == null && evidence == null && ownership == null && module == null && search == null
+                val matches = if (unfiltered) null else IntArray(table.size)
+                var matched = if (unfiltered) table.size else 0
+                if (!unfiltered) {
+                    for (position in orderRows.indices) {
+                        val row = orderRows[if (order == "asc") position else orderRows.size - 1 - position]
+                        if (status != null && table.status[row] != status) continue
+                        if (evidence != null && table.evidence(row) != evidence) continue
+                        if (ownership != null && table.ownership(row) != ownership) continue
+                        if (module != null && table.owners[row] != module) continue
+                        if (search != null && !(table.ids[row].contains(search, true) || table.names[row]?.contains(search, true) == true ||
+                                (addressPrefix != null && table.address(row)?.startsWith(addressPrefix) == true))) continue
+                        matches!![matched++] = row
+                    }
                 }
                 val start = offset(owner, route, index, query, matched)
                 val items = ArrayList<JsonObject>(query.limit)
                 var bytes = 0
                 for (position in start until minOf(matched, start + query.limit)) {
-                    val item = entityItem(index, table, matches[position])
+                    val ordered = if (order == "asc") position else orderRows.size - 1 - position
+                    val row = matches?.get(position) ?: orderRows[ordered]
+                    val item = entityItem(index, table, row)
                     val size = item.toString().toByteArray(Charsets.UTF_8).size + 1
                     if (items.isNotEmpty() && bytes + size > MAXIMUM_ITEM_BYTES) break
                     bytes += size; items += item
@@ -717,7 +721,8 @@ internal class WebProgramStructurePages(
         })
         put("modules", index.modules.size)
         put("modulesDeclaredAccepted", index.modules.count { it.implementationDeclaration == "accepted" })
-        put("dependencyCycles", index.modules.map { it.cycle }.filter { it.isNotEmpty() }.distinct().size)
+        // Validated cycles have disjoint members and name each recorded module once.
+        put("dependencyCycles", index.modules.count { it.cycle.firstOrNull() == it.id })
         put("unknownPlanReferences", index.unknownPlanReferences)
         put("nameCollisions", index.collisions.size)
         put("unresolvedCallTargets", (0 until functions.size).sumOf { row -> functions.calls[row].count { it !in functions.index } })

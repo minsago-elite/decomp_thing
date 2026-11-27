@@ -1983,6 +1983,8 @@ private class ProductionAcpSandboxExecution(
                 configuration.executable,
                 configuration.expectedExecutableManifestSha256,
             )
+            requireAgentRuntimeMountsExcludeWorkspace(request.workspaceRoots,
+                listOf(executableMount) + sandboxConfiguration.agentRuntimeMounts)
             val sandboxed = observePrefix(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { boundary.launch(
                 AcpSandboxLaunch(
                     command = configuration.command(),
@@ -3192,7 +3194,7 @@ private class PolicyClientOperations(
 }
 
 private data class FileMetadata(val mode: Int, val uid: Int, val gid: Int, val linkCount: Int)
-private data class FileState(val sha256: String, val size: Long, val metadata: FileMetadata)
+private data class FileState(val sha256: String, val size: Long, val metadata: FileMetadata, val validUtf8: Boolean)
 
 internal data class WorkspaceSnapshotLimits(
     val entries: Int = 8192,
@@ -3291,7 +3293,12 @@ internal class WorkspaceSnapshot private constructor(
                     AgentFileChangeKind.MODIFIED -> AgentOperation.WRITE_FILE
                     AgentFileChangeKind.DELETED -> AgentOperation.DELETE_FILE
                 }
-                if (!request.accessPolicy.allows(path, operation)) {
+                if (!request.accessPolicy.allowsMutation(
+                        path,
+                        operation,
+                        (afterState ?: beforeState)?.size,
+                        (afterState ?: beforeState)?.validUtf8,
+                    )) {
                     throw AgentExecutionException(
                         AgentFailure(
                             AgentFailureKind.WORKSPACE_VIOLATION,
@@ -3408,7 +3415,7 @@ internal class WorkspaceSnapshot private constructor(
             }
             if (result.identity != expected) throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
             return FileState(result.sha256, result.size, FileMetadata(
-                result.identity.mode, result.identity.uid, result.identity.gid, result.identity.linkCount))
+                result.identity.mode, result.identity.uid, result.identity.gid, result.identity.linkCount), result.validUtf8)
         }
     }
 }
@@ -3479,19 +3486,8 @@ private fun PlanEntryStatus.toContractStatus(): AgentPlanStatus = when (this) {
     PlanEntryStatus.COMPLETED -> AgentPlanStatus.COMPLETED
 }
 
-private fun renderPrompt(request: AgentExecutionRequest): String = buildString {
-    appendLine(request.objective)
-    if (request.contextInputs.isNotEmpty()) {
-        appendLine()
-        appendLine("Context inputs (immutable):")
-        request.contextInputs.forEach { context ->
-            append("--- ").append(context.id).append(" [").append(context.mediaType).append(']')
-            context.description?.let { append(" — ").append(it) }
-            appendLine()
-            appendLine(context.content)
-        }
-    }
-}
+private fun renderPrompt(request: AgentExecutionRequest): String =
+    decompengine.agent.renderAgentPrompt(request.objective, request.contextInputs)
 
 private fun tokenLimitExceeded(request: AgentExecutionRequest, usage: AgentUsage): Boolean =
     request.limits.maxInputTokens?.let { requireNotNull(usage.inputTokens) > it } == true ||

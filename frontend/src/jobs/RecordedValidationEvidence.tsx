@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner } from '../api/generated';
 import { withApiFailureReference } from '../api/errors';
 import { recordedValidationCopy as copy } from '../copy/attempt';
+import { commonCopy } from '../copy/common';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ValidationSourceSnapshot } from './ValidationSourceSnapshot';
 import { validationPageDownload } from './recordedValidationExport';
@@ -12,6 +13,7 @@ import type { ValidationLocation, ValidationNavigation } from './validationNavig
 import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { message, textMessage } from '../shared/messages';
 
 function requestedValidation(search: string, preserveRouteContext = false) {
   try {
@@ -214,7 +216,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
   [report, history, selected, jobId, runId]);
   const loading = view?.loading ?? false;
   const flag = (value: boolean | null) => value === null ? copy.notCompared : value ? copy.matches : copy.differs;
-  return <section aria-labelledby="recorded-validation-title">
+  return <section class="retained-cases" aria-labelledby="recorded-validation-title">
     <h2 id="recorded-validation-title">{copy.title}</h2>
     <p>{copy.scope}</p>
     <button type="button" disabled={loading} onClick={() => { void readHistory(); }}>{copy.read}</button>
@@ -222,18 +224,18 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
     {view?.error && <p role="alert">{view.error}</p>}
     {history && <>
       <MetadataReceipt kind="validationHistory" receipt={receiptOf(history)} />
-      <p>{copy.historyState}: {history.state}</p>
+      <p>{textMessage(commonCopy.labeledValue, { label: copy.historyState, value: history.state })}</p>
       <ul aria-label={copy.limitations}>{history.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
       {history.state === 'recorded' && <>
         <p>{copy.historyPage} {history.page} / {history.totalPages}</p>
-        <div role="region" aria-label={copy.owners} tabIndex={0}>
+        <div class="retained-case-table" role="region" aria-label={copy.owners} tabIndex={0}>
           <table><caption>{copy.owners}</caption><thead><tr>
             <th scope="col">{copy.operation}</th><th scope="col">{copy.candidate}</th><th scope="col">{copy.source}</th><th scope="col">{copy.receipt}</th>
           </tr></thead><tbody>{history.items.map(owner => <tr key={`${owner.ownerKind}:${owner.ownerId}`}>
-            <th scope="row">{owner.ownerKind}: <code>{owner.ownerId}</code></th>
+            <th scope="row">{message(commonCopy.labeledValue, { label: owner.ownerKind, value: <code>{owner.ownerId}</code> })}</th>
             <td><code>{owner.candidateId ?? copy.withheld}</code></td><td><code>{owner.sourceSha256 ?? copy.withheld}</code></td>
             <td>{owner.normalOutcome ?? owner.failureKind ?? copy.notRecorded} <button type="button" disabled={loading || !owner.canInspect}
-              aria-label={`${owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}: ${owner.ownerKind} ${owner.ownerId}`}
+              aria-label={textMessage(copy.ownerAction, { action: owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect, kind: owner.ownerKind, owner: owner.ownerId })}
               onClick={() => { void readCases(history, owner); }}>{owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}</button></td>
           </tr>)}</tbody></table>
         </div>
@@ -250,7 +252,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
     </>}
     {report && <>
       <MetadataReceipt kind="validationReport" receipt={receiptOf(report)} />
-      <p>{copy.reportState}: {report.state}</p>
+      <p>{textMessage(commonCopy.labeledValue, { label: copy.reportState, value: report.state })}</p>
       <p>{copy.acceptance}</p>
       {report.state === 'available' && (cases || failure) && <>
         <p>{copy.exportScope}</p>
@@ -287,7 +289,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
           }}>{copy.setComparisonBaseline}</button> : <p>{copy.comparisonUnavailable}</p>}
           {baseline && <>
             <MetadataReceipt kind="baseline" receipt={baseline.receipt} />
-            <dl><dt>{copy.comparisonBaseline}</dt><dd><code>{baseline.snapshot.ownerKind}: {baseline.snapshot.ownerId}</code></dd>
+            <dl><dt>{copy.comparisonBaseline}</dt><dd><code>{textMessage(commonCopy.labeledValue, { label: baseline.snapshot.ownerKind, value: baseline.snapshot.ownerId })}</code></dd>
               <dt>{copy.candidate}</dt><dd><code>{baseline.snapshot.candidateId}</code></dd>
               <dt>{copy.source}</dt><dd><code>{baseline.snapshot.sourceSha256}</code></dd></dl>
             <button type="button" onClick={() => {
@@ -320,11 +322,11 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
         <dl><dt>{copy.source}</dt><dd><code>{cases.sourceSha256}</code></dd><dt>{copy.corpus}</dt><dd><code>{cases.corpusSha256}</code></dd>
           <dt>{copy.inputs}</dt><dd>{cases.totalInputs}</dd><dt>{copy.matched}</dt><dd>{cases.matchedInputs ?? copy.notCompared}</dd></dl>
         <p>{copy.casePage} {cases.page} / {cases.totalPages}</p>
-        <div role="region" aria-label={copy.cases} tabIndex={0}>
+        <div class="retained-case-table" role="region" aria-label={copy.cases} tabIndex={0}>
           <table><caption>{copy.cases}</caption><thead><tr><th scope="col">{copy.case}</th><th scope="col">{copy.outcome}</th>
             <th scope="col">{copy.exit}</th><th scope="col">{copy.stdout}</th><th scope="col">{copy.stderr}</th><th scope="col">{copy.previews}</th>
           </tr></thead><tbody>{cases.items.map(item => <tr key={item.caseId}>
-            <th scope="row">{item.ordinal}: <code>{item.caseId}</code></th><td>{item.outcome}</td><td>{flag(item.exitCodeMatches)}</td>
+            <th scope="row">{message(commonCopy.labeledValue, { label: item.ordinal, value: <code>{item.caseId}</code> })}</th><td>{item.outcome}</td><td>{flag(item.exitCodeMatches)}</td>
             <td>{flag(item.stdoutMatches)}</td><td>{flag(item.stderrMatches)}</td><td>
               <Preview title={copy.originalStdout} value={item.originalStdoutPreview} />
               <Preview title={copy.rebuiltStdout} value={item.rebuiltStdoutPreview} />
@@ -369,16 +371,16 @@ function MismatchComparison({ first, second, page, onPageChange, onInspectPage, 
     [copy.resolvedMismatch, result.resolvedMismatches]] as const;
   const pages = Math.max(1, Math.ceil(Math.max(...groups.map(([, ordinals]) => ordinals.length)) / 20));
   return <>
-    <p>{copy.comparisonPopulation}: {second.totalInputs}. {copy.comparisonPolicy}: {second.comparisonPolicy}.</p>
+    <p>{textMessage(copy.comparisonFacts, { population: copy.comparisonPopulation, total: second.totalInputs, policy: copy.comparisonPolicy, value: second.comparisonPolicy })}</p>
     <dl>{groups.map(([label, ordinals]) => <div key={label}><dt>{label}</dt><dd>{ordinals.length}</dd></div>)}
       <dt>{copy.matchingBoth}</dt><dd>{result.matched}</dd></dl>
-    <p>{copy.comparisonWindow} {page} / {pages}. {copy.comparisonOrdinals}</p>
-    <div role="region" aria-label={copy.comparisonDifferences} tabIndex={0}>
+    <p>{textMessage(copy.comparisonWindowText, { window: copy.comparisonWindow, page, pages, ordinals: copy.comparisonOrdinals })}</p>
+    <div class="retained-case-table" role="region" aria-label={copy.comparisonDifferences} tabIndex={0}>
       <table><caption>{copy.comparisonDifferences}</caption><thead><tr><th scope="col">{copy.outcome}</th>
         <th scope="col">{copy.caseOrdinal}</th><th scope="col">{copy.inspectSelected}</th></tr></thead><tbody>
         {groups.flatMap(([label, ordinals]) => ordinals.slice((page - 1) * 20, page * 20).map(ordinal => <tr key={`${label}:${ordinal}`}>
           <th scope="row">{label}</th><td>{ordinal}</td><td><button type="button" onClick={() => { onInspectPage(Math.floor((ordinal - 1) / 20) + 1); }}
-            aria-label={`${copy.inspectSelected}: ${ordinal}`}>{copy.inspectSelected}</button></td>
+            aria-label={textMessage(copy.ordinalAction, { action: copy.inspectSelected, ordinal })}>{copy.inspectSelected}</button></td>
         </tr>))}
       </tbody></table>
     </div>
@@ -393,8 +395,8 @@ function MismatchComparison({ first, second, page, onPageChange, onInspectPage, 
 
 function Preview({ title, value }: { title: string; value: ValidationBytePreview | null }) {
   return <details><summary>{title}</summary>{value === null ? <p>{copy.notCompared}</p> : <>
-    <p>{copy.bytes}: {value.totalBytes}. {copy.prefix}: {value.prefixBytes}. {value.truncated ? copy.truncated : copy.complete}</p>
-    <pre aria-label={`${title}: ${copy.hex}`}>{value.hex === '' ? copy.empty : value.hex}</pre>
-    <pre aria-label={`${title}: ${copy.text}`}>{value.text === null ? copy.noText : value.text === '' ? copy.empty : value.text}</pre>
+    <p>{textMessage(copy.previewSize, { bytes: copy.bytes, total: value.totalBytes, prefix: copy.prefix, prefixBytes: value.prefixBytes, completeness: value.truncated ? copy.truncated : copy.complete })}</p>
+    <pre aria-label={textMessage(copy.previewPart, { title, part: copy.hex })}>{value.hex === '' ? copy.empty : value.hex}</pre>
+    <pre aria-label={textMessage(copy.previewPart, { title, part: copy.text })}>{value.text === null ? copy.noText : value.text === '' ? copy.empty : value.text}</pre>
   </>}</details>;
 }

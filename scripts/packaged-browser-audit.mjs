@@ -1,0 +1,1901 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
+
+// Packaged accessibility, reflow, asset and timing audit (#615 #616 #619 #623 #633).
+// The document, CSP header, base path, entry/lazy chunks and worker are the real packaged
+// JVM responses. Only `/nested/api/v1/*` reads are fulfilled in DevTools from the shared
+// contract fixtures, because inert seeding cannot persist source revisions; every
+// response is a schema fixture the SPA validates exactly as it would a server response.
+
+export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
+  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file', 'structure'];
+export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
+export const engineSupplementalInteractionContexts = [
+  ...['attempt overview', 'attempt activity', 'attempt evidence', 'source file'].flatMap(page =>
+    ['focus light', 'focus dark'].map(context => ({ page, context }))),
+  { page: 'attempt overview', context: 'keyboard commands' },
+  { page: 'source file', context: 'keyboard download' },
+  { page: 'source file', context: 'worker/CSP qualification' },
+];
+export const auditProfileEvidence = (profile) => {
+  if (profile === 'reference') return { name: 'reference', cpuThrottlingRate: 1, network: 'browser-default' };
+  if (profile === 'constrained') return { name: 'constrained', cpuThrottlingRate: 4,
+    network: { offline: false, latency: 0, downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 } };
+  throw new Error(`Unknown packaged audit profile: ${profile}`);
+};
+export async function applyAuditProfile(cdp, sessionId, profile) {
+  const evidence = auditProfileEvidence(profile);
+  if (profile === 'constrained') {
+    await cdp.call('Emulation.setCPUThrottlingRate', { rate: evidence.cpuThrottlingRate }, sessionId);
+    await cdp.call('Network.emulateNetworkConditions', evidence.network, sessionId);
+  }
+  return evidence;
+}
+export function chromiumSupplementalInteractionContexts(pages) {
+  return [
+    ...pages.filter(page => (page.preparation ?? []).length > 0).flatMap(({ name }) =>
+      ['focus light', 'focus dark'].map(context => ({ page: name, context }))),
+    { page: 'source file', context: 'worker/CSP qualification' },
+  ];
+}
+
+const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
+const longFilename = `${'reconstructed-firmware-image-with-an-unbroken-very-long-name-'.repeat(4)}0123456789abcdef.elf`.slice(0, 255);
+export const jobFilterContract = Object.freeze({ label: 'Filename or label search', value: 'audit-filter-match',
+  filteredQuery: 'search=audit-filter-match&limit=50', unfilteredQuery: 'limit=50',
+  filteredRendered: 'audit-filter-match.elf', unfilteredRendered: longFilename,
+  filteredJobId: 'fedcba9876543210fedcba9876543210', unfilteredJobId: '1234567890abcdef1234567890abcdef' });
+
+/** Require an in-viewport layout box plus non-hidden styles through the ancestor chain. */
+export function filterElementVisible(element, computedStyle) {
+  if (!element || typeof element.getClientRects !== 'function') return false;
+  const view = element.ownerDocument?.defaultView;
+  if (!view) return false;
+  const getStyle = typeof computedStyle === 'function' ? computedStyle : node => view.getComputedStyle(node);
+  const rectangles = Array.from(element.getClientRects());
+  if (!rectangles.some(rectangle => rectangle.width > 0 && rectangle.height > 0 && rectangle.right > 0
+    && rectangle.bottom > 0 && rectangle.left < view.innerWidth && rectangle.top < view.innerHeight)) return false;
+  for (let current = element; current; current = current.parentElement) {
+    const style = getStyle(current);
+    if (!style || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    const opacity = Number.parseFloat(style.opacity);
+    if (Number.isFinite(opacity) && opacity <= 0) return false;
+  }
+  return true;
+}
+export function focusFilterSubmitForTiming(document, button) {
+  if (!document || !button || typeof button.focus !== 'function') return false;
+  button.focus();
+  return document.activeElement === button;
+}
+const longLine = `static const unsigned char embedded_table_with_a_long_identifier[] = { ${Array.from({ length: 160 }, (_, index) => `0x${(index * 37 % 256).toString(16).padStart(2, '0')}`).join(', ')} };`;
+const sourceText = ['/* Synthetic audit source: long unbroken lines must stay inside the scroll region. */',
+  '#include <stdint.h>', longLine, `const char *path = "${'/very/deep/source/tree'.repeat(24)}";`,
+  ...Array.from({ length: 40 }, (_, index) => `int f${index}(int value) { return value * ${index} + 0x${(index * 4099).toString(16)}; }`), ''].join('\n');
+const secondSourceText = ['/* Second audit source: rotates the opened file identity between samples. */',
+  'int audit_second_source(int value) { return value ^ 0x5a; }', ''].join('\n');
+const sourceFileContract = (fileId, displayName, text) => {
+  const bytes = Buffer.from(text, 'utf8');
+  const lines = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n');
+  return Object.freeze({ fileId, displayName, sizeBytes: String(bytes.length), sha256: createHash('sha256').update(bytes).digest('hex'),
+    rows: lines.length, firstRow: lines[0], lastRow: lines.at(-1) });
+};
+/**
+ * Source-file open timing (#623): directory click into file metadata, then the explicit preview
+ * action into the first bounded chunk. Identity comes from this contract, not from the report.
+ */
+export const fileOpenContract = Object.freeze({
+  samples: 50, jobId: '1234567890abcdef1234567890abcdef', runId: 'run_example_1', revisionId: 'revision_1', directoryId: 'root',
+  sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64), offset: '0', maxBytes: '65536',
+  returnDirectory: 'Return to source directory', loadingMetadata: 'Loading recorded file metadata…', openPreview: 'Open source preview', loadingRange: 'Loading source range…',
+  deadlineMs: 10000,
+  files: Object.freeze([
+    sourceFileContract(`file_0_${'a'.repeat(64)}`, 'embedded_tables_with_long_lines.c', sourceText),
+    sourceFileContract(`file_2_${'b'.repeat(64)}`, 'audit_second_source.c', secondSourceText),
+  ]),
+});
+const fileOpenIdentityKeys = ['samples', 'jobId', 'runId', 'revisionId', 'directoryId', 'sourceSha256', 'metadataVersion', 'offset', 'maxBytes'];
+export const fileOpenPin = `?sourceSha256=${fileOpenContract.sourceSha256}&metadataVersion=${fileOpenContract.metadataVersion}`;
+const fileOpenApi = fileId => `/jobs/${fileOpenContract.jobId}/runs/${fileOpenContract.runId}/revisions/${fileOpenContract.revisionId}/source-files/${fileId}`;
+export const fileOpenChunkQuery = new URLSearchParams({ offset: fileOpenContract.offset, maxBytes: fileOpenContract.maxBytes,
+  metadataVersion: fileOpenContract.metadataVersion }).toString();
+/** Identity of a fulfilled file-metadata or chunk response, without the chunk text. */
+export function sourceResponseIdentity(data) {
+  if (!data || typeof data !== 'object') return null;
+  const chunk = typeof data.text === 'string';
+  return { kind: chunk ? 'chunk' : 'file', binding: data.binding ?? null, fileId: chunk ? data.fileId : data.item?.fileId ?? null,
+    sourceSha256: data.sourceSha256 ?? null, metadataVersion: data.metadataVersion ?? null,
+    sha256: chunk ? data.sha256 : data.item?.sha256 ?? null, sizeBytes: chunk ? data.sizeBytes : data.item?.sizeBytes ?? null,
+    ...(chunk ? { offsetBytes: data.offsetBytes, lengthBytes: data.lengthBytes, completeFile: data.completeFile,
+      textSha256: createHash('sha256').update(data.text).digest('hex') } : {}) };
+}
+
+/** Identity the contract expects for one file's metadata or chunk response. */
+export function expectedSourceResponseIdentity(kind, file) {
+  const c = fileOpenContract;
+  return { kind, binding: { jobId: c.jobId, runId: c.runId, revisionId: c.revisionId }, fileId: file.fileId,
+    sourceSha256: c.sourceSha256, metadataVersion: c.metadataVersion, sha256: file.sha256, sizeBytes: file.sizeBytes,
+    ...(kind === 'chunk' ? { offsetBytes: c.offset, lengthBytes: file.sizeBytes, completeFile: true, textSha256: file.sha256 } : {}) };
+}
+/** Compact report form of a response identity: a digest of its canonical JSON. */
+export const sourceResponseDigest = identity => `sha256:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+const sha256Json = value => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
+const sourceReadCommitment = entry => sha256Json(canonicalSourceRead(entry)).slice('sha256:'.length, 'sha256:'.length + 32);
+const canonicalSourceRead = entry => ({ method: entry?.method, path: entry?.path, status: entry?.status, query: entry?.query,
+  fulfillmentSucceeded: entry?.fulfillmentSucceeded, response: entry?.response });
+const renderedOpenKeys = ['renderedFileId', 'pageSearch', 'renderedName', 'renderedSha256', 'focus', 'previewOpen'];
+const renderedPreviewKeys = ['ariaBusy', 'focus', 'renderedRows', 'renderedBytes', 'renderedTextSha256'];
+const renderedFileOpenDetails = sample => ({ fileId: sample?.fileId,
+  open: Object.fromEntries(renderedOpenKeys.map(key => [key, sample?.open?.[key]])),
+  preview: Object.fromEntries(renderedPreviewKeys.map(key => [key, sample?.preview?.[key]])) });
+/** The rendered details and source requests a clean run must produce, from the contract alone. */
+function expectedFileOpenSample(index) {
+  const file = fileOpenContract.files[index % fileOpenContract.files.length];
+  const read = kind => ({ method: 'GET', path: kind === 'file' ? fileOpenApi(file.fileId) : `${fileOpenApi(file.fileId)}/chunk`, status: 200,
+    query: kind === 'file' ? '' : fileOpenChunkQuery, fulfillmentSucceeded: true, response: expectedSourceResponseIdentity(kind, file) });
+  return { rendered: { fileId: file.fileId,
+    open: { renderedFileId: file.fileId, pageSearch: fileOpenPin, renderedName: file.displayName, renderedSha256: file.sha256, focus: 'main-heading', previewOpen: false },
+    preview: { ariaBusy: 'false', focus: 'source-preview-title', renderedRows: file.rows, renderedBytes: Number(file.sizeBytes), renderedTextSha256: file.sha256 } },
+    requests: [read('file'), read('chunk')] };
+}
+
+/**
+ * In-page timed action. `control` locates the element to click; `observe` returns
+ * { signal: 'loading' | 'data' | null, details }. A signal counts only when the following
+ * animation frame observes the same signal and details, so transient pre-paint states are not
+ * timed. The promise rejects at the hard deadline.
+ */
+export function timedPhaseScript({ control, observe, deadlineMs = fileOpenContract.deadlineMs }) {
+  return `(async () => {
+    const visible = ${filterElementVisible.toString()};
+    const control = (${control})();
+    if (!control || typeof control.click !== 'function' || control.disabled) throw new Error('timed phase control is missing');
+    const observe = ${observe};
+    const started = performance.now();
+    let feedbackMs = null; let feedbackSignal = null; let dataMs = null; let details = null;
+    control.click();
+    return await new Promise((resolve, reject) => {
+      const deadline = started + ${Number(deadlineMs)};
+      const check = () => {
+        if (performance.now() > deadline) { reject(new Error('timed phase deadline')); return; }
+        const first = observe();
+        if (first.signal === null) { requestAnimationFrame(check); return; }
+        requestAnimationFrame(() => {
+          const presented = observe();
+          if (presented.signal === first.signal && JSON.stringify(presented.details ?? null) === JSON.stringify(first.details ?? null)) {
+            const elapsed = performance.now() - started;
+            if (feedbackMs === null) { feedbackMs = elapsed; feedbackSignal = presented.signal; }
+            if (presented.signal === 'data' && dataMs === null) { dataMs = elapsed; details = presented.details; }
+          }
+          if (feedbackMs !== null && dataMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, details });
+          else if (performance.now() > deadline) reject(new Error('timed phase deadline'));
+          else requestAnimationFrame(check);
+        });
+      };
+      requestAnimationFrame(check);
+    });
+  })()`;
+}
+
+/** Phase A: directory link to file metadata. The preview must stay closed and no chunk may load. */
+export function fileOpenMetadataPhase(file) {
+  const c = fileOpenContract;
+  return timedPhaseScript({
+    control: `() => {
+      const link = [...document.querySelectorAll('main ul.job-list a')].find(element =>
+        new URL(element.href, location.href).pathname.endsWith(${JSON.stringify(`/source-files/${file.fileId}`)}));
+      if (link) link.focus();
+      return link && document.activeElement === link ? link : null;
+    }`,
+    observe: `() => {
+      const main = document.querySelector('main');
+      if (!main || !location.pathname.endsWith(${JSON.stringify(`/source-files/${file.fileId}`)})) return { signal: null };
+      const loading = [...main.querySelectorAll('p[role="status"]')].find(element =>
+        element.textContent.trim() === ${JSON.stringify(c.loadingMetadata)} && visible(element));
+      const name = main.querySelector('h2');
+      const digest = [...main.querySelectorAll('dl.job-facts dd code')].find(element => element.textContent.trim() === ${JSON.stringify(file.sha256)});
+      const open = [...main.querySelectorAll('button')].find(element => element.textContent.trim() === ${JSON.stringify(c.openPreview)});
+      const populated = !loading && visible(name) && name.textContent.trim() === ${JSON.stringify(file.displayName)} && visible(digest)
+        && open && !open.disabled && open.getClientRects().length > 0 && !main.querySelector('[role="alert"]')
+        && !main.querySelector('section.source-preview') && document.activeElement === main.querySelector('h1');
+      if (populated) return { signal: 'data', details: { renderedFileId: location.pathname.split('/').at(-1), pageSearch: location.search,
+        renderedName: name.textContent.trim(), renderedSha256: digest.textContent.trim(), focus: 'main-heading', previewOpen: false } };
+      return { signal: loading ? 'loading' : null };
+    }`,
+  });
+}
+
+/** Phase B: the explicit preview action to the first bounded, focused, non-busy chunk. */
+export function fileOpenPreviewPhase(file) {
+  const c = fileOpenContract;
+  return timedPhaseScript({
+    control: `() => {
+      const button = [...document.querySelectorAll('main button')].find(element => element.textContent.trim() === ${JSON.stringify(c.openPreview)});
+      if (button) button.focus();
+      return button && document.activeElement === button ? button : null;
+    }`,
+    observe: `() => {
+      const section = document.querySelector('main section.source-preview');
+      if (!section) return { signal: null };
+      const busy = section.getAttribute('aria-busy');
+      const loading = [...section.querySelectorAll('p[role="status"]')].find(element =>
+        element.textContent.trim() === ${JSON.stringify(c.loadingRange)} && visible(element));
+      const heading = section.querySelector('#source-preview-title');
+      const rows = [...section.querySelectorAll('.source-rows .source-row pre')];
+      const populated = !loading && busy === 'false' && visible(heading) && document.activeElement === heading
+        && rows.length === ${file.rows} && rows[0].getClientRects().length > 0
+        && rows[0].textContent === ${JSON.stringify(file.firstRow)} && rows.at(-1).textContent === ${JSON.stringify(file.lastRow)}
+        && !section.querySelector('[role="alert"]');
+      if (populated) return { signal: 'data', details: { ariaBusy: busy, focus: 'source-preview-title', renderedRows: rows.length } };
+      return { signal: loading && busy === 'true' ? 'loading' : null };
+    }`,
+  });
+}
+
+/** Untimed digest of the rendered preview rows, so the report binds content without retaining it. */
+export const renderedPreviewDigest = `(async () => {
+  const rows = [...document.querySelectorAll('main section.source-preview .source-rows .source-row pre')];
+  const text = rows.map(row => row.textContent).join('\\n') + '\\n';
+  const bytes = new TextEncoder().encode(text);
+  if (!globalThis.crypto?.subtle) return { renderedBytes: bytes.length, renderedTextSha256: null };
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return { renderedBytes: bytes.length, renderedTextSha256: [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
+})()`;
+
+/** Contract fixtures bound to one job, attempt and revision, with long names and lines. */
+export function auditFixtures(repo, buildId) {
+  const load = (name) => {
+    const path = join(fixtureRoot(repo), `${name}.json`);
+    try { return JSON.parse(readFileSync(path, 'utf8')); }
+    catch (error) { throw new Error(`Could not load browser-audit fixture ${name} from ${path}`, { cause: error }); }
+  };
+  const job = load('job-lossless');
+  const jobId = job.data.jobId;
+  job.data.displayFilename = longFilename;
+  const jobs = load('jobs-page');
+  for (const item of jobs.data.items) if (item.jobId === jobId) item.displayFilename = longFilename;
+  const jobFilter = jobFilterContract;
+  const filteredJobs = structuredClone(jobs);
+  filteredJobs.data.items = [structuredClone(jobs.data.items[0])];
+  Object.assign(filteredJobs.data.items[0], { jobId: jobFilter.filteredJobId, displayFilename: jobFilter.filteredRendered,
+    version: 'job_version_filter_fixture' });
+  const run = load('run-completed-unaccepted');
+  const runId = run.data.runId;
+  const revisionId = 'revision_1';
+  const selected = { jobId, runId, revisionId };
+  const bound = (name, binding) => { const document = load(name); document.data.binding = binding; return document; };
+  const directory = bound('revision-directory-root', selected);
+  const fileTemplate = bound('revision-file-root', selected);
+  const chunkTemplate = load('source-chunk-mid-line');
+  for (const [key, actual] of [['jobId', jobId], ['runId', runId], ['sourceSha256', directory.data.sourceSha256],
+    ['metadataVersion', directory.data.metadataVersion], ['sourceSha256', fileTemplate.data.sourceSha256],
+    ['metadataVersion', fileTemplate.data.metadataVersion], ['fileId', fileTemplate.data.item.fileId]]) {
+    const expected = key === 'fileId' ? fileOpenContract.files[0].fileId : fileOpenContract[key];
+    if (actual !== expected) throw new Error(`Browser-audit fixture ${key} ${actual} differs from the file-open contract ${expected}`);
+  }
+  // Two distinct files rotate the timed file identity; each has its own metadata, chunk and bytes.
+  const sourceFiles = new Map(fileOpenContract.files.map((contract, index) => {
+    const text = index === 0 ? sourceText : secondSourceText;
+    const bytes = Buffer.from(text, 'utf8');
+    const metadata = structuredClone(fileTemplate);
+    Object.assign(metadata.data.item, { fileId: contract.fileId, displayName: contract.displayName, sizeBytes: contract.sizeBytes, sha256: contract.sha256 });
+    const chunk = structuredClone(chunkTemplate);
+    Object.assign(chunk.data, { binding: selected, fileId: contract.fileId, sourceSha256: metadata.data.sourceSha256,
+      metadataVersion: metadata.data.metadataVersion, sha256: contract.sha256, sizeBytes: contract.sizeBytes, offsetBytes: '0',
+      lengthBytes: contract.sizeBytes, nextOffsetBytes: null, completeFile: true, text,
+      firstLine: '1', startsMidLine: false, endsMidLine: false });
+    return [contract.fileId, { metadata, chunk, bytes }];
+  }));
+  const file = sourceFiles.get(fileOpenContract.files[0].fileId).metadata;
+  const bytes = sourceFiles.get(fileOpenContract.files[0].fileId).bytes;
+  const fileItem = directory.data.items.find(item => item.kind === 'file');
+  directory.data.items = [...directory.data.items.filter(item => item.kind !== 'file'), ...fileOpenContract.files.map(contract => ({
+    ...fileItem, fileId: contract.fileId, displayName: contract.displayName, sizeBytes: contract.sizeBytes, sha256: contract.sha256,
+    declaredUtf8Text: true, declaredViewable: true }))];
+  // The SPA requires directories before files, files in code-unit name order, and exact counts.
+  directory.data.items.sort((left, right) => left.kind !== right.kind ? (left.kind === 'directory' ? -1 : 1)
+    : left.displayName < right.displayName ? -1 : left.displayName > right.displayName ? 1 : 0);
+  directory.data.totalChildren = directory.data.items.length;
+  directory.data.sourceFileCount = directory.data.items.reduce((count, item) => count + (item.kind === 'file' ? 1 : item.sourceFileCount), 0);
+  const sourceFileFrom = pathname => sourceFiles.get(pathname.split('/source-files/')[1]?.split('/')[0]);
+  const bootstrap = load('bootstrap');
+  Object.assign(bootstrap.data, { basePath: '/nested/', uiBuildId: buildId,
+    sessionExpiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+  const error = (status, code) => ({ status, document: { apiVersion: 1, kind: 'error', requestId: `request_audit_${status}`,
+    error: { code, message: 'Audit fixture response.', retryable: false, details: [], retryAfterMs: null } } });
+  const ok = (document) => ({ status: 200, document });
+  const id = '[A-Za-z0-9][A-Za-z0-9_-]{0,127}';
+  // The keyboard journey reads eligibility, retries, then reads again and cancels; each
+  // command response is bound to this attempt exactly as the server would bind it.
+  const controls = { mode: 'retry' };
+  const controlsFor = () => {
+    const document = load(controls.mode === 'retry' ? 'attempt-controls-retry' : 'attempt-controls-running');
+    Object.assign(document.data, { jobId, runId, runVersion: run.data.version });
+    return document;
+  };
+  const retried = load('run-retry');
+  Object.assign(retried.data, { jobId, previousRunId: runId });
+  const cancelling = structuredClone(run);
+  Object.assign(cancelling.data, { state: 'cancelling', terminalReason: null, endedAt: null, version: 'run_version_cancelling' });
+  const exploration = bound('report-exploration', selected);
+  exploration.data.sourceArtifact.binding = selected;
+  exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
+  const chartExpected = {
+    reportId: exploration.data.reportId, jobId, runId, revisionId,
+    chartName: 'Observed output signature counts', tableName: 'Output signature counts reported by the producer',
+    counts: {
+      expanded: exploration.data.summary.expandedOutputSignatures,
+      added: exploration.data.summary.confidence.newOutputSignatureCount,
+      denominator: `Expanded observed signatures: ${exploration.data.summary.confidence.outputSignatureCount}`,
+    },
+    headers: ['Measurement', 'Reported count', 'Denominator / sample'],
+    labels: ['Expanded distinct exit/output signatures', 'New distinct exit/output signatures'],
+    sample: 'The producer’s expanded observation sample',
+    approximation: 'Bar lengths are approximate; the table preserves exact reported counts.',
+  };
+  const history = bound('validation-history', { jobId, runId, revisionId: null });
+  const sourceSearch = bound('source-search-complete', selected);
+  const functionInventory = bound('function-inventory', selected);
+  const owner = history.data.items[0];
+  const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
+  const routes = [
+    [/^\/bootstrap$/, () => ok(bootstrap)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/controls$`), () => ok(controlsFor())],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/recover$`), () => ({ status: 201, document: retried }), 'POST'],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/cancel$`), () => ({ status: 202, document: cancelling }), 'POST'],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/content$`),
+      (accept, query, pathname) => sourceFileFrom(pathname) ? { status: 200, bytes: sourceFileFrom(pathname).bytes, contentType: 'application/octet-stream' }
+        : error(404, 'NOT_FOUND')],
+    [/^\/recovery$/, () => ok(load('recovery-empty'))],
+    [/^\/jobs$/, (accept, query) => query === jobFilter.filteredQuery ? ok(filteredJobs)
+      : query === null || query === jobFilter.unfilteredQuery ? ok(jobs) : error(404, 'NOT_FOUND')],
+    [new RegExp(`^/jobs/${jobId}$`), () => ok(job)],
+    [new RegExp(`^/jobs/${jobId}/runs$`), () => ok(load('runs-page'))],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}$`), () => ok(run)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/snapshot$`), () => ok(load('snapshot'))],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/events$`), (accept) => accept.includes('text/event-stream')
+      ? error(406, 'STREAM_UNSUPPORTED') : ok(load('events-poll'))],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/progress-pin$`), () => ok(load('progress-pin'))],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/exploration$`), () => ok(exploration)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions$`), () => ok(functionInventory)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), (accept, query, pathname) => sourceFileFrom(pathname)
+      ? ok(sourceFileFrom(pathname).chunk) : error(404, 'NOT_FOUND')],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), (accept, query, pathname) => sourceFileFrom(pathname)
+      ? ok(sourceFileFrom(pathname).metadata) : error(404, 'NOT_FOUND')],
+  ];
+  const base = `/nested/jobs/${jobId}/runs/${runId}`;
+  const api = `/jobs/${jobId}/runs/${runId}`;
+  // Query-free attempt routes intentionally start with explicit-read shells. Each measurement
+  // must activate these controls afresh and prove both the reads and distinctive DOM content.
+  const activity = [
+    { action: 'Follow activity', reads: [`${api}/snapshot`, `${api}/events`],
+      content: [{ selector: '.activity-row', text: 'Recorded attempt state: running.' }] },
+    { action: 'Pause activity', reads: [], content: [{ selector: '.activity-row', text: 'Recorded attempt state: running.' }] },
+  ];
+  const evidence = [
+    { action: 'Read exploration evidence', reads: [`${api}/reports/exploration`], content: [
+      { selector: '#exploration-report-binding', text: exploration.data.reportId },
+      { selector: '.output-signature-chart [role="img"]', text: '' },
+      { selector: '[aria-labelledby="output-signature-breadth-title"] .retained-case-table tbody', text: 'New distinct exit/output signatures' },
+    ] },
+    { action: 'Read validation evidence', reads: [`${api}/validation-history`],
+      content: [{ selector: '[aria-label="Recorded validation operations"] tbody', text: owner.ownerId }] },
+    { action: `Inspect cases: ${owner.ownerKind} ${owner.ownerId}`, reads: [`${api}/reports/revision-validation`],
+      content: [{ selector: '[aria-label="Recorded validation cases"] tbody', text: validation.data.validationCases.items[0].caseId }] },
+  ];
+  // Unknown paths are a server 404 document, not an SPA view, so the router's not-found view
+  // stays covered by the component accessibility gate.
+  const pages = [
+    { name: 'workspace', path: '/nested/', rendered: longFilename },
+    { name: 'upload', path: '/nested/upload', rendered: 'Binary file' },
+    { name: 'runtime', path: '/nested/runtime', rendered: 'Page build identity' },
+    { name: 'job detail', path: `/nested/jobs/${jobId}`, rendered: 'Binary metadata' },
+    { name: 'attempt history', path: `/nested/jobs/${jobId}/runs`, rendered: runId },
+    { name: 'attempt overview', path: base, rendered: 'Attempt identity', preparation: [...activity, ...evidence] },
+    { name: 'attempt activity', path: `${base}/activity`, rendered: 'Attempt identity', preparation: activity },
+    { name: 'attempt evidence', path: `${base}/evidence`, rendered: 'Attempt identity', preparation: evidence },
+    { name: 'source directory', path: `${base}/revisions/${revisionId}/sources/root`, rendered: 'é space' },
+    { name: 'source search form', path: `${base}/revisions/${revisionId}/source-search`, rendered: 'Enter text to search the recorded inputs of this revision.' },
+    { name: 'source search results', path: `${base}/revisions/${revisionId}/source-search?q=needle`, rendered: 'Showing 4 matches on this page.' },
+    { name: 'source file', path: `${base}/revisions/${revisionId}/source-files/${file.data.item.fileId}?byte=0`, rendered: 'embedded_table_with_a_long_identifier',
+      preparation: [{ action: 'Highlight displayed rows locally', reads: [], content: [
+        { selector: '.source-token-plain', text: 'embedded_table_with_a_long_identifier' },
+        { selector: '.source-token-keyword', text: 'static' },
+        { selector: '.source-token-string', text: '"/very/deep/source/tree' },
+        { selector: '.source-token-comment', text: 'Synthetic audit source' },
+        { selector: '.source-token-number', text: '0x00' },
+      ] }] },
+    { name: 'structure', path: `${base}/revisions/${revisionId}/functions`, rendered: 'Showing 1–3 of 5 matching functions' },
+  ];
+  return {
+    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId, chartExpected,
+    jobFilter, fileOpen: { ...fileOpenContract, directoryPath: `${base}/revisions/${revisionId}/sources/${fileOpenContract.directoryId}` },
+    respond(method, pathname, accept, query = null) {
+      const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
+      return route ? route[1](accept, query, pathname) : error(404, 'NOT_FOUND');
+    },
+  };
+}
+
+// Supported sizes from docs/web-delivery.md. Browser zoom divides the CSS viewport by the
+// zoom factor at a higher device scale, which is what Chrome renders for 200%/400%.
+export const auditViewports = [
+  { name: 'desktop 1440x900', width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
+  { name: 'narrow 390x844', width: 390, height: 844, deviceScaleFactor: 1, mobile: true },
+  { name: 'reflow 320', width: 320, height: 640, deviceScaleFactor: 1, mobile: true },
+  { name: 'zoom 200% of 1280x800', width: 640, height: 400, deviceScaleFactor: 2, mobile: false },
+  { name: 'zoom 400% of 1280x800', width: 320, height: 200, deviceScaleFactor: 4, mobile: false },
+];
+
+// Capture the approximate graphic and exact identity-bound table from the real packaged page.
+export const measureOutputSignatureChart = `(() => {
+  const text = element => (element?.innerText ?? element?.textContent ?? '').trim().replace(/\\s+/g, ' ');
+  const ids = value => (value ?? '').split(/\\s+/).filter(Boolean);
+  const chart = document.querySelector('.output-signature-chart [role="img"]');
+  const figure = document.querySelector('.output-signature-chart');
+  const region = document.querySelector('[aria-labelledby="output-signature-breadth-title"] .retained-case-table');
+  const table = region?.querySelector('table');
+  const rect = element => {
+    const box = element?.getBoundingClientRect();
+    return box ? { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom } : null;
+  };
+  const visible = element => !!element && element.checkVisibility()
+    && getComputedStyle(element).visibility === 'visible' && getComputedStyle(element).display !== 'none';
+  const labelledBy = ids(chart?.getAttribute('aria-labelledby'));
+  const describedBy = ids(chart?.getAttribute('aria-describedby'));
+  return {
+    chartPresent: !!chart, chartRole: chart?.getAttribute('role') ?? null,
+    chartVisible: visible(chart), figurePresent: !!figure, figureVisible: visible(figure),
+    chartName: labelledBy.map(id => text(document.getElementById(id))).filter(Boolean).join(' '),
+    chartDescription: describedBy.map(id => text(document.getElementById(id))).filter(Boolean),
+    chartBounds: rect(figure),
+    chartSeries: [...(chart?.querySelectorAll('.output-signature-series') ?? [])].map(series => ({
+      label: text(series.querySelector('span')), bounds: rect(series), svgBounds: rect(series.querySelector('svg')),
+      barWidth: series.querySelector('rect')?.getAttribute('width') ?? null,
+    })),
+    binding: text(document.querySelector('#exploration-report-binding')),
+    region: region ? { name: region.getAttribute('aria-label'), focusable: region.tabIndex === 0, visible: visible(region),
+      bounds: rect(region), clientWidth: region.clientWidth, scrollWidth: region.scrollWidth } : null,
+    caption: text(table?.querySelector('caption')),
+    headers: [...(table?.querySelectorAll('thead th') ?? [])].map(text),
+    rows: [...(table?.querySelectorAll('tbody tr') ?? [])].map(row => [...row.querySelectorAll('th, td')].map(text)),
+  };
+})()`;
+
+// Chart evidence is captured from the actual rendered viewport only: no beyond-viewport capture,
+// no viewport widening and no stitching. A figure taller than the viewport is recorded as numbered,
+// contiguous viewport tiles. Each tile records geometry before and after the capture so a capture
+// that reflowed the page, was occluded (for example by a focused skip link) or produced a PNG of the
+// wrong size is rejected by assertAudit instead of being retained as proof.
+export const chartCaptureMaxTiles = 8;
+export const chartCaptureTolerancePx = 0.5;
+// Coverage is checked strictly: segments must abut exactly and every clip must contain its segment,
+// so a sub-pixel gap or overlap cannot hide inside the 0.5 px layout-stability tolerance.
+export const chartCoverageEpsilonPx = 1e-3;
+export const chartCaptureSets = [
+  { viewport: 'desktop 1440x900', prefix: 'attempt-evidence-output-signature-chart-desktop', deviceScaleFactor: 1 },
+  { viewport: 'zoom 400% of 1280x800', prefix: 'attempt-evidence-output-signature-chart-zoom-400', deviceScaleFactor: 4 },
+];
+const chartCaptureState = `(offset => {
+  const figure = document.querySelector('.output-signature-chart');
+  if (!figure) return null;
+  const root = document.scrollingElement;
+  const box = figure.getBoundingClientRect();
+  const viewWidth = root.clientWidth, viewHeight = root.clientHeight || innerHeight;
+  const pageLeft = visualViewport?.pageLeft ?? scrollX, pageTop = visualViewport?.pageTop ?? scrollY;
+  // Exact figure/viewport intersection for the segment starting at offset, in viewport CSS px.
+  const top = Math.max(0, box.top + offset), bottom = Math.min(viewHeight, box.bottom);
+  const left = Math.max(0, box.left), right = Math.min(viewWidth, box.right);
+  // Browsers snap fractional clips, so the capture clip is the smallest integer CSS rectangle that
+  // contains the intersection (floor left/top, ceil right/bottom), bounded to the viewport.
+  const clipLeft = Math.max(0, Math.floor(left)), clipTop = Math.max(0, Math.floor(top));
+  const clipRight = Math.min(viewWidth, Math.ceil(right)), clipBottom = Math.min(viewHeight, Math.ceil(bottom));
+  const describe = element => element ? element.tagName.toLowerCase() + (element.id ? '#' + element.id : '')
+    + (element.classList?.length ? '.' + [...element.classList].join('.') : '') : null;
+  // Probe one CSS pixel inside each corner of the figure/clip intersection, never in clip padding.
+  const hits = [[left + 1, top + 1], [right - 1, top + 1], [left + 1, bottom - 1], [right - 1, bottom - 1]].map(([x, y]) => {
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, inFigure: !!hit && (hit === figure || figure.contains(hit)), hit: describe(hit) };
+  });
+  const skip = document.querySelector('.skip-link');
+  const skipBox = skip?.getBoundingClientRect();
+  const skipVisible = !!skip && skip.checkVisibility() && getComputedStyle(skip).visibility === 'visible'
+    && skipBox.width > 1 && skipBox.height > 1 && skipBox.right > 0 && skipBox.bottom > 0
+    && skipBox.left < viewWidth && skipBox.top < viewHeight;
+  return {
+    figure: { x: box.left, y: box.top, width: box.width, height: box.height },
+    rootClientWidth: viewWidth, rootClientHeight: viewHeight,
+    seriesHeights: [...figure.querySelectorAll('.output-signature-series')].map(series => series.getBoundingClientRect().height),
+    activeElement: describe(document.activeElement), skipFocused: !!skip && document.activeElement === skip, skipVisible,
+    segment: { start: top - box.top, end: bottom - box.top },
+    viewportClip: { x: clipLeft, y: clipTop, width: clipRight - clipLeft, height: clipBottom - clipTop },
+    pageClip: { x: clipLeft + pageLeft, y: clipTop + pageTop, width: clipRight - clipLeft, height: clipBottom - clipTop },
+    hits,
+  };
+})`;
+/** Blur focus, scroll so the figure segment starting at `offset` CSS px is at the viewport top, then measure. */
+export const prepareChartCaptureTile = offset => `/*chart-capture-tile*/(() => {
+  const figure = document.querySelector('.output-signature-chart');
+  if (!figure) return null;
+  const active = document.activeElement;
+  if (active && active !== document.body && typeof active.blur === 'function') active.blur();
+  const start = figure.getBoundingClientRect();
+  scrollTo({ left: scrollX, top: Math.floor(start.top + (visualViewport?.pageTop ?? scrollY) + ${Number(offset)}), behavior: 'instant' });
+  return ${chartCaptureState}(${Number(offset)});
+})()`;
+/** Re-measure without scrolling, immediately after the capture. */
+export const measureChartCaptureTile = offset => `/*chart-capture-after*/${chartCaptureState}(${Number(offset)})`;
+
+/** Width and height from a PNG IHDR chunk; pixel data is never inspected or changed. */
+export function pngDimensions(bytes) {
+  const buffer = Buffer.from(bytes ?? []);
+  const signature = '89504e470d0a1a0a';
+  if (buffer.length < 24 || buffer.subarray(0, 8).toString('hex') !== signature || buffer.subarray(12, 16).toString('latin1') !== 'IHDR')
+    return null;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+/**
+ * Captures one chart evidence set. `evaluate(expression)` runs in the page; `shoot({ file, pageClip,
+ * viewportClip })` must take a viewport-only clipped PNG and return its bytes.
+ */
+export async function captureOutputSignatureChart({ set, evaluate, shoot }) {
+  const tiles = [];
+  let offset = 0, height = Infinity;
+  while (offset < height - chartCoverageEpsilonPx && tiles.length < chartCaptureMaxTiles) {
+    const before = await evaluate(prepareChartCaptureTile(offset));
+    if (!before) break;
+    height = before.figure.height;
+    const file = `${set.prefix}-tile-${tiles.length + 1}.png`;
+    const bytes = await shoot({ file, pageClip: before.pageClip, viewportClip: before.viewportClip });
+    const after = await evaluate(measureChartCaptureTile(offset));
+    tiles.push({ file, offset, before, after, png: pngDimensions(bytes) });
+    // The next tile starts exactly where this tile's actual figure intersection ended.
+    if (!(before.segment.end > offset + chartCoverageEpsilonPx)) break;
+    offset = before.segment.end;
+  }
+  return { viewport: set.viewport, prefix: set.prefix, deviceScaleFactor: set.deviceScaleFactor,
+    figure: tiles[0]?.before?.figure ?? null, tiles };
+}
+
+/** Every reason a chart capture set does not prove the intact, unobscured rendered figure. */
+export function chartCaptureFailures(capture, set) {
+  const failures = [];
+  const where = `chart capture ${set.viewport}`;
+  const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCaptureTolerancePx;
+  const exact = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCoverageEpsilonPx;
+  const eps = chartCoverageEpsilonPx;
+  if (!capture || capture.viewport !== set.viewport || capture.prefix !== set.prefix || capture.deviceScaleFactor !== set.deviceScaleFactor)
+    return [`${where}: missing or mislabelled capture manifest`];
+  const tiles = Array.isArray(capture.tiles) ? capture.tiles : [];
+  if (tiles.length < 1 || tiles.length > chartCaptureMaxTiles) failures.push(`${where}: ${tiles.length} tiles outside 1..${chartCaptureMaxTiles}`);
+  const first = tiles[0]?.before?.figure;
+  let covered = 0;
+  tiles.forEach((tile, index) => {
+    const at = `${where} tile ${index + 1}`;
+    const { before, after, png } = tile ?? {};
+    if (tile?.file !== `${set.prefix}-tile-${index + 1}.png`) failures.push(`${at}: unexpected file ${tile?.file}`);
+    if (!before || !after || !first) { failures.push(`${at}: missing before/after geometry`); return; }
+    for (const key of ['x', 'y', 'width', 'height'])
+      if (!near(before.figure?.[key], after.figure?.[key])) failures.push(`${at}: figure ${key} changed during capture`);
+    if (!near(before.figure.width, first.width) || !near(before.figure.height, first.height))
+      failures.push(`${at}: figure size differs from the first tile`);
+    if (!near(before.rootClientWidth, after.rootClientWidth) || !near(before.rootClientHeight, after.rootClientHeight))
+      failures.push(`${at}: viewport client size changed during capture`);
+    if (!Array.isArray(before.seriesHeights) || before.seriesHeights.length !== 2 || !Array.isArray(after.seriesHeights)
+      || after.seriesHeights.length !== before.seriesHeights.length
+      || before.seriesHeights.some((value, series) => !near(value, after.seriesHeights[series])))
+      failures.push(`${at}: chart series rows reflowed during capture`);
+    const clip = before.viewportClip;
+    const integral = clip && ['x', 'y', 'width', 'height'].every(key => Number.isInteger(clip[key]));
+    if (!integral || !(clip.width > 0) || !(clip.height > 0) || clip.x < 0 || clip.y < 0
+      || clip.x + clip.width > before.rootClientWidth || clip.y + clip.height > before.rootClientHeight)
+      failures.push(`${at}: clip is not an integer rectangle inside the rendered viewport`);
+    else {
+      const { figure, segment } = before;
+      const figureRight = figure.x + figure.width, clipRight = clip.x + clip.width, clipBottom = clip.y + clip.height;
+      // Outward cover with less than one CSS px of padding: floor(left), ceil(right).
+      if (!(clip.x <= figure.x + eps && clip.x > figure.x - 1 - eps && clipRight >= figureRight - eps && clipRight < figureRight + 1 + eps))
+        failures.push(`${at}: clip does not span the figure width`);
+      if (!exact(segment?.start, covered)) failures.push(`${at}: segment starts at ${segment?.start}, expected ${covered} (gap or overlap)`);
+      const segTop = figure.y + segment?.start, segBottom = figure.y + segment?.end;
+      // The segment must be the actual figure/viewport intersection from its start.
+      if (!(segment?.end > segment?.start) || segTop < -eps || !exact(segment.end, Math.min(figure.height, before.rootClientHeight - figure.y)))
+        failures.push(`${at}: segment is not the figure/viewport intersection`);
+      if (!(clip.y <= segTop + eps && clip.y > segTop - 1 - eps && clipBottom >= segBottom - eps
+        && (clipBottom < segBottom + 1 + eps)))
+        failures.push(`${at}: clip does not match its figure segment`);
+      if (!before.pageClip || !exact(before.pageClip.width, clip.width) || !exact(before.pageClip.height, clip.height))
+        failures.push(`${at}: page and viewport clips differ`);
+      // Integer CSS clip at an integer DPR: the PNG must be exactly clip*DPR device pixels.
+      const expected = { width: clip.width * set.deviceScaleFactor, height: clip.height * set.deviceScaleFactor };
+      if (!png || png.width !== expected.width || png.height !== expected.height)
+        failures.push(`${at}: PNG ${JSON.stringify(png)} does not match clip*DPR ${JSON.stringify(expected)}`);
+    }
+    covered = before.segment?.end;
+    for (const state of [before, after]) {
+      if (state.skipFocused || state.skipVisible) failures.push(`${at}: skip link is focused or visible over the capture`);
+      if (!Array.isArray(state.hits) || state.hits.length !== 4 || state.hits.some(hit => !hit.inFigure))
+        failures.push(`${at}: figure is occluded at a clip corner ${JSON.stringify(state.hits?.filter(hit => !hit.inFigure))}`);
+    }
+  });
+  if (first && !exact(covered, first.height)) failures.push(`${where}: tiles cover ${covered} of ${first.height} CSS px`);
+  return failures;
+}
+
+// Runs in the page. Regions that require two-dimensional reading may scroll; nothing else may
+// push the page wider than its viewport or hide an action off-screen.
+export const measurePage = `(() => {
+  const scrollRegions = '.source-rows, .retained-case-table';
+  const root = document.scrollingElement;
+  const width = root.clientWidth;
+  const describe = element => [element.tagName.toLowerCase(), element.id ? '#' + element.id : '',
+    element.classList.length ? '.' + [...element.classList].join('.') : ''].join('') + ' ' + JSON.stringify((element.textContent || '').trim().slice(0, 48));
+  const shown = element => {
+    // Closed <details> descendants can still have client rects and computed styles.
+    // checkVisibility excludes those unrendered boxes without exempting open disclosures.
+    if (element.closest('[hidden], .sr-only') || !element.checkVisibility()) return false;
+    const style = getComputedStyle(element);
+    return style.visibility === 'visible' && style.display !== 'none';
+  };
+  const overflow = [];
+  for (const element of document.body.querySelectorAll('*')) {
+    const region = element.closest(scrollRegions);
+    if ((region && region !== element) || !shown(element)) continue;
+    const box = element.getBoundingClientRect();
+    const outside = box.width > 0 && (box.right > width + 1 || box.left < -1);
+    // A bounded local scroller or clipping container need not enlarge the root. Only the
+    // named source/table regions may retain horizontal overflow, including hidden overflow.
+    // Firefox includes the native file-picker button's intrinsic width in scrollWidth even
+    // when its clipped control box fits; the box itself is still checked for viewport bounds.
+    const clippedFilePicker = element.matches('input[type="file"]') && getComputedStyle(element).overflowX === 'clip';
+    const local = !region && !clippedFilePicker && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
+    if (outside || local) overflow.push(describe(element));
+  }
+  const actions = [...document.querySelectorAll('button, a[href], input, select, textarea, summary')].filter(shown);
+  const clipped = actions.filter(element => {
+    if (element.closest(scrollRegions)) return false;
+    const box = element.getBoundingClientRect();
+    return box.right > width + 1 || box.left < -1;
+  }).map(describe);
+  // WCAG 2.5.8: controls are at least 24x24 CSS px; inline links in a sentence are exempt.
+  const small = actions.filter(element => element.matches('button, input:not([type="checkbox"], [type="radio"]), select, textarea, summary, .app-nav a, .breadcrumbs a')).filter(element => {
+    const box = element.getBoundingClientRect();
+    return box.width < 24 || box.height < 24;
+  }).map(describe);
+  const toggle = document.querySelector('.navigation-toggle');
+  const links = document.querySelector('#main-navigation-links');
+  const narrow = matchMedia('(width < 48rem)').matches;
+  const heading = document.querySelector('main h1');
+  const headingBox = heading?.getBoundingClientRect();
+  return {
+    metrics: { width, innerWidth, innerHeight, devicePixelRatio },
+    pageOverflowPx: root.scrollWidth - width,
+    overflow: overflow.slice(0, 12), overflowCount: overflow.length,
+    clippedActions: clipped.slice(0, 12), smallTargets: small.slice(0, 12),
+    actionCount: actions.length,
+    navigation: { narrow, toggleShown: !!toggle && shown(toggle), linksShown: !!links && shown(links) },
+    headingWithinWidth: !!headingBox && headingBox.left >= -1 && headingBox.right <= width + 1,
+    animations: document.getAnimations().length,
+    scrollRegions: [...document.querySelectorAll(scrollRegions)].filter(shown).map(region => ({
+      fits: region.getBoundingClientRect().right <= width + 1, scrolls: region.scrollWidth > region.clientWidth,
+      focusable: region.tabIndex === 0, named: !!region.getAttribute('aria-label') })),
+  };
+})()`;
+
+// Opaque sRGB only; unsupported backgrounds fail instead of being guessed. Text-bearing
+// control values and ::placeholder glyphs are measured separately from ordinary text nodes.
+export const measureContrast = `(() => {
+  const parse = value => {
+    const match = /^rgba?\\((\\d+), (\\d+), (\\d+)(?:, ([\\d.]+))?\\)$/.exec(value);
+    return match ? { rgb: match.slice(1, 4).map(Number), alpha: match[4] === undefined ? 1 : Number(match[4]) } : null;
+  };
+  const luminance = rgb => rgb.map(value => value / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+  const ratio = (a, b) => { const [low, high] = [luminance(a), luminance(b)].sort((x, y) => x - y); return (high + 0.05) / (low + 0.05); };
+  const background = element => {
+    for (let current = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.backgroundImage !== 'none' && !current.matches('.state-mark')) return { unsupported: 'background-image ' + current.tagName };
+      const color = parse(style.backgroundColor);
+      if (!color) return { unsupported: style.backgroundColor };
+      if (color.alpha === 1) return { rgb: color.rgb };
+      if (color.alpha > 0) return { unsupported: 'translucent ' + style.backgroundColor };
+    }
+    return { rgb: [255, 255, 255] };
+  };
+  const results = []; const failures = []; const unsupported = [];
+  const tokens = Object.fromEntries((${JSON.stringify(auditTokenKinds)}).map(kind => [kind, 0]));
+  const record = (label, colorText, bg, style, allowAlpha) => {
+    const fg = parse(colorText);
+    if (!fg || bg.unsupported) { unsupported.push({ text: label, color: colorText, background: bg.unsupported }); return; }
+    let rgb = fg.rgb;
+    if (allowAlpha) {
+      const opacity = Number(style.opacity);
+      if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) { unsupported.push({ text: label, color: colorText, background: 'invalid opacity ' + style.opacity }); return; }
+      const alpha = fg.alpha * opacity;
+      rgb = fg.rgb.map((channel, index) => Math.round(channel * alpha + bg.rgb[index] * (1 - alpha)));
+    } else if (fg.alpha !== 1) { unsupported.push({ text: label, color: colorText, background: bg.unsupported }); return; }
+    const size = parseFloat(style.fontSize); const bold = Number(style.fontWeight) >= 700;
+    const required = size >= 24 || (bold && size >= 18.66) ? 3 : 4.5;
+    const value = ratio(rgb, bg.rgb);
+    results.push(value);
+    if (value < required) failures.push({ text: label, ratio: Number(value.toFixed(3)), required, color: colorText, background: 'rgb(' + bg.rgb.join(', ') + ')' });
+  };
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const seen = new Set();
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const element = node.parentElement;
+    if (!element || seen.has(element) || !node.textContent.trim()) continue;
+    seen.add(element);
+    if (element.closest('[hidden], .sr-only, script, style, noscript') || !element.checkVisibility()) continue;
+    const style = getComputedStyle(element);
+    if (style.visibility !== 'visible' || Number(style.opacity) === 0) continue;
+    // WCAG 1.4.3 exempts inactive controls.
+    if (element.closest(':disabled, [aria-disabled="true"]')) continue;
+    const bg = background(element);
+    record(node.textContent.trim().slice(0, 40), style.color, bg, style, false);
+    for (const kind of Object.keys(tokens)) if (element.matches('.source-token-' + kind)) tokens[kind]++;
+  }
+  const controls = document.querySelectorAll?.('input, textarea, select') ?? [];
+  for (const element of controls) {
+    if (element.closest('[hidden], .sr-only') || !element.checkVisibility()) continue;
+    const style = getComputedStyle(element);
+    if (style.visibility !== 'visible' || Number(style.opacity) === 0 || element.closest(':disabled, [aria-disabled="true"]')) continue;
+    if (Number(style.opacity) !== 1) { unsupported.push({ text: (element.name || element.tagName.toLowerCase()) + ' value', color: style.color, background: 'translucent control opacity' }); continue; }
+    const bg = background(element);
+    const type = (element.type || '').toLowerCase();
+    const valueTypes = new Set(['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number', 'date', 'datetime-local', 'month', 'time', 'week']);
+    const value = valueTypes.has(type) ? element.value : element.tagName === 'TEXTAREA' || element.tagName === 'SELECT' ? element.value : '';
+    if (value) record((element.name || element.tagName.toLowerCase()) + ' value: ' + value.slice(0, 40), style.color, bg, style, true);
+    if (!value && element.hasAttribute('placeholder') && element.placeholder) {
+      const placeholderStyle = getComputedStyle(element, '::placeholder');
+      if (placeholderStyle.visibility === 'visible' && Number(placeholderStyle.opacity) !== 0)
+        record((element.name || element.tagName.toLowerCase()) + ' placeholder: ' + element.placeholder.slice(0, 40), placeholderStyle.color, bg, placeholderStyle, true);
+    }
+  }
+  return { measured: results.length, minimum: results.length ? Number(Math.min(...results).toFixed(3)) : null, failures: failures.slice(0, 12), failureCount: failures.length, unsupported: unsupported.slice(0, 12), tokens };
+})()`;
+
+export const measureFocus = `(async () => {
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const element = document.activeElement;
+  if (!element || element === document.body) return null;
+  const ids = window.__auditFocusIds ??= new WeakMap();
+  if (!ids.has(element)) { window.__auditFocusNext = (window.__auditFocusNext ?? 0) + 1; ids.set(element, window.__auditFocusNext); }
+  const parse = value => { const match = /^rgb\\((\\d+), (\\d+), (\\d+)\\)$/.exec(value); return match ? match.slice(1).map(Number) : null; };
+  const luminance = rgb => rgb.map(value => value / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+  let parent = element.parentElement;
+  while (parent && getComputedStyle(parent).backgroundColor === 'rgba(0, 0, 0, 0)') parent = parent.parentElement;
+  const style = getComputedStyle(element);
+  const outline = parse(style.outlineColor);
+  const adjacent = parse(parent ? getComputedStyle(parent).backgroundColor : 'rgb(255, 255, 255)');
+  const box = element.getBoundingClientRect();
+  const hit = document.elementFromPoint(Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1), Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1));
+  const [low, high] = outline && adjacent ? [luminance(outline), luminance(adjacent)].sort((a, b) => a - b) : [0, 0];
+  return {
+    key: ids.get(element), heading: element.matches('main h1'),
+    target: element.tagName.toLowerCase() + (element.id ? '#' + element.id : '') + ' ' + JSON.stringify((element.getAttribute('aria-label') || element.textContent || '').trim().slice(0, 40)),
+    focusVisible: element.matches(':focus-visible'), outlineStyle: style.outlineStyle, outlineWidth: parseFloat(style.outlineWidth),
+    contrast: outline && adjacent ? Number(((high + 0.05) / (low + 0.05)).toFixed(3)) : null,
+    outlineColor: style.outlineColor, adjacent: parent ? getComputedStyle(parent).backgroundColor + ' ' + parent.tagName.toLowerCase() + '.' + [...parent.classList].join('.') : null,
+    inViewport: box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth,
+    unobscured: hit !== null && (element.contains(hit) || hit.contains(element)),
+  };
+})()`;
+
+function percentile(values, fraction) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(fraction * sorted.length) - 1)];
+}
+const summary = (values) => ({ samples: values.length, median: Number(percentile(values, 0.5).toFixed(1)), p95: Number(percentile(values, 0.95).toFixed(1)) });
+
+/** Shell readiness is used for initial-route metadata timing, not explicit-read coverage. */
+export const auditPageReady = (page, content = false) => `document.querySelector('main h1') !== null
+  && document.querySelector('main [aria-busy="true"]') === null
+  && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')
+  ${content ? `&& ${auditContentReady((page.preparation ?? []).flatMap(step => step.content))}` : ''}`;
+
+export const auditContentReady = (checks) => `(${JSON.stringify(checks)}).every(check =>
+  [...document.querySelectorAll(check.selector)].some(element => element.getClientRects().length > 0
+    && element.textContent.includes(check.text)))`;
+
+/** Runs after every fresh navigation, before any layout/contrast/focus measurement. */
+export async function prepareAuditPage({ tab, page, evaluate, ready, fulfilled }) {
+  const interactions = [];
+  for (const [stepIndex, step] of (page.preparation ?? []).entries()) {
+    const before = fulfilled.length;
+    const started = Date.now();
+    const clicked = await evaluate(tab, `(() => {
+      const button = [...document.querySelectorAll('main button')].find(element =>
+        (element.getAttribute('aria-label') || element.textContent.trim()) === ${JSON.stringify(step.action)});
+      if (!button || button.disabled) return false;
+      button.click(); return true;
+    })()`);
+    assert.ok(clicked, `${page.name}: missing enabled control ${step.action}`);
+    await ready(tab, auditContentReady(step.content), `${page.name}: ${step.action} content`);
+    for (const path of step.reads) assert.ok(fulfilled.slice(before).some(entry =>
+      entry.method === 'GET' && entry.path === path && entry.status === 200), `${page.name}: ${step.action} did not read ${path}`);
+    interactions.push({ page: page.name, action: step.action, stepIndex, elapsedMs: Date.now() - started, reads: step.reads });
+  }
+  await ready(tab, auditPageReady(page, true), `${page.name}: populated content`);
+  return interactions;
+}
+
+// Connection notice (#1896): the real offline/online path, driven by DevTools network emulation
+// so Chrome itself dispatches trusted `offline`/`online` events. Copy is from frontend/src/copy/shell.ts.
+export const connectionNoticeNames = { status: 'Connection status', offline: 'Browser reports offline', reconnected: 'Refresh loaded information' };
+export const connectedSessionText = 'Local session connected.';
+export const connectionNoticeShots = { offline: 'audit-connection-notice-offline.png', reconnected: 'audit-connection-notice-reconnected.png' };
+const onlineConditions = { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 };
+
+export const installConnectionProbe = `(() => {
+  const probe = window.__auditConnection = { events: [], token: Math.random().toString(36).slice(2) };
+  const record = event => probe.events.push({ type: event.type, isTrusted: event.isTrusted, onLine: navigator.onLine, atMs: performance.now() });
+  probe.remove = () => { removeEventListener('offline', record); removeEventListener('online', record); probe.removed = true; };
+  addEventListener('offline', record); addEventListener('online', record);
+  return probe.token;
+})()`;
+
+export const measureConnectionState = `(() => {
+  const storage = area => { try { const out = {}; for (let i = 0; i < area.length; i++) { const key = area.key(i); out[key] = area.getItem(key); } return JSON.stringify(out); } catch { return null; } };
+  const focused = document.activeElement;
+  const sections = [...document.querySelectorAll('section.connection-notice')];
+  const statuses = [...document.querySelectorAll('[role="status"]')].filter(element => element.getAttribute('aria-label') === ${JSON.stringify(connectionNoticeNames.status)});
+  const session = document.querySelector('aside.session-notice.is-connected');
+  return {
+    token: window.__auditConnection?.token ?? null, events: [...(window.__auditConnection?.events ?? [])],
+    onLine: navigator.onLine, href: location.href, historyLength: history.length,
+    navigations: performance.getEntriesByType('navigation').length, resources: performance.getEntriesByType('resource').length,
+    fetches: performance.getEntriesByType('resource').filter(entry => entry.initiatorType === 'fetch').map(entry => ({ path: new URL(entry.name).pathname, startTime: entry.startTime })),
+    sessionAuthenticated: !!session && [...session.querySelectorAll('p')].some(element => element.textContent.trim() === ${JSON.stringify(connectedSessionText)}),
+    local: storage(localStorage), session: storage(sessionStorage),
+    focus: focused ? focused.tagName.toLowerCase() + (focused.id ? '#' + focused.id : '') + ' ' + (focused.textContent || '').trim().slice(0, 40) : null,
+    dom: {
+      sections: sections.length,
+      sectionName: sections.length === 1 ? (document.getElementById(sections[0].getAttribute('aria-labelledby') || '')?.textContent ?? '').trim() : null,
+      statuses: statuses.length, statusInSection: statuses.length === 1 && sections.length === 1 && sections[0].contains(statuses[0]),
+      invalidAsides: sections.reduce((count, section) => count + section.querySelectorAll('aside[role="status"]').length, 0),
+    },
+  };
+})()`;
+
+/** Reduces an Accessibility.getFullAXTree response to the connection-notice roles. */
+export function connectionAxSummary(nodes) {
+  const shown = (Array.isArray(nodes) ? nodes : []).filter(node => !node.ignored);
+  const named = (role) => shown.filter(node => node.role?.value === role).map(node => String(node.name?.value ?? ''));
+  return { regions: named('region'), statuses: named('status') };
+}
+
+export async function qualifyConnectionNotice({ tab, cdp, evaluate, capture, delay, fulfilled, waitForValue }) {
+  const result = { events: [], phases: [], restoration: null };
+  const conditions = []; let offline = false; let probe = false; let accessibility = false;
+  const emulate = async (params) => { conditions.push(params); await cdp.call('Network.emulateNetworkConditions', params, tab.sessionId); offline = params.offline; };
+  const phase = async (name, online, sent) => {
+    const label = connectionNoticeNames[name];
+    const state = await waitForValue(async () => {
+      const value = await evaluate(tab, measureConnectionState);
+      return value.onLine === online && value.dom.sectionName === label ? value : null;
+    }, `connection notice ${name}`, 5000);
+    const { nodes } = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
+    await capture(tab, connectionNoticeShots[name]);
+    const requests = fulfilled.slice(sent).map(({ method, path, status }) => ({ method, path, status }));
+    result.phases.push({ phase: name, dom: state.dom, ax: connectionAxSummary(nodes), screenshot: connectionNoticeShots[name],
+      requestsAtCapture: requests, requests });
+    return state;
+  };
+  try {
+    const token = await evaluate(tab, installConnectionProbe); probe = true;
+    await cdp.call('Network.enable', {}, tab.sessionId);
+    await cdp.call('Accessibility.enable', {}, tab.sessionId); accessibility = true;
+    const baseline = await evaluate(tab, measureConnectionState);
+    if (baseline.sessionAuthenticated !== true) throw new Error('Connection notice qualification requires an authenticated local session');
+    const start = fulfilled.length;
+    await emulate({ offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await phase('offline', false, start);
+    const reconnectStart = fulfilled.length;
+    await emulate(onlineConditions);
+    await phase('reconnected', true, reconnectStart);
+    // Cover the shell's 250–1250 ms session revalidation jitter plus bounded render/CI scheduling.
+    await delay(2250);
+    const after = await evaluate(tab, measureConnectionState);
+    result.phases[1].requests = fulfilled.slice(reconnectStart).map(({ method, path, status }) => ({ method, path, status }));
+    result.events = after.events;
+    const onlineAt = after.events.find(event => event.type === 'online')?.atMs;
+    const baselineFetches = new Set(baseline.fetches.map(entry => `${entry.path}\0${entry.startTime}`));
+    const newFetches = after.fetches.filter(entry => !baselineFetches.has(`${entry.path}\0${entry.startTime}`));
+    const bootstrapFetch = newFetches.filter(entry => entry.path.endsWith('/api/v1/bootstrap'));
+    result.invariants = { token: after.token === token, href: after.href === baseline.href, history: after.historyLength === baseline.historyLength,
+      reload: after.navigations !== baseline.navigations, storage: after.local === baseline.local && after.session === baseline.session,
+      focus: after.focus === baseline.focus, authenticatedSession: baseline.sessionAuthenticated === true && after.sessionAuthenticated === true,
+      fetchResourceDelta: newFetches.length,
+      revalidationDelayMs: bootstrapFetch.length === 1 && Number.isFinite(onlineAt) ? Number((bootstrapFetch[0].startTime - onlineAt).toFixed(1)) : null };
+  } finally {
+    // Always leave the shared tab online with listeners and the AX domain released.
+    const failed = [];
+    if (offline || conditions.length) await emulate(onlineConditions).catch(error => failed.push(String(error)));
+    if (accessibility) await cdp.call('Accessibility.disable', {}, tab.sessionId).catch(error => failed.push(String(error)));
+    const removed = probe ? await evaluate(tab, `(() => { window.__auditConnection?.remove(); return window.__auditConnection?.removed === true && navigator.onLine; })()`).catch(() => false) : false;
+    result.restoration = { conditions: conditions.at(-1) ?? null, offline, listenersRemoved: removed === true, accessibilityDisabled: accessibility && !failed.length, failed };
+  }
+  return result;
+}
+
+/** Fails closed on any missing, duplicate, misbound or incorrect connection-notice evidence. */
+export function connectionNoticeFailures(evidence) {
+  const failures = []; const fail = (message) => failures.push(`connection notice: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing evidence'); return failures; }
+  const events = Array.isArray(evidence.events) ? evidence.events : [];
+  const expectedEvents = [{ type: 'offline', onLine: false }, { type: 'online', onLine: true }];
+  if (events.length !== 2 || !expectedEvents.every((want, index) => events[index]?.type === want.type && events[index]?.onLine === want.onLine))
+    fail(`event sequence ${JSON.stringify(events)}`);
+  if (!events.length || events.some(event => event?.isTrusted !== true)) fail('connectivity events were not trusted browser events');
+  const phases = Array.isArray(evidence.phases) ? evidence.phases : [];
+  if (phases.length !== 2 || phases[0]?.phase !== 'offline' || phases[1]?.phase !== 'reconnected') fail(`phases ${JSON.stringify(phases.map(entry => entry?.phase))}`);
+  for (const name of ['offline', 'reconnected']) {
+    const entry = phases.find(candidate => candidate?.phase === name);
+    if (!entry) { fail(`${name}: missing phase`); continue; }
+    const label = connectionNoticeNames[name]; const dom = entry.dom ?? {}; const ax = entry.ax ?? {};
+    if (dom.sections !== 1 || dom.sectionName !== label) fail(`${name}: DOM section ${JSON.stringify(dom)}`);
+    if (dom.statuses !== 1 || dom.statusInSection !== true) fail(`${name}: DOM status ${JSON.stringify(dom)}`);
+    if (dom.invalidAsides !== 0) fail(`${name}: aside[role=status] present`);
+    const regions = Array.isArray(ax.regions) ? ax.regions : []; const statuses = Array.isArray(ax.statuses) ? ax.statuses : [];
+    if (regions.filter(value => value === label).length !== 1 || regions.some(value => value === connectionNoticeNames[name === 'offline' ? 'reconnected' : 'offline']))
+      fail(`${name}: accessibility region ${JSON.stringify(regions)}`);
+    if (statuses.filter(value => value === connectionNoticeNames.status).length !== 1) fail(`${name}: accessibility status ${JSON.stringify(statuses)}`);
+    if (entry.screenshot !== connectionNoticeShots[name]) fail(`${name}: screenshot ${JSON.stringify(entry.screenshot)}`);
+    const requests = Array.isArray(entry.requests) ? entry.requests : null;
+    if (!requests) fail(`${name}: missing request evidence`);
+    else if (requests.some(request => request?.method !== 'GET')) fail(`${name}: connectivity sent a mutation ${JSON.stringify(requests)}`);
+    // Only the shell's documented session revalidation may follow a reconnect.
+    else if (name === 'offline' ? requests.length !== 0 : requests.length !== 1 || requests.some(request => request.path !== '/bootstrap' || request.status !== 200))
+      fail(`${name}: connectivity made requests ${JSON.stringify(requests)}`);
+    if (!Array.isArray(entry.requestsAtCapture)) fail(`${name}: missing screenshot-time request evidence`);
+  }
+  const invariants = evidence.invariants ?? {};
+  for (const key of ['token', 'href', 'history', 'storage', 'focus', 'authenticatedSession']) if (invariants[key] !== true) fail(`${key} changed or unmeasured`);
+  if (invariants.reload !== false) fail('page reloaded or unmeasured');
+  const revalidations = phases[1]?.requests?.length ?? 0;
+  if (!Number.isInteger(invariants.fetchResourceDelta) || invariants.fetchResourceDelta !== revalidations)
+    fail(`unexpected fetch-resource delta ${invariants.fetchResourceDelta}`);
+  if (!Number.isFinite(invariants.revalidationDelayMs) || invariants.revalidationDelayMs < 250 || invariants.revalidationDelayMs > 2250)
+    fail(`session revalidation timing ${invariants.revalidationDelayMs}`);
+  const restoration = evidence.restoration ?? {};
+  const restored = restoration.conditions ?? {};
+  if (restoration.offline !== false || Object.entries(onlineConditions).some(([key, value]) => restored[key] !== value)
+    || restoration.listenersRemoved !== true || restoration.accessibilityDisabled !== true || (restoration.failed?.length ?? 1) !== 0)
+    fail(`network/probe cleanup ${JSON.stringify(restoration)}`);
+  return failures;
+}
+
+export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, cdp, makeTarget, evaluate, ready, capture, delay,
+  profile = 'reference' }) {
+  const waitForValue = async (check, label, timeout = 20000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) { const value = check(); if (value) return value; await delay(75); }
+    throw new Error(`Timed out waiting for ${typeof label === 'function' ? label() : label}`);
+  };
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const fulfilled = []; const unmapped = [];
+  async function intercept(tab) {
+    cdp.on('Fetch.requestPaused', (event) => {
+      let url;
+      try { url = new URL(event.request.url); }
+      catch {
+        unmapped.push(`Invalid intercepted API URL: ${event.request.url}`);
+        void cdp.call('Fetch.failRequest', { requestId: event.requestId, errorReason: 'Aborted' }, tab.sessionId).catch(() => undefined);
+        return;
+      }
+      const pathname = url.pathname.slice('/nested/api/v1'.length);
+      const headers = Object.fromEntries(Object.entries(event.request.headers).map(([name, value]) => [name.toLowerCase(), value]));
+      const query = url.search.slice(1);
+      const response = fixtures.respond(event.request.method, pathname, headers.accept ?? '', pathname === '/jobs' ? query : null);
+      if (response.status === 404) unmapped.push(`${event.request.method} ${pathname}`);
+      const evidence = { method: event.request.method, path: pathname, status: response.status };
+      if (pathname === '/jobs') Object.assign(evidence, { query,
+        responseJobIds: response.document?.data?.items?.map(item => item.jobId) ?? [], fulfillmentSucceeded: false });
+      const sourceRead = pathname.includes('/source-files/');
+      if (sourceRead) Object.assign(evidence, { query, response: sourceResponseIdentity(response.document?.data), fulfillmentSucceeded: false });
+      if (event.request.method === 'POST') Object.assign(evidence, {
+        idempotencyKey: headers['idempotency-key'] ?? null, ifMatch: headers['if-match'] ?? null,
+        csrf: headers['x-csrf-token'] === fixtures.csrfToken, body: event.request.postData ?? null,
+      });
+      fulfilled.push(evidence);
+      const body = response.bytes ?? Buffer.from(JSON.stringify(response.document));
+      const requestId = response.document?.requestId ?? 'request_audit_download';
+      void cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: response.status, body: body.toString('base64'),
+        responseHeaders: [{ name: 'Content-Type', value: response.contentType ?? 'application/json; charset=utf-8' }, { name: 'X-Request-ID', value: requestId },
+          { name: 'Cache-Control', value: 'no-store' }] }, tab.sessionId).then(() => {
+        if (pathname === '/jobs' || sourceRead) evidence.fulfillmentSucceeded = true;
+      }).catch(() => undefined);
+    }, tab.sessionId);
+    await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/*`, requestStage: 'Request' }] }, tab.sessionId);
+  }
+  const populated = auditPageReady;
+  const interactions = [];
+  const prepare = async (tab, page, context) => {
+    const results = await prepareAuditPage({ tab, page, evaluate, ready, fulfilled });
+    interactions.push(...results.map(result => ({ ...result, context })));
+  };
+  const theme = async (tab, scheme) => cdp.call('Emulation.setEmulatedMedia', { features: [
+    { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
+  const tab = await makeTarget();
+  const profileEvidence = await applyAuditProfile(cdp, tab.sessionId, profile);
+  await intercept(tab);
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = []; const chartCaptures = [];
+  for (const viewport of auditViewports) {
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: viewport.width, height: viewport.height,
+      deviceScaleFactor: viewport.deviceScaleFactor, mobile: viewport.mobile }, tab.sessionId);
+    for (const page of fixtures.pages) {
+      await theme(tab, 'light');
+      await cdp.call('Page.navigate', { url: origin + page.path }, tab.sessionId);
+      await ready(tab, populated(page), `${page.name} at ${viewport.name}`);
+      await prepare(tab, page, viewport.name);
+      await delay(150);
+      for (const scheme of ['light', 'dark']) {
+        await theme(tab, scheme);
+        await delay(50);
+        const measured = await evaluate(tab, measurePage);
+        layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured });
+        if (page.name === 'attempt evidence') chart.push({ page: page.name, viewport: viewport.name, scheme,
+          viewportWidth: viewport.width, ...await evaluate(tab, measureOutputSignatureChart) });
+        // Colour does not depend on width; measure it at the two layouts that restyle text.
+        if (viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1) {
+          contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await evaluate(tab, measureContrast) });
+        }
+      }
+      if (page.name === 'attempt evidence' && (viewport.name === 'desktop 1440x900' || viewport.name === 'zoom 400% of 1280x800')) {
+        await theme(tab, 'light');
+        await delay(50);
+        const set = chartCaptureSets.find(candidate => candidate.viewport === viewport.name);
+        const captured = await captureOutputSignatureChart({ set, evaluate: expression => evaluate(tab, expression),
+          shoot: ({ file, pageClip }) => capture(tab, file, { ...pageClip, scale: 1 }) });
+        chartCaptures.push(captured);
+        chartScreenshots.push(...captured.tiles.map(tile => tile.file));
+      }
+      // Visual evidence: every route at 400% zoom, and the #619 views at every supported size.
+      if ((viewport.width === 320 && viewport.deviceScaleFactor === 4) || ['workspace', 'job detail', 'source directory', 'source file'].includes(page.name)) {
+        await capture(tab, `audit-${viewport.name.split(' ')[0]}-${viewport.width}-${page.name.replaceAll(' ', '-')}.png`);
+      }
+    }
+  }
+  // Keyboard focus: every Tab stop on each populated page is visible, high contrast and unobscured.
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
+  for (const scheme of ['light', 'dark']) {
+    for (const page of fixtures.pages) {
+      await theme(tab, scheme);
+      await cdp.call('Page.navigate', { url: origin + page.path }, tab.sessionId);
+      await ready(tab, populated(page), `${page.name} for focus`);
+      await prepare(tab, page, `focus ${scheme}`);
+      // Route focus lands on the page heading. Walk forward to the end of the page, then back from
+      // the heading to the skip link, so every stop is reached by real keyboard input.
+      const stops = [];
+      for (const shift of [false, true]) {
+        await evaluate(tab, `document.querySelector('main h1').focus()`);
+        const seen = new Set();
+        for (let index = 0; index < 80; index += 1) {
+          const key = { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: shift ? 8 : 0 };
+          await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', ...key }, tab.sessionId);
+          await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', ...key }, tab.sessionId);
+          const stop = await evaluate(tab, measureFocus);
+          if (stop === null || seen.has(stop.key) || stop.heading) break;
+          seen.add(stop.key);
+          stops.push({ ...stop, direction: shift ? 'backward' : 'forward' });
+        }
+      }
+      focus.push({ page: page.name, scheme, stops });
+    }
+  }
+  // Dynamic assets: the explicit highlight action starts the packaged module worker under CSP.
+  const sourcePage = fixtures.pages.find((page) => page.name === 'source file');
+  const workers = [];
+  cdp.on('Target.attachedToTarget', ({ sessionId, targetInfo }) => {
+    if (targetInfo.type !== 'worker') return;
+    const record = { url: targetInfo.url, responses: [] };
+    workers.push(record);
+    cdp.on('Network.responseReceived', (event) => record.responses.push({ url: event.response.url, status: event.response.status }), sessionId);
+    void cdp.call('Network.enable', {}, sessionId).catch(() => undefined)
+      .then(() => cdp.call('Runtime.runIfWaitingForDebugger', {}, sessionId)).catch(() => undefined);
+  }, tab.sessionId);
+  await cdp.call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, tab.sessionId);
+  await cdp.call('Page.navigate', { url: origin + sourcePage.path }, tab.sessionId);
+  await ready(tab, populated(sourcePage), 'source file for highlighting');
+  await prepare(tab, sourcePage, 'worker/CSP qualification');
+  const highlighted = await evaluate(tab, `document.querySelectorAll('.source-token').length`);
+  await cdp.call('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }, tab.sessionId);
+
+  // Keyboard completion: workflow commands and a download, reached with Tab and activated with
+  // Enter or Space only. Commands are checked for their identity-bound request headers.
+  const keys = { Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 }, Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' },
+    Space: { key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' } };
+  const press = async (name) => {
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', ...keys[name] }, tab.sessionId);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', ...keys[name] }, tab.sessionId);
+  };
+  const tabTo = async (label) => {
+    for (let count = 1; count <= 150; count += 1) {
+      await press('Tab');
+      const name = await evaluate(tab, `(document.activeElement?.textContent ?? '').trim()`);
+      if (name === label) {
+        assert.ok(await evaluate(tab, `document.activeElement.matches(':focus-visible')`), `${label} focus is not visible`);
+        return count;
+      }
+    }
+    throw new Error(`Tab did not reach ${label}`);
+  };
+  const keyboard = { steps: [] };
+  const overview = fixtures.pages.find((page) => page.name === 'attempt overview');
+  await cdp.call('Page.navigate', { url: origin + overview.path }, tab.sessionId);
+  await ready(tab, populated(overview), 'attempt overview for keyboard commands');
+  const mutations = () => fulfilled.filter((entry) => entry.method === 'POST');
+  for (const [mode, command, key, done] of [
+    ['retry', 'Retry as a new attempt', 'Space', `Open new attempt ${fixtures.retriedRunId}`],
+    ['running', 'Request cancellation', 'Enter', `Cancellation of attempt ${fixtures.runId} was recorded`],
+  ]) {
+    fixtures.controls.mode = mode;
+    const before = mutations().length;
+    keyboard.steps.push({ action: 'Read available actions', tabs: await tabTo('Read available actions'), key: 'Enter' });
+    await press('Enter');
+    await ready(tab, `document.body.innerText.includes('Available actions verified')`, `${mode} eligibility read`);
+    keyboard.steps.push({ action: command, tabs: await tabTo(command), key });
+    await press(key);
+    await ready(tab, `document.body.innerText.includes(${JSON.stringify(done)})`, `${command} by keyboard`);
+    const sent = mutations().slice(before);
+    assert.equal(sent.length, 1, `${command} must send exactly one command`);
+    assert.ok(sent[0].idempotencyKey && sent[0].ifMatch === `"${fixtures.runVersion}"` && sent[0].csrf, `${command} lost its identity-bound headers`);
+    keyboard.steps.push({ result: done, request: { path: sent[0].path, ifMatch: sent[0].ifMatch, idempotencyKey: true, csrf: true } });
+  }
+  await cdp.call('Browser.setDownloadBehavior', { behavior: 'allowAndName', downloadPath: evidenceDirectory, eventsEnabled: true });
+  const downloads = new Map();
+  cdp.on('Browser.downloadWillBegin', (event) => downloads.set(event.guid, { suggestedFilename: event.suggestedFilename, state: 'started' }));
+  cdp.on('Browser.downloadProgress', (event) => { if (downloads.has(event.guid)) downloads.get(event.guid).state = event.state; });
+  await cdp.call('Page.navigate', { url: origin + sourcePage.path }, tab.sessionId);
+  await ready(tab, populated(sourcePage), 'source file for keyboard download');
+  keyboard.steps.push({ action: 'Download complete recorded input', tabs: await tabTo('Download complete recorded input'), key: 'Enter' });
+  await press('Enter');
+  const [guid] = await waitForValue(() => [...downloads].find(([, value]) => value.state === 'completed'),
+    () => `keyboard download ${JSON.stringify({ downloads: [...downloads], requests: fulfilled.filter((entry) => entry.path.endsWith('/content')),
+      active: keyboard.steps.at(-1) })}`);
+  const saved = readFileSync(join(evidenceDirectory, guid));
+  assert.ok(saved.equals(fixtures.sourceBytes), 'Keyboard download bytes differ from the recorded input');
+  keyboard.download = { suggestedFilename: downloads.get(guid).suggestedFilename, bytes: saved.length, matches: true };
+  rmSync(join(evidenceDirectory, guid));
+  await cdp.call('Browser.setDownloadBehavior', { behavior: 'default' });
+
+  // Connectivity alone must announce once and leave requests, storage, URL and focus untouched.
+  const workspace = fixtures.pages[0];
+  await cdp.call('Page.navigate', { url: origin + workspace.path }, tab.sessionId);
+  await ready(tab, populated(workspace), 'workspace for connection notice');
+  const connectionNotice = await qualifyConnectionNotice({ tab, cdp, evaluate, capture, delay, fulfilled, waitForValue: async (check, label, timeout) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) { const value = await check(); if (value) return value; await delay(75); }
+    throw new Error(`Timed out waiting for ${label}`);
+  } });
+  // Connection qualification restores browser-default network conditions; reapply the requested
+  // measurement profile before taking the cold and route timing samples.
+  await applyAuditProfile(cdp, tab.sessionId, profile);
+
+  // Timing on the selected profile: cold loads use a new target with an empty cache; route
+  // changes are in-app link activations measured to heading focus and initial-route metadata.
+  // Other explicit activity/evidence reads are recorded separately in interactions above.
+  const cold = [];
+  for (let sample = 0; sample < 20; sample += 1) {
+    const probe = await makeTarget();
+    await applyAuditProfile(cdp, probe.sessionId, profile);
+    await intercept(probe);
+    const started = Date.now();
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, probe.sessionId);
+    await ready(probe, populated(fixtures.pages[0]), 'cold dashboard');
+    cold.push(Date.now() - started);
+    await cdp.call('Target.closeTarget', { targetId: probe.targetId });
+  }
+  await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
+  await ready(tab, populated(fixtures.pages[0]), 'dashboard for navigation timing');
+  const feedback = []; const data = [];
+  const cycle = fixtures.pages.filter((page) => page.name !== 'upload');
+  for (let sample = 0; sample < 50; sample += 1) {
+    const page = cycle[(sample + 1) % cycle.length];
+    const timing = await evaluate(tab, `new Promise((resolve, reject) => {
+      const target = ${JSON.stringify(page.path)};
+      const link = document.createElement('a'); link.href = target; link.textContent = 'audit'; document.querySelector('main').append(link);
+      const started = performance.now(); let focused = null;
+      link.click();
+      const deadline = started + 10000;
+      const check = () => {
+        const heading = document.querySelector('main h1');
+        if (focused === null && heading && document.activeElement === heading && location.pathname === new URL(target, location.href).pathname) focused = performance.now() - started;
+        if (focused !== null && ${populated(page)}) resolve({ focused, populated: performance.now() - started });
+        else if (performance.now() > deadline) reject(new Error('navigation timing deadline'));
+        else requestAnimationFrame(check);
+      };
+      requestAnimationFrame(check);
+    })`);
+    feedback.push(timing.focused); data.push(timing.populated);
+  }
+  await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
+  await ready(tab, populated(fixtures.pages[0]), 'dashboard for job filter timing');
+  // Exercise the documented job-library filter action independently from route changes.
+  // The fixture returns one distinctive row for either query so first visible feedback and
+  // completed rendering can be measured separately without server or data-volume variance.
+  const filterFeedback = []; const filterData = []; const filterSamples = [];
+  for (let sample = 0; sample < 50; sample += 1) {
+    const filtered = sample % 2 === 0;
+    const query = filtered ? fixtures.jobFilter.filteredQuery : fixtures.jobFilter.unfilteredQuery;
+    const expectedJobId = filtered ? fixtures.jobFilter.filteredJobId : fixtures.jobFilter.unfilteredJobId;
+    const pageSearch = filtered ? `?search=${fixtures.jobFilter.value}` : '';
+    const value = filtered ? fixtures.jobFilter.value : '';
+    const rendered = filtered ? fixtures.jobFilter.filteredRendered : fixtures.jobFilter.unfilteredRendered;
+    await evaluate(tab, `(() => {
+      const label = [...document.querySelectorAll('main label')].find(element => element.textContent.trim().startsWith(${JSON.stringify(fixtures.jobFilter.label)}));
+      const input = label?.querySelector('input');
+      if (!input) throw new Error('job filter input is missing');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const before = fulfilled.length;
+    const measured = await evaluate(tab, `(async () => {
+      const expectedPageSearch = ${JSON.stringify(pageSearch)};
+      const expectedRow = ${JSON.stringify(rendered)};
+      const expectedJobId = ${JSON.stringify(expectedJobId)};
+      const section = document.querySelector('main section[aria-labelledby="job-library-title"]');
+      const input = [...(section?.querySelectorAll('label') ?? [])].find(element => element.textContent.trim().startsWith(${JSON.stringify(fixtures.jobFilter.label)}))?.querySelector('input');
+      const button = [...(section?.querySelectorAll('button') ?? [])].find(element => element.textContent.trim() === 'Apply filters');
+      const heading = section?.querySelector('h3');
+      if (!input || !button || !heading) throw new Error('job filter controls are missing');
+      const focusSubmit = ${focusFilterSubmitForTiming.toString()};
+      if (!focusSubmit(document, button)) throw new Error('job filter submit control did not receive focus before timing');
+      const started = performance.now();
+      let feedbackMs = null; let feedbackSignal = null;
+      button.click();
+      return await new Promise((resolve, reject) => {
+        const deadline = started + 10000;
+        const visible = ${filterElementVisible.toString()};
+        let presentationPending = false; let pendingSignal = null; let dataMs = null; let renderedJobId = null;
+        const observe = () => {
+          const status = heading.nextElementSibling?.matches('p[role="status"]') ? heading.nextElementSibling : null;
+          const statusVisible = visible(status);
+          const row = section.querySelector('ul.job-list h4 a');
+          const rowJobId = row ? new URL(row.href, location.href).pathname.split('/').at(-1) : null;
+          const populated = visible(row) && row.textContent.trim() === expectedRow && rowJobId === expectedJobId && document.activeElement === heading
+            && !section.querySelector('[role="alert"]') && statusVisible && status.textContent.includes('1 jobs on this page');
+          const loading = statusVisible && status.textContent.trim() === 'Loading jobs…';
+          return { populated, loading, rowJobId };
+        };
+        const check = () => {
+          if (performance.now() > deadline) { reject(new Error('job filter timing deadline')); return; }
+          const state = observe();
+          const signal = location.search !== expectedPageSearch ? null : state.loading ? 'loading' : state.populated ? 'data' : null;
+          if (!presentationPending && signal !== null) {
+            presentationPending = true;
+            pendingSignal = signal;
+            // requestAnimationFrame runs before paint. Require the same state in the following
+            // frame, proving it survived the intervening presentation before timing it.
+            requestAnimationFrame(() => {
+              const presented = observe();
+              const presentedSignal = location.search !== expectedPageSearch ? null
+                : presented.loading ? 'loading' : presented.populated ? 'data' : null;
+              if (presentedSignal === pendingSignal) {
+                const elapsed = performance.now() - started;
+                if (feedbackMs === null) {
+                  feedbackMs = elapsed;
+                  feedbackSignal = presentedSignal;
+                }
+                if (presentedSignal === 'data' && dataMs === null) {
+                  dataMs = elapsed;
+                  renderedJobId = presented.rowJobId;
+                }
+              }
+              presentationPending = false;
+              pendingSignal = null;
+              if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
+              else if (performance.now() > deadline) reject(new Error('job filter timing deadline'));
+              else requestAnimationFrame(check);
+            });
+            return;
+          }
+          if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
+          else requestAnimationFrame(check);
+        };
+        requestAnimationFrame(check);
+      });
+    })()`);
+    const requests = fulfilled.map((entry, index) => ({ entry, index })).slice(before)
+      .filter(({ entry }) => entry.method === 'GET' && entry.path === '/jobs');
+    const expectedQuery = query;
+    filterFeedback.push(measured.feedbackMs); filterData.push(measured.dataMs);
+    filterSamples.push({ sample, direction: filtered ? 'filtered' : 'cleared', query: expectedQuery, expectedJobId,
+      pageSearch, feedbackMs: measured.feedbackMs, dataMs: measured.dataMs, feedbackSignal: measured.feedbackSignal,
+      renderedJobId: measured.renderedJobId,
+      requestStartIndex: before, requestEndIndex: fulfilled.length,
+      requestIndex: requests.length === 1 ? requests[0].index : null });
+  }
+  // Source-file open (#623): each sample re-enters the pinned directory untimed, then times the
+  // directory link into metadata and the explicit preview action into the first bounded chunk.
+  const directoryPage = fixtures.pages.find((page) => page.name === 'source directory');
+  const fileOpenSamples = [];
+  const fileOpenRaw = { openFeedback: [], openData: [], previewFeedback: [], previewData: [] };
+  const phaseRecord = (start, measured, extra = {}) => ({ feedbackMs: measured.feedbackMs, dataMs: measured.dataMs,
+    feedbackSignal: measured.feedbackSignal, ...measured.details, ...extra, requestStartIndex: start, requestEndIndex: fulfilled.length });
+  const requestIn = (start, path, query) => {
+    const matches = fulfilled.map((entry, index) => ({ entry, index })).slice(start)
+      .filter(({ entry }) => entry.method === 'GET' && entry.path === path && (query === undefined || entry.query === query));
+    return matches.length === 1 ? matches[0].index : null;
+  };
+  for (let sample = 0; sample < fixtures.fileOpen.samples; sample += 1) {
+    const file = fixtures.fileOpen.files[sample % fixtures.fileOpen.files.length];
+    // Re-enter in-app after the first sample, so no extra document loads or CSP reports accrue.
+    if (sample === 0) await cdp.call('Page.navigate', { url: origin + fixtures.fileOpen.directoryPath }, tab.sessionId);
+    else assert.ok(await evaluate(tab, `(() => {
+      const link = [...document.querySelectorAll('main a')].find(element => element.textContent.trim() === ${JSON.stringify(fileOpenContract.returnDirectory)});
+      if (!link) return false; link.click(); return true;
+    })()`), `file open ${sample}: missing directory return link`);
+    await ready(tab, `${populated(directoryPage)} && location.search === ${JSON.stringify(fileOpenPin)}
+      && [...document.querySelectorAll('main ul.job-list a')].some(link => link.href.includes(${JSON.stringify(`/source-files/${file.fileId}`)}))`,
+    `source directory for file open ${sample}`);
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const openStart = fulfilled.length;
+    const open = await evaluate(tab, fileOpenMetadataPhase(file));
+    const openWindow = phaseRecord(openStart, open, { requestIndex: requestIn(openStart, fileOpenApi(file.fileId)) });
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const previewStart = fulfilled.length;
+    const preview = await evaluate(tab, fileOpenPreviewPhase(file));
+    const content = await evaluate(tab, renderedPreviewDigest);
+    const previewWindow = phaseRecord(previewStart, preview, { ...content,
+      requestIndex: requestIn(previewStart, `${fileOpenApi(file.fileId)}/chunk`) });
+    fileOpenSamples.push({ sample, fileId: file.fileId, open: openWindow, preview: previewWindow });
+    fileOpenRaw.openFeedback.push(open.feedbackMs); fileOpenRaw.openData.push(open.dataMs);
+    fileOpenRaw.previewFeedback.push(preview.feedbackMs); fileOpenRaw.previewData.push(preview.dataMs);
+  }
+  const interactionTimes = interactions.map(({ elapsedMs }) => elapsedMs);
+  return { profile: profileEvidence, fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
+    layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
+    workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
+    jobFilter: { ...fixtures.jobFilter, samples: filterSamples },
+    fileOpen: { contract: fileOpenEvidenceContract(), samples: fileOpenSamples },
+    timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+      interactions: summary(interactionTimes), filterFeedback: summary(filterFeedback), filterData: summary(filterData),
+      fileOpenFeedback: summary(fileOpenRaw.openFeedback), fileOpenData: summary(fileOpenRaw.openData),
+      filePreviewFeedback: summary(fileOpenRaw.previewFeedback), filePreviewData: summary(fileOpenRaw.previewData),
+      raw: { cold, feedback, data, interactions: interactionTimes, filterFeedback, filterData, fileOpenFeedback: fileOpenRaw.openFeedback,
+        fileOpenData: fileOpenRaw.openData, filePreviewFeedback: fileOpenRaw.previewFeedback, filePreviewData: fileOpenRaw.previewData } } };
+}
+
+/** Validate explicit-read records against the trusted fixture preparation contract. */
+export function interactionEvidenceFailures(audit, pages, extraContexts = []) {
+  const failures = [];
+  if (!Array.isArray(pages)) return ['interactions: missing expected fixture contract'];
+  const contextsByPage = new Map(pages.map(page => [page.name, auditViewports.map(viewport => viewport.name)]));
+  for (const extra of extraContexts) {
+    if (!extra || typeof extra.page !== 'string' || typeof extra.context !== 'string' || !contextsByPage.has(extra.page)) {
+      failures.push('interactions: invalid extra context contract');
+      continue;
+    }
+    contextsByPage.get(extra.page).push(extra.context);
+  }
+  const expected = new Map();
+  for (const page of pages) {
+    for (const [stepIndex, step] of (page.preparation ?? []).entries()) {
+      for (const context of contextsByPage.get(page.name) ?? []) {
+        const identity = JSON.stringify([page.name, stepIndex, step.action, context]);
+        if (expected.has(identity)) failures.push(`interactions: duplicate fixture contract ${identity}`);
+        else expected.set(identity, step.reads);
+      }
+    }
+  }
+
+  const records = Array.isArray(audit?.interactions) ? audit.interactions : [];
+  if (!Array.isArray(audit?.interactions)) failures.push('interactions: missing records');
+  const seen = new Set();
+  for (const record of records) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      failures.push('interactions: invalid record');
+      continue;
+    }
+    const identity = JSON.stringify([record.page, record.stepIndex, record.action, record.context]);
+    if (!expected.has(identity)) failures.push(`interactions: unexpected action ${identity}`);
+    else if (seen.has(identity)) failures.push(`interactions: duplicate action ${identity}`);
+    else {
+      seen.add(identity);
+      const expectedReads = expected.get(identity);
+      if (!Array.isArray(record.reads) || record.reads.some(path => typeof path !== 'string') ||
+          JSON.stringify(record.reads) !== JSON.stringify(expectedReads)) {
+        failures.push(`interactions: ${record.page} / ${record.action} (${record.context}) reads do not match fixture`);
+      }
+    }
+    if (!Number.isFinite(record.elapsedMs) || record.elapsedMs < 0) {
+      failures.push(`interactions: ${record.page} / ${record.action} (${record.context}) has invalid elapsed time`);
+    }
+  }
+  for (const identity of expected.keys()) if (!seen.has(identity)) failures.push(`interactions: missing action ${identity}`);
+
+  const timing = audit?.timing?.interactions;
+  const raw = audit?.timing?.raw?.interactions;
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const elapsed = records.map(record => record?.elapsedMs);
+  const expectedSamples = expected.size;
+  if (!timing || timing.samples !== expectedSamples || !validMs(timing.median) || !validMs(timing.p95) ||
+      !Array.isArray(raw) || raw.length !== expectedSamples || !Array.from(raw).every(validMs)) {
+    failures.push(`interaction timing: invalid evidence (requires ${expectedSamples} finite nonnegative samples, median and p95)`);
+  } else {
+    if (raw.length !== elapsed.length || raw.some((value, index) => value !== elapsed[index])) {
+      failures.push('interaction timing: raw samples do not match interaction records');
+    }
+    const calculated = summary(raw);
+    if (timing.median !== calculated.median || timing.p95 !== calculated.p95) {
+      failures.push('interaction timing: summary does not match raw samples');
+    }
+  }
+  return failures;
+}
+
+/** Compact pointer for report.json; the complete measurements remain in the hashed audit sidecar. */
+export function summarizeAuditEvidence(audit, evidence) {
+  return {
+    evidence,
+    fixtures: audit.fixtures,
+    coverage: {
+      layout: audit.layout.map(({ page, viewport, scheme }) => ({ page, viewport, scheme })),
+      contrast: audit.contrast.map(({ page, viewport, scheme }) => ({ page, viewport, scheme })),
+      focus: audit.focus.map(({ page, scheme, stops }) => ({ page, scheme, stopCount: stops.length })),
+      focusStops: audit.focus.reduce((count, entry) => count + entry.stops.length, 0),
+    },
+    unmapped: audit.unmapped,
+    interactions: audit.interactions,
+    workers: { highlightedTokens: audit.workers.highlightedTokens,
+      targets: audit.workers.targets.map(({ url, responses }) => ({ url, responses })) },
+    keyboard: audit.keyboard,
+    timing: audit.timing,
+  };
+}
+
+export function encodeAuditEvidence(audit, maxBytes = 8 * 1024 * 1024) {
+  const json = Buffer.from(JSON.stringify(audit), 'utf8');
+  assert.ok(json.byteLength <= maxBytes, `Audit evidence exceeds its ${maxBytes}-byte raw bound`);
+  const bytes = gzipSync(json, { level: 9, mtime: 0 });
+  return { bytes, metadata: { sha256: createHash('sha256').update(bytes).digest('hex'),
+    compressedBytes: bytes.byteLength, uncompressedBytes: json.byteLength } };
+}
+
+/** Assertions are separate from measurement so the full report is retained when one fails. */
+export function assertAudit(audit, manifest, responses, origin, budgets = {}, {
+  connectionNotice = true, jobFilter = true, fileOpen = true, interactionPages = null, extraInteractionContexts = [], profile = 'reference',
+} = {}) {
+  const budgetLimits = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500,
+    filterFeedbackP95: 100, filterDataP95: 500, fileOpenFeedbackP95: 100, fileOpenDataP95: 500,
+    filePreviewFeedbackP95: 100, filePreviewDataP95: 500, ...budgets };
+  const failures = [];
+  let expectedProfile;
+  try { expectedProfile = auditProfileEvidence(profile); }
+  catch { failures.push(`audit profile: unknown requested profile ${profile}`); }
+  if (expectedProfile && JSON.stringify(audit?.profile) !== JSON.stringify(expectedProfile)) {
+    failures.push(`audit profile: report does not match requested ${profile} profile`);
+  }
+  // Expectations come from the qualification contract, not the report's claimed coverage.
+  const schemes = ['light', 'dark'];
+  const expected = (viewports) => auditPageNames.flatMap(page => viewports.flatMap(viewport => {
+    return schemes.map(scheme => {
+      const entry = { page, scheme };
+      if (viewport) entry.viewport = viewport.name;
+      return entry;
+    });
+  }));
+  const coverage = (kind, matrix) => {
+    const records = Array.isArray(audit[kind]) ? audit[kind] : [];
+    const key = entry => JSON.stringify([entry.page, ...(kind === 'focus' ? [] : [entry.viewport]), entry.scheme]);
+    const missing = new Set(matrix.map(key));
+    const seen = new Set();
+    for (const entry of records) {
+      if (!entry || typeof entry !== 'object') { failures.push(`${kind}: invalid coverage record`); continue; }
+      const identity = key(entry);
+      if (seen.has(identity)) failures.push(`${kind}: duplicate coverage ${identity}`);
+      else if (!missing.delete(identity)) failures.push(`${kind}: unexpected coverage ${identity}`);
+      seen.add(identity);
+    }
+    if (missing.size) failures.push(`${kind}: missing ${missing.size} coverage records: ${[...missing].join(', ')}`);
+    return records.filter(entry => entry && typeof entry === 'object');
+  };
+  const layout = coverage('layout', expected(auditViewports));
+  const chart = coverage('chart', expected(auditViewports).filter(entry => entry.page === 'attempt evidence'));
+  const contrast = coverage('contrast', expected(auditViewports.filter(viewport =>
+    viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1)));
+  const focus = coverage('focus', expected([null]));
+  const chartExpected = audit.chartExpected;
+  const same = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+  const captures = Array.isArray(audit.chartCaptures) ? audit.chartCaptures : [];
+  if (captures.length !== chartCaptureSets.length) failures.push('chart: missing desktop or 400% packaged screenshot evidence');
+  chartCaptureSets.forEach((set, index) => failures.push(...chartCaptureFailures(captures[index], set)));
+  if (!same(audit.chartScreenshots, captures.flatMap(capture => (capture?.tiles ?? []).map(tile => tile?.file))) || !audit.chartScreenshots?.length)
+    failures.push('chart: screenshot list does not match the capture manifests');
+  for (const entry of chart) {
+    const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
+    const validRect = box => box && [box.x, box.y, box.width, box.height, box.right, box.bottom].every(Number.isFinite)
+      && box.width > 0 && box.height > 0;
+    if (!chartExpected || !entry.chartPresent || entry.chartRole !== 'img' || !entry.chartVisible || !entry.figurePresent
+      || !entry.figureVisible || entry.chartName !== chartExpected.chartName)
+      failures.push(`${where}: missing or misnamed accessible signature chart`);
+    if (!validRect(entry.chartBounds) || entry.chartBounds.x < -1 || entry.chartBounds.right > entry.viewportWidth + 1)
+      failures.push(`${where}: signature chart has invalid or off-viewport bounds`);
+    const expectedCounts = `Expanded distinct exit/output signatures: ${chartExpected?.counts.expanded}. New distinct exit/output signatures: ${chartExpected?.counts.added}.`;
+    if (!chartExpected || !entry.chartDescription?.includes(entry.binding)
+      || !entry.chartDescription.includes(expectedCounts)
+      || !entry.chartDescription.includes(chartExpected.tableName)
+      || !entry.chartDescription.includes(chartExpected.approximation))
+      failures.push(`${where}: chart description lost its report identity, exact counters, table or approximation note`);
+    if (!chartExpected || !entry.binding.includes(chartExpected.reportId) || !entry.binding.includes(chartExpected.jobId)
+      || !entry.binding.includes(chartExpected.runId) || !entry.binding.includes(chartExpected.revisionId))
+      failures.push(`${where}: chart is not bound to the expected report, job, attempt and revision`);
+    if (!chartExpected || entry.region?.name !== chartExpected.tableName || entry.region?.focusable !== true || entry.region?.visible !== true
+      || !validRect(entry.region?.bounds) || !Number.isFinite(entry.region?.clientWidth) || entry.region.clientWidth <= 0
+      || !Number.isFinite(entry.region?.scrollWidth) || entry.region.scrollWidth < entry.region.clientWidth)
+      failures.push(`${where}: exact table is not in a visible, named, keyboard-scrollable region`);
+    if (!chartExpected || entry.caption !== chartExpected.tableName || !same(entry.headers, chartExpected.headers)
+      || !same(entry.rows, [
+        [chartExpected.labels[0], chartExpected.counts.expanded, chartExpected.sample],
+        [chartExpected.labels[1], chartExpected.counts.added, chartExpected.counts.denominator],
+      ])) failures.push(`${where}: accessible table does not preserve exact producer counters and denominator`);
+    if (entry.chartSeries?.length !== 2 || entry.chartSeries.some(series => !series.label || !validRect(series.bounds)
+      || !validRect(series.svgBounds) || series.barWidth === null))
+      failures.push(`${where}: visual chart series are missing or not rendered`);
+    const expandedCount = Number(chartExpected?.counts.expanded);
+    const addedCount = Number(chartExpected?.counts.added);
+    const expectedBarWidths = [100, expandedCount > 0 ? addedCount / expandedCount * 100 : NaN];
+    const actualBarWidths = entry.chartSeries?.map(series => Number(series.barWidth)) ?? [];
+    if (!Number.isFinite(expandedCount) || !Number.isFinite(addedCount) || expandedCount <= 0
+      || actualBarWidths.length !== expectedBarWidths.length
+      || actualBarWidths.some((width, index) => !Number.isFinite(width) || Math.abs(width - expectedBarWidths[index]) > 0.1))
+      failures.push(`${where}: visual bar widths do not represent the reported counts`);
+  }
+  for (const entry of layout) {
+    const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
+    if (entry.pageOverflowPx > 1) failures.push(`${where}: page scrolls horizontally by ${entry.pageOverflowPx}px: ${entry.overflow.join('; ')}`);
+    if (entry.overflowCount > 0) failures.push(`${where}: non-exempt horizontal overflow (${entry.overflowCount}): ${entry.overflow.join('; ')}`);
+    if (entry.clippedActions.length) failures.push(`${where}: actions outside the viewport: ${entry.clippedActions.join('; ')}`);
+    if (entry.smallTargets.length) failures.push(`${where}: targets below 24x24: ${entry.smallTargets.join('; ')}`);
+    if (!entry.headingWithinWidth) failures.push(`${where}: page heading is outside the viewport`);
+    if (entry.navigation.narrow !== entry.navigation.toggleShown || (entry.navigation.narrow && entry.navigation.linksShown))
+      failures.push(`${where}: navigation disclosure state ${JSON.stringify(entry.navigation)}`);
+    if (entry.animations !== 0) failures.push(`${where}: ${entry.animations} animations under reduced motion`);
+    for (const region of entry.scrollRegions) if (!region.fits || !region.focusable || !region.named)
+      failures.push(`${where}: scroll region ${JSON.stringify(region)}`);
+  }
+  for (const entry of contrast) {
+    const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
+    if (entry.failureCount) failures.push(`${where}: text contrast ${JSON.stringify(entry.failures)}`);
+    if (entry.unsupported.length) failures.push(`${where}: unmeasurable colours ${JSON.stringify(entry.unsupported)}`);
+    if (!Number.isInteger(entry.measured) || entry.measured <= 0 || !Number.isFinite(entry.minimum))
+      failures.push(`${where}: no valid text measurement`);
+    if (entry.page === 'source file') for (const kind of auditTokenKinds)
+      if (!Number.isInteger(entry.tokens?.[kind]) || entry.tokens[kind] <= 0)
+        failures.push(`${where}: no measured highlighted ${kind} tokens`);
+  }
+  for (const entry of focus) {
+    if (entry.stops.length < 3) failures.push(`${entry.page} (${entry.scheme}): only ${entry.stops.length} Tab stops`);
+    for (const stop of entry.stops) {
+      if (!stop.focusVisible || stop.outlineStyle === 'none' || stop.outlineWidth < 2 || stop.contrast === null || stop.contrast < 3 || !stop.inViewport || !stop.unobscured)
+        failures.push(`${entry.page} (${entry.scheme}): focus ${JSON.stringify(stop)}`);
+    }
+  }
+  // Chrome-DevTools-only evidence; the Playwright cross-engine runner opts out explicitly.
+  if (connectionNotice !== false) failures.push(...connectionNoticeFailures(audit.connectionNotice));
+  failures.push(...interactionEvidenceFailures(audit, interactionPages, extraInteractionContexts));
+  if (audit.unmapped.length) failures.push(`unmapped API reads: ${[...new Set(audit.unmapped)].join(', ')}`);
+  // Every packaged script, style, worker and font must resolve under the deployment base.
+  const assetBase = `${origin}/nested/assets/ui/`;
+  const declared = manifest.files.map((entry) => entry.path).filter((path) => /\.(?:js|css|woff2?|ttf|otf)$/.test(path));
+  const loaded = new Map(responses.filter((response) => response.url.startsWith(assetBase)).map((response) => [response.url.slice(assetBase.length), response.status]));
+  // A dedicated worker is its own DevTools target: its script counts as resolved when that target
+  // attached at the packaged URL and produced highlighting, which has no main-thread fallback.
+  for (const worker of audit.workers.targets) {
+    if (!worker.url.startsWith(assetBase)) failures.push(`worker outside the asset base: ${worker.url}`);
+    const own = worker.responses.find((response) => response.url === worker.url);
+    if (own && own.status !== 200) failures.push(`worker script status ${own.status}`);
+    if (audit.workers.highlightedTokens > 0 && (!own || own.status === 200)) loaded.set(worker.url.slice(assetBase.length), 200);
+  }
+  const missing = declared.filter((path) => loaded.get(path) !== 200);
+  if (missing.length) failures.push(`packaged assets not loaded under ${assetBase}: ${missing.join(', ')}`);
+  const failed = responses.filter((response) => response.url.startsWith(assetBase) && response.status !== 200);
+  if (failed.length) failures.push(`asset responses failed: ${JSON.stringify(failed)}`);
+  for (const [name, rawName, count, label, budget] of [
+    ['coldLoad', 'cold', 20, 'cold dashboard', budgetLimits.coldLoadP95],
+    ['routeFeedback', 'feedback', 50, 'route feedback', budgetLimits.routeFeedbackP95],
+    ['routeData', 'data', 50, 'route data', budgetLimits.routeDataP95],
+    ...(jobFilter === false ? [] : [
+      ['filterFeedback', 'filterFeedback', 50, 'job filter feedback', budgetLimits.filterFeedbackP95],
+      ['filterData', 'filterData', 50, 'job filter first data', budgetLimits.filterDataP95],
+    ]),
+    ...(fileOpen === false ? [] : [
+      ['fileOpenFeedback', 'fileOpenFeedback', 50, 'source file open feedback', budgetLimits.fileOpenFeedbackP95],
+      ['fileOpenData', 'fileOpenData', 50, 'source file open first data', budgetLimits.fileOpenDataP95],
+      ['filePreviewFeedback', 'filePreviewFeedback', 50, 'source preview feedback', budgetLimits.filePreviewFeedbackP95],
+      ['filePreviewData', 'filePreviewData', 50, 'source preview first chunk', budgetLimits.filePreviewDataP95],
+    ]),
+  ]) {
+    const timing = audit.timing?.[name];
+    const raw = audit.timing?.raw?.[rawName];
+    const validMs = value => Number.isFinite(value) && value >= 0;
+    if (!timing || timing.samples !== count || !validMs(timing.median) || !validMs(timing.p95)
+      || !Array.isArray(raw) || raw.length !== count || !Array.from(raw).every(validMs)) {
+      failures.push(`${label}: invalid timing evidence (requires ${count} finite nonnegative samples, median and p95)`);
+      continue;
+    }
+    const calculated = summary(raw);
+    if (timing.median !== calculated.median || timing.p95 !== calculated.p95)
+      failures.push(`${label}: timing summary does not match raw samples`);
+    if (!Number.isFinite(budget) || budget < 0) failures.push(`${label}: invalid timing budget ${JSON.stringify(budget)}`);
+    else if (profile === 'reference') {
+      // The opt-in constrained profile records and validates timing evidence without budgets.
+      const exactP95 = percentile(raw, 0.95);
+      if (exactP95 > budget) failures.push(`${label} p95 ${exactP95}ms exceeds ${budget}ms`);
+    }
+  }
+  if (jobFilter !== false) failures.push(...jobFilterFailures(audit.jobFilter, audit.timing?.raw, audit.fulfilled));
+  if (fileOpen !== false) failures.push(...fileOpenFailures(audit.fileOpen, audit.timing?.raw, audit.fulfilled));
+  return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)),
+    profile, timingBudgetsEnforced: profile === 'reference', budgets: budgetLimits };
+}
+
+/** Validate filter sample completeness, workload identity, summaries and request-to-render binding. */
+export function jobFilterFailures(evidence, raw, fulfilled) {
+  const failures = []; const fail = message => failures.push(`job filter: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing workload evidence'); return failures; }
+  for (const key of ['label', 'value', 'filteredQuery', 'unfilteredQuery', 'filteredRendered', 'unfilteredRendered',
+    'filteredJobId', 'unfilteredJobId'])
+    if (evidence[key] !== jobFilterContract[key]) fail(`unexpected ${key} ${JSON.stringify(evidence[key])}`);
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== 50) fail(`requires 50 samples, found ${samples.length}`);
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seenRequests = new Set(); let previousEnd = 0;
+  samples.forEach((sample, index) => {
+    const filtered = index % 2 === 0;
+    const direction = filtered ? 'filtered' : 'cleared';
+    const query = filtered ? jobFilterContract.filteredQuery : jobFilterContract.unfilteredQuery;
+    const expectedJobId = filtered ? jobFilterContract.filteredJobId : jobFilterContract.unfilteredJobId;
+    if (!sample || sample.sample !== index || sample.direction !== direction || sample.query !== query)
+      fail(`sample ${index}: unexpected direction/query binding`);
+    if (sample?.expectedJobId !== expectedJobId || sample?.renderedJobId !== expectedJobId)
+      fail(`sample ${index}: rendered row does not match the expected job identity`);
+    if (!validMs(sample?.feedbackMs) || !validMs(sample?.dataMs) || sample.feedbackMs > sample.dataMs)
+      fail(`sample ${index}: invalid feedback/data timing`);
+    if (sample?.feedbackSignal !== 'loading' && sample?.feedbackSignal !== 'data') fail(`sample ${index}: invalid feedback signal`);
+    if (sample?.feedbackSignal === 'data' && validMs(sample?.feedbackMs) && validMs(sample?.dataMs)
+      && sample.dataMs - sample.feedbackMs > 20) fail(`sample ${index}: data feedback is not coincident with first data`);
+    if (!Number.isInteger(sample?.requestStartIndex) || !Number.isInteger(sample?.requestEndIndex)
+      || sample.requestStartIndex < previousEnd || sample.requestEndIndex < sample.requestStartIndex
+      || !Number.isInteger(sample?.requestIndex) || sample.requestIndex < sample.requestStartIndex
+      || sample.requestIndex >= sample.requestEndIndex || seenRequests.has(sample.requestIndex)) {
+      fail(`sample ${index}: missing or duplicate fulfilled request index`);
+      return;
+    }
+    previousEnd = sample.requestEndIndex;
+    seenRequests.add(sample.requestIndex);
+    const request = fulfilled?.[sample.requestIndex];
+    const expectedRequest = { method: 'GET', path: '/jobs', status: 200, query, fulfillmentSucceeded: true };
+    const pageSearch = filtered ? `?search=${jobFilterContract.value}` : '';
+    if (sample?.pageSearch !== pageSearch) fail(`sample ${index}: unexpected page-search binding`);
+    const requestsInWindow = Array.isArray(fulfilled) ? fulfilled.slice(sample.requestStartIndex, sample.requestEndIndex)
+      .filter(entry => entry?.method === 'GET' && entry?.path === '/jobs') : [];
+    if (!request || Object.keys(expectedRequest).some(key => request[key] !== expectedRequest[key])
+      || !Array.isArray(request.responseJobIds) || request.responseJobIds.length !== 1 || request.responseJobIds[0] !== expectedJobId
+      || requestsInWindow.length !== 1 || requestsInWindow[0] !== request)
+      fail(`sample ${index}: not bound to its fulfilled ${query} request`);
+  });
+  for (const [name, values, label] of [['filterFeedback', raw?.filterFeedback, 'feedback'], ['filterData', raw?.filterData, 'first data']]) {
+    if (!Array.isArray(values) || values.length !== 50 || !values.every(validMs)) {
+      fail(`${label}: requires 50 finite nonnegative raw samples`);
+      continue;
+    }
+    const measured = values;
+    const recorded = samples;
+    const field = name === 'filterFeedback' ? 'feedbackMs' : 'dataMs';
+    if (recorded.length !== 50 || measured.some((value, index) => value !== recorded[index]?.[field]))
+      fail(`${label}: raw samples do not match workload records`);
+  }
+  return failures;
+}
+
+
+/** The workload identity a file-open report must carry; row text stays out of the report. */
+export function fileOpenEvidenceContract() {
+  return { ...Object.fromEntries(fileOpenIdentityKeys.map(key => [key, fileOpenContract[key]])),
+    files: fileOpenContract.files.map(({ fileId, displayName, sizeBytes, sha256, rows }) => ({ fileId, displayName, sizeBytes, sha256, rows })) };
+}
+
+/** Validate both file-open phases against the contract, their exact request windows and rendered content. */
+export function fileOpenFailures(evidence, raw, fulfilled) {
+  const failures = []; const fail = message => failures.push(`source file open: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing workload evidence'); return failures; }
+  const c = fileOpenContract;
+  if (JSON.stringify(evidence.contract) !== JSON.stringify(fileOpenEvidenceContract())) fail('unexpected workload contract');
+  if (evidence.form === 'compact-v1') return [...failures, ...compactFileOpenFailures(evidence, raw, fulfilled).map(message => `source file open: ${message}`)];
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== c.samples) fail(`requires ${c.samples} samples, found ${samples.length}`);
+  const table = Array.isArray(fulfilled) ? fulfilled : [];
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seen = new Set(); let previousEnd = 0;
+  samples.forEach((sample, index) => {
+    const file = c.files[index % c.files.length];
+    const where = `sample ${index}`;
+    if (!sample || typeof sample !== 'object' || sample.sample !== index || sample.fileId !== file.fileId) {
+      fail(`${where}: unexpected file rotation binding`); return;
+    }
+    for (const name of ['open', 'preview']) {
+      const phase = sample[name]; const at = `${where} ${name}`;
+      if (!phase || typeof phase !== 'object') { fail(`${at}: missing phase record`); continue; }
+      if (!validMs(phase.feedbackMs) || !validMs(phase.dataMs) || phase.feedbackMs > phase.dataMs
+        || phase.dataMs > c.deadlineMs) fail(`${at}: invalid feedback/data timing`);
+      if (phase.feedbackSignal !== 'loading' && phase.feedbackSignal !== 'data') fail(`${at}: invalid feedback signal`);
+      if (phase.feedbackSignal === 'data' && validMs(phase.feedbackMs) && validMs(phase.dataMs) && phase.dataMs - phase.feedbackMs > 20)
+        fail(`${at}: data feedback is not coincident with first data`);
+      const { requestStartIndex: start, requestEndIndex: end, requestIndex } = phase;
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < previousEnd || end < start || end > table.length
+        || !Number.isInteger(requestIndex) || requestIndex < start || requestIndex >= end || seen.has(requestIndex)) {
+        fail(`${at}: missing or duplicate fulfilled request index`); continue;
+      }
+      previousEnd = end; seen.add(requestIndex);
+      const path = name === 'open' ? fileOpenApi(file.fileId) : `${fileOpenApi(file.fileId)}/chunk`;
+      const request = table[requestIndex];
+      const response = request?.response;
+      const expected = expectedSourceResponseIdentity(name === 'open' ? 'file' : 'chunk', file);
+      // Live reports carry the identity object; compacted reports carry its canonical digest.
+      const mismatched = typeof response === 'string' ? (response === sourceResponseDigest(expected) ? [] : ['response'])
+        : response && typeof response === 'object' ? [...new Set([...Object.keys(expected), ...Object.keys(response)])]
+          .filter(key => JSON.stringify(response[key]) !== JSON.stringify(expected[key])).map(key => `response.${key}`) : ['response'];
+      const expectedRequest = { method: 'GET', path, status: 200, fulfillmentSucceeded: true, query: name === 'open' ? '' : fileOpenChunkQuery };
+      if (request) mismatched.unshift(...Object.keys(expectedRequest).filter(key => request[key] !== expectedRequest[key]));
+      if (!request || mismatched.length)
+        fail(`${at}: not bound to its fulfilled ${name === 'open' ? 'metadata' : 'chunk'} request (${request ? mismatched.join(', ') : 'missing'})`);
+      const windowEntries = table.slice(start, end);
+      if (name === 'open' && windowEntries.some(entry => typeof entry?.path === 'string' && entry.path.endsWith('/chunk')))
+        fail(`${at}: metadata open requested a source chunk`);
+      if (windowEntries.length !== 1 || windowEntries[0] !== request) fail(`${at}: unexpected requests in the measured window`);
+    }
+    const open = sample.open ?? {};
+    if (open.renderedFileId !== file.fileId || open.renderedName !== file.displayName || open.renderedSha256 !== file.sha256)
+      fail(`${where} open: rendered metadata does not match the file identity`);
+    if (open.pageSearch !== fileOpenPin) fail(`${where} open: snapshot pin is not bound to the source revision`);
+    if (open.focus !== 'main-heading' || open.previewOpen !== false) fail(`${where} open: unexpected focus or preview state`);
+    const preview = sample.preview ?? {};
+    if (preview.renderedRows !== file.rows || preview.renderedBytes !== Number(file.sizeBytes) || preview.renderedTextSha256 !== file.sha256)
+      fail(`${where} preview: rendered chunk content does not match the file digest`);
+    if (preview.ariaBusy !== 'false' || preview.focus !== 'source-preview-title') fail(`${where} preview: unexpected busy state or focus`);
+  });
+  for (const [name, phase, field, label] of [['fileOpenFeedback', 'open', 'feedbackMs', 'open feedback'], ['fileOpenData', 'open', 'dataMs', 'open first data'],
+    ['filePreviewFeedback', 'preview', 'feedbackMs', 'preview feedback'], ['filePreviewData', 'preview', 'dataMs', 'preview first chunk']]) {
+    const values = raw?.[name];
+    if (!Array.isArray(values) || values.length !== c.samples || !values.every(validMs)) {
+      fail(`${label}: requires ${c.samples} finite nonnegative raw samples`); continue;
+    }
+    if (samples.length !== c.samples || values.some((value, index) => value !== samples[index]?.[phase]?.[field]))
+      fail(`${label}: raw samples do not match workload records`);
+  }
+  return failures;
+}
+
+/** Validate the retained compact file-open form against the contract-derived expectation. */
+function compactFileOpenFailures(evidence, raw, fulfilled) {
+  const failures = []; const c = fileOpenContract;
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== c.samples) failures.push(`requires ${c.samples} samples, found ${samples.length}`);
+  const table = Array.isArray(fulfilled) ? fulfilled : [];
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seen = new Set(); let previousEnd = 0;
+  const expected = Array.from({ length: c.samples }, (_, index) => expectedFileOpenSample(index));
+  const sourceWindows = [];
+  samples.forEach((tuple, index) => {
+    if (!Array.isArray(tuple) || tuple.length !== 8) { failures.push(`sample ${index}: invalid compact record`); return; }
+    if (index >= expected.length) return;
+    for (const [offset, name, kind] of [[0, 'open', 'file'], [4, 'preview', 'chunk']]) {
+      const [start, end, requestIndex, signal] = tuple.slice(offset, offset + 4); const at = `sample ${index} ${name}`;
+      if (signal !== 'loading' && signal !== 'data') failures.push(`${at}: invalid feedback signal`);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < previousEnd || end < start || end > table.length
+        || !Number.isInteger(requestIndex) || requestIndex < start || requestIndex >= end || seen.has(requestIndex)) {
+        failures.push(`${at}: missing or duplicate fulfilled request index`); continue;
+      }
+      previousEnd = end; seen.add(requestIndex);
+      const window = table.slice(start, end);
+      const expectedRead = expected[index].requests[name === 'open' ? 0 : 1];
+      const readCommitment = sourceReadCommitment(expectedRead);
+      if (table[requestIndex]?.source !== kind || table[requestIndex]?.readCommitment !== readCommitment)
+        failures.push(`${at}: not bound to its fulfilled ${kind === 'file' ? 'metadata' : 'chunk'} request identity`);
+      if (name === 'open' && window.some(entry => entry?.source === 'chunk' || (typeof entry?.path === 'string' && entry.path.endsWith('/chunk'))))
+        failures.push(`${at}: metadata open requested a source chunk`);
+      if (window.length !== 1) failures.push(`${at}: unexpected requests in the measured window`);
+      sourceWindows.push({ sample: index, phase: name, start, end, requestIndex, source: kind, readCommitment });
+    }
+  });
+  if (evidence.renderedSha256 !== sha256Json(expected.map(sample => sample.rendered)))
+    failures.push('rendered metadata, chunk content, focus or pin do not match the contract');
+  if (evidence.sourceRequestsSha256 !== sha256Json(sourceWindows))
+    failures.push('source request windows are not bound to their sample and phase identities');
+  const names = [['fileOpenFeedback', 'fileOpenData', 'open'], ['filePreviewFeedback', 'filePreviewData', 'preview']];
+  for (const [feedback, data, label] of names) {
+    const feedbackValues = raw?.[feedback]; const dataValues = raw?.[data];
+    if (![feedbackValues, dataValues].every(values => Array.isArray(values) && values.length === c.samples && values.every(validMs))) {
+      failures.push(`${label}: requires ${c.samples} finite nonnegative raw samples`); continue;
+    }
+    feedbackValues.forEach((value, index) => {
+      const signal = samples[index]?.[label === 'open' ? 3 : 7];
+      if (value > dataValues[index] || dataValues[index] > c.deadlineMs) failures.push(`sample ${index} ${label}: invalid feedback/data timing`);
+      else if (signal === 'data' && dataValues[index] - value > 20) failures.push(`sample ${index} ${label}: data feedback is not coincident with first data`);
+    });
+  }
+  return failures;
+}
+
+/**
+ * Keep every fulfilled request inside the measured job-filter and file-open windows, so an
+ * unexpected request there still reaches the validator, and drop unrelated route reads.
+ * Indexes are remapped; any malformed window leaves the report untouched for the validator.
+ */
+export function compactTimedAuditEvidence(audit) {
+  const fulfilled = Array.isArray(audit?.fulfilled) ? audit.fulfilled : null;
+  const filterSamples = Array.isArray(audit?.jobFilter?.samples) ? audit.jobFilter.samples : null;
+  const fileSamples = Array.isArray(audit?.fileOpen?.samples) ? audit.fileOpen.samples : null;
+  if (!fulfilled || (!filterSamples && !fileSamples)) return audit;
+  const windows = [...(filterSamples ?? []), ...(fileSamples ?? []).flatMap(sample => [sample?.open, sample?.preview])];
+  const retainedSources = new Set();
+  for (const record of windows) {
+    const start = record?.requestStartIndex; const end = record?.requestEndIndex;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > fulfilled.length) return audit;
+    for (let index = start; index < end; index += 1) retainedSources.add(index);
+  }
+  const ordered = [...retainedSources].sort((a, b) => a - b);
+  const indexes = new Map(ordered.map((source, retained) => [source, retained]));
+  const position = source => { let low = 0; let high = ordered.length;
+    while (low < high) { const middle = (low + high) >> 1; if (ordered[middle] < source) low = middle + 1; else high = middle; }
+    return low; };
+  const remap = record => record && typeof record === 'object' ? { ...record, requestStartIndex: position(record.requestStartIndex),
+    requestEndIndex: position(record.requestEndIndex), requestIndex: indexes.get(record.requestIndex) ?? null } : record;
+  const compact = { ...audit, fulfilled: ordered.map(index => fulfilled[index]),
+    fulfilledRequestSummary: { observed: fulfilled.length, retained: ordered.length, scope: 'timed-request-windows' } };
+  if (filterSamples) compact.jobFilter = { ...audit.jobFilter, samples: filterSamples.map(remap) };
+  if (fileSamples) {
+    // The report bound leaves little room: file-open samples become index/signal tuples, each
+    // source read in a window becomes a one-letter marker, and the per-sample rendered details
+    // and source requests are bound by digests the validator recomputes from the contract.
+    // Requests in a window that are not source reads are kept verbatim.
+    const sourceEntries = [];
+    const marked = new Set();
+    const sourceMarkers = new Map();
+    for (let sampleIndex = 0; sampleIndex < fileSamples.length; sampleIndex += 1) {
+      const sample = fileSamples[sampleIndex];
+      for (const [name, phase] of [['open', sample?.open], ['preview', sample?.preview]]) {
+      for (let index = phase.requestStartIndex; index < phase.requestEndIndex; index += 1) {
+        const entry = fulfilled[index];
+        if (typeof entry?.path === 'string' && entry.path.includes('/source-files/') && !marked.has(index)) {
+          marked.add(index);
+          const readCommitment = sourceReadCommitment(entry);
+          sourceMarkers.set(index, { source: entry.path.endsWith('/chunk') ? 'chunk' : 'file', readCommitment });
+        }
+      }
+      const retainedStart = position(phase.requestStartIndex);
+      const retainedEnd = position(phase.requestEndIndex);
+      const retainedRequest = indexes.get(phase.requestIndex) ?? null;
+      const readIndex = phase.requestIndex;
+      sourceEntries.push({ sample: sampleIndex, phase: name, start: retainedStart, end: retainedEnd,
+        requestIndex: retainedRequest, source: name === 'open' ? 'file' : 'chunk',
+        readCommitment: sourceReadCommitment(fulfilled[readIndex]) });
+      }
+    }
+    compact.fulfilled = ordered.map(index => marked.has(index)
+      ? sourceMarkers.get(index) : fulfilled[index]);
+    const tuple = phase => { const record = remap(phase); return [record.requestStartIndex, record.requestEndIndex, record.requestIndex, record.feedbackSignal]; };
+    compact.fileOpen = { contract: audit.fileOpen.contract, form: 'compact-v1',
+      samples: fileSamples.map(sample => [...tuple(sample.open), ...tuple(sample.preview)]),
+      renderedSha256: sha256Json(fileSamples.map(renderedFileOpenDetails)), sourceRequestsSha256: sha256Json(sourceEntries) };
+  }
+  return compact;
+}
+/** @deprecated Kept for existing callers; compacts every timed request window. */
+export const compactJobFilterAuditEvidence = compactTimedAuditEvidence;

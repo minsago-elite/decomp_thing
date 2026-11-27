@@ -24,6 +24,7 @@ MAX_COMPRESSED_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_INVENTORY_BYTES = 4 * 1024 * 1024
 MAX_COMMIT_BYTES = 64 * 1024
+MAX_CANONICAL_NODES = 2_000_000
 DOMAINS = ["model-provenance", "function-boundaries", "surviving-symbol-identities"]
 UNAVAILABLE = ["interfaces", "calls", "globals", "types", "calibration"]
 ROLES = frozenset(("model", "qualification", "result", "accuracy", "boundary-score",
@@ -75,9 +76,71 @@ def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+class _CanonicalBudget:
+    """Charge occurrences, not unique objects, before expanding or encoding JSON."""
+
+    def __init__(self) -> None:
+        self.bytes = 0
+        self.nodes = 0
+
+    def charge(self, size: int, nodes: int = 0) -> None:
+        self.bytes += size
+        self.nodes += nodes
+        _require(self.bytes <= MAX_DECODED_BYTES, "canonical JSON byte budget exceeded")
+        _require(self.nodes <= MAX_CANONICAL_NODES, "canonical JSON node budget exceeded")
+
+    def add(self, value: Any, depth: int = 0) -> None:
+        _require(depth <= 64, "canonical JSON depth exceeds its bound")
+        self.charge(0, 1)
+        if type(value) in (dict, list):
+            count = len(value)
+            self.charge(2)  # Braces or brackets.
+            if count:
+                # Entry indentation, commas and newlines (indent=2). The final
+                # newline replaces the absent comma after the last entry.
+                self.charge(count * (2 * (depth + 1) + 2) + 2 * depth)
+            if type(value) is dict:
+                self.charge(2 * count)  # Colon and space for each member.
+                for key, child in value.items():
+                    _require(type(key) is str, "canonical JSON key is not a string")
+                    self.add(key, depth + 1)
+                    self.add(child, depth + 1)
+            else:
+                for child in value:
+                    self.add(child, depth + 1)
+        elif type(value) is str:
+            self.charge(2)  # Quotes; only bounded fragments are escaped here.
+            for start in range(0, len(value), 4096):
+                try:
+                    escaped = json.dumps(value[start:start + 4096], ensure_ascii=False)
+                    self.charge(len(escaped.encode("utf-8", "strict")) - 2)
+                except UnicodeError as error:
+                    raise EvidenceError("canonical JSON is not strict UTF-8") from error
+        elif value is None or type(value) in (bool, int, float):
+            if type(value) is int:
+                _require(value.bit_length() <= 426 and len(str(value)) <= 128,
+                         "canonical JSON integer exceeds its bound")
+            if type(value) is float:
+                _require(math.isfinite(value), "non-finite canonical JSON number")
+            self.charge(len(json.dumps(value, allow_nan=False)))
+        else:
+            raise EvidenceError("unsupported canonical JSON value")
+
+
 def _canonical(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2,
-                       allow_nan=False) + "\n").encode("utf-8")
+    budget = _CanonicalBudget()
+    budget.add(value)
+    budget.charge(1)  # Final newline is part of every canonical commitment.
+    # Preflight bounds even an individual encoder chunk; streaming also avoids
+    # materializing the complete Unicode encoding alongside the UTF-8 result.
+    encoded = bytearray()
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+    for chunk in encoder.iterencode(value):
+        data = chunk.encode("utf-8", "strict")
+        _require(len(encoded) + len(data) < MAX_DECODED_BYTES, "canonical JSON byte budget exceeded")
+        encoded.extend(data)
+    encoded.extend(b"\n")
+    return bytes(encoded)
 
 
 def _json(payload: bytes) -> dict:
@@ -420,6 +483,7 @@ def rederive_measurements(model: dict, oracle: dict, observation: dict) -> dict:
     _require(all(type(parts["boundaries"][key]) is int and parts["boundaries"][key] == value
                  for key, value in counts.items()), "boundary count summary differs from complete raw partitions")
     symbols = []
+    projection_budget = _CanonicalBudget()
     for function in sorted(oracle["functions"], key=lambda f: (f["rva"] is None, _rva(f["rva"]) if f["rva"] else 0, f["id"])):
         names = set()
         for alias in sorted(_rows(function["aliases"], 256), key=lambda a: a["name"]):
@@ -433,10 +497,15 @@ def rederive_measurements(model: dict, oracle: dict, observation: dict) -> dict:
             _require(function["rva"] is not None, "surviving alias lacks an exact start")
             found = recovered.get(_rva(function["rva"]))
             outcome = "missing" if found is None else "exact" if found["name"] == name else "name-mismatch"
-            symbols.append({"oracleId": function["id"], "name": name, "rva": function["rva"],
+            row = {"oracleId": function["id"], "name": name, "rva": function["rva"],
                 "oracleExcluded": function["exclusion"] is not None, "exclusion": function["exclusion"], "outcome": outcome,
                 "recoveredId": found["id"] if found else None, "recoveredRva": function["rva"] if found else None,
-                "recoveredName": found["name"] if found else None, "recoveredStatus": found["extractionStatus"] if found else None})
+                "recoveredName": found["name"] if found else None, "recoveredStatus": found["extractionStatus"] if found else None}
+            # The row is at depth three in measurements. Charge every repeated
+            # field, including nested exclusions, before growing the population.
+            projection_budget.add(row, depth=3)
+            projection_budget.charge(8)  # Parent-list indentation, comma, newline.
+            symbols.append(row)
     outcomes = Counter(s["outcome"] for s in symbols)
     return {"provider": "structural-function-accuracy-v1", "schemaVersion": 1, "twin": "stripped",
         "sourcePartitions": {**{name: "/result/" + name for name in ("exactMatches", "nearMisses", "falsePositives", "falseNegatives", "ignoredExcludedRecoveries")}, "excludedFunctions": "/excludedFunctions"},

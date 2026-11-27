@@ -29,6 +29,8 @@ internal sealed interface AcpMountEventWitness {
     val diagnosticRecord: String
     /** Already captured optional display data; no refreshed identity or native query. */
     val admissionRecord: String? get() = null
+    /** Captured clock scalars only; origin is unspecified by the Java API. */
+    val timingRecord: String? get() = null
 }
 
 /** A fatal failure to prove that a sandbox scope/tree or one of its pinned resources is gone. */
@@ -2178,6 +2180,13 @@ private class RuntimePrivateControlScope private constructor(
 
     /** One scope's original event latch, with failure-only diagnostics and no query injection. */
     private class MountEventCheck(private val poll: LinuxFilesystemSyscalls.MountMetadataPollScratch) {
+        private val createdNs = System.nanoTime()
+        private var admissionCompleteNs = 0L
+        private var lastCleanNs = 0L
+        private var firstObservedNs = 0L
+        private var observedFailure = false
+        private var cleanPollCount = 0L
+        private var firstEventTimingContext: String? = null
         private var mountChanged = false
         private var firstEventPhase: MountEventPhase? = null
         private var firstEventObservation = 0L
@@ -2197,7 +2206,23 @@ private class RuntimePrivateControlScope private constructor(
         }
 
         fun markAdmissionComplete() {
+            if (!admissionComplete) admissionCompleteNs = System.nanoTime()
             admissionComplete = true
+        }
+
+        // No subtraction or nonnegative-origin assumption; absent observations remain NA.
+        private fun timingContext(): String? = try {
+            "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=$createdNs " +
+                "admittedNs=${if (admissionComplete) admissionCompleteNs else "NA"} " +
+                "lastCleanNs=${if (cleanPollCount > 0) lastCleanNs else "NA"} " +
+                "firstObservedNs=${if (observedFailure) firstObservedNs else "NA"} cleanPolls=$cleanPollCount"
+        } catch (_: Throwable) { null }
+
+        private fun recordFailureTime() {
+            if (!observedFailure) {
+                firstObservedNs = System.nanoTime()
+                observedFailure = true
+            }
         }
 
         // Already-owned initial scalars only: no refreshed rows, identities, or native queries.
@@ -2226,8 +2251,12 @@ private class RuntimePrivateControlScope private constructor(
                 firstEventPhase = phase
                 firstEventObservation = observation
                 mountChanged = true
+                recordFailureTime()
+                firstEventTimingContext = timingContext()
                 throw eventFailure()
             }
+            lastCleanNs = System.nanoTime()
+            if (cleanPollCount < Long.MAX_VALUE) cleanPollCount++
         }
 
         private fun eventFailure(): IOException {
@@ -2236,7 +2265,7 @@ private class RuntimePrivateControlScope private constructor(
                 val diagnostic = firstEventDiagnostic ?: MountEventDiagnostic(
                     checkNotNull(firstEventPhase), MountEventOutcome.EVENT,
                     (firstEventObservation ushr 32).toInt(), firstEventObservation.toInt() and 0xffff, null,
-                    admissionContext(),
+                    admissionContext(), firstEventTimingContext,
                 ).also { firstEventDiagnostic = it }
                 // This exact local IOException is fresh: no graph lookup or existing-list growth.
                 failure.addSuppressed(diagnostic)
@@ -2250,11 +2279,12 @@ private class RuntimePrivateControlScope private constructor(
             try {
                 // Claim before construction/attachment; no retries even if diagnostics fail.
                 val observation = poll.claimFailureObservation(failure) ?: return
+                recordFailureTime()
                 val outcome = if (observation.events != null) MountEventOutcome.INVALID_DESCRIPTOR
                     else MountEventOutcome.SYSCALL_ERROR
                 // Only the exact scratch-created, not-yet-annotated exception can reach this line.
                 val diagnostic = MountEventDiagnostic(phase, outcome,
-                    observation.result, observation.events, observation.error, admissionContext())
+                    observation.result, observation.events, observation.error, admissionContext(), timingContext())
                 failure.addSuppressed(diagnostic)
                 // The claimed scratch token proves this exact native primary was freshly constructed.
                 failure.initCause(diagnostic)
@@ -2270,6 +2300,7 @@ private class RuntimePrivateControlScope private constructor(
         events: Int?,
         error: Int?,
         private val admissionContext: String?,
+        private val timingContext: String?,
     ) : Throwable(
         "mount-event-v1 phase=${phase.name} generation=" +
             (if (phase == MountEventPhase.REFRESH) "MISMATCH_ALREADY_OBSERVED" else "NOT_EVALUATED") +
@@ -2278,6 +2309,10 @@ private class RuntimePrivateControlScope private constructor(
     ), AcpMountEventWitness {
         override val diagnosticRecord: String get() = message.orEmpty()
         override val admissionRecord: String? get() = admissionContext
+        override val timingRecord: String? get() = timingContext
+
+        constructor(phase: MountEventPhase, outcome: MountEventOutcome, result: Int?, events: Int?, error: Int?,
+            admissionContext: String?) : this(phase, outcome, result, events, error, admissionContext, null)
 
         // Preserve the legacy scalar witness constructor and its exact message.
         constructor(phase: MountEventPhase, outcome: MountEventOutcome, result: Int?, events: Int?, error: Int?) :
@@ -4306,6 +4341,7 @@ internal data class PinnedFileIdentity(
     val uid: Int,
     val size: Long,
     val modifiedMillis: Long,
+    val changedTime: FileTime,
     val metadataSha256: String,
 )
 
@@ -4372,6 +4408,7 @@ private class PinnedReadOnlyMount private constructor(
     private val descriptorSha256: String?,
 ) {
     private var mountedSnapshotUnlinked = false
+    @Volatile private var sealedSnapshotIdentity: PinnedFileIdentity? = null
     val expectedIdentity: PinnedFileIdentity get() = manifest.rootIdentity
     fun evidence(): AcpSandboxMountEvidence = AcpSandboxMountEvidence(
         sourcePathSha256 = sha256(mount.source.toString()),
@@ -4417,8 +4454,29 @@ private class PinnedReadOnlyMount private constructor(
         if (mountedSnapshotUnlinked) {
             val expectedDigest = descriptorSha256
                 ?: throw IOException("sealed runtime snapshot lacks a pinned content digest")
-            if (sha256(sourceDescriptor, limits.maximumUserOwnedFileBytes, cancellationCheck, statistics) != expectedDigest) {
-                throw IOException("sealed runtime snapshot bytes changed")
+            // Unlinking changes ctime. Verify bytes once against the pre-unlink identity, then
+            // compare the post-unlink identity (including kernel-owned ctime) on later checks.
+            var sealedIdentity = sealedSnapshotIdentity
+            if (sealedIdentity == null) synchronized(this) {
+                sealedIdentity = sealedSnapshotIdentity
+                if (sealedIdentity == null) {
+                    val beforeHash = readPinnedDescriptorIdentity(sourceDescriptor, cancellationCheck)
+                    if (beforeHash.copy(changedTime = manifest.rootIdentity.changedTime) != manifest.rootIdentity) {
+                        throw IOException("sealed runtime snapshot metadata changed")
+                    }
+                    if (sha256(sourceDescriptor, limits.maximumUserOwnedFileBytes, cancellationCheck, statistics) != expectedDigest) {
+                        throw IOException("sealed runtime snapshot bytes changed")
+                    }
+                    val afterHash = readPinnedDescriptorIdentity(sourceDescriptor, cancellationCheck)
+                    if (afterHash.copy(changedTime = manifest.rootIdentity.changedTime) != manifest.rootIdentity) {
+                        throw IOException("sealed runtime snapshot metadata changed while verifying its bytes")
+                    }
+                    sealedSnapshotIdentity = afterHash
+                    sealedIdentity = afterHash
+                }
+            }
+            if (readPinnedDescriptorIdentity(sourceDescriptor, cancellationCheck) != sealedIdentity) {
+                throw IOException("sealed runtime snapshot metadata changed")
             }
             return
         }
@@ -5475,7 +5533,7 @@ private fun readIdentity(
     cancellationCheck()
     val unix = Files.readAttributes(
         path,
-        "unix:dev,ino,mode,uid,size,lastModifiedTime",
+        "unix:dev,ino,mode,uid,size,lastModifiedTime,ctime",
         LinkOption.NOFOLLOW_LINKS,
     )
     val descriptor = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
@@ -5493,9 +5551,38 @@ private fun readIdentity(
             uid = (unix.getValue("uid") as Number).toInt(),
             size = (unix.getValue("size") as Number).toLong(),
             modifiedMillis = (unix.getValue("lastModifiedTime") as FileTime).toMillis(),
+            changedTime = unix.getValue("ctime") as FileTime,
             metadataSha256 = sandboxMetadataSha256(descriptor, cancellationCheck),
         )
     }
+}
+
+internal fun readPinnedDescriptorIdentity(
+    descriptor: LinuxDescriptor,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+): PinnedFileIdentity = descriptor.whileOpen { fd ->
+    cancellationCheck()
+    val unix = Files.readAttributes(
+        Path.of("/proc/self/fd/$fd"),
+        "unix:dev,ino,mode,uid,size,lastModifiedTime,ctime",
+    )
+    val device = (unix.getValue("dev") as Number).toLong()
+    val inode = (unix.getValue("ino") as Number).toLong()
+    val identity = LinuxFilesystemSyscalls.identity(fd)
+    if (identity.key.device != device || identity.key.inode != inode) {
+        throw IOException("pinned sandbox descriptor changed while reading its metadata")
+    }
+    PinnedFileIdentity(
+        device = device,
+        inode = inode,
+        mountId = identity.mountId,
+        mode = (unix.getValue("mode") as Number).toInt(),
+        uid = (unix.getValue("uid") as Number).toInt(),
+        size = (unix.getValue("size") as Number).toLong(),
+        modifiedMillis = (unix.getValue("lastModifiedTime") as FileTime).toMillis(),
+        changedTime = unix.getValue("ctime") as FileTime,
+        metadataSha256 = sandboxMetadataSha256(descriptor, cancellationCheck),
+    )
 }
 
 private fun sandboxMetadataSha256(
@@ -6141,9 +6228,10 @@ internal fun AcpTerminalExecutionPolicy.policyDigest(
     require(canonicalRules.map { it.first }.distinct().size == canonicalRules.size) {
         "terminal command rules must have distinct canonical authority"
     }
-    val sortedRules = canonicalRules.sortedWith { left, right ->
-        compareCheckpointed(left.first, right.first, cancellationCheck)
-    }
+    val sortedRules =
+        canonicalRules.sortedWith { left, right ->
+            compareCheckpointed(left.first, right.first, cancellationCheck)
+        }
     val digest = CanonicalMetadataDigest(MAXIMUM_TERMINAL_POLICY_AUTHORITY_BYTES * 2L, cancellationCheck)
     digest.field("schema", "acp-terminal-policy-v2")
     stagingRoots.sortedWith { left, right ->

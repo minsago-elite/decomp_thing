@@ -7,8 +7,11 @@ import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
+import decompengine.project.SourceTreeManifestByteReader
+import decompengine.project.SourceTreeManifestProbe
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
+import decompengine.repair.StableComparison
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Collections
@@ -43,10 +46,18 @@ internal class WebSourceCatalogEvidence(
     profiles: List<ReconstructionProfile>,
     private val readInput: (String) -> StableRegularFile,
     private val readArtifact: (String, String, Long) -> StableRegularFile,
+    private val verifyInput: ((String, StableRegularFile) -> Unit)?,
+    private val verifyArtifact: ((String, String, Long, StableRegularFile) -> Unit)?,
+    private val compareArtifact: ((String, String, Long, StableRegularFile) -> StableComparison)? = null,
 ) {
+    constructor(profiles: List<ReconstructionProfile>, readInput: (String) -> StableRegularFile,
+        readArtifact: (String, String, Long) -> StableRegularFile) :
+        this(profiles, readInput, readArtifact, null, null)
+
     private val profiles = profiles.associateBy { it.id to it.sha256 }
     private val capturing = AtomicBoolean(false)
     private val structureWorkers = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("decomp-web-structure-", 0).factory())
+    private val searching = AtomicBoolean(false)
 
     init { require(profiles.size in 1..16 && this.profiles.size == profiles.size) }
 
@@ -104,15 +115,34 @@ internal class WebSourceCatalogEvidence(
 
     /**
      * Program-structure projection of the selected candidate. A retained projection is reused only for the
-     * same input, manifest and descriptor digests; every read still recaptures those three commitments.
-     *
-     * On a first read the profile-declared model and plan are read and parsed on two workers while this thread
-     * parses the manifest. Each is used only after the manifest commits it and its bytes match that digest, so
-     * the result is identical to a sequential read. Admission stays held until both worker bodies exit, even
-     * after cancellation or a refused manifest; Future cancellation alone is not evidence of worker completion.
+     * same input digest and stable manifest/descriptor captures; every read rechecks all three commitments.
+     * First reads parse bounded model and plan records on two workers while validating the manifest.
+     * Their results are admitted only when the manifest commits their digests. Cancellation holds capture
+     * admission until both bodies actually exit; successful reads drain them before returning.
      */
     fun <T> readStructure(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
+        project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T =
+        readStructureMeasured(reference, cache, null, project)
+
+    /** Optional in-process diagnostics for bounded qualification; timings never enter the wire response. */
+    internal fun <T> readStructureMeasured(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
+        timing: ((String, Long) -> Unit)?, project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T =
+        readStructureDiagnosed(reference, cache, timing, null, project)
+
+    internal fun <T> readStructureDiagnosed(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
+        timing: ((String, Long) -> Unit)?, retention: ((WebStructureRetention) -> Unit)?,
+        project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T =
+        readStructureDiagnosed(reference, cache, timing, retention, null, project)
+
+    internal fun <T> readStructureDiagnosed(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
+        timing: ((String, Long) -> Unit)?, retention: ((WebStructureRetention) -> Unit)?,
+        manifestProbe: SourceTreeManifestProbe?,
         project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T {
+        fun <V> measured(phase: String, action: () -> V): V {
+            if (timing == null) return action()
+            val started = System.nanoTime()
+            return try { action() } finally { timing(phase, System.nanoTime() - started) }
+        }
         if (!capturing.compareAndSet(false, true)) {
             throw WebAccessDenied(429, "SOURCE_CATALOG_BUSY", "Another source metadata capture is in progress. Try this read again later.")
         }
@@ -126,9 +156,17 @@ internal class WebSourceCatalogEvidence(
             val manifestPath = "$root/source_tree_manifest.json"
             val descriptorPath = "$root/reports/build_contract.json"
             canonicalReportSegments(manifestPath)
-            val input = readInput(reference.jobId)
-            val captured = readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES)
-            val descriptor = readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES)
+            val input = measured("read-input") { readInput(reference.jobId) }
+            val prefix = WebProgramStructureCache.Prefix(reference.jobId, reference.runId, reference.revisionId,
+                reference.sourceSha256, input.sha256)
+            // Census is MRU-first but does not touch candidates until projection and every after-fence succeed.
+            // A stable identity/content difference is a miss; an unavailable or changing capture must propagate.
+            val entry = cache.candidates(prefix).firstOrNull { candidate ->
+                measured("compare-manifest") { compareCapturedArtifact(reference.jobId, manifestPath, candidate.manifest) } == StableComparison.SAME &&
+                    measured("compare-descriptor") { compareCapturedArtifact(reference.jobId, descriptorPath, candidate.descriptor) } == StableComparison.SAME
+            }
+            val captured = entry?.manifest ?: measured("read-manifest") { readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES) }
+            val descriptor = entry?.descriptor ?: measured("read-descriptor") { readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES) }
             require(captured.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES && descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
             fun <R> speculate(profile: ReconstructionProfile, declaration: String, maximum: Int,
                 parse: (ByteArray) -> WebStructureParse<R>): Future<WebStructureEvidence<R>>? {
@@ -160,50 +198,78 @@ internal class WebSourceCatalogEvidence(
             } catch (failure: ExecutionException) { throw failure.cause ?: failure }
             val key = WebProgramStructureCache.Key(reference.jobId, reference.runId, reference.revisionId,
                 reference.sourceSha256, captured.sha256, descriptor.sha256, input.sha256)
-            val index = cache.get(key) ?: run {
-                val document = OracleJson.parse(captured.bytes, JSON_LIMITS) as? JsonObject
-                    ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
-                val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-                val profileSha256 = (document["profileSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-                val profile = profiles[profileId to profileSha256]
+            // Rebuild every miss, including byte-identical replacement with a new inode and the same digest key.
+            val index = entry?.index ?: measured("build-projection") { run {
+                val document = measured("parse-manifest-json") {
+                    SourceTreeManifestByteReader.parse(captured.bytes, JSON_LIMITS)
+                }
+                require(document.isObject) { "Source catalog manifest is invalid." }
+                val profile = profiles[document.profileId to document.profileSha256]
                     ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
-                require(((document["files"] as? JsonArray)?.size ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
+                require((document.fileCount ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
                 val model = speculate(profile, "program-model-evidence", WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES,
                     WebProgramStructureBuilder::parseModel)
                 val plan = speculate(profile, "module-plan-evidence", WebProgramStructureBuilder.MAXIMUM_PLAN_BYTES,
                     WebProgramStructureBuilder::parsePlan)
-                val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
+                val manifest = measured("validate-manifest") { document.validate(profile, manifestProbe) }
                 require(manifest.inputSha256 == input.sha256)
-                val descriptorDocument = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
+                val descriptorDocument = measured("parse-descriptor-json") { OracleJson.parse(descriptor.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source input descriptor is invalid.")
-                val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256)
-                WebProgramStructureBuilder.build(snapshot, profile, manifest, { joined(model) }, { joined(plan) })
-                    .also { cache.put(key, it) }
-            }
+                val snapshot = measured("parse-source-inputs") { parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256) }
+                WebProgramStructureBuilder.build(snapshot, profile, manifest, { joined(model) }, { joined(plan) }, timing, retention)
+            } }
             // Retention pins change the attempt version without changing the candidate; the projection depends
             // only on the keyed commitments, so it stays valid for the current reference.
-            check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
-            val result = project(index) { record, maximum ->
+            check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256 && index.inputSha256 == input.sha256)
+            val result = measured("project-page") { project(index, WebStructureRecordReader { record, maximum ->
                 val read = readArtifact(reference.jobId, "$root/${record.path}", maximum.toLong())
                 if (read.bytes.size > maximum) throw RepairBudgetExceededException("Structure record exceeds its byte bound.")
                 if (read.sha256 != record.sha256 || WebExplorationArtifact.sha256(read.bytes) != record.sha256) revisionSourceChanged()
                 read.bytes
-            }
-            requireSame(descriptor, readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES))
-            requireSame(captured, readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
-            requireSame(input, readInput(reference.jobId))
-            // Future.get() can precede its executor wrapper's final admission release, and unused speculative
-            // records may never be joined. A successful synchronous read must drain both bounded bodies before
-            // returning so its immediate continuation is not spuriously refused as SOURCE_CATALOG_BUSY.
-            // Failure/interruption still takes the nonblocking cancellation path below and retains admission
-            // until every actual body exits; cancelled Future state is never treated as cleanup evidence.
+            }) }
+            measured("verify-descriptor") { verifyCapturedArtifact(reference.jobId, descriptorPath, descriptor) }
+            measured("verify-manifest") { verifyCapturedArtifact(reference.jobId, manifestPath, captured) }
+            measured("verify-input") { verifyCapturedInput(reference.jobId, input) }
             workerExits.forEach { it.await() }
+            if (entry == null) cache.put(WebProgramStructureCache.Entry(key, index, captured, descriptor))
+            else cache.touch(entry)
             return result
         } finally {
             // Covers rejection, submission failure and an early unavailable-model result that never joins the plan.
             tasks.forEach { it.cancel(true) }
             finished()
         }
+    }
+
+    /**
+     * One bounded search admission. Metadata is captured before and after the scan; each body is selected only from
+     * that snapshot's canonical inputs and must match its committed size and SHA-256. Missing bodies are reported as
+     * unavailable to the scan; changed bodies or metadata refuse the whole page.
+     */
+    fun search(reference: WebRevisionSourceReference, readSource: (String, String, String, Long) -> StableRegularFile,
+        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> JsonObject): JsonObject {
+        if (!searching.compareAndSet(false, true)) {
+            throw WebAccessDenied(429, "SOURCE_SEARCH_BUSY", "Another source search is in progress. Try this search again later.")
+        }
+        try {
+            val before = readRevision(reference)
+            val members = Collections.newSetFromMap(java.util.IdentityHashMap<WebRevisionSourceFile, Boolean>()).apply { addAll(before.files) }
+            val result = scan(before) { file ->
+                check(file in members)
+                val captured = try {
+                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+                } catch (failure: Exception) {
+                    if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                    null
+                }
+                captured?.bytes?.copyOf()?.also { bytes ->
+                    if (bytes.size.toLong() != file.sizeBytes || captured.sha256 != file.evidence.sha256 ||
+                        WebExplorationArtifact.sha256(bytes) != file.evidence.sha256) revisionSourceChanged()
+                }
+            }
+            if (readRevision(reference).metadataVersion != before.metadataVersion) revisionSourceChanged()
+            return result
+        } finally { searching.set(false) }
     }
 
     private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,
@@ -215,7 +281,7 @@ internal class WebSourceCatalogEvidence(
             ?: throw IllegalArgumentException("Source input descriptor is invalid.")
         val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, document, descriptor.sha256)
         val result = project(snapshot)
-        requireSame(descriptor, readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES))
+        verifyCapturedArtifact(reference.jobId, path, descriptor)
         return result
     }
 
@@ -247,9 +313,29 @@ internal class WebSourceCatalogEvidence(
         val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
         require(manifest.inputSha256 == input.sha256)
         val result = project(manifest, captured)
-        requireSame(captured, readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES))
-        requireSame(input, readInput(jobId))
+        verifyCapturedArtifact(jobId, path, captured)
+        verifyCapturedInput(jobId, input)
         return result
+    }
+
+    private fun compareCapturedArtifact(jobId: String, path: String, expected: StableRegularFile): StableComparison {
+        compareArtifact?.let { return it(jobId, path, MAXIMUM_MANIFEST_BYTES, expected) }
+        // Legacy adapters must capture the current file too; absence of a streaming callback is never a hit.
+        val current = readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES)
+        require(current.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
+        return if (expected.bytes.size == current.bytes.size && expected.identity == current.identity &&
+            expected.sha256 == current.sha256 && expected.bytes.contentEquals(current.bytes)) StableComparison.SAME
+        else StableComparison.DIFFERENT
+    }
+
+    private fun verifyCapturedInput(jobId: String, expected: StableRegularFile) {
+        if (verifyInput == null) requireSame(expected, readInput(jobId))
+        else verifyInput.invoke(jobId, expected)
+    }
+
+    private fun verifyCapturedArtifact(jobId: String, path: String, expected: StableRegularFile) {
+        if (verifyArtifact == null) requireSame(expected, readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES))
+        else verifyArtifact.invoke(jobId, path, MAXIMUM_MANIFEST_BYTES, expected)
     }
 
     private fun requireSame(expected: StableRegularFile, current: StableRegularFile) {

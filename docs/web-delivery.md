@@ -105,6 +105,24 @@ round-trip latency. Record 20 cold loads and 50 interactions per workload; repor
 median/p95 and failures. Empty browser cache/storage and a fresh process define
 cold load; warm data is measured separately. Do not hide failing runs as outliers.
 
+For function-inventory qualification (#536), each cold sample uses a new packaged
+JVM and a new Chrome process/profile. The 100,000-function fixture is seeded before
+JVM launch. The normal bootstrap handoff is exchanged before timing; the timed
+interval remains the inventory action through the first 100 rendered rows. This
+measures cold application caches and browser cache/storage, not a cold operating
+system page cache. The 20 per-profile samples retain every child report and gate the
+nearest-rank p95, raw inventory failures, browser heap and incremental JVM RSS. The
+separate full structure journey still supplies the 50 interactions and navigation
+evidence for each profile.
+
+Structure reports bind the files actually read by the qualification driver to Git
+blobs in the declared source commit. Pull-request attribution is accepted only
+when that commit is the declared head or a merge commit whose parents are the
+declared base and head; push runs bind to the checked-out commit and event. The
+browser must be the installed Chrome whose executable digest, version and
+installation lock match the reviewed browser lock. Cold-sample aggregation rejects
+missing or inconsistent source, browser, archive or application identities.
+
 | Metric | Initial acceptance budget and measurement | Fixture / owner |
 | --- | --- | --- |
 | Entry payload | ≤150 KiB gzip-9 combined HTML + initial JS/CSS; ≤500 KiB gzip-9 all UI resources excluding private maps; sum exact shipped bytes and identify lazy chunks | Asset manifest; #151 #157 #219 |
@@ -120,6 +138,87 @@ cold load; warm data is measured separately. Do not hide failing runs as outlier
 | Local Git | First status/history page ≤1 s; first diff page ≤2 s; 50 default/200 max rows, 1 MiB response ceiling and 256 KiB diff hunk read | 10,000 commits, 2,000 changed paths, 200 refs; #202 #206 |
 | Git transfer | Reserved growth ≤512 MiB; over-limit/timeout/cancel produces terminal bounded operation evidence, ≤5 s process-tree cleanup after cancel | Isolated 64/256/512 MiB remote with delay/disconnect injection; #209 #215 |
 | Accessible use | WCAG 2.2 AA target, zero serious/critical automated violations, all documented keyboard/dialog/status cases pass; manual NVDA/Firefox and VoiceOver/Safari smoke | Four navigation walkthroughs plus conflict/push review; #147 #217 #226 |
+
+### Packaged navigation and interaction timing
+
+`node scripts/check-packaged-web-browser.mjs --mode audit` (CI `web-packaged`) measures the
+packaged JVM at `/nested/` in the pinned Chrome on the CI runner, after its layout, contrast and
+keyboard checks pass (`scripts/packaged-browser-audit.mjs`). It records 20 cold dashboard loads,
+each in a new target with the HTTP cache disabled, timed from navigation to a populated first
+page with no alert; and 50 in-app route activations cycling through job, attempt, activity,
+evidence, source directory/file and source-search views, timed to the new heading receiving focus (local feedback) and to the
+view's initial-route metadata (or source rows for source views). Attempt metadata readiness
+is not evidence/activity readiness: those routes intentionally require explicit reads. Before
+each layout/contrast/focus pass, the audit activates the activity/exploration/history/receipt
+controls and requires populated content and successful reads. The source-search form and
+populated results each have independent route coverage, and visible input values and placeholders
+are included in contrast measurements. Each explicit action's page, action, context, elapsed time
+and ordered fixture reads are validated against the trusted fixture contract. The finite,
+nonnegative raw interaction samples are tied to those records and their samples/median/p95 summary
+is recomputed into `report.json`; they have no interaction budget, so that summary is not a qualified
+interaction p95 threshold. The navigation gate asserts p95 ≤1.5 s cold, ≤100 ms feedback and ≤500 ms
+first route data. The audit also submits the job-library filename filter 50
+times, alternating between `audit-filter-match` and clearing that filter. Each timed action starts
+with focus on the submit button, so a previous sample's focus cannot satisfy the next one. It
+measures local feedback when the applied query and visible status survive a later animation-frame
+observation, then measures first data when the distinctive, in-viewport job row is visible and
+focus reaches the results heading on a later frame. Visibility requires a nonzero viewport box and
+no `display:none`, hidden/collapsed visibility, or zero-opacity ancestor. These are browser
+DOM/layout readiness timings, not a measurement of compositor presentation or pixel scanout. Each
+sample is bound to its exact successfully fulfilled `/jobs` query, the sole job ID in that response,
+and the job ID in the rendered link. The gate compares the raw p95
+against ≤100 ms filter feedback and ≤500 ms first data, using the documented loopback interaction
+budgets. These filter samples are
+reported independently from route timing in `report.json`.
+
+The audit also times opening a source file 50 times, alternating between two distinct files in
+the pinned loopback fixture revision. Each sample re-enters the pinned source directory untimed,
+then measures two phases. Phase A is the directory-link click into file metadata: the
+heading receives focus, the file's name, ID and digest render, the preview stays closed and no
+source chunk may be requested. Phase B is the explicit "Open source preview" action into the first
+bounded chunk (`offset=0`, `maxBytes=65536`, pinned `metadataVersion`; the runtime's absolute source
+view ceiling is 262,144 bytes): the preview heading takes focus, `aria-busy` is `false`, no alert is
+shown and the rendered rows and bytes hash to the file's digest. Each phase must contain exactly
+one successfully fulfilled request, bound to the
+contract's job, run, revision, file, source digest and metadata version. Each phase is gated on its
+raw p95 at exactly ≤100 ms feedback and ≤500 ms first data (metadata or chunk). The report keeps the
+raw samples and recomputed summaries, and compaction retains every request in the filter and
+source-open windows so an unexpected request is still rejected. Fixture API responses are
+loopback contract fixtures, so these timings exclude server latency and storage. Under the opt-in constrained profile they are recorded
+without budgets; they do not measure cross-engine source-open timing (Playwright
+engines opt out of this Chromium DevTools measurement) or compositor presentation and pixel
+scanout. A phase is "ready" when Chromium's DOM state is unchanged across two consecutive
+`requestAnimationFrame` observations (10 s hard deadline); that is DOM readiness, not a
+measured frame on screen. Other explicit actions remain recorded
+in `interactions` without qualified latency budgets. The report retains raw samples and recomputed
+median/p95 values.
+
+The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
+chunks and worker are real packaged responses. That isolates browser-side navigation and
+rendering work. The default `--profile reference` preserves browser defaults and applies the
+documented navigation budgets. An opt-in `--profile constrained` applies 4× CPU throttling and
+symmetric 10 Mbit/s throughput to each audit page target. It records and validates the same timing
+evidence (navigation, filter and source-open) but does not apply the reference timing thresholds; it creates no new interaction budget
+or CI gate. The profile does not create a fresh browser process per cold load, measure server
+latency or establish a cross-engine result. A local reference-profile run on a development host
+measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI retains its
+own numbers.
+
+
+The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
+chunks and worker are real packaged responses. That isolates browser-side navigation and
+rendering work. The filter workload renders one fixture row, so it does not measure scanning a
+large server-side job library. It is not a fresh browser
+process per cold load, a server-latency measurement or a cross-engine filter result. Tabs and
+dialogs remain outside this timing qualification; constrained-profile filter and source-open samples are recorded
+but not gated. CI
+retains its own raw and summary timing evidence.
+
+Heavy browser work is bounded rather than deferred: source previews read at most one
+64 KiB chunk and mount at most 200 rows, and syntax highlighting is an explicit action that runs
+in a dedicated module worker with a one-second deadline and is cancelled whenever the row window,
+file or route changes (`sources/highlightOperation.ts`). The audit drives that worker under the
+enforced CSP and requires its tokens to render.
 
 Performance tools may themselves consume memory; record measurement overhead and
 use the same method for control/candidate comparisons. Use server counters and
@@ -152,3 +251,18 @@ by reviewed code/spec changes. A weaker machine is not an automatic exemption;
 record a new profile and rerun the required baseline. Do not mark a criterion
 passed because a limit was silently raised, rows were hidden, a fixture was
 shrunk, a capability was relabeled, or an acceptance check was removed.
+
+## Retained listeners, timers and stream buffers
+
+`frontend/tests/retention-leaks.test.tsx` (#624) instruments the test page and counts what can
+outlive a view: listeners on `window`, `document`, media queries and still-live abort signals,
+pending timers and intervals, and open broadcast channels. Element listeners are excluded because
+they die with their nodes. It navigates through every SPA route four times with a live session.
+After the first cycle, which loads each lazy route, every later cycle must end with exactly the
+same retained set, and unmounting the shell and disposing the session must return to the
+pre-render baseline. A second case subscribes to the event stream 60 times with one shared page signal that is never
+aborted, unsubscribing at each yielded event. Every response body must be cancelled, and no
+reader, deadline timer or listener on that live signal may remain. The harness patches both the
+DOM and the runtime `EventTarget` implementations, so abort-signal listeners are counted. Control
+cases prove it reports an injected global listener, interval, channel and live-signal listener. This is a structural retention check in jsdom; the Chromium heap
+budgets above still need a heap trace on the reference profile.

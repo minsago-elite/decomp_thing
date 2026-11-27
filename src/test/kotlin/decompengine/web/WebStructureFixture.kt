@@ -34,7 +34,7 @@ internal class WebStructureFixture {
         if (file.bytes.size > maximum) throw RepairBudgetExceededException("fixture exceeds $maximum")
         file
     }
-    val cache = WebProgramStructureCache(capacity = 4)
+    val cache = WebProgramStructureCache(capacity = 2)
     val pages = WebProgramStructurePages { job, run, revision, project ->
         val reference = references[run to revision] ?: throw WebAccessDenied(404, "REVISION_NOT_FOUND", "No such revision.")
         check(job == jobId)

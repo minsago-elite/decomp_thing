@@ -155,6 +155,16 @@ data class RepairResourceBudget(
 
 class RepairBudgetExceededException(message: String) : IllegalArgumentException(message)
 
+/** A contained stable read found no admissible regular file (missing, linked, special or escaping). */
+internal class StableFileUnavailableException(message: String) : IllegalArgumentException(message)
+
+/** A contained stable read observed its file or a path binding change; nothing read may be used. */
+internal class StableFileChangedException(message: String) : IllegalArgumentException(message)
+
+private inline fun requireUnchanged(condition: Boolean, message: () -> String) {
+    if (!condition) throw StableFileChangedException(message())
+}
+
 class RepairGraphLockTimeoutException(message: String) : IllegalStateException(message)
 
 /** Optional source-bound diagnostic ownership supplied by a profile. */
@@ -1459,6 +1469,22 @@ class RetainedRegressionCorpus(inputs: Collection<ProcessInput>, val sha256: Str
     val inputs: List<ProcessInput> get() = immutableList(content.map(ProcessInput::deepCopy))
 }
 
+/** Data-only snapshot issued to one secure repair session for exploration-before-repair flows. */
+class RepairExplorationSnapshotData(
+    val formatVersion: Int,
+    val projectPath: String,
+    inputs: Collection<ProcessInput>,
+    val corpusSha256: String,
+    val graphSha256: String,
+    val profileSha256: String,
+    val indexSha256: String,
+    val headId: String,
+    val originalBinarySha256: String,
+) {
+    private val corpus = RetainedRegressionCorpus(inputs, corpusSha256)
+    val inputs: List<ProcessInput> get() = corpus.inputs
+}
+
 class ModuleRevisionAttempt internal constructor(val id: String)
 
 internal sealed interface ModuleRevisionFaultPoint {
@@ -2288,6 +2314,10 @@ internal class ModuleRevisionGraph private constructor(
             )
         }
 
+    /** The immutable source-tree contract admitted by this graph's repair index, when present. */
+    internal val declaredRoleProfile: ReconstructionProfile?
+        get() = index.profile.reconstructionProfile()
+
     /** Preserve the original bytes before assigning honest authority to legacy head records. */
     @Synchronized
     fun enableRunContract() = graphOperation {
@@ -2550,6 +2580,36 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun retainedRegressionCorpus(): RetainedRegressionCorpus = graphOperation {
         RetainedRegressionCorpus(state.retainedRegressionInputs, state.regressionCorpusSha256)
+    }
+
+    /** Capture the graph and retained inputs in one graph operation under the lifetime root lock. */
+    @Synchronized
+    fun captureExplorationSnapshot(originalBinarySha256: String): RepairExplorationSnapshotData = graphOperation {
+        require(originalBinarySha256.matches(REPAIR_BLOB_DIGEST)) { "exploration binary digest is invalid" }
+        RepairExplorationSnapshotData(
+            1,
+            portableProjectRoot.toAbsolutePath().normalize().pathString,
+            state.retainedRegressionInputs,
+            state.regressionCorpusSha256,
+            sha256(renderGraph(state).toByteArray(Charsets.UTF_8)),
+            state.profileSha256,
+            state.indexSha256,
+            state.headId,
+            originalBinarySha256,
+        )
+    }
+
+    /** Must run before any graph mutation while the caller retains this graph's root lock. */
+    @Synchronized
+    fun requireCurrentExplorationSnapshot(snapshot: RepairExplorationSnapshotData) = graphOperation {
+        require(snapshot.formatVersion == 1 &&
+            snapshot.projectPath == portableProjectRoot.toAbsolutePath().normalize().pathString &&
+            snapshot.graphSha256 == sha256(renderGraph(state).toByteArray(Charsets.UTF_8)) &&
+            snapshot.corpusSha256 == state.regressionCorpusSha256 &&
+            snapshot.profileSha256 == state.profileSha256 && snapshot.indexSha256 == state.indexSha256 &&
+            snapshot.headId == state.headId) {
+            "retained exploration snapshot is stale for the current repair graph"
+        }
     }
 
     @Synchronized
@@ -5513,10 +5573,14 @@ private fun recordedHistoryCapture(
                     RepairRecordedValidationContext(state.profileId, state.budget))
             }, normalObservation(it.id, it.baselineId))
     }
+    // An assessed baseline accepts the root itself; expose it only with a proof bound to the root's source.
+    val acceptedBaseline = state.nodes.singleOrNull { it.id == state.fullyAcceptedHeadId && it.status == ModuleRevisionStatus.ROOT }
+        ?.let { root -> state.acceptedProof?.takeIf { it.sourceRevisionSha256 == root.sourceRevisionSha256 }
+            ?.let { proof -> RepairRecordedAcceptedBaseline(identities.revision(root.id), root.sourceRevisionSha256, proof.assurance) } }
     val snapshot = RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),
         state.regressionCorpusSha256, identities.revision(state.headId), identity(state.provisionalHeadId),
         identity(state.fullyAcceptedHeadId), runs, attempts, pending,
-        state.retainedRegressionInputs.map { identities.case(it.id) })
+        state.retainedRegressionInputs.map { identities.case(it.id) }, acceptedBaseline)
     return RepairHistoryArtifactCapture(snapshot, artifactPaths)
 }
 
@@ -7214,7 +7278,7 @@ internal data class StableRegularFile(
     val identity: LinuxFileIdentity,
 )
 
-internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity)
+internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity, val validUtf8: Boolean)
 
 /** Stream a pinned regular file, then revalidate its metadata and every directory binding. */
 internal fun hashStableRegularFile(
@@ -7224,6 +7288,7 @@ internal fun hashStableRegularFile(
     readBytes: (Int, Long) -> Unit,
     cancellationCheck: () -> Unit,
     validateMetadata: (LinuxDescriptor) -> Unit = {},
+    verifyChunk: (ByteArray, Int, Long) -> Unit = { _, _, _ -> },
 ): StableFileDigest {
     cancellationCheck()
     // Snapshot paths use Linux filename semantics, independently of repair manifest grammar.
@@ -7248,17 +7313,17 @@ internal fun hashStableRegularFile(
             parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
             directories += parent
         }
-        authorized = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())) {
-            "stable hash target is unavailable"
-        }
+        authorized = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())
+            ?: throw StableFileUnavailableException("stable hash target is unavailable")
         readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
-        require(readable.identity == authorized.identity) { "stable hash descriptor identity changed" }
+        requireUnchanged(readable.identity == authorized.identity) { "stable hash descriptor identity changed" }
         validateMetadata(readable)
         val descriptorPath = Path.of("/proc/self/fd/${readable.fd}")
         val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
-        require(before.isRegularFile) { "stable hash descriptor is not regular" }
+        requireUnchanged(before.isRegularFile) { "stable hash descriptor is not regular" }
         declaredSize(before.size())
         val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val utf8 = StrictUtf8ByteValidator()
         val buffer = ByteArray(64 * 1024)
         var size = 0L
         // This kernel-owned proc entry references our still-owned descriptor, not the workspace name.
@@ -7269,13 +7334,15 @@ internal fun hashStableRegularFile(
                 if (count < 0) break
                 size = Math.addExact(size, count.toLong())
                 readBytes(count, size)
+                verifyChunk(buffer, count, size - count)
                 digest.update(buffer, 0, count)
+                utf8.accept(buffer, count)
             }
         }
         cancellationCheck()
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
         validateMetadata(readable)
-        require(after.isRegularFile && before.fileKey() == after.fileKey() &&
+        requireUnchanged(after.isRegularFile && before.fileKey() == after.fileKey() &&
             before.size() == after.size() && after.size() == size &&
             before.lastModifiedTime() == after.lastModifiedTime() &&
             LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity) {
@@ -7283,12 +7350,134 @@ internal fun hashStableRegularFile(
         }
         revalidateDescriptorPath(base, parts, directories.map { it.identity }, authorized.identity)
         cancellationCheck()
-        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity)
+        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity, utf8.finish())
     } finally {
         readable?.close()
         authorized?.close()
         directories.asReversed().forEach { it.close() }
     }
+}
+
+internal enum class StableComparison { SAME, DIFFERENT }
+
+/** Compare only after the current capture has passed every stability fence. */
+internal fun compareStableRegularFile(
+    root: Path, relative: String, maximumBytes: Long, expected: StableRegularFile,
+    cancellationCheck: () -> Unit = {},
+): StableComparison {
+    require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+    var sizeMatches = false
+    var contentMatches = true
+    var opened: LinuxFileIdentity? = null
+    var changeTime: java.nio.file.attribute.FileTime? = null
+    val result = try { hashStableRegularFile(root, relative,
+        declaredSize = { size ->
+            if (size > maximumBytes) throw RepairBudgetExceededException("comparison exceeds read limit")
+            sizeMatches = size == expected.bytes.size.toLong()
+        },
+        readBytes = { _, total ->
+            if (total > maximumBytes) throw RepairBudgetExceededException("comparison exceeds read limit")
+        },
+        cancellationCheck = cancellationCheck,
+        validateMetadata = { descriptor ->
+            val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            // The proc entry is kernel-owned and the descriptor remains owned throughout capture.
+            val ctime = Files.getAttribute(Path.of("/proc/self/fd/${descriptor.fd}"), "unix:ctime")
+                as? java.nio.file.attribute.FileTime
+                ?: throw StableFileUnavailableException("comparison change time unavailable")
+            if (opened == null) {
+                if (!identity.isRegularFile || identity.isSymbolicLink || identity.linkCount != 1)
+                    throw StableFileUnavailableException("comparison target is unavailable")
+                opened = identity
+                changeTime = ctime
+            } else {
+                requireUnchanged(identity == opened && ctime == changeTime) {
+                    "comparison metadata changed during reading"
+                }
+            }
+        },
+        verifyChunk = { bytes, count, offset ->
+            val available = (expected.bytes.size.toLong() - offset).coerceAtLeast(0).coerceAtMost(count.toLong()).toInt()
+            if (available != count) contentMatches = false
+            if (available > 0 && !java.util.Arrays.equals(bytes, 0, available,
+                    expected.bytes, offset.toInt(), offset.toInt() + available)) contentMatches = false
+        })
+    } catch (failure: java.io.IOException) {
+        if (failure is java.io.InterruptedIOException || failure is java.nio.channels.ClosedByInterruptException ||
+            Thread.currentThread().isInterrupted) throw failure
+        throw StableFileUnavailableException("comparison target or required metadata unavailable: ${failure.message}")
+    } catch (failure: UnsupportedOperationException) {
+        throw StableFileUnavailableException("comparison required metadata unsupported: ${failure.message}")
+    }
+    return if (sizeMatches && contentMatches && result.size == expected.bytes.size.toLong() &&
+        result.sha256 == expected.sha256 && opened == expected.identity && result.identity == expected.identity)
+        StableComparison.SAME else StableComparison.DIFFERENT
+}
+
+/** Verify captured bytes without allocating another whole-file array. */
+internal fun verifyStableRegularFile(
+    root: Path, relative: String, maximumBytes: Long, expected: StableRegularFile,
+    cancellationCheck: () -> Unit = {},
+) {
+    require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+    val result = hashStableRegularFile(root, relative,
+        declaredSize = { size ->
+            if (size > maximumBytes) throw RepairBudgetExceededException("verification exceeds read limit")
+            requireUnchanged(size == expected.bytes.size.toLong()) { "verification length changed" }
+        },
+        readBytes = { _, total ->
+            if (total > maximumBytes) throw RepairBudgetExceededException("verification exceeds read limit")
+            requireUnchanged(total <= expected.bytes.size) { "verification grew" }
+        },
+        cancellationCheck = cancellationCheck,
+        validateMetadata = { descriptor ->
+            val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            requireUnchanged(identity == expected.identity && identity.isRegularFile &&
+                !identity.isSymbolicLink && identity.linkCount == 1) { "verification identity changed" }
+        },
+        verifyChunk = { bytes, count, offset ->
+            requireUnchanged(java.util.Arrays.equals(bytes, 0, count,
+                expected.bytes, offset.toInt(), offset.toInt() + count)) {
+                "verification content changed"
+            }
+        })
+    requireUnchanged(result.identity == expected.identity && result.size == expected.bytes.size.toLong() &&
+        result.sha256 == expected.sha256) { "verification commitment changed" }
+}
+
+/** Incremental UTF-8 validation performed on the exact descriptor-bound bytes being hashed. */
+private class StrictUtf8ByteValidator {
+    private var remaining = 0
+    private var codePoint = 0
+    private var minimum = 0
+    private var valid = true
+
+    fun accept(bytes: ByteArray, count: Int) {
+        if (!valid) return
+        for (index in 0 until count) {
+            val value = bytes[index].toInt() and 0xff
+            if (remaining == 0) {
+                when {
+                    value <= 0x7f -> Unit
+                    value in 0xc2..0xdf -> { remaining = 1; codePoint = value and 0x1f; minimum = 0x80 }
+                    value in 0xe0..0xef -> { remaining = 2; codePoint = value and 0x0f; minimum = 0x800 }
+                    value in 0xf0..0xf4 -> { remaining = 3; codePoint = value and 0x07; minimum = 0x10000 }
+                    else -> valid = false
+                }
+            } else if (value !in 0x80..0xbf) {
+                valid = false
+            } else {
+                codePoint = (codePoint shl 6) or (value and 0x3f)
+                remaining--
+                if (remaining == 0 && (codePoint < minimum || codePoint > 0x10ffff || codePoint in 0xd800..0xdfff)) {
+                    valid = false
+                }
+            }
+            if (!valid) return
+        }
+    }
+
+    fun finish(): Boolean = valid && remaining == 0
 }
 
 internal fun readStableRegularFile(
@@ -7298,9 +7487,72 @@ internal fun readStableRegularFile(
     afterAuthorization: (() -> Unit)? = null,
     afterRead: (() -> Unit)? = null,
     cancellationCheck: () -> Unit = {},
+): StableRegularFile = readStableRegularFileInternal(
+    root, relative, maximumBytes, afterAuthorization, afterRead, cancellationCheck,
+    allowFinalDirectoryLinkCountChange = false,
+)
+
+/** Job metadata alone tolerates job-directory link-count changes while every other binding remains pinned. */
+internal fun readStableJobMetadataFile(
+    root: Path,
+    jobId: String,
+    maximumBytes: Long,
+    afterAuthorization: (() -> Unit)? = null,
+): StableRegularFile {
+    val relative = "$jobId/job.json"
+    val parts = normalizedRelative(relative).split('/')
+    require(parts.size == 2 && parts[0] == jobId && parts[1] == "job.json") {
+        "stable job-metadata path is invalid"
+    }
+    return readStableRegularFileInternal(
+        root, relative, maximumBytes, afterAuthorization, null, {},
+        allowFinalDirectoryLinkCountChange = true,
+    )
+}
+
+internal fun readBudgetedStableRegularFile(
+    root: Path,
+    relative: String,
+    maximumBytes: Long,
+    cancellationCheck: () -> Unit,
+    admitSize: (Long) -> Unit,
+    chargeBytes: (Int) -> Unit,
+): StableRegularFile = readStableRegularFileInternal(
+    root, relative, maximumBytes, null, null, cancellationCheck, false,
+) { descriptorPath, size ->
+    admitSize(size.toLong())
+    cancellationCheck()
+    val bytes = ByteArray(size)
+    Files.newInputStream(descriptorPath).use { input ->
+        var offset = 0
+        while (offset < size) {
+            cancellationCheck()
+            val count = input.read(bytes, offset, minOf(size - offset, 16 * 1024))
+            requireUnchanged(count > 0) { "stable file-read target shrank: $relative" }
+            offset += count
+            chargeBytes(count)
+        }
+        // Each admitted entry permits one EOF probe in addition to its admitted payload.
+        // A mismatching descriptor can consume at most one extra byte, even at a zero limit.
+        cancellationCheck()
+        requireUnchanged(input.read() == -1) { "stable file-read target exceeds its reported size: $relative" }
+    }
+    bytes
+}
+
+private fun readStableRegularFileInternal(
+    root: Path,
+    relative: String,
+    maximumBytes: Long,
+    afterAuthorization: (() -> Unit)?,
+    afterRead: (() -> Unit)?,
+    cancellationCheck: () -> Unit,
+    allowFinalDirectoryLinkCountChange: Boolean,
+    admittedRead: ((Path, Int) -> ByteArray)? = null,
 ): StableRegularFile {
     cancellationCheck()
-    require(maximumBytes in 1 until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
+    val minimumLimit = if (admittedRead == null) 1L else 0L
+    require(maximumBytes in minimumLimit until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
     val normalized = normalizedRelative(relative)
     val base = root.toAbsolutePath().normalize()
     RepairDescriptorReadSupport.requireSupported(base)
@@ -7317,40 +7569,57 @@ internal fun readStableRegularFile(
             pinnedDirectories += parent
             cancellationCheck()
         }
-        authorized = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())) {
-            "stable file-read target disappeared: $relative"
-        }
-        require(authorized.identity.isRegularFile && !authorized.identity.isSymbolicLink) {
-            "stable file-read target is not a regular non-symbolic-link file: $relative"
+        authorized = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())
+            ?: throw StableFileUnavailableException("stable file-read target disappeared: $relative")
+        if (!authorized.identity.isRegularFile || authorized.identity.isSymbolicLink) {
+            throw StableFileUnavailableException("stable file-read target is not a regular non-symbolic-link file: $relative")
         }
         afterAuthorization?.invoke()
         readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
-        require(readable.identity == authorized.identity) {
+        requireUnchanged(readable.identity == authorized.identity) {
             "stable file-read descriptor identity differs from its authorized path: $relative"
         }
         val descriptorPath = Path.of("/proc/self/fd/${readable.fd}")
         val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
-        require(before.isRegularFile) { "stable file-read descriptor is not regular: $relative" }
+        requireUnchanged(before.isRegularFile) { "stable file-read descriptor is not regular: $relative" }
         if (before.size() > maximumBytes) {
             throw RepairBudgetExceededException(
                 "stable file-read target $relative has ${before.size()} bytes; limit=$maximumBytes",
             )
         }
-        val bytes = try {
-            LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt(), cancellationCheck)
-        } catch (_: LinuxResourceLimitException) {
-            throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
+        val bytes = if (admittedRead != null) {
+            admittedRead.invoke(descriptorPath, before.size().toInt())
+        } else {
+            val observed = try {
+                LinuxFilesystemSyscalls.readKnownSize(
+                    readable, before.size().toInt(), maximumBytes.toInt(), cancellationCheck,
+                )
+            } catch (_: LinuxResourceLimitException) {
+                throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
+            }
+            requireUnchanged(observed.observedCount == before.size()) {
+                "stable file-read descriptor changed while it was read: $relative"
+            }
+            requireNotNull(observed.bytes) {
+                "stable file-read descriptor changed while it was read: $relative"
+            }
         }
         afterRead?.invoke()
         cancellationCheck()
+        requireUnchanged(bytes.size.toLong() == before.size()) {
+            "stable file-read descriptor changed while it was read: $relative"
+        }
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
-        require(
+        requireUnchanged(
             after.isRegularFile && before.fileKey() == after.fileKey() &&
                 before.size() == after.size() && after.size() == bytes.size.toLong() &&
                 before.lastModifiedTime() == after.lastModifiedTime() &&
                 LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity,
         ) { "stable file-read descriptor changed while it was read: $relative" }
-        revalidateDescriptorPath(base, parts, pinnedDirectories.map { it.identity }, authorized.identity)
+        revalidateDescriptorPath(
+            base, parts, pinnedDirectories.map { it.identity }, authorized.identity,
+            allowFinalDirectoryLinkCountChange,
+        )
         cancellationCheck()
         return StableRegularFile(bytes, sha256(bytes), authorized.identity)
     } finally {
@@ -7365,24 +7634,30 @@ private fun revalidateDescriptorPath(
     parts: List<String>,
     expectedDirectories: List<LinuxFileIdentity>,
     expectedFile: LinuxFileIdentity,
+    allowFinalDirectoryLinkCountChange: Boolean = false,
 ) {
     val opened = mutableListOf<decompengine.acp.LinuxDescriptor>()
     var target: decompengine.acp.LinuxDescriptor? = null
     try {
         var parent = openRepairRootDirectory(base)
         opened += parent
-        require(parent.identity == expectedDirectories.first()) { "stable file-read root binding changed" }
+        requireUnchanged(parent.identity == expectedDirectories.first()) { "stable file-read root binding changed" }
         parts.dropLast(1).forEachIndexed { index, segment ->
             parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
             opened += parent
-            require(parent.identity == expectedDirectories[index + 1]) {
-                "stable file-read directory binding changed"
-            }
+            val expected = expectedDirectories[index + 1]
+            val allowLinkCountChange = allowFinalDirectoryLinkCountChange && index + 1 == expectedDirectories.lastIndex
+            val sameBinding = if (allowLinkCountChange) {
+                expected.copy(linkCount = parent.identity.linkCount) == parent.identity
+            } else expected == parent.identity
+            requireUnchanged(sameBinding) { "stable file-read directory binding changed" }
         }
-        target = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())) {
-            "stable file-read target disappeared during revalidation"
-        }
-        require(target.identity == expectedFile) { "stable file-read target binding changed" }
+        target = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())
+            ?: throw StableFileChangedException("stable file-read target disappeared during revalidation")
+        requireUnchanged(target.identity == expectedFile) { "stable file-read target binding changed" }
+    } catch (failure: java.io.IOException) {
+        // The path was admitted at open; failing to reopen it now is a concurrent change, not absence.
+        throw StableFileChangedException("stable file-read path binding changed").apply { initCause(failure) }
     } finally {
         target?.close()
         opened.asReversed().forEach { it.close() }

@@ -1,0 +1,52 @@
+{
+  "issue": 623,
+  "title": "Packaged interaction evidence integrity",
+  "observedAtUtc": "2026-11-12T17:08:09Z",
+  "source": {
+    "commit": "fb3cbd9e841afb06f26481a36130ebfe39322fdf",
+    "tree": "aaf56b18a4436fb2275aeeb14c736f6df85e124b",
+    "parent": "2b1121999c806d5b3f89d3723fca8a39879c49b1"
+  },
+  "qualification": "local Node contract tests for interaction evidence validation; no browser measurement",
+  "tests": [
+    {
+      "command": "node --test --test-reporter=junit --test-reporter-destination=docs/evidence/issue-623-interaction-evidence-integrity-2026-11-13.xml scripts/test-packaged-browser-audit.mjs",
+      "node": "v26.12.1",
+      "tests": 30,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "junit": "docs/evidence/issue-623-interaction-evidence-integrity-2026-11-13.xml",
+      "junitSha256": "458976f5f9ead30625ccfad6930fd2d8a2152ae59b211abb92510678c299972f"
+    },
+    {
+      "command": "node --test --test-reporter=junit --test-reporter-destination=docs/evidence/issue-623-cross-engine-adapter-interaction-2026-11-13.xml scripts/test-packaged-browser-engine-adapter.mjs",
+      "node": "v26.12.1",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "junit": "docs/evidence/issue-623-cross-engine-adapter-interaction-2026-11-13.xml",
+      "junitSha256": "c0413cdaa71fc15ea3232d99f0084f12a7ac5ce35d534b900bdd1a9e4b87b207"
+    }
+  ],
+  "claims": {
+    "expectedFixtureActionsValidated": true,
+    "chromiumSupplementalFocusAndWorkerContextsValidated": true,
+    "crossEngineSupplementalContextsValidated": true,
+    "timingSamplesFiniteAndBoundToRecords": true,
+    "interactionSummaryRecomputed": true,
+    "interactionBudgetAdded": false,
+    "chromiumPackagedRunPerformed": false,
+    "firefoxWebkitPackagedRunPerformed": false,
+    "constrainedProfileMeasured": false,
+    "constrainedProfileCallContractTested": true,
+    "constrainedProfileAppliedInPackagedBrowser": false
+  },
+  "limitations": [
+    "This verifies validator and adapter contracts only; it does not establish navigation performance on a browser or machine profile.",
+    "The constrained CPU/network profile has not been measured in a packaged browser; no interaction timing budget was added.",
+    "Issue #623 remains open pending packaged measurements and the remaining acceptance criteria.",
+    "The constrained CDP call contract is unit-tested only; no packaged browser run has measured the constrained profile."
+  ]
+}

@@ -9,7 +9,7 @@ const definitions = new Map<string, Schema>(Object.entries(contractSchema.defini
 export function registerDefinitions(entries: Readonly<Record<string, Schema>>): void {
   for (const [key, value] of Object.entries(entries)) {
     const existing = definitions.get(key);
-    if (existing !== undefined && existing !== value) throw new ApiClientError('unsupported_contract');
+    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(value)) throw new ApiClientError('unsupported_contract');
     definitions.set(key, value);
   }
 }

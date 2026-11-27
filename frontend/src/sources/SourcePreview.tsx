@@ -12,6 +12,7 @@ import { sourceHighlightLanguage } from './highlight';
 import { beginSourceHighlight } from './highlightOperation';
 import type { HighlightResult } from './highlightOperation';
 import { sourceHighlightRuntime } from './highlightRuntime';
+import { browserCapabilities } from '../shared/browserCapabilities';
 
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
@@ -40,6 +41,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
   const highlighting = highlight?.key === copyKey ? highlight : null;
   const highlighted = highlighting?.result?.status === 'ready' ? highlighting.result.value : null;
   const language = sourceHighlightLanguage(metadata.item.displayName);
+  const [{ clipboardWrite }] = useState(browserCapabilities);
   useEffect(() => {
     setHighlight(current => current?.key === copyKey ? current : null);
     return () => {
@@ -105,11 +107,11 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
       </nav>
       {view.originalText !== null && <>
         <p>{message(copy.copyRange, { offset: view.offset, length: view.length })}</p>
-        <button type="button" disabled={copying?.state === 'loading'} onClick={() => {
+        {!clipboardWrite ? <p>{copy.clipboardUnavailable}</p> : <><button type="button" disabled={copying?.state === 'loading'} onClick={() => {
           const text = view.originalText!; stopCopy.current?.();
           stopCopy.current = beginSourceRead(copyKey, async () => { await navigator.clipboard.writeText(text); return null; }, setCopied);
         }}>{copy.copyText}</button>
-        <p role="status">{copying?.state === 'ready' ? copy.copied : copying?.state === 'failed' ? copy.copyFailed : copy.clipboardNotice}</p>
+        <p role="status">{copying?.state === 'ready' ? copy.copied : copying?.state === 'failed' ? copy.copyFailed : copy.clipboardNotice}</p></>}
       </>}
     </>}
     <nav aria-label={copy.rangeNavigation}>

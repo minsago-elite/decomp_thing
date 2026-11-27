@@ -2,7 +2,9 @@ package decompengine.project
 
 import decompengine.assessment.HeuristicScoreInterpretation
 import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.repair.readStableRegularFile
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionRequest
@@ -21,7 +23,9 @@ import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.receiptCommitmentBytes
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -29,7 +33,11 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.nio.file.AtomicMoveNotSupportedException
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.nio.channels.ClosedByInterruptException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -58,6 +66,10 @@ data class ModuleReconstructionRequest(
     val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     val sessionEvidenceFingerprint: String? = null,
     val acceptedSourceSha256: String? = null,
+    /** Bounded compiler feedback is prompt context only; acceptance uses fresh compilation below. */
+    val compilerDiagnostics: String? = null,
+    /** Recovered ownership used to select only required cross-module interfaces. */
+    val modulePlan: ModulePlan? = null,
 )
 
 data class ReconstructedModule(
@@ -76,6 +88,16 @@ data class ModuleReconstructionIssue(
     val message: String,
     val entityIds: List<String>,
 )
+
+/** Cached execution belongs to the checkpoint's historical prompt identity. */
+internal fun requestForCheckpointReconciliation(
+    request: ModuleReconstructionRequest,
+    checkpointFingerprint: String,
+    checkpointReused: Boolean,
+): ModuleReconstructionRequest = if (checkpointReused &&
+    request.sessionEvidenceFingerprint != checkpointFingerprint) {
+    request.copy(sessionEvidenceFingerprint = checkpointFingerprint)
+} else request
 
 fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
@@ -121,10 +143,10 @@ class BoundedLlmModuleReconstructor(
 
     override fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity(contextBudget(profile))
 
-    // v3 rejects checkpoints created before declared-role validation was enforced.
+    // v5 additionally binds the declared-role mutation authority into the execution receipt.
     private fun cacheIdentity(contextCharacters: Int): String =
         "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
-            "factory-${harnessProvenanceSha256 ?: "unbound"}:v3"
+            "factory-${harnessProvenanceSha256 ?: "unbound"}:v5"
 
     private fun contextBudget(profile: ReconstructionProfile): Int =
         minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
@@ -138,7 +160,7 @@ class BoundedLlmModuleReconstructor(
 
     internal fun requireRetainableFallbackObservation(request: ModuleReconstructionRequest) {
         if (promptBudgetFailure(request, modulePromptEvidence(request).text) != null) {
-            requireRetainableModuleObservation(request.observedBehavior)
+            ModuleObservationRetention.retain(request)
         }
     }
 
@@ -151,14 +173,7 @@ class BoundedLlmModuleReconstructor(
         val fingerprint = request.sessionEvidenceFingerprint ?: return null
         if (harnessProvenanceSha256 == null) return null
         val root = request.workspaceRoot.toAbsolutePath().normalize()
-        val implementationViewable = ProjectFileRole.VIEWABLE in
-            request.profile.layout.declaration("module-implementation").roles
-        val paths = (listOf(
-            request.profile.layout.declaration("shared-interface").materialize(),
-            request.module.headerPath,
-            request.profile.layout.declaration("module-private-interface").materialize(mapOf("module" to request.module.id)),
-        ) + (if (implementationViewable) listOf(request.module.sourcePath) else emptyList()) +
-            request.dependencyHeaders.keys).distinct()
+        val paths = listOf(request.module.sourcePath)
         val files = try {
             AgentSessionJournal.captureWorkspaceFiles(
                 paths.map { AgentWorkspacePath("project", it) }, listOf(AgentWorkspaceRoot("project", root)),
@@ -166,8 +181,8 @@ class BoundedLlmModuleReconstructor(
         } catch (failure: Exception) {
             throw AgentSessionRecoveryException("could not capture the bounded reconstruction session inventory", failure)
         }
-        // v2 isolates journals created before declared-role inventory enforcement.
-        val workflowSha256 = sha256(("module-reconstruction-session-v2\n" + request.model.inputSha256 + "\n" +
+        // v3 isolates journals created before minimal inline context enforcement.
+        val workflowSha256 = sha256(("module-reconstruction-session-v3\n" + request.model.inputSha256 + "\n" +
             request.profile.sha256 + "\n" + fingerprint).toByteArray())
         return AgentSessionContinuation(
             directory = root.parent.resolve(".decomp-agent-sessions")
@@ -203,11 +218,9 @@ class BoundedLlmModuleReconstructor(
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
-        val implementation = request.profile.layout.declaration("module-implementation")
         val prompt = modulePromptEvidence(request)
         val objective = prompt.objective
         val evidence = prompt.evidence
-        val files = prompt.files
         val observed = prompt.observed
         val promptEvidence = prompt.text
         val contextSize = promptEvidence.length
@@ -216,14 +229,10 @@ class BoundedLlmModuleReconstructor(
         val promptSha256 = sha256(promptEvidence.toByteArray())
         val workspaceRoot = request.workspaceRoot.toAbsolutePath().normalize()
         val root = AgentWorkspaceRoot("project", workspaceRoot)
-        val readRules = files.keys.map { path ->
-            AgentPathRule(AgentWorkspacePath(root.id, path), setOf(AgentOperation.READ_FILE))
-        }
         val targetPath = AgentWorkspacePath(root.id, target)
         val sourcePath = targetPath.resolve(listOf(root))
         val before = sourcePath.takeIf { it.exists() }?.readBytes()
-        val targetOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE) +
-            if (ProjectFileRole.VIEWABLE in implementation.roles) setOf(AgentOperation.READ_FILE) else emptySet()
+        val targetOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)
         var invocationEvidence: ReconstructionAgentExecutionEvidence? = null
         try {
             val agentRequest = AgentExecutionRequest(
@@ -234,9 +243,21 @@ class BoundedLlmModuleReconstructor(
                     AgentContextInput("observed-behavior", observed),
                 ),
                 accessPolicy = AgentAccessPolicy(
-                    readRules + AgentPathRule(
+                    listOf(AgentPathRule(
                         targetPath,
                         targetOperations,
+                    )),
+                    mutationAuthority = DeclaredRoleMutationPolicy.forDeclaredPaths(
+                        profile = request.profile,
+                        rootId = root.id,
+                        ownerId = "module-reconstruction:${request.profile.id}:${request.module.id}",
+                        operationsByPath = mapOf(target to targetOperations),
+                        requiredOwnershipRoles = setOf(
+                            ProjectFileRole.MODULE_IMPLEMENTATION,
+                            ProjectFileRole.ENTRYPOINT_IMPLEMENTATION,
+                        ),
+                        maximumBytes = request.profile.budgets.archiveMaximumFileBytes,
+                        policyId = "declared-role-reconstruction-v1",
                     ),
                 ),
                 sessionContinuation = sessionContinuation(request),
@@ -257,6 +278,9 @@ class BoundedLlmModuleReconstructor(
             )
             invocationEvidence?.let { evidence ->
                 request.persistAgentExecutionEvidence?.invoke(evidence)
+            }
+            invocationEvidence?.wirePromptSha256?.let { wireDigest ->
+                require(wireDigest == promptSha256) { "dispatched wire prompt differs from bounded module context" }
             }
             val execution = receipt.requireResult()
             if (execution.stopReason in setOf(AgentStopReason.CANCELLED, AgentStopReason.LIMIT_EXHAUSTED)) {
@@ -368,7 +392,11 @@ private class ModuleReconstructionAgentOutcomeException(
 private class ModuleReconstructionEvidencePersistenceException(cause: Exception) :
     IllegalStateException("failed to persist invocation-bound agent execution evidence", cause)
 
-class GeneratedFileEvidence(
+private val SHA256_HEX_PATTERN = Regex("[0-9a-f]{64}")
+
+private class GeneratedFileEvidenceValidation(val checkpoint: () -> Unit)
+
+class GeneratedFileEvidence private constructor(
     val path: String,
     val sha256: String,
     val generator: String,
@@ -377,19 +405,45 @@ class GeneratedFileEvidence(
     val acceptedImplementation: Boolean? = null,
     roles: Set<ProjectFileRole>,
     val contentKind: ProjectContentKind,
+    validationHooks: GeneratedFileEvidenceValidation?,
 ) {
-    val entityIds: List<String> = Collections.unmodifiableList(entityIds.toList().sorted())
+    constructor(
+        path: String,
+        sha256: String,
+        generator: String,
+        promptSha256: String? = null,
+        entityIds: List<String> = emptyList(),
+        acceptedImplementation: Boolean? = null,
+        roles: Set<ProjectFileRole>,
+        contentKind: ProjectContentKind,
+    ) : this(path, sha256, generator, promptSha256, entityIds, acceptedImplementation, roles, contentKind, null)
+
+    internal constructor(
+        path: String,
+        sha256: String,
+        generator: String,
+        promptSha256: String?,
+        entityIds: List<String>,
+        acceptedImplementation: Boolean?,
+        roles: Set<ProjectFileRole>,
+        contentKind: ProjectContentKind,
+        validationCheckpoint: () -> Unit,
+    ) : this(path, sha256, generator, promptSha256, entityIds, acceptedImplementation, roles, contentKind,
+        GeneratedFileEvidenceValidation(validationCheckpoint))
+
+    val entityIds: List<String> = immutableSortedEntityIds(entityIds, path, validationHooks?.checkpoint)
+    private val validationCheckpoint: (() -> Unit)? = validationHooks?.checkpoint
     val roles: Set<ProjectFileRole> = Collections.unmodifiableSet(
         if (roles.isEmpty()) EnumSet.noneOf(ProjectFileRole::class.java) else EnumSet.copyOf(roles),
     )
 
     init {
         requireNormalizedProjectPath(path, "source tree manifest path")
-        require(sha256.matches(Regex("[0-9a-f]{64}"))) { "source tree manifest file hash is invalid: $path" }
+        require(sha256.matches(SHA256_HEX_PATTERN)) { "source tree manifest file hash is invalid: $path" }
         require(generator.isNotBlank() && generator.length <= 4_096 && '\n' !in generator && '\r' !in generator) {
             "source tree manifest generator is invalid: $path"
         }
-        require(promptSha256 == null || promptSha256.matches(Regex("[0-9a-f]{64}"))) {
+        require(promptSha256 == null || promptSha256.matches(SHA256_HEX_PATTERN)) {
             "source tree manifest prompt hash is invalid: $path"
         }
         require(this.roles.isNotEmpty()) { "source tree manifest file roles are empty: $path" }
@@ -399,9 +453,25 @@ class GeneratedFileEvidence(
         require(ProjectFileRole.MODULE_IMPLEMENTATION !in this.roles || acceptedImplementation != null) {
             "module implementation acceptance is not classified: $path"
         }
-        require(this.entityIds.distinct().size == this.entityIds.size) {
-            "source tree manifest entity IDs must be unique: $path"
-        }
+        requireEntityIdsUnique(this.entityIds, path, validationCheckpoint)
+    }
+}
+
+private fun immutableSortedEntityIds(values: List<String>, path: String, checkpoint: (() -> Unit)?): List<String> {
+    var comparisons = 0
+    val sorted = values.sortedWith { left, right ->
+        comparisons++
+        if (comparisons % 1024 == 0) checkpoint?.invoke()
+        left.compareTo(right)
+    }
+    return Collections.unmodifiableList(sorted)
+}
+
+private fun requireEntityIdsUnique(values: List<String>, path: String, checkpoint: (() -> Unit)?) {
+    val seen = HashSet<String>(values.size)
+    values.forEachIndexed { index, value ->
+        if (index % 1024 == 0) checkpoint?.invoke()
+        require(seen.add(value)) { "source tree manifest entity IDs must be unique: $path" }
     }
 }
 
@@ -537,17 +607,9 @@ object SourceTreeGenerator {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
-    ): SourceTreeManifest = generate(
-        model = model,
-        projectDir = projectDir,
-        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
-        planner = planner,
-        reconstructor = reconstructor,
-        overrides = overrides,
-        observedBehavior = observedBehavior,
-        profile = profile,
-        progress = progress,
-        onModuleProgress = onModuleProgress,
+    ): SourceTreeManifest = generateWithCompilerFeedback(
+        model, projectDir, ReconstructionHostSafetyLimits.DEFAULT, planner, reconstructor, overrides,
+        observedBehavior, profile, progress, { null }, {}, onModuleProgress,
     )
 
     /** Explicit host policy can authorize a profile without changing its recorded budgets or identity. */
@@ -561,6 +623,24 @@ object SourceTreeGenerator {
         observedBehavior: String? = null,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+    ): SourceTreeManifest = generateWithCompilerFeedback(
+        model, projectDir, hostSafetyLimits, planner, reconstructor, overrides,
+        observedBehavior, profile, progress, { null }, {}, onModuleProgress,
+    )
+
+    internal fun generateWithCompilerFeedback(
+        model: RecoveredProgramModel,
+        projectDir: Path,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        planner: DeterministicModulePlanner? = null,
+        reconstructor: ModuleReconstructor? = null,
+        overrides: Map<String, String> = emptyMap(),
+        observedBehavior: String? = null,
+        profile: ReconstructionProfile,
+        progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        compilerFeedback: (moduleId: String) -> ModuleCompilerFeedback? = { null },
+        onCompilerFeedback: (ModuleCompilerFeedback) -> Unit = {},
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
         hostSafetyLimits.requireAllows(profile.budgets)
@@ -584,6 +664,9 @@ object SourceTreeGenerator {
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
         val privateHeaders = plan.modules.associate { module -> module.id to rendering.privateInterface(module) }
+        if (selectedReconstructor is BoundedLlmModuleReconstructor) {
+            ModuleObservationRetention.requireRawInput(observedBehavior)
+        }
         if (selectedReconstructor is BoundedLlmModuleReconstructor && observedBehavior != null &&
             observedBehavior.toByteArray(Charsets.UTF_8).size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES) {
             // Validate actual fallback inputs before writing any project state. Larger
@@ -594,10 +677,11 @@ object SourceTreeGenerator {
                 }
                 selectedReconstructor.requireRetainableFallbackObservation(ModuleReconstructionRequest(
                     module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id),
-                    dependencyHeaders, projectDir, observedBehavior, profile = profile,
+                    dependencyHeaders, projectDir, observedBehavior, profile = profile, modulePlan = plan,
                 ))
             }
         }
+        val previousBuildDefinition = capturePreviousBuildDefinition(projectDir, profile)
         typesHeaderFile.parent.createDirectories()
         typesHeaderFile.writeText(typesHeader)
         headers.forEach { (id, content) ->
@@ -637,6 +721,30 @@ object SourceTreeGenerator {
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
             val dependencyHeaders = dependencies.associate { dependency -> moduleById.getValue(dependency).headerPath to headers.getValue(dependency) }
+            val basePromptRequest = ModuleReconstructionRequest(
+                module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id),
+                dependencyHeaders, projectDir, observedBehavior, profile = profile, modulePlan = plan,
+            )
+            val contextFingerprint = if (selectedReconstructor is BoundedLlmModuleReconstructor &&
+                compilationPolicy.providesCompilerFeedback) {
+                selectedModuleInputFingerprint(basePromptRequest)
+            } else null
+            val feedbackSource = projectDir.resolve(module.sourcePath)
+            val recordedCompilerFeedback = contextFingerprint?.let { expectedContext ->
+                runCatching { compilerFeedback(module.id) }.getOrNull()?.takeIf { it.contextSha256 == expectedContext }
+            }
+            val currentSourceSha256 = feedbackSource.takeIf { it.exists() }?.let { sha256(it.readBytes()) }
+            val priorCompilerDiagnostics = recordedCompilerFeedback?.takeIf {
+                it.sourceSha256 == currentSourceSha256
+            }?.diagnostics
+            // Retain the old dispatched prompt identity for cache comparison only. Diagnostics
+            // tied to a failed source are never passed to a new attempt after source correction.
+            val retainedFeedbackFingerprint = recordedCompilerFeedback?.takeIf {
+                currentSourceSha256 != null && it.sourceSha256 != currentSourceSha256
+            }?.let { feedback ->
+                selectedModuleInputFingerprint(basePromptRequest.copy(compilerDiagnostics = feedback.diagnostics))
+            }
+            val promptRequest = basePromptRequest.copy(compilerDiagnostics = priorCompilerDiagnostics)
             val localFingerprint = moduleFingerprint(
                 module,
                 model,
@@ -648,7 +756,9 @@ object SourceTreeGenerator {
                 profile.sha256,
                 compilationPolicy.id,
             )
-            val fingerprint = sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
+            val fingerprint = if (selectedReconstructor is BoundedLlmModuleReconstructor)
+                selectedModuleInputFingerprint(promptRequest)
+            else sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
                 interfaceFingerprints.getValue(module.id)).toByteArray())
             val sourcePath = projectDir.resolve(module.sourcePath)
             val checkpointPath = projectDir.resolve(profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)))
@@ -714,12 +824,15 @@ object SourceTreeGenerator {
                 profile = profile,
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
+                compilerDiagnostics = priorCompilerDiagnostics,
+                modulePlan = plan,
             )
             val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
                 checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
                     checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
-                    checkpoint.fingerprint == fingerprint &&
+                    (checkpoint.fingerprint == fingerprint ||
+                        checkpoint.accepted && checkpoint.fingerprint == retainedFeedbackFingerprint) &&
                     sourcePath.exists() &&
                     sha256(sourcePath.readBytes()) == checkpoint.sourceSha256 &&
                     checkpoint.reconstructorIdentity == cacheIdentity &&
@@ -730,6 +843,7 @@ object SourceTreeGenerator {
                     ) &&
                     (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
+            if (cached != null) progress.checkpointReused(module.id, cached.sourceSha256)
             val checkpoint = cached ?: run {
                 val previousAccepted = verifiedPreviousAcceptance
                 val previousSource = previousAccepted?.let { sourcePath.readText() }
@@ -810,6 +924,16 @@ object SourceTreeGenerator {
                         throw interrupted
                     }
                     validation.also { validation ->
+                        if (!validation.passed && contextFingerprint != null) {
+                            runCatching {
+                                onCompilerFeedback(retainedModuleCompilerFeedback(
+                                    moduleId = module.id,
+                                    sourceSha256 = validation.sourceSha256,
+                                    contextSha256 = requireNotNull(contextFingerprint),
+                                    diagnostics = validation.diagnosticsPrefix,
+                                ))
+                            }
+                        }
                         if (!validation.passed) issues += ModuleReconstructionIssue(
                             "module-compilation-${validation.outcome}",
                             "module compiler gate ${validation.outcome}; diagnostics SHA-256=${validation.diagnosticsSha256}",
@@ -827,9 +951,10 @@ object SourceTreeGenerator {
                     sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
                     workflowOrigin = workflowOrigin,
-                    preDispatchObservedBehavior = observedBehavior.takeIf {
-                        workflowOrigin == "pre-dispatch-context-budget-fallback"
-                    },
+                    preDispatchObservedBehavior = if (workflowOrigin == "pre-dispatch-context-budget-fallback")
+                        ModuleObservationRetention.retain(request) else null,
+                    preDispatchCompilerFeedback = if (workflowOrigin == "pre-dispatch-context-budget-fallback" &&
+                        priorCompilerDiagnostics != null) recordedCompilerFeedback else null,
                     reconstructorIdentity = cacheIdentity,
                     promptSha256 = attempted.promptSha256,
                     promptCharacters = attempted.promptCharacters,
@@ -871,8 +996,9 @@ object SourceTreeGenerator {
             if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             projectDir.resolve("reports/modules/${module.id}.attempt.execution.json").deleteIfExists()
+            val reconciliationRequest = requestForCheckpointReconciliation(request, checkpoint.fingerprint, cached != null)
             selectedReconstructor.reconcileSessionCheckpoint(
-                request, checkpoint.accepted, checkpoint.sourceSha256,
+                reconciliationRequest, checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
             val normalizedSource = sourcePath.readText()
@@ -914,7 +1040,7 @@ object SourceTreeGenerator {
                 append("{\"sourcePath\":\"").append(module.sourcePath.jsonEscape()).append("\",")
                 append("\"sourceSha256\":\"").append(checkpoint.sourceSha256).append("\",")
                 append("\"inputFingerprint\":\"").append(checkpoint.fingerprint).append("\",")
-                append("\"inputFingerprintProvider\":\"").append(INPUT_FINGERPRINT_PROVIDER).append("\",")
+                append("\"inputFingerprintProvider\":\"").append(archivedModuleInputFingerprintProvider(checkpoint.reconstructorIdentity)).append("\",")
                 append("\"inputBinarySha256\":\"").append(model.inputSha256.jsonEscape()).append("\",")
                 append("\"modelSchemaVersion\":").append(model.schemaVersion).append(',')
                 append("\"checkpointPath\":\"").append(checkpointEvidencePath.jsonEscape()).append("\",")
@@ -958,40 +1084,9 @@ object SourceTreeGenerator {
         }.map { it.path }.sorted()
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
-        // A rerun with a different built-in profile must not leave the previous
-        // profile's generated build definition beside the new one. Both built-in
-        // generated-C profiles declare their definition under this id.
-        for (candidate in ReconstructionProfiles.builtIn.map {
-            it.layout.declaration("build-definition").materialize()
-        }.toSet()) {
-            if (candidate != makefilePath) projectDir.resolve(candidate).deleteIfExists()
-        }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
-        // Only remove an inactive built-in definition when the previous manifest
-        // proves that the generator owned it. An arbitrary file in a reused
-        // project directory (for example, a user's Makefile) is not ours to delete.
-        val previouslyGeneratedBuildDefinitions = runCatching {
-            val manifest = projectDir.resolve("source_tree_manifest.json")
-            if (!manifest.exists()) emptySet() else {
-                Json.parseToJsonElement(manifest.readText()).jsonObject
-                    .getValue("files").jsonArray
-                    .mapNotNull { file ->
-                        val item = file.jsonObject
-                        val roles = item.getValue("roles").jsonArray.map { it.jsonPrimitive.content }
-                        item.getValue("path").jsonPrimitive.content.takeIf {
-                            ProjectFileRole.BUILD_DEFINITION.wireName in roles
-                        }
-                    }.toSet()
-            }
-        }.getOrDefault(emptySet())
-        for (candidate in ReconstructionProfiles.builtIn) {
-            val stalePath = candidate.layout.declaration("build-definition").materialize()
-            if (stalePath != makefilePath && stalePath in previouslyGeneratedBuildDefinitions &&
-                !runCatching { profile.layout.declarationForPath(stalePath) }.isSuccess) {
-                projectDir.resolve(stalePath).deleteIfExists()
-            }
-        }
+        removeUnchangedPreviousBuildDefinition(projectDir, previousBuildDefinition)
         makefileFile.writeText(makefile)
         generated += evidence(profile, makefilePath, makefile, "planner", emptyList())
 
@@ -1035,6 +1130,74 @@ object SourceTreeGenerator {
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
+    }
+
+    private data class PreviousBuildDefinition(
+        val path: String,
+        val sha256: String,
+        val identity: LinuxFileIdentity,
+        val maximumBytes: Long,
+    )
+
+    private fun capturePreviousBuildDefinition(
+        projectDir: Path,
+        currentProfile: ReconstructionProfile,
+    ): PreviousBuildDefinition? = optionalBuildDefinitionEvidence {
+        val builtInProfiles = ReconstructionProfiles.builtIn
+        val maximumBytes = minOf(currentProfile.budgets.archiveMaximumFileBytes,
+            builtInProfiles.minOf { it.budgets.archiveMaximumFileBytes }, Int.MAX_VALUE.toLong() - 1L)
+        val text = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumBytes,
+            cancellationCheck = ::buildDefinitionCleanupCheckpoint).bytes.decodeToString(throwOnInvalidSequence = true)
+        val previous = builtInProfiles.firstNotNullOfOrNull { descriptor ->
+            optionalBuildDefinitionEvidence { descriptor to SourceTreeManifestReader.parse(text, descriptor) }
+        } ?: return@optionalBuildDefinitionEvidence null
+        val declaration = previous.first.layout.declaration("build-definition")
+        val path = declaration.materialize()
+        if (currentProfile.layout.declarations.any { it.matches(path) }) return@optionalBuildDefinitionEvidence null
+        require(ProjectFileRole.BUILD_DEFINITION in declaration.roles &&
+            ProjectFileRole.BUILD_INPUT in declaration.roles && declaration.contentKind == ProjectContentKind.UTF8_TEXT)
+        val record = previous.second.files.singleOrNull { it.path == path } ?: return@optionalBuildDefinitionEvidence null
+        require(record.generator == "planner" && record.promptSha256 == null &&
+            record.acceptedImplementation == null && record.entityIds.isEmpty())
+        val candidate = readStableRegularFile(projectDir, path, maximumBytes,
+            cancellationCheck = ::buildDefinitionCleanupCheckpoint)
+        require(candidate.sha256 == record.sha256) { "previous build definition no longer matches its manifest" }
+        PreviousBuildDefinition(path, candidate.sha256, candidate.identity, maximumBytes)
+    }
+
+    private fun removeUnchangedPreviousBuildDefinition(projectDir: Path, previous: PreviousBuildDefinition?) {
+        buildDefinitionCleanupCheckpoint()
+        if (previous == null) return
+        val current = optionalBuildDefinitionEvidence {
+            readStableRegularFile(projectDir, previous.path, previous.maximumBytes,
+                cancellationCheck = ::buildDefinitionCleanupCheckpoint)
+        } ?: return
+        if (current.identity != previous.identity || current.sha256 != previous.sha256) return
+        // This is local manifest consistency, not authenticated producer history or an
+        // atomic unlink against concurrent writers. Never infer ownership from a filename.
+        buildDefinitionCleanupCheckpoint()
+        projectDir.resolve(previous.path).deleteIfExists()
+    }
+
+    private inline fun <T> optionalBuildDefinitionEvidence(read: () -> T): T? {
+        buildDefinitionCleanupCheckpoint()
+        return try {
+            read()
+        } catch (failure: InterruptedIOException) {
+            throw failure
+        } catch (failure: ClosedByInterruptException) {
+            throw failure
+        } catch (_: IOException) {
+            buildDefinitionCleanupCheckpoint()
+            null
+        } catch (_: IllegalArgumentException) {
+            buildDefinitionCleanupCheckpoint()
+            null
+        }
+    }
+
+    private fun buildDefinitionCleanupCheckpoint() {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("build definition cleanup interrupted")
     }
 
     private fun requireWorkflowOwnedPathsAreReserved(profile: ReconstructionProfile) {
@@ -1103,6 +1266,7 @@ object SourceTreeGenerator {
         val generator: String,
         val workflowOrigin: String = "reconstructor-return",
         val preDispatchObservedBehavior: String? = null,
+        val preDispatchCompilerFeedback: ModuleCompilerFeedback? = null,
         val reconstructorIdentity: String,
         val promptSha256: String,
         val promptCharacters: Int?,
@@ -1131,6 +1295,19 @@ object SourceTreeGenerator {
             require(preDispatchObservedBehavior == null ||
                 workflowOrigin == "pre-dispatch-context-budget-fallback") {
                 "retained pre-dispatch prompt input requires an undispatched fallback"
+            }
+            require(preDispatchCompilerFeedback == null ||
+                workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                "retained pre-dispatch compiler feedback requires an undispatched fallback"
+            }
+            preDispatchCompilerFeedback?.let { feedback ->
+                require(feedback.moduleId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")) &&
+                    listOf(feedback.sourceSha256, feedback.contextSha256, feedback.diagnosticsSha256)
+                        .all { it.matches(Regex("[0-9a-f]{64}")) } &&
+                    feedback.diagnostics.toByteArray(Charsets.UTF_8).size <= 32_768 &&
+                    sha256(feedback.diagnostics.toByteArray(Charsets.UTF_8)) == feedback.diagnosticsSha256) {
+                    "retained pre-dispatch compiler feedback is invalid"
+                }
             }
             requireRetainableModuleObservation(preDispatchObservedBehavior)
             require(schemaVersion < 5 || !accepted ||
@@ -1199,6 +1376,14 @@ object SourceTreeGenerator {
             if (schemaVersion >= 6 && workflowOrigin == "pre-dispatch-context-budget-fallback") {
                 append("\n  \"preDispatchObservedBehavior\": ")
                 append(preDispatchObservedBehavior?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull).append(',')
+                append("\n  \"preDispatchCompilerFeedback\": ")
+                append(preDispatchCompilerFeedback?.let { feedback -> buildJsonObject {
+                    put("moduleId", feedback.moduleId)
+                    put("sourceSha256", feedback.sourceSha256)
+                    put("contextSha256", feedback.contextSha256)
+                    put("diagnosticsSha256", feedback.diagnosticsSha256)
+                    put("diagnostics", feedback.diagnostics)
+                } } ?: JsonNull).append(',')
             }
             append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
             append("\n  \"promptSha256\": \"").append(promptSha256).append("\",")
@@ -1275,6 +1460,15 @@ object SourceTreeGenerator {
                 generator = root.getValue("generator").jsonPrimitive.content,
                 workflowOrigin = optionalString("workflowOrigin") ?: "reconstructor-return",
                 preDispatchObservedBehavior = optionalString("preDispatchObservedBehavior"),
+                preDispatchCompilerFeedback = root["preDispatchCompilerFeedback"]?.takeUnless { it is JsonNull }?.jsonObject?.let {
+                    ModuleCompilerFeedback(
+                        it.getValue("moduleId").jsonPrimitive.content,
+                        it.getValue("sourceSha256").jsonPrimitive.content,
+                        it.getValue("contextSha256").jsonPrimitive.content,
+                        it.getValue("diagnosticsSha256").jsonPrimitive.content,
+                        it.getValue("diagnostics").jsonPrimitive.content,
+                    )
+                },
                 reconstructorIdentity = root.getValue("reconstructorIdentity").jsonPrimitive.content,
                 promptSha256 = root.getValue("promptSha256").jsonPrimitive.content,
                 promptCharacters = root["promptCharacters"]?.jsonPrimitive?.intOrNull,
@@ -1728,6 +1922,41 @@ private fun String.jsonEscape(): String = buildString {
     }
 }
 
+/** Diagnostic boundaries only; starting a stage closes the previous stage. */
+internal interface SourceTreeManifestProbe {
+    fun start(stage: SourceTreeManifestStage)
+    fun end()
+}
+
+internal enum class SourceTreeManifestStage(val marker: String) {
+    ROOT("manifest-root"),
+    FILE_FIELDS("manifest-file-fields"),
+    FILE_EVIDENCE_INIT("manifest-file-evidence-init"),
+    // Includes input identity and unresolved-ID argument validation, in its original order.
+    PATH_ORDER("manifest-path-order"),
+    CONSTRUCT("manifest-construct"),
+    PROFILE_POLICY("manifest-profile-policy"),
+}
+
+// A broken diagnostic collector must not replace the reader's result or original refusal.
+internal fun SourceTreeManifestProbe.startSafely(stage: SourceTreeManifestStage) {
+    try { start(stage) } catch (failure: Throwable) { rethrowManifestProbeCancellation(failure) }
+}
+
+internal fun SourceTreeManifestProbe.endSafely() {
+    try { end() } catch (failure: Throwable) { rethrowManifestProbeCancellation(failure) }
+}
+
+private fun rethrowManifestProbeCancellation(failure: Throwable) {
+    if (failure is InterruptedException || failure is InterruptedIOException) {
+        Thread.currentThread().interrupt()
+        throw failure
+    }
+    if (failure is java.util.concurrent.CancellationException || failure is VirtualMachineError
+        || failure is ThreadDeath || Thread.currentThread().isInterrupted) throw failure
+    // Ordinary diagnostic failures cannot change validation results or refusals.
+}
+
 object SourceTreeManifestReader {
     private val rootKeys = setOf(
         "schemaVersion",
@@ -1761,89 +1990,123 @@ object SourceTreeManifestReader {
 
     fun parse(text: String, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         UniqueJsonObjectKeyValidator(text).validate()
-        val root = Json.parseToJsonElement(text).jsonObject
-        require(root.keys == rootKeys) { "source tree manifest fields do not match schema version 3" }
-        val schemaPrimitive = root.getValue("schemaVersion").jsonPrimitive
-        require(!schemaPrimitive.isString) { "source tree manifest schemaVersion must be an integer" }
-        val schemaVersion = schemaPrimitive.intOrNull
-            ?: throw IllegalArgumentException("source tree manifest schemaVersion must be an integer")
-        require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
-        val profileId = requiredManifestString(root, "profileId")
-        val profileSha256 = requiredManifestString(root, "profileSha256")
-        val files = root.getValue("files").jsonArray.map { element ->
-            val item = element.jsonObject
-            require(item.keys == fileKeys) { "source tree manifest file fields do not match schema version 3" }
-            val roles = item.getValue("roles").jsonArray.map { role ->
-                require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
-                ProjectFileRole.fromWireName(role.jsonPrimitive.content)
-            }
-            require(roles.map(ProjectFileRole::wireName) == roles.map(ProjectFileRole::wireName).distinct().sorted()) {
-                "source tree manifest file roles must be unique and sorted"
-            }
-            val entityIds = item.getValue("entityIds").jsonArray.map {
-                require(it.jsonPrimitive.isString) { "source tree manifest entity IDs must be strings" }
-                it.jsonPrimitive.content
-            }
-            require(entityIds == entityIds.distinct().sorted()) {
-                "source tree manifest entity IDs must be unique and sorted"
-            }
-            val accepted = item.getValue("acceptedImplementation").let { value ->
-                if (value is JsonNull) {
-                    null
-                } else {
-                    require(!value.jsonPrimitive.isString) {
-                        "source tree manifest acceptance value must be Boolean or null"
+        return parse(Json.parseToJsonElement(text).jsonObject, expectedProfile)
+    }
+
+    /** Parse an object already decoded by a bounded strict JSON reader which rejects duplicate keys. */
+    internal fun parse(
+        root: JsonObject,
+        expectedProfile: ReconstructionProfile,
+        probe: SourceTreeManifestProbe? = null,
+    ): SourceTreeManifest {
+        probe?.startSafely(SourceTreeManifestStage.ROOT)
+        try {
+            require(root.keys == rootKeys) { "source tree manifest fields do not match schema version 3" }
+            val schemaPrimitive = root.getValue("schemaVersion").jsonPrimitive
+            require(!schemaPrimitive.isString) { "source tree manifest schemaVersion must be an integer" }
+            val schemaVersion = schemaPrimitive.intOrNull
+                ?: throw IllegalArgumentException("source tree manifest schemaVersion must be an integer")
+            require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
+            val profileId = requiredManifestString(root, "profileId")
+            val profileSha256 = requiredManifestString(root, "profileSha256")
+            probe?.endSafely()
+            val files = root.getValue("files").jsonArray.map { element ->
+                probe?.startSafely(SourceTreeManifestStage.FILE_FIELDS)
+                try {
+                    val item = element.jsonObject
+                    require(item.keys == fileKeys) { "source tree manifest file fields do not match schema version 3" }
+                    val roles = item.getValue("roles").jsonArray.map { role ->
+                        require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
+                        ProjectFileRole.fromWireName(role.jsonPrimitive.content)
                     }
-                    value.jsonPrimitive.booleanOrNull
-                        ?: throw IllegalArgumentException("source tree manifest acceptance value must be Boolean or null")
+                    require(rolesAreStrictlySorted(roles)) {
+                        "source tree manifest file roles must be unique and sorted"
+                    }
+                    val entityIds = item.getValue("entityIds").jsonArray.map {
+                        require(it.jsonPrimitive.isString) { "source tree manifest entity IDs must be strings" }
+                        it.jsonPrimitive.content
+                    }
+                    require(stringsAreStrictlySorted(entityIds)) {
+                        "source tree manifest entity IDs must be unique and sorted"
+                    }
+                    val accepted = item.getValue("acceptedImplementation").let { value ->
+                        if (value is JsonNull) {
+                            null
+                        } else {
+                            require(!value.jsonPrimitive.isString) {
+                                "source tree manifest acceptance value must be Boolean or null"
+                            }
+                            value.jsonPrimitive.booleanOrNull
+                                ?: throw IllegalArgumentException("source tree manifest acceptance value must be Boolean or null")
+                        }
+                    }
+                    // Preserve constructor argument evaluation order; measure the constructor separately.
+                    val path = requiredManifestString(item, "path")
+                    val sha256 = requiredManifestString(item, "sha256")
+                    val generator = requiredManifestString(item, "generator")
+                    val promptSha256 = item.getValue("promptSha256").let { value ->
+                        if (value is JsonNull) null else {
+                            require(value.jsonPrimitive.isString) {
+                                "source tree manifest prompt hash must be a string or null"
+                            }
+                            value.jsonPrimitive.contentOrNull
+                        }
+                    }
+                    val roleSet = roles.toSet()
+                    val contentKind = ProjectContentKind.fromWireName(requiredManifestString(item, "contentKind"))
+                    probe?.startSafely(SourceTreeManifestStage.FILE_EVIDENCE_INIT)
+                    GeneratedFileEvidence(
+                        path = path,
+                        sha256 = sha256,
+                        generator = generator,
+                        promptSha256 = promptSha256,
+                        entityIds = entityIds,
+                        acceptedImplementation = accepted,
+                        roles = roleSet,
+                        contentKind = contentKind,
+                    )
+                } finally {
+                    probe?.endSafely()
                 }
             }
-            GeneratedFileEvidence(
-                path = requiredManifestString(item, "path"),
-                sha256 = requiredManifestString(item, "sha256"),
-                generator = requiredManifestString(item, "generator"),
-                promptSha256 = item.getValue("promptSha256").let { value ->
-                    if (value is JsonNull) null else {
-                        require(value.jsonPrimitive.isString) {
-                            "source tree manifest prompt hash must be a string or null"
-                        }
-                        value.jsonPrimitive.contentOrNull
-                    }
-                },
-                entityIds = entityIds,
-                acceptedImplementation = accepted,
-                roles = roles.toSet(),
-                contentKind = ProjectContentKind.fromWireName(requiredManifestString(item, "contentKind")),
-            )
-        }
-        require(files.map(GeneratedFileEvidence::path) == files.map(GeneratedFileEvidence::path).distinct().sorted()) {
-            "source tree manifest files must be unique and sorted"
-        }
-        fun sortedIds(name: String): List<String> = root.getValue(name).jsonArray.map {
-            require(it.jsonPrimitive.isString) { "source tree manifest $name values must be strings" }
-            it.jsonPrimitive.content
-        }.also { ids ->
-            require(ids == ids.distinct().sorted()) { "source tree manifest $name must be unique and sorted" }
-        }
-        val manifest = SourceTreeManifest(
-            schemaVersion = schemaVersion,
-            profileId = profileId,
-            profileSha256 = profileSha256,
-            inputSha256 = requiredManifestString(root, "inputSha256"),
-            files = files,
-            unresolvedEntityIds = sortedIds("unresolvedEntityIds"),
-            unresolvedImplementationIds = sortedIds("unresolvedImplementationIds"),
-        )
-        require(manifest.profileId == expectedProfile.id && manifest.profileSha256 == expectedProfile.sha256) {
-            "source tree manifest reconstruction profile does not match the expected profile"
-        }
-        manifest.files.forEach { file ->
-            val declaration = expectedProfile.layout.declarationForPath(file.path)
-            require(file.roles == declaration.roles && file.contentKind == declaration.contentKind) {
-                "source tree manifest file policy does not match the reconstruction profile: ${file.path}"
+            probe?.startSafely(SourceTreeManifestStage.PATH_ORDER)
+            require(filesAreStrictlySorted(files)) {
+                "source tree manifest files must be unique and sorted"
             }
+            fun sortedIds(name: String): List<String> = root.getValue(name).jsonArray.map {
+                require(it.jsonPrimitive.isString) { "source tree manifest $name values must be strings" }
+                it.jsonPrimitive.content
+            }.also { ids ->
+                require(stringsAreStrictlySorted(ids)) { "source tree manifest $name must be unique and sorted" }
+            }
+            val inputSha256 = requiredManifestString(root, "inputSha256")
+            val unresolvedEntityIds = sortedIds("unresolvedEntityIds")
+            val unresolvedImplementationIds = sortedIds("unresolvedImplementationIds")
+            probe?.startSafely(SourceTreeManifestStage.CONSTRUCT)
+            val manifest = SourceTreeManifest(
+                schemaVersion = schemaVersion,
+                profileId = profileId,
+                profileSha256 = profileSha256,
+                inputSha256 = inputSha256,
+                files = files,
+                unresolvedEntityIds = unresolvedEntityIds,
+                unresolvedImplementationIds = unresolvedImplementationIds,
+            )
+            probe?.startSafely(SourceTreeManifestStage.PROFILE_POLICY)
+            require(manifest.profileId == expectedProfile.id && manifest.profileSha256 == expectedProfile.sha256) {
+                "source tree manifest reconstruction profile does not match the expected profile"
+            }
+            manifest.files.forEach { file ->
+                // GeneratedFileEvidence validated path normalization during construction above.
+                val declaration = expectedProfile.layout.declarationForValidatedPath(file.path)
+                require(file.roles == declaration.roles && file.contentKind == declaration.contentKind) {
+                    "source tree manifest file policy does not match the reconstruction profile: ${file.path}"
+                }
+            }
+            return manifest
+        } finally {
+            probe?.endSafely()
         }
-        return manifest
     }
 
     fun editablePaths(
@@ -1859,6 +2122,27 @@ object SourceTreeManifestReader {
         val primitive = objectValue.getValue(name).jsonPrimitive
         require(primitive.isString) { "source tree manifest $name must be a string" }
         return primitive.content
+    }
+
+    private fun stringsAreStrictlySorted(values: List<String>): Boolean {
+        for (index in 1 until values.size) {
+            if (values[index - 1] >= values[index]) return false
+        }
+        return true
+    }
+
+    private fun rolesAreStrictlySorted(values: List<ProjectFileRole>): Boolean {
+        for (index in 1 until values.size) {
+            if (values[index - 1].wireName >= values[index].wireName) return false
+        }
+        return true
+    }
+
+    private fun filesAreStrictlySorted(values: List<GeneratedFileEvidence>): Boolean {
+        for (index in 1 until values.size) {
+            if (values[index - 1].path >= values[index].path) return false
+        }
+        return true
     }
 }
 

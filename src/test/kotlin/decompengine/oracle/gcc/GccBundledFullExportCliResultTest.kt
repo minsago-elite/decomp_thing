@@ -7,6 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -95,6 +96,19 @@ class GccBundledFullExportCliResultTest {
         assertEquals(result.keys, driverResult.keys)
         assertEquals(result - "structuralBindingSha256", driverResult - "structuralBindingSha256")
         assertEquals(OracleArtifacts.sha256(driverBinding), driverResult.getValue("structuralBindingSha256").jsonPrimitive.content)
+        // Binding JSON alone never creates a live admission. Both historical target variants
+        // retain the exact v2 field inventory instead of acquiring a v4 assessment pointer.
+        val historicalFields = setOf("provider", "schemaVersion", "complete", "releaseEligible", "scored",
+            "operationId", "requestSha256", "journal", "programModel", "programModelSha256", "programModelBytes",
+            "functionCount", "outputTreeSha256", "outputTreeManifest", "outputTreeManifestSha256",
+            "exportAssessmentReceiptSha256", "executionReceiptSha256", "structuralBinding",
+            "structuralBindingSha256", "operationWallTime", "scratchDisposition")
+        for (historical in listOf(result, driverResult)) {
+            assertEquals(historicalFields, historical.keys)
+            assertEquals(JsonPrimitive(2), historical.getValue("schemaVersion"))
+            assertEquals(JsonPrimitive("gcc-bundled-cli-full-export-result-v2"), historical.getValue("provider"))
+            assertFalse("selectedFunctionAssessment" in historical)
+        }
 
         for ((profile, engine) in listOf(
             "gcc-cc1-16.2.0" to "driver",

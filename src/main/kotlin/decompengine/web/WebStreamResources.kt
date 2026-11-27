@@ -14,6 +14,8 @@ internal class WebStreamResources(
     private val maximumPerSession: Int = 2,
     private val lifetimeMs: Long = 30_000,
     private val shutdownTimeoutMs: Long = 1000,
+    /** Runs without the stream gate once a stopped resource releases its last reservation late. */
+    private val onDrained: () -> Unit = {},
 ) : AutoCloseable {
     init {
         require(maximumConnections in 1..16 && maximumPerSession in 1..2)
@@ -102,8 +104,12 @@ internal class WebStreamResources(
         }
     }
 
-    private fun release(lease: Lease) = synchronized(gate) {
-        if (lease.workDone && lease.cleanupDone) leases.remove(lease)
+    private fun release(lease: Lease) {
+        val drained = synchronized(gate) {
+            lease.workDone && lease.cleanupDone && leases.remove(lease) && stopped && leases.isEmpty()
+        }
+        // An owner whose bounded shutdown gave up must still learn when the last stream finally ends.
+        if (drained) try { onDrained() } catch (_: Exception) { /* The owner reports its own cleanup failure. */ }
     }
 
     /** A false result preserves outstanding reservations; it must not be reported as clean shutdown. */

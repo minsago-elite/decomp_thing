@@ -37,7 +37,7 @@ internal class StagedJobUpload(
 
     fun publish(idempotencyKey: String? = null, writeBinary: (OutputStream) -> String): PublishedJobUpload {
         require(idempotencyKey == null || idempotencyKey.matches(Regex("[A-Za-z0-9_-]{16,128}"))) { "Invalid upload idempotency key" }
-        val keyHash = idempotencyKey?.let { hash("local-owner\u0000POST\u0000/api/v1/jobs\u0000$it".toByteArray()) }
+        val keyHash = idempotencyKey?.let(::keyHash)
         require(Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) { "Upload storage must already be owned and initialized" }
         val stage = Files.createTempDirectory(root, ".upload-stream-v1-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val id = keyHash?.take(32) ?: UUID.randomUUID().toString().replace("-", "")
@@ -151,6 +151,16 @@ internal class StagedJobUpload(
         }
     }
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    companion object {
+        private fun keyHash(key: String) = MessageDigest.getInstance("SHA-256")
+            .digest("local-owner\u0000POST\u0000/api/v1/jobs\u0000$key".toByteArray()).joinToString("") { "%02x".format(it) }
+        /** The job identity a keyed upload publishes or replays; callers check it against retained tombstones. */
+        fun keyedJobId(key: String): String {
+            require(key.matches(Regex("[A-Za-z0-9_-]{16,128}"))) { "Invalid upload idempotency key" }
+            return keyHash(key).take(32)
+        }
+    }
 
     private fun syncDirectory(path: Path) { FileChannel.open(path, READ).use { it.force(true) } }
 }

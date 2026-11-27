@@ -4,6 +4,7 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.structural.StructuralProductionReplayContract
+import decompengine.oracle.structural.StructuralSelectedFunctionAssessmentV1
 import decompengine.oracle.structural.VerifiedStructuralInputsV1
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -14,6 +15,7 @@ import kotlinx.serialization.json.jsonPrimitive
 /** Immutable result-pointer document for a captured, deliberately unscored full export. */
 internal object GccBundledFullExportCliResultV2 {
     const val PRODUCTION_BOUNDARY_SCORE_NAME = "structural-boundary-production-score.json"
+    const val SELECTED_FUNCTION_ASSESSMENT_NAME = "structural-selected-function-assessment.json"
     const val TREE_MANIFEST_NAME = "full-export-tree-manifest.json"
     const val MAXIMUM_TREE_MANIFEST_BYTES = 64 * 1024 * 1024
     internal val TREE_MANIFEST_JSON_LIMITS = StrictJsonLimits(
@@ -203,6 +205,7 @@ internal object GccBundledFullExportCliResultV2 {
             }
             val score = StructuralProductionReplayContract.scoreSelectedBoundary(verified)
             val accuracy = GccDriverProductionFunctionAccuracyV1.create(verified)
+            val assessment = StructuralProductionReplayContract.assessSelectedFunctions(verified)
             mapOf("boundaryScore" to JsonObject(mapOf(
                 "path" to JsonPrimitive(structuralBindingPath.parent.resolve(PRODUCTION_BOUNDARY_SCORE_NAME).toString()),
                 "sha256" to JsonPrimitive(OracleArtifacts.sha256(score)), "bytes" to JsonPrimitive(score.size),
@@ -211,11 +214,15 @@ internal object GccBundledFullExportCliResultV2 {
                 "path" to JsonPrimitive(structuralBindingPath.parent.resolve(GccDriverProductionFunctionAccuracyV1.SCORE_NAME).toString()),
                 "sha256" to JsonPrimitive(OracleArtifacts.sha256(accuracy)), "bytes" to JsonPrimitive(accuracy.size),
                 "scope" to JsonPrimitive(GccDriverProductionFunctionAccuracyV1.SCOPE),
+            )), "selectedFunctionAssessment" to JsonObject(mapOf(
+                "path" to JsonPrimitive(structuralBindingPath.parent.resolve(SELECTED_FUNCTION_ASSESSMENT_NAME).toString()),
+                "sha256" to JsonPrimitive(OracleArtifacts.sha256(assessment)), "bytes" to JsonPrimitive(assessment.size),
+                "scope" to JsonPrimitive(StructuralSelectedFunctionAssessmentV1.SCOPE),
             )))
         }.orEmpty()
         return OracleJson.canonicalBytes(JsonObject(mapOf(
-            "provider" to JsonPrimitive(if (verifiedBoundaryInputs == null) "gcc-bundled-cli-full-export-result-v2" else "gcc-bundled-cli-full-export-result-v3"),
-            "schemaVersion" to JsonPrimitive(if (verifiedBoundaryInputs == null) 2 else 3),
+            "provider" to JsonPrimitive(if (verifiedBoundaryInputs == null) "gcc-bundled-cli-full-export-result-v2" else "gcc-bundled-cli-full-export-result-v4"),
+            "schemaVersion" to JsonPrimitive(if (verifiedBoundaryInputs == null) 2 else 4),
             "complete" to JsonPrimitive(false),
             "releaseEligible" to JsonPrimitive(false),
             "scored" to JsonPrimitive(false),

@@ -395,6 +395,7 @@ class VerifiedStructuralInputsV1 private constructor(
     val programModelBytes: Long = admission.programModelBytes
     private val binding = admission.fullExportBindingBytes
     private val report = admission.reportBytes
+    private val assessment = admission.assessmentBytes
     val admittedDomains: Set<StructuralReplayDomainV1> = java.util.Collections.unmodifiableSet(
         setOf(StructuralReplayDomainV1.MODEL_PROVENANCE, StructuralReplayDomainV1.FUNCTION_BOUNDARIES,
             StructuralReplayDomainV1.SURVIVING_SYMBOL_IDENTITIES),
@@ -406,6 +407,7 @@ class VerifiedStructuralInputsV1 private constructor(
 
     internal val fullExportBindingBytes: ByteArray get() = binding.copyOf()
     internal val selectedBoundaryReportBytes: ByteArray get() = report.copyOf()
+    internal val selectedFunctionAssessmentBytes: ByteArray get() = assessment.copyOf()
 
     internal companion object {
         fun fromOwnedAdmission(admission: StructuralReplayAdapterRegistry.SelectedBoundaryAdmission): VerifiedStructuralInputsV1 =
@@ -423,6 +425,14 @@ object StructuralProductionReplayContract {
         inputs.requireDomain(StructuralReplayDomainV1.MODEL_PROVENANCE)
         inputs.requireDomain(StructuralReplayDomainV1.FUNCTION_BOUNDARIES)
         return inputs.selectedBoundaryReportBytes
+    }
+
+    /** Returns the immutable scoped overlay derived during admission from the complete captured model. */
+    fun assessSelectedFunctions(inputs: VerifiedStructuralInputsV1): ByteArray {
+        inputs.requireDomain(StructuralReplayDomainV1.MODEL_PROVENANCE)
+        inputs.requireDomain(StructuralReplayDomainV1.FUNCTION_BOUNDARIES)
+        inputs.requireDomain(StructuralReplayDomainV1.SURVIVING_SYMBOL_IDENTITIES)
+        return inputs.selectedFunctionAssessmentBytes
     }
 
     /** Derives exact-address and complete surviving-alias measurements from the admitted snapshot. */

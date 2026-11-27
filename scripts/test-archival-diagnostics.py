@@ -17,6 +17,8 @@ from unittest.mock import patch
 REPOSITORY = Path(__file__).resolve().parent.parent
 SOURCE = REPOSITORY / "scripts/collect-archival-diagnostics.py"
 SPEC = importlib.util.spec_from_file_location("archival_diagnostics_controls", SOURCE)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("Unable to load archival diagnostic collector controls")
 collector = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(collector)
 
@@ -49,17 +51,32 @@ class DiagnosticCollector(unittest.TestCase):
         self.assertEqual(status == 0, decoded[-1]["status"] == "passed")
         return status, raw, decoded
 
-    def test_actual_collector_selects_build_module_and_main_evidence_with_owner_facts(self):
+    def test_actual_collector_selects_build_module_ghidra_and_main_evidence_with_owner_facts(self):
         self.file()
         self.file("symbols-a/reports/build/modules/deep/unit.log", b"module diagnostic\n")
+        self.file("symbols-a/reports/ghidra_stdout.log", b"Ghidra stdout diagnostic\n")
+        self.file("symbols-a/reports/ghidra_stderr.log", b"Ghidra stderr diagnostic\n")
+        self.file("symbols-a/reports/ghidra_resource_usage.json", b'{"remainingWallClockNanosAtLaunch":123}')
         self.file("symbols-a/src/main.c", b"int main(void) { return 0; }\n")
         self.file("symbols-a/private-not-selected.txt", b"NOT-DIAGNOSTIC")
         status, raw, rows = self.collect()
         self.assertEqual(0, status)
         files = [row for row in rows if row["kind"] == "file"]
-        self.assertEqual(3, len(files))
+        self.assertEqual(6, len(files))
         self.assertTrue(all(set(("uid", "gid", "mode", "size")) <= row.keys() for row in files))
+        self.assertIn("Ghidra stdout diagnostic", raw)
+        self.assertIn("Ghidra stderr diagnostic", raw)
         self.assertNotIn("NOT-DIAGNOSTIC", raw)
+
+    def test_ghidra_log_retains_bounded_final_cleanup_evidence(self):
+        data = (b"x" * 600 + b"\n") * 64 + b"cleanup owner state\n"
+        self.file("symbols-a/analysis/reports/ghidra_stdout.log", data)
+        status, raw, rows = self.collect()
+        self.assertEqual(0, status)
+        report = next(row for row in rows if row.get("kind") == "file")
+        self.assertEqual(len(data), report["size"])
+        self.assertFalse(report["truncated"])
+        self.assertIn("cleanup owner state", raw)
 
     def test_newline_absolute_operand_counterexample_stays_inside_retained_directories(self):
         outside = tempfile.TemporaryDirectory(prefix="archival-external-control-", dir=collector.BUILD)

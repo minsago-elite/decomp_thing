@@ -550,6 +550,87 @@ class AgentProgressJournalTest {
     }
 
     @Test
+    fun `timed out snapshot close retains ownership until full history finalizes`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-full-run-finalization")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val journal = AgentProgressJournal.withFullRunWriterHooks(
+            root,
+            "reconstruction",
+            FullRunJournalWriterHooks(maximumQueuedEvents = 1, beforeAppend = {
+                entered.countDown()
+                release.await()
+                error("private append failure")
+            }),
+        )
+        try {
+            assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val firstClose = assertFailsWith<IllegalStateException> { journal.close() }
+            assertEquals("progress writer did not stop within five seconds", firstClose.message)
+
+            val blocked = runCatching { AgentProgressJournal(root, "reconstruction") }
+            blocked.getOrNull()?.close()
+            assertEquals("another workflow owns the progress journal",
+                assertIs<IllegalArgumentException>(blocked.exceptionOrNull()).message)
+
+            release.countDown()
+            val finalizationAttempt = runCatching { journal.close() }
+            assertNotNull(journal.persistenceFailure, "full history failure was not retained")
+            val finalization = assertIs<IllegalStateException>(finalizationAttempt.exceptionOrNull())
+            assertEquals("progress journal persistence failed", finalization.message)
+            val history = root.resolve(FullRunJournal.DIRECTORY).toFile().listFiles().orEmpty().single()
+            val metadata = FullRunJournal.metadata(history.toPath())
+            assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
+
+        } finally {
+            release.countDown()
+            runCatching { journal.close() }
+        }
+    }
+
+    @Test
+    fun `snapshot publication failure marks the retained full history incomplete`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-snapshot-history-failure")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        val snapshotEntered = java.util.concurrent.CountDownLatch(1)
+        val releaseSnapshot = java.util.concurrent.CountDownLatch(1)
+        val journal = AgentProgressJournal.withFullRunWriterHooks(
+            root,
+            "reconstruction",
+            FullRunJournalWriterHooks(),
+            afterSnapshotWrite = {
+                snapshotEntered.countDown()
+                releaseSnapshot.await()
+                error("injected snapshot publication failure")
+            },
+        )
+        try {
+            assertTrue(snapshotEntered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            journal.phase(AgentWorkflowPhase.AGENT_RUNNING)
+        } finally {
+            releaseSnapshot.countDown()
+        }
+
+        val closeFailure = assertFailsWith<IllegalStateException> { journal.close() }
+        assertEquals("progress journal persistence failed", closeFailure.message)
+        assertEquals("injected snapshot publication failure", journal.persistenceFailure?.message)
+        val history = assertNotNull(journal.fullRunDirectory)
+        val metadata = FullRunJournal.metadata(history)
+        assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
+        FullRunEventReader(history).use { reader ->
+            val events = mutableListOf<JsonObject>()
+            while (true) events += reader.next() ?: break
+            assertTrue(events.any { it.getValue("sequence").jsonPrimitive.long == 1L })
+            assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `sequence exhaustion preserves a readable boundary and releases rejected startup ownership`(): Unit {
         val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-sequence-exhaustion").toAbsolutePath())
         val root = createTempDirectory(parent, "journal-")

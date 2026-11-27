@@ -5,15 +5,29 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Run, Report, ResponseOf, RevisionDirectory, RevisionFile } from '../src/api/generated';
 import { sourceCopy } from '../src/copy/sources';
+import { stopOutcomeCopy } from '../src/copy/attemptOutcome';
 import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
+const structureRoute = vi.hoisted(() => ({ load: vi.fn(() => Promise.resolve({ default: () => null })) }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+vi.mock('../src/routes/loadStructureRoute', () => ({ loadStructureRoute: structureRoute.load }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/run-completed-unaccepted.json'), 'utf8')) as { data: Run }).data;
 const bootstrap = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap }).data;
-beforeEach(() => { transport.get.mockReset(); });
+beforeEach(() => { transport.get.mockReset(); structureRoute.load.mockClear(); });
+
+it('preloads the lazy structure route once a result revision is available', async () => {
+  const auth = await session();
+  transport.get.mockResolvedValue({ data: sample });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}/evidence`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'Browse recovered functions' });
+    await waitFor(() => expect(structureRoute.load).toHaveBeenCalledOnce());
+  } finally { auth.dispose(); }
+});
 
 it('wires explicit validation discovery into the attempt and discards its private data on sign out', async () => {
   const auth = await session();
@@ -112,6 +126,24 @@ it('pins attempt identity and shows completed candidate separately from acceptan
     expect(screen.queryByText('9007199254740993')).toBeNull();
   } finally { auth.dispose(); }
 });
+
+it.each(Object.keys(stopOutcomeCopy) as (keyof typeof stopOutcomeCopy)[])(
+  'preserves the catalogued stop description and technical code for %s', async terminalReason => {
+    const auth = await session();
+    transport.get.mockResolvedValue({ data: { ...sample, terminalReason } });
+    history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+    try {
+      render(<App basePath="/nested" session={auth} />);
+      const code = await screen.findByText(terminalReason, { selector: 'code' });
+      const description = code.closest('dd')!;
+      const outcome = stopOutcomeCopy[terminalReason];
+      expect(description.textContent).toBe(`${outcome.label}. ${outcome.detail} Recorded code ${terminalReason}.`);
+      expect(description.querySelector('strong')?.textContent).toBe(outcome.label);
+      expect(code.textContent).toBe(terminalReason);
+      expect(transport.get).toHaveBeenCalledOnce();
+    } finally { auth.dispose(); }
+  },
+);
 
 it('shows a canonical reference on an attempt read failure without exposing its server code', async () => {
   const auth = await session();

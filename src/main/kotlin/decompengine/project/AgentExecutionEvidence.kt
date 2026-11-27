@@ -223,6 +223,7 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
     private val acp: AcpInvocationEvidenceSnapshot,
 ) {
     val requestSha256: String get() = request.requestSha256
+    val wirePromptSha256: String? get() = request.wirePromptSha256
     private val eventChanges: List<AgentFileChange> =
         events.events.filterIsInstance<ArchivedFileChangeEvent>().map { it.change }
     val terminalOutcome: String = when (outcome) {
@@ -386,6 +387,7 @@ internal data class RenderedAcpReceiptArtifact(
  */
 internal class AcpExecutionReceiptDocument private constructor(
     val requestSha256: String,
+    val wirePromptSha256: String?,
     val resultChangesSha256: String,
     val terminalOutcome: String,
     val releaseComplete: Boolean,
@@ -419,6 +421,7 @@ internal class AcpExecutionReceiptDocument private constructor(
             )
             return AcpExecutionReceiptDocument(
                 artifact.requestSha256,
+                artifact.wirePromptSha256,
                 artifact.resultChangesSha256,
                 artifact.terminalOutcome,
                 rendered.releaseComplete,
@@ -620,6 +623,7 @@ class ReconstructionAgentExecutionEvidence private constructor(
     private val document: AcpExecutionReceiptDocument,
 ) {
     internal val requestSha256: String get() = document.requestSha256
+    internal val wirePromptSha256: String? get() = document.wirePromptSha256
     internal val terminalOutcome: String get() = document.terminalOutcome
     internal val releaseComplete: Boolean get() = document.releaseComplete
 

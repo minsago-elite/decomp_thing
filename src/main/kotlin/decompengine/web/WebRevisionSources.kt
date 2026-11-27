@@ -62,6 +62,9 @@ internal class WebRevisionSourceSnapshot(
     private companion object { val SHA256 = Regex("[a-f0-9]{64}") }
 }
 
+private val REVISION_SOURCE_INPUT_KEYS = setOf("path", "bytes", "sha256")
+private val REVISION_SOURCE_INPUT_SIZE = Regex("0|[1-9][0-9]{0,18}")
+
 /** Project only schema-supported commitments; no compiler/graph API is invoked by this read. */
 internal fun parseWebRevisionSourceInputs(
     reference: WebRevisionSourceReference,
@@ -82,14 +85,14 @@ internal fun parseWebRevisionSourceInputs(
     val paths = ArrayList<String>(records.size)
     val files = records.map { value ->
         val item = value as? JsonObject ?: error("Source input descriptor is invalid.")
-        require(item.keys == setOf("path", "bytes", "sha256"))
+        require(item.keys == REVISION_SOURCE_INPUT_KEYS)
         fun text(key: String): String = (item[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
             ?: error("Source input descriptor is invalid.")
         val path = text("path")
         val evidence = expected[path] ?: revisionSourceChanged()
         if (text("sha256") != evidence.sha256) revisionSourceChanged()
         val size = item["bytes"] as? JsonPrimitive ?: error("Source input descriptor is invalid.")
-        require(!size.isString && size.content.matches(Regex("0|[1-9][0-9]{0,18}")))
+        require(!size.isString && size.content.matches(REVISION_SOURCE_INPUT_SIZE))
         val bytes = requireNotNull(size.longOrNull)
         paths += path
         WebRevisionSourceFile(evidence, bytes)
@@ -119,6 +122,17 @@ internal fun revisionSourceDigest(text: String): String = revisionSourceHex(
 internal fun revisionSourceFileId(reference: WebRevisionSourceReference, index: Int, path: String): String =
     "file_${index}_${revisionSourceDigest(listOf("revision-source-file-v1", reference.jobId, reference.runId,
         reference.revisionId, reference.sourceSha256, path).joinToString("\u0000"))}"
+
+internal fun revisionSourceFileIds(reference: WebRevisionSourceReference, paths: List<String>): Map<String, String> {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val prefix = (listOf("revision-source-file-v1", reference.jobId, reference.runId,
+        reference.revisionId, reference.sourceSha256).joinToString("\u0000") + "\u0000").toByteArray(Charsets.UTF_8)
+    return paths.withIndex().associate { (index, path) ->
+        digest.reset()
+        digest.update(prefix)
+        path to "file_${index}_${revisionSourceHex(digest.digest(path.toByteArray(Charsets.UTF_8)))}"
+    }
+}
 
 /** Bounded pages over the canonical input set of one actual persisted candidate. */
 internal class WebRevisionSourcePages(private val source: (String, String, String) -> WebRevisionSourceSnapshot) {

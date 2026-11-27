@@ -1,4 +1,5 @@
 import { activityStagesCopy as copy, stageLabels } from '../copy/activityStages';
+import { commonCopy } from '../copy/common';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { StateMark } from '../shared/StateMark';
 import type { Run, WebEvent } from '../api/generated';
@@ -23,7 +24,8 @@ export function ActivityStages({ run, events, onSelectTask }: {
   const attempt = run ? attemptStage(run) : null;
   return <section aria-labelledby="activity-stages-title" class="activity-stages">
     <h3 id="activity-stages-title">{copy.title}</h3>
-    <p>{copy.attempt}: {attempt ? <StateMark tone={stageTone(attempt)}>{stageLabels[attempt]}</StateMark> : copy.attemptUnknown}</p>
+    <p>{displayMessage(commonCopy.labeledValue, { label: copy.attempt,
+      value: attempt ? <StateMark tone={stageTone(attempt)}>{stageLabels[attempt]}</StateMark> : copy.attemptUnknown })}</p>
     <p>{copy.attemptAuthority}</p>
     {stages.length === 0 ? <p>{copy.noTasks}</p> : <>
       <p>{displayMessage(copy.counts, { total: stages.filter(stage => stage.taskDigest !== null).length, summary: reported.map(state => textMessage(copy.countPart, { label: stageLabels[state], count: counts[state] })).join('; ') })}</p>

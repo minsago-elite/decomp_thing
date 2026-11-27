@@ -2,17 +2,22 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { promises as fs, readFileSync, createReadStream } from 'node:fs';
-import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
+import { join, basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
-import { seedStructure, qualifyStructure } from './packaged-browser-structure.mjs';
+import { seedStructure, qualifyStructure, qualifyStructureColdSample } from './packaged-browser-structure.mjs';
+import { structureProfile, verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
+import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
+import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
+import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence, encodeAuditEvidence, summarizeAuditEvidence } from './packaged-browser-audit.mjs';
+import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,20 +25,26 @@ const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
+  profile: { type: 'string', default: 'reference' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
+  'browser-temp-parent': { type: 'string', default: repo },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
   'java-home': { type: 'string' },
   python: { type: 'string', default: '/usr/bin/python3' },
   'no-sandbox': { type: 'boolean', default: false },
+  'structure-profile': { type: 'string', default: 'loopback' },
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|structure|live|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|structure|structure-cold|live|proxy|upgrade|legacy|audit] [--structure-profile loopback|constrained] [--profile reference|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--browser-temp-parent /absolute/short-owned-directory] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; structure-cold: one fresh-JVM/browser first-inventory sample; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
+  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP, navigation timing budgets, 50 job-filter submissions, and 50 alternating source-file metadata/preview actions (100ms local feedback / 500ms first data).');
+  console.log('profile reference preserves browser defaults and enforces the documented navigation budgets; profile constrained applies 4x CPU throttling and symmetric 10 Mbit/s network throughput to audit targets, records timings without applying those budgets, and does not establish a new threshold.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
-  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
+  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh; then labels, archives and deliberately deletes one inert job with peer-tab, deep-link and focus recovery (#173).');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -45,23 +56,38 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'structure', 'live', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, structure, live, proxy, upgrade or legacy');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'structure', 'structure-cold', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, structure, structure-cold, live, proxy, upgrade, legacy or audit');
+structureProfile(values['structure-profile']);
+assert.ok(['reference', 'constrained'].includes(values.profile), '--profile must be reference or constrained');
+assert.ok(values.mode === 'audit' || values.profile === 'reference', '--profile constrained is only supported with --mode audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
 } else assert.equal(values['previous-archive'], undefined, '--previous-archive is only supported with --mode upgrade');
 assert.ok(isAbsolute(values['work-parent']), '--work-parent must be an absolute directory');
+assert.ok(isAbsolute(values['browser-temp-parent']), '--browser-temp-parent must be an absolute directory');
 const archive = values.archive;
 const javaHome = values['java-home'];
 const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
 assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
+assert.ok((await fs.stat(values['browser-temp-parent'])).isDirectory(), '--browser-temp-parent must already exist');
 if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
 const sensitiveValues = [];
 const safeDiagnostic = (value) => {
   let safe = String(value).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
   for (const sensitive of sensitiveValues) if (sensitive) safe = safe.replaceAll(sensitive, '[redacted]');
   return safe;
+};
+const structureServerTimingSummary = (output) => {
+  const timings = [];
+  let overflow = 0;
+  for (const match of output.matchAll(/web-structure-timing phase=([a-z0-9-]{1,64}) elapsedNanos=(\d{1,16})/g)) {
+    const elapsedNanos = Number(match[2]);
+    if (timings.length >= 512 || !Number.isSafeInteger(elapsedNanos)) { overflow++; continue; }
+    timings.push({ phase: match[1], elapsedNanos });
+  }
+  return { timings, limit: 512, overflow };
 };
 const safeEvidence = (value) => {
   if (Array.isArray(value)) return value.map(safeEvidence);
@@ -82,6 +108,7 @@ let work;
 let browserTmp;
 let lastTarget;
 const targets = [];
+const cdpDiagnostics = new PackagedBrowserCdpDiagnostics();
 const profile = join(root, 'browser profile');
 const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
@@ -90,7 +117,15 @@ let applicationError = '';
 let applicationOutput = '';
 let browserError = '';
 let viteError = '';
-const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
+let driverCommit = process.env.PACKAGED_WEB_SOURCE_COMMIT ?? process.env.GITHUB_SHA ?? null;
+const driverPullRequestHeadCommit = process.env.PACKAGED_WEB_SOURCE_HEAD_SHA || null;
+const driverPullRequestBaseCommit = process.env.PACKAGED_WEB_SOURCE_BASE_SHA || null;
+if (!driverCommit) {
+  try { driverCommit = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
+  catch { /* The report records unavailable provenance; structure qualification fails closed below. */ }
+}
+const report = { status: 'running', mode: values.mode, testDirectory: root, browserProfileDirectory: profile, startedAt: new Date().toISOString(), driverNode: nodeVersion,
+  driverCommit, driverPullRequestHeadCommit, driverPullRequestBaseCommit,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -99,6 +134,15 @@ function startOwned(command, args, options) {
   const child = spawn(command, args, options);
   child.on('error', (error) => launchErrors.set(child, error));
   return child;
+}
+
+async function processStartTimeTicks(pid) {
+  const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
+  const commandEnd = stat.lastIndexOf(') ');
+  assert.ok(commandEnd >= 0, 'Linux process identity record is malformed');
+  const startTimeTicks = Number(stat.slice(commandEnd + 2).trim().split(/\s+/)[19]);
+  assert.ok(Number.isSafeInteger(startTimeTicks) && startTimeTicks > 0, 'Linux process start time is unavailable');
+  return startTimeTicks;
 }
 
 async function waitFor(check, label, timeout = 20000) {
@@ -121,13 +165,22 @@ class Protocol {
     this.pending = new Map();
     this.listeners = new Map();
     socket.addEventListener('message', ({ data }) => {
-      const message = JSON.parse(data);
+      let message;
+      try { message = JSON.parse(data); }
+      catch (error) {
+        const failure = new Error('Chrome DevTools returned invalid JSON', { cause: error });
+        for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(failure); }
+        this.pending.clear();
+        socket.close();
+        return;
+      }
       if (message.id) {
         const pending = this.pending.get(message.id);
         if (!pending) return;
         clearTimeout(pending.timer);
         this.pending.delete(message.id);
-        message.error ? pending.reject(new Error(message.error.message)) : pending.resolve(message.result);
+        if (message.error) pending.reject(new Error(`DevTools ${pending.method} failed: ${message.error.message}`));
+        else pending.resolve(message.result);
       } else {
         for (const listener of this.listeners.get(`${message.sessionId ?? ''}:${message.method}`) ?? []) listener(message.params);
       }
@@ -144,7 +197,7 @@ class Protocol {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`DevTools deadline: ${method}`)); }, 15000);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { method, resolve, reject, timer });
       this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
@@ -168,6 +221,7 @@ async function snapshot(directory, relative = '') {
   return result;
 }
 
+const forcedKill = new WeakSet();
 async function stop(process) {
   if (!process || process.exitCode !== null || process.signalCode !== null) return;
   if (!process.pid && launchErrors.has(process)) return; // Spawn failed before any process existed.
@@ -175,6 +229,7 @@ async function stop(process) {
   const deadline = Date.now() + 5000;
   while (process.exitCode === null && process.signalCode === null && Date.now() < deadline) await delay(50);
   if (process.exitCode === null && process.signalCode === null) {
+    forcedKill.add(process);
     process.kill('SIGKILL');
     const killDeadline = Date.now() + 5000;
     while (process.exitCode === null && process.signalCode === null && Date.now() < killDeadline) await delay(50);
@@ -190,7 +245,8 @@ async function connectDevTools(url, timeoutMs = 15000) {
         clearTimeout(timer);
         socket.removeEventListener('open', opened);
         socket.removeEventListener('error', failed);
-        error ? reject(error) : resolve();
+        if (error) reject(error);
+        else resolve();
       };
       const opened = () => finish();
       const failed = () => finish(new Error('Chrome DevTools connection failed'));
@@ -210,8 +266,13 @@ function responseHeader(response, name) {
   return value === undefined ? null : String(value);
 }
 
+function urlPath(value) {
+  try { return new URL(value).pathname; }
+  catch { return null; }
+}
+
 function responseSummary(response, source) {
-  return { responseRoute: new URL(response.url.split('#')[0].split('?')[0]).pathname,
+  return { responseRoute: urlPath(response.url.split('#')[0].split('?')[0]),
     status: response.status, contentSecurityPolicy: responseHeader(response, 'content-security-policy'), source };
 }
 
@@ -226,11 +287,17 @@ function correlateDocumentResponse(state, requestId, response, source) {
   state.pendingDocumentRequests.delete(requestId);
 }
 
-async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
+async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = false } = {}) {
   assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
-  const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
-  const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
+  const initialization = cdpDiagnostics.beginTarget();
+  const { targetId } = await cdpDiagnostics.command(initialization, 'Target.createTarget', () =>
+    cdp.call('Target.createTarget', { url: 'about:blank', ...(newWindow ? { newWindow: true } : {}) }));
+  cdpDiagnostics.setTargetIds(initialization, targetId);
+  const { sessionId } = await cdpDiagnostics.command(initialization, 'Target.attachToTarget', () =>
+    cdp.call('Target.attachToTarget', { targetId, flatten: true }));
+  cdpDiagnostics.setTargetIds(initialization, targetId, sessionId);
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    initializationComplete: false,
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
     cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
@@ -244,11 +311,11 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
     const type = event.type ?? (priorDocument ? 'Document' : undefined);
     const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
-    state.requests.push({ method: event.request.method, url, type });
+    state.requests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
-        route: new URL(url).pathname, method: event.request.method, status: null,
+        route: urlPath(url), method: event.request.method, status: null,
         contentSecurityPolicy: null, source: null, failure: null };
       state.documentRequests.push(request);
       state.pendingDocumentRequests.set(event.requestId, request);
@@ -258,7 +325,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
     if (cacheEnabled) state.cacheRequestIds.add(event.requestId);
   }, sessionId);
   cdp.on('Network.responseReceived', (event) => {
-    const response = { url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
+    const response = { requestId: event.requestId, url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
     if (cacheEnabled) state.cacheResponses.push({ requestId: event.requestId, ...response,
       fromDiskCache: event.response.fromDiskCache ?? null, fromServiceWorker: event.response.fromServiceWorker ?? null });
     if (event.type === 'Document' || state.pendingDocumentRequests.has(event.requestId)) {
@@ -290,22 +357,26 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
   cdp.on('Audits.issueAdded', ({ issue }) => {
     if (issue.code === 'ContentSecurityPolicyIssue') state.cspIssues.push(issue.details?.contentSecurityPolicyIssueDetails ?? issue);
   }, sessionId);
-  await cdp.call('Page.enable', {}, sessionId);
-  await cdp.call('Runtime.enable', {}, sessionId);
-  await cdp.call('Network.enable', {}, sessionId);
-  await cdp.call('Log.enable', {}, sessionId);
-  await cdp.call('Audits.enable', {}, sessionId);
-  await cdp.call('Runtime.addBinding', { name: '__decompRecordCspViolation' }, sessionId);
-  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
+  const initialize = (method, params = {}) => cdpDiagnostics.command(initialization, method,
+    () => cdp.call(method, params, sessionId));
+  await initialize('Page.enable');
+  await initialize('Runtime.enable');
+  await initialize('Network.enable');
+  await initialize('Log.enable');
+  await initialize('Audits.enable');
+  await initialize('Runtime.addBinding', { name: '__decompRecordCspViolation' });
+  await initialize('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
     globalThis.__decompRecordCspViolation(JSON.stringify({
       blockedURI: event.blockedURI, columnNumber: event.columnNumber, disposition: event.disposition,
       documentURI: event.documentURI, effectiveDirective: event.effectiveDirective,
       lineNumber: event.lineNumber, originalPolicy: event.originalPolicy,
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
-  });` }, sessionId);
-  await cdp.call('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled }, sessionId);
-  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
+  });` });
+  state.initialize = initialize;
+  await initialize('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled });
+  await initialize('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  state.initializationComplete = true;
   return state;
 }
 
@@ -335,6 +406,12 @@ function cspEvidence() {
     target.unresolvedDocumentRequests.map((request) => ({ targetIndex, ...request })));
   const orphanDocumentResponses = inspectedTargets.flatMap((target, targetIndex) =>
     target.orphanDocumentResponses.map((response) => ({ targetIndex, ...response })));
+  const invalidDocumentUrls = [
+    ...documentRequests.filter((request) => request.route === null || request.responseRoute === null)
+      .map(({ sequence, route, responseRoute }) => ({ sequence, route, responseRoute })),
+    ...orphanDocumentResponses.filter((response) => response.responseRoute === null)
+      .map(({ targetIndex, responseRoute }) => ({ targetIndex, responseRoute })),
+  ];
   return safeEvidence({
     inspectedTargets,
     attachedTargetCount: inspectedTargets.length,
@@ -345,6 +422,7 @@ function cspEvidence() {
     unresolvedDocumentRequests,
     orphanDocumentResponseCount: orphanDocumentResponses.length,
     orphanDocumentResponses,
+    invalidDocumentUrls,
     missingPolicyDocuments: documentPolicies.filter((response) => !response.contentSecurityPolicy),
     unsafePolicyDocuments: documentPolicies.filter((response) => /'unsafe-(?:inline|eval)'/.test(response.contentSecurityPolicy ?? '')),
     violationCount: productTargets.reduce((count, target) => count + targetCspViolationCount(target), 0),
@@ -370,7 +448,11 @@ async function qualifyCspDetector() {
 
 async function evaluate(target, expression) {
   const result = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, target.sessionId);
-  if (result.exceptionDetails) throw new Error(`Browser expression failed: ${result.exceptionDetails.text}`);
+  if (result.exceptionDetails) {
+    const exception = result.exceptionDetails.exception;
+    const detail = exception?.description ?? exception?.value ?? result.exceptionDetails.text;
+    throw new Error(`Browser expression failed: ${result.exceptionDetails.text}: ${detail}`);
+  }
   return result.result.value;
 }
 
@@ -384,9 +466,13 @@ async function ready(target, expression, label) {
   }, label);
 }
 
-async function capture(target, name) {
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
-  await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
+async function capture(target, name, clip) {
+  // Clipped (chart) captures stay inside the rendered viewport: beyond-viewport capture can resize
+  // the layout viewport (dropping the scrollbar) and reflow the figure after it was measured.
+  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport: false } : {}) }, target.sessionId);
+  const bytes = Buffer.from(data, 'base64');
+  await fs.writeFile(join(root, name), bytes);
+  return bytes;
 }
 
 async function prepareArchive(archivePath) {
@@ -394,8 +480,13 @@ async function prepareArchive(archivePath) {
   const archiveSha256 = await fileHash(archivePath);
   work = await fs.mkdtemp(join(values['work-parent'], 'packaged-browser-work-'));
   report.workDirectory = work;
-  const setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archivePath,
-    '--work', work, '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  let setup;
+  try {
+    setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archivePath,
+      '--work', work, '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  } catch (error) {
+    throw new Error('Packaged archive preparation failed or returned invalid JSON', { cause: error });
+  }
   const before = await snapshot(setup.app);
   const bins = join(work, 'launcher tools');
   const working = join(work, 'unrelated working directory');
@@ -407,7 +498,17 @@ async function prepareArchive(archivePath) {
   }
   // Gradle uses xargs with its default external echo command while parsing JVM options.
   await fs.symlink('/usr/bin/echo', join(bins, 'echo'));
-  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
+  const runtimeHome = join(working, 'jvm-home');
+  const runtimeTmp = join(working, 'jvm-tmp');
+  await fs.mkdir(runtimeHome);
+  await fs.mkdir(runtimeTmp);
+  // HOME/TMPDIR alone do not set HotSpot's directory properties. These controlled
+  // options keep the test JVM and its native extraction inside the owned workspace.
+  assert.ok(!/["\r\n]/.test(runtimeHome + runtimeTmp), 'JVM test directory cannot be represented in launcher options');
+  const structureTimingOption = ['structure', 'structure-cold'].includes(values.mode) ? ' -Ddecompengine.web.structureTiming=true' : '';
+  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8', HOME: runtimeHome,
+    TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp,
+    JAVA_TOOL_OPTIONS: `-XX:-UsePerfData -Duser.home="${runtimeHome}" -Djava.io.tmpdir="${runtimeTmp}" -Djna.tmpdir="${runtimeTmp}"${structureTimingOption}` };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
   return { ...setup, archivePath, archiveSha256, work, before, working, environment, data };
@@ -453,19 +554,30 @@ async function removeOwnedWork() {
 }
 
 try {
-  report.tools.chromeSha256 = await fileHash(chromeBinary);
+  if (values.mode === 'structure' || values.mode === 'structure-cold') {
+    report.sourceIdentity = await verifyStructureQualificationSource(repo, report.driverCommit);
+    report.sourceIdentity.revisionBinding = await verifyStructureSourceRevision(repo, report.driverCommit);
+    report.browserIdentity = await verifyStructureBrowser({ repoRoot: repo, chromePath: chromeBinary });
+    const browserLockSource = report.sourceIdentity.files.find(file => file.path === 'scripts/web-test-browser.json');
+    if (browserLockSource?.sha256 !== report.browserIdentity.lockSha256) {
+      throw new Error('verified browser lock changed after qualification source identity capture');
+    }
+    report.tools.chromeSha256 = report.browserIdentity.executableSha256;
+  } else {
+    report.tools.chromeSha256 = await fileHash(chromeBinary);
+  }
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
+  const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
-  const structureFixture = values.mode === 'structure' ? await seedStructure(data) : null;
+  const structureFixture = values.mode === 'structure' || values.mode === 'structure-cold' ? await seedStructure(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || scaleFixture || structureFixture || liveFixture);
-  const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
-    : structureFixture ? 'synthetic-structure.elf'
-    : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
+  const populated = !!(historyFixture || restartFixture || scaleFixture || structureFixture || liveFixture);
+  const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+    : structureFixture ? 'synthetic-structure.elf' : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
   if (values.mode === 'proxy') {
@@ -481,13 +593,25 @@ try {
   const origin = await launchApplication(installation, '0', values.mode === 'proxy' ? browserOrigin : undefined);
   report.origin = origin;
   browserOrigin ??= origin;
+  const observeNativeVisibility = values.mode === 'restart';
+  if (observeNativeVisibility && !process.env.DISPLAY) {
+    throw new Error('restart mode requires a real X display; run it under xvfb-run rather than emulating visibility');
+  }
+  report.browserDisplayMode = observeNativeVisibility ? 'headful-x11' : 'headless';
 
-  browserTmp = await fs.mkdtemp(join(repo, 'build/ct-'));
+  // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
+  // runners whose checkout path is /home/runner/work/<repo>/<repo>.
+  browserTmp = await fs.mkdtemp(join(values['browser-temp-parent'], '.ct-'));
+  const browserTmpForProcess = relative(repo, browserTmp);
+  assert(!isAbsolute(browserTmpForProcess) && browserTmpForProcess !== '..' && !browserTmpForProcess.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`),
+    'Browser temporary directory (--browser-temp-parent) must remain inside the repository');
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
-  browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
-    env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
+  browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
+    cwd: repo, env: { ...process.env, TMPDIR: browserTmpForProcess }, stdio: ['ignore', 'ignore', 'pipe'],
   });
+  report.runtimeProcesses = { applicationPid: application.pid, applicationStartTimeTicks: await processStartTimeTicks(application.pid),
+    browserPid: browser.pid, browserStartTimeTicks: await processStartTimeTicks(browser.pid) };
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
     if (browser.exitCode !== null || browser.signalCode !== null) throw new Error(`Browser exited: ${browserError}`);
@@ -496,6 +620,23 @@ try {
   const [port, socketPath] = portFile.trim().split('\n');
   const socket = await connectDevTools(`ws://127.0.0.1:${port}${socketPath}`);
   cdp = new Protocol(socket);
+  cdp.on('Target.targetCreated', ({ targetInfo }) => cdpDiagnostics.targetEvent('target-created', {
+    targetId: targetInfo?.targetId, targetType: targetInfo?.type, attached: targetInfo?.attached,
+  }));
+  cdp.on('Target.targetDestroyed', ({ targetId }) => cdpDiagnostics.targetEvent('target-destroyed', { targetId }));
+  cdp.on('Target.attachedToTarget', ({ sessionId, targetInfo }) => cdpDiagnostics.targetEvent('target-attached', {
+    targetId: targetInfo?.targetId, sessionId, targetType: targetInfo?.type, attached: targetInfo?.attached,
+  }));
+  cdp.on('Target.detachedFromTarget', ({ sessionId, targetId }) => cdpDiagnostics.targetEvent('target-detached', { targetId, sessionId }));
+  const discoveryStarted = performance.now();
+  try {
+    await cdp.call('Target.setDiscoverTargets', { discover: true });
+    report.targetDiscoveryMonitoring = { outcome: 'success', elapsedMs: Math.max(0, Math.round(performance.now() - discoveryStarted)) };
+  } catch (error) {
+    report.targetDiscoveryMonitoring = { outcome: error?.message === 'DevTools deadline: Target.setDiscoverTargets' ? 'deadline' : 'protocol-error',
+      elapsedMs: Math.max(0, Math.round(performance.now() - discoveryStarted)) };
+    throw error;
+  }
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
   report.cspDetectorProbe = await qualifyCspDetector();
@@ -620,6 +761,45 @@ try {
       recoveredCurrentBuild: true, mutationRequests: 0, noticeTitleWithinViewport: true, reloadControlWithinViewport: true });
     report.requests.upgrade = tab.requests;
     report.requests.upgradeCacheWarm = cacheProbe.requests;
+    report.jobDataCreated = false;
+  }
+  if (restartFixture) {
+    const restartApplication = async () => {
+      const previous = application;
+      const signalsSent = ['SIGTERM'];
+      previous.kill('SIGTERM');
+      await waitFor(() => previous.exitCode !== null || previous.signalCode !== null, 'graceful SIGTERM exit', 30000);
+      const exit = assertGracefulShutdown({ signalsSent, exitCode: previous.exitCode, signalCode: previous.signalCode });
+      const restartedOrigin = await launchApplication(installation, new URL(origin).port);
+      return { origin: restartedOrigin, exit };
+    };
+    const captureSafe = async (target, name) => {
+      const safe = await evaluate(target, `(() => {
+        if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
+        document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
+        return true;
+      })()`);
+      assert.ok(safe, 'Refusing to capture a page with a bootstrap fragment or visible credential');
+      await capture(target, name);
+    };
+    const restarted = await qualifyRestart({ fixture: restartFixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay,
+      readOutput: () => applicationOutput, restartApplication, captureSafe, sensitiveValues });
+    report.restart = restarted.evidence;
+    report.requests.restart = restarted.requests;
+    report.jobDataCreated = true;
+  }
+  if (values.mode === 'audit') {
+    const audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay,
+      profile: values.profile });
+    await delay(100); // Drain resource events from the last measured target.
+    const interactionPages = auditFixtures(repo, manifest.buildId).pages;
+    report.auditVerdict = assertAudit(audit, manifest,
+      targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin, undefined,
+      { interactionPages, extraInteractionContexts: chromiumSupplementalInteractionContexts(interactionPages), profile: values.profile });
+    report.audit = compactJobFilterAuditEvidence(audit);
+    assert.deepEqual(report.auditVerdict.failures, [], `Packaged audit failures:\n${report.auditVerdict.failures.join('\n')}`);
+    assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
+    assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live') {
@@ -779,7 +959,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'structure-cold' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -798,6 +978,23 @@ try {
     })();` }, authenticated.sessionId);
     await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.')`, 'authenticated packaged session');
+    if (values.mode === 'structure-cold') {
+      assert.equal(await evaluate(authenticated, 'location.hash'), '', 'Bootstrap fragment must be scrubbed');
+      assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0, 'Fresh browser profile must not retain browser storage');
+      const bootstrapFetches = await evaluate(authenticated, 'window.__sessionTestRequests');
+      assert.equal(bootstrapFetches.filter(request => request.method === 'POST').length, 1, 'The cold profile must make one bootstrap exchange');
+      assert.ok(bootstrapFetches.every(request => request.fragmentEmpty), 'Bootstrap credential must be scrubbed before fetch');
+      const cookies = (await cdp.call('Network.getCookies', { urls: [browserOrigin + '/nested/'] }, authenticated.sessionId)).cookies;
+      const localCookie = cookies.find(cookie => cookie.path === '/nested/' && cookie.httpOnly);
+      assert.ok(localCookie, 'Cold sample must use the packaged HttpOnly session cookie');
+      assert.equal(localCookie.sameSite, 'Strict');
+      report.sessionBootstrap = { authenticatedFromFreshProfile: true, handoffFragmentScrubbed: true,
+        storageEntries: 0, cookie: { httpOnly: true, sameSite: localCookie.sameSite, path: localCookie.path },
+        timedBoundary: 'click browse-recovered-functions to first 100 rendered rows' };
+      report.structureCold = await qualifyStructureColdSample({ fixture: structureFixture, makeTarget, cdp, evaluate, ready,
+        browserOrigin, applicationPid: application.pid, profile: values['structure-profile'] });
+      if (!report.structureCold.passed) throw new Error(`Cold structure sample failed: ${JSON.stringify(report.structureCold.failures)}`);
+    } else {
     if (values.mode === 'proxy') {
       await waitFor(() => hmrConnected, 'real Vite HMR connection');
       report.hmrConnected = true;
@@ -809,7 +1006,7 @@ try {
     }
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
     await evaluate(authenticated, `(() => {
-      const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename search')).querySelector('input');
+      const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
@@ -854,7 +1051,10 @@ try {
     await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.querySelector('#server-runtime-title')?.textContent === 'Connected server'`, 'authenticated Runtime');
     assert.equal((await evaluate(authenticated, 'window.__sessionTestRequests')).length, firstRequests.length,
       'Opening Runtime issued a probe or another bootstrap request');
-    assert.ok(await evaluate(authenticated, `document.body.innerText.includes('Workflow actions are unavailable in this preview.') && document.body.innerText.includes('33554432 bytes')`));
+    // The packaged environment configures no agent: agent options report that reason, unimplemented workflows say so.
+    assert.ok(await evaluate(authenticated, `(() => { const text = document.body.innerText; return text.includes('workflow-reconstruct-agent: unavailable')
+      && text.includes('HARNESS_NOT_CONFIGURED') && text.includes('workflow-build: unsupported') && text.includes('WORKFLOW_NOT_IMPLEMENTED')
+      && !text.includes('Workflow actions are unavailable in this preview.') && text.includes('33554432 bytes'); })()`));
     const scheduler = await evaluate(authenticated, `(() => {
       const section = document.querySelector('section[aria-labelledby="scheduler-title"]');
       return { text: section.innerText, values: Array.from(section.querySelectorAll('dd')).map(node => node.textContent), sampledAt: section.querySelector('time')?.dateTime };
@@ -906,9 +1106,11 @@ try {
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
-    if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+    if (values.mode === 'structure') report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+      applicationPid: application.pid, profile: values['structure-profile'] });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
+      report.jobLifecycle = await qualifyLifecycle({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
     }
     if (historyFixture) {
@@ -1009,6 +1211,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'metadata' || populated);
     report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || values.mode === 'metadata' || populated };
     report.requests.authenticated = authenticated.requests;
+    }
   }
 
   // Let the final DevTools events drain before taking the evidence snapshot.
@@ -1023,6 +1226,8 @@ try {
     'A packaged Document request did not receive a correlated response');
   assert.deepEqual(report.contentSecurityPolicy.orphanDocumentResponses, [],
     'A packaged Document response did not correlate to its request');
+  assert.deepEqual(report.contentSecurityPolicy.invalidDocumentUrls, [],
+    'A packaged Document request or response had an invalid URL');
   if (values.mode !== 'proxy') assert.deepEqual(report.contentSecurityPolicy.missingPolicyDocuments, [],
     'A packaged production Document response omitted CSP');
   assert.deepEqual(report.contentSecurityPolicy.unsafePolicyDocuments, [],
@@ -1041,7 +1246,7 @@ try {
   report.viteError = safeDiagnostic(viteError);
   console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
-  if (lastTarget && cdp) {
+  if (lastTarget && cdp && lastTarget.initializationComplete) {
     try {
       // Fail closed if the handoff has not been scrubbed. Hide editable fields
       // before a diagnostic capture, and never capture visible credential text.
@@ -1057,16 +1262,20 @@ try {
     } catch {
       report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
     }
-  }
+  } else if (lastTarget && !lastTarget.initializationComplete) report.failureScreenshotSkipped = 'Target initialization failed before page commands completed';
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
+  if (values.mode === 'restart' && application && forcedKill.has(application)) {
+    report.status = 'failed'; report.forcedShutdown = true; process.exitCode = 1;
+  }
   report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
   if (!report.shutdownConfirmed) {
     report.status = 'failed';
     report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => safeDiagnostic(result.reason));
     process.exitCode = 1;
   }
+  report.cdpTargetDiagnostics = cdpDiagnostics.snapshot();
   report.workRetained = true;
   if (report.shutdownConfirmed && !values['keep-workdir']) {
     try {
@@ -1082,7 +1291,24 @@ try {
       process.exitCode = 1;
     }
   }
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  console.log(JSON.stringify(report, null, 2));
+  if (report.audit) {
+    try {
+      const { bytes, metadata } = encodeAuditEvidence(scrubTokens(report.audit, sensitiveValues));
+      const file = 'audit-evidence.json.gz';
+      await fs.writeFile(join(root, file), bytes, { flag: 'wx', mode: 0o600 });
+      report.audit = summarizeAuditEvidence(report.audit, { file, ...metadata });
+    } catch (error) {
+      report.status = 'failed';
+      report.auditEvidenceError = safeDiagnostic(error.stack);
+      process.exitCode = 1;
+      report.audit = summarizeAuditEvidence(report.audit, { status: 'unavailable' });
+    }
+  }
+  if (values.mode === 'structure' || values.mode === 'structure-cold') report.structureServerTiming = structureServerTimingSummary(applicationError);
+  const retained = boundReport(scrubTokens(report, sensitiveValues));
+  // boundReport enforces the compact JSON byte ceiling. Pretty printing here would expand the
+  // retained artifact beyond that same ceiling even though the bounded object passed validation.
+  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained));
+  console.log(JSON.stringify(retained, null, 2));
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }

@@ -9,15 +9,21 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.LinkOption
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import java.util.concurrent.CancellationException
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -26,9 +32,11 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
+import kotlin.test.assertSame
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
@@ -41,6 +49,251 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
+    @Test
+    fun `cached checkpoint reconciliation uses cached prompt fingerprint only on reuse`() {
+        val model = oneModuleModel()
+        val module = DeterministicModulePlanner().plan(model).modules.single()
+        val request = ModuleReconstructionRequest(
+            module = module,
+            model = model,
+            sharedHeader = "",
+            moduleHeader = "",
+            privateHeader = "",
+            dependencyHeaders = emptyMap(),
+            workspaceRoot = Path.of("build/test-work/reconciliation-fingerprint"),
+            sessionEvidenceFingerprint = "a".repeat(64),
+        )
+        val cachedFingerprint = "b".repeat(64)
+
+        assertEquals(cachedFingerprint,
+            requestForCheckpointReconciliation(request, cachedFingerprint, checkpointReused = true).sessionEvidenceFingerprint)
+        assertEquals(request.sessionEvidenceFingerprint,
+            requestForCheckpointReconciliation(request, cachedFingerprint, checkpointReused = false).sessionEvidenceFingerprint)
+    }
+
+    @Test
+    fun `inactive unowned build definitions survive both profile selections`(): Unit {
+        for (profile in ReconstructionProfiles.builtIn) {
+            val previous = ReconstructionProfiles.builtIn.single { it.id != profile.id }
+            val project = createTempDirectory(
+                Path.of("build").toAbsolutePath().normalize().createDirectories(), "inactive-unowned-build-",
+            )
+            val inactive = project.resolve(previous.layout.declaration("build-definition").materialize())
+            val sentinel = "# user-owned ${previous.id} build definition\n".toByteArray()
+            Files.write(inactive, sentinel)
+
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, profile = profile)
+
+            assertTrue(inactive.exists(), "${profile.id} must preserve the unowned inactive definition")
+            assertContentEquals(sentinel, inactive.readBytes())
+            assertTrue(project.resolve(profile.layout.declaration("build-definition").materialize()).exists())
+            assertEquals(profile.sha256, manifest.profileSha256)
+        }
+    }
+
+    @Test
+    fun `inactive edited build definitions survive both profile switches`(): Unit {
+        for (previous in ReconstructionProfiles.builtIn) {
+            val selected = ReconstructionProfiles.builtIn.single { it.id != previous.id }
+            val project = inactiveBuildProject()
+            SourceTreeGenerator.generate(oneModuleModel(), project, profile = previous)
+            val inactive = project.resolve(previous.layout.declaration("build-definition").materialize())
+            val edited = inactive.readBytes() + "\n# retained user edit\n".toByteArray()
+            Files.write(inactive, edited)
+
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, profile = selected)
+
+            assertContentEquals(edited, inactive.readBytes())
+            assertEquals(selected.sha256, manifest.profileSha256)
+        }
+    }
+
+    @Test
+    fun `inactive cleanup rejects inconsistent manifest policy and record claims`(): Unit {
+        val previous = GeneratedCMakeReconstructionProfile.descriptor
+        val selected = GeneratedCNinjaReconstructionProfile.descriptor
+        val mutations = linkedMapOf<String, (String) -> String>(
+            "malformed" to { "{" },
+            "duplicate key" to { it.replaceFirst("{\n", "{\n  \"\\u0073chemaVersion\": 3,\n") },
+            "unknown field" to { it.replaceFirst("{\n", "{\n  \"unexpected\": true,\n") },
+            "legacy schema" to { it.replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": 2") },
+            "profile id" to { it.replace(previous.id, "unregistered-profile") },
+            "profile digest" to { it.replace(previous.sha256, "0".repeat(64)) },
+            "role mismatch" to { alterInactiveBuildRecord(it, "roles", JsonArray(listOf(JsonPrimitive("build-definition")))) },
+            "content kind" to { alterInactiveBuildRecord(it, "contentKind", JsonPrimitive("binary")) },
+            "different path" to { alterInactiveBuildRecord(it, "path", JsonPrimitive("notes.txt")) },
+            "digest mismatch" to { alterInactiveBuildRecord(it, "sha256", JsonPrimitive("0".repeat(64))) },
+            "different generator" to { alterInactiveBuildRecord(it, "generator", JsonPrimitive("user-authored")) },
+            "prompt claim" to { alterInactiveBuildRecord(it, "promptSha256", JsonPrimitive("a".repeat(64))) },
+            "acceptance claim" to { alterInactiveBuildRecord(it, "acceptedImplementation", JsonPrimitive(true)) },
+            "entity claim" to { alterInactiveBuildRecord(it, "entityIds", JsonArray(listOf(JsonPrimitive("fn_extra")))) },
+        )
+        for ((label, mutate) in mutations) {
+            val project = inactiveBuildProject()
+            SourceTreeGenerator.generate(oneModuleModel(), project, profile = previous)
+            val inactive = project.resolve("Makefile")
+            val before = inactive.readBytes()
+            val notes = project.resolve("notes.txt")
+            notes.writeText("unrelated retained bytes\n")
+            val manifestPath = project.resolve("source_tree_manifest.json")
+            val original = manifestPath.readText()
+            val changed = mutate(original)
+            assertNotEquals(original, changed, label)
+            manifestPath.writeText(changed)
+
+            try {
+                SourceTreeGenerator.generate(oneModuleModel(), project, profile = selected)
+            } catch (_: IllegalArgumentException) {
+                // Existing admission may reject malformed state before cleanup; that grants no deletion.
+            }
+
+            assertTrue(inactive.exists(), label)
+            assertContentEquals(before, inactive.readBytes(), label)
+            assertEquals("unrelated retained bytes\n", notes.readText(), label)
+        }
+    }
+
+    @Test
+    fun `inactive custom profile manifest does not authorize built in cleanup`(): Unit {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val previous = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+            base.budgets.copy(reconstructionMaximumContextCharacters = base.budgets.reconstructionMaximumContextCharacters - 1),
+            base.adapterConfiguration)
+        val project = inactiveBuildProject()
+        SourceTreeGenerator.generate(oneModuleModel(), project, profile = previous)
+        val inactive = project.resolve("Makefile")
+        val before = inactive.readBytes()
+
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCNinjaReconstructionProfile.descriptor)
+
+        assertContentEquals(before, inactive.readBytes())
+        assertEquals(GeneratedCNinjaReconstructionProfile.descriptor.sha256, manifest.profileSha256)
+    }
+
+    @Test
+    fun `inactive cleanup preserves nonregular replacements after ownership capture`(): Unit {
+        for (kind in listOf("symlink", "dangling symlink", "directory")) {
+            val project = inactiveBuildProject()
+            SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCMakeReconstructionProfile.descriptor)
+            val inactive = project.resolve("Makefile")
+            val referent = project.resolve("user-build.txt")
+            val before = inactive.readBytes()
+            val identity = Files.readAttributes(inactive, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+            var replaced = false
+
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project,
+                profile = GeneratedCNinjaReconstructionProfile.descriptor, onModuleProgress = { _, _, _ ->
+                    replaced = true
+                    if (kind == "symlink") {
+                        // A following reader would see the exact captured inode and digest.
+                        Files.move(inactive, referent, StandardCopyOption.ATOMIC_MOVE)
+                        assertEquals(identity, Files.readAttributes(referent,
+                            java.nio.file.attribute.BasicFileAttributes::class.java).fileKey())
+                    } else Files.delete(inactive)
+                    if (kind == "directory") Files.createDirectory(inactive)
+                    else Files.createSymbolicLink(inactive, referent.fileName)
+                })
+
+            assertTrue(replaced)
+            assertTrue(Files.exists(inactive, LinkOption.NOFOLLOW_LINKS), kind)
+            if (kind == "directory") assertTrue(Files.isDirectory(inactive, LinkOption.NOFOLLOW_LINKS))
+            else assertEquals(referent.fileName, Files.readSymbolicLink(inactive))
+            if (kind == "symlink") assertContentEquals(before, referent.readBytes())
+            else assertFalse(referent.exists())
+            assertEquals(GeneratedCNinjaReconstructionProfile.descriptor.sha256, manifest.profileSha256)
+        }
+    }
+
+    @Test
+    fun `inactive cleanup rechecks bytes and identity after reconstruction`(): Unit {
+        for (replacement in listOf(false, true)) {
+            val project = inactiveBuildProject()
+            SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCMakeReconstructionProfile.descriptor)
+            val inactive = project.resolve("Makefile")
+            val before = inactive.readBytes()
+            val identity = Files.readAttributes(inactive, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+            val expected = if (replacement) before else before + "\n# intervening edit\n".toByteArray()
+            var called = false
+            val reconstructor = validReconstructor {
+                called = true
+                if (replacement) {
+                    val changed = project.resolve("replacement-build")
+                    Files.write(changed, expected)
+                    Files.move(changed, inactive, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                    assertNotEquals(identity, Files.readAttributes(inactive,
+                        java.nio.file.attribute.BasicFileAttributes::class.java).fileKey())
+                } else Files.write(inactive, expected)
+            }
+
+            SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor,
+                profile = GeneratedCNinjaReconstructionProfile.descriptor)
+
+            assertTrue(called, "the mutation must occur after ownership capture")
+            assertContentEquals(expected, inactive.readBytes())
+        }
+    }
+
+    @Test
+    fun `inactive cleanup preserves a path claimed by the admitted current profile`(): Unit {
+        val project = inactiveBuildProject()
+        SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCMakeReconstructionProfile.descriptor)
+        val inactive = project.resolve("Makefile")
+        val before = inactive.readBytes()
+        val base = GeneratedCNinjaReconstructionProfile.descriptor
+        val selected = ReconstructionProfile(base.schemaVersion, base.id,
+            ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations + ProjectFileDeclaration(
+                "retained-user-build", "Makefile", setOf(ProjectFileRole.VIEWABLE, ProjectFileRole.EVIDENCE),
+                ProjectContentKind.UTF8_TEXT)), base.budgets, base.adapterConfiguration)
+
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, profile = selected)
+
+        assertEquals(selected.sha256, manifest.profileSha256, "the current descriptor must be admitted successfully")
+        assertTrue(project.resolve("build.ninja").exists())
+        assertContentEquals(before, inactive.readBytes())
+    }
+
+    @Test
+    fun `inactive cleanup propagates interruption after module publication`(): Unit {
+        val project = inactiveBuildProject()
+        SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCMakeReconstructionProfile.descriptor)
+        val inactive = project.resolve("Makefile")
+        val before = inactive.readBytes()
+        var called = false
+
+        try {
+            val failure = assertFailsWith<InterruptedException> {
+                SourceTreeGenerator.generate(oneModuleModel(), project,
+                    profile = GeneratedCNinjaReconstructionProfile.descriptor, onModuleProgress = { _, _, _ ->
+                        called = true
+                        Thread.currentThread().interrupt()
+                    })
+            }
+            assertTrue(called)
+            assertEquals("build definition cleanup interrupted", failure.message)
+            assertTrue(Thread.currentThread().isInterrupted, "cleanup must not clear the interrupt flag")
+        } finally {
+            Thread.interrupted()
+        }
+        assertContentEquals(before, inactive.readBytes())
+    }
+
+    private fun inactiveBuildProject(): Path = createTempDirectory(
+        Path.of("build").toAbsolutePath().normalize().createDirectories(), "inactive-build-ownership-",
+    )
+
+    private fun alterInactiveBuildRecord(
+        text: String,
+        key: String,
+        value: kotlinx.serialization.json.JsonElement,
+    ): String {
+        val root = Json.parseToJsonElement(text).jsonObject
+        val files = root.getValue("files").jsonArray.map { item ->
+            val record = item.jsonObject
+            if (record.getValue("path").jsonPrimitive.content == "Makefile") JsonObject(record + (key to value)) else record
+        }
+        return JsonObject(root + ("files" to JsonArray(files))).toString()
+    }
+
     @Test
     fun `reconstruction cannot claim the reserved repair generator`() {
         val project = createTempDirectory("source-tree-reserved-repair-generator-")
@@ -58,14 +311,15 @@ class SourceTreeTest {
     }
 
     @Test
-    fun `rerun with the other profile removes the stale build definition`() {
+    fun `rerun with the other profile removes the stale build definition`(): Unit {
         val project = createTempDirectory("source-tree-profile-rerun-")
         val model = oneModuleModel()
         val makeProfile = GeneratedCMakeReconstructionProfile.descriptor
         val ninjaProfile = GeneratedCNinjaReconstructionProfile.descriptor
         SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
         assertTrue(project.resolve("Makefile").exists())
-        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = ninjaProfile)
+        SourceTreeGenerator.generate(model.copy(inputSha256 = "b".repeat(64)), project,
+            reconstructor = validReconstructor(), profile = ninjaProfile)
         assertTrue(project.resolve("build.ninja").exists())
         assertFalse(project.resolve("Makefile").exists(), "make-to-ninja rerun must not retain a stale Makefile")
         SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
@@ -640,7 +894,7 @@ class SourceTreeTest {
         ).cacheIdentity()
 
         assertNotEquals(first, second)
-        assertTrue(first.endsWith(":v3"))
+        assertTrue(first.endsWith(":v5"))
         assertFalse(first.contains(firstDescriptor))
     }
 
@@ -681,6 +935,7 @@ class SourceTreeTest {
         val expected = GeneratedCMakeReconstructionProfile.descriptor
 
         val parsed = SourceTreeManifestReader.parse(text, expected)
+        assertEquals(parsed.toJson(), SourceTreeManifestReader.parse(Json.parseToJsonElement(text).jsonObject, expected).toJson())
         assertEquals(parsed.editablePaths, SourceTreeManifestReader.editablePaths(project))
         assertFailsWith<IllegalArgumentException> {
             SourceTreeManifestReader.parse(text.replaceFirst("{\n", "{\n  \"unexpected\": true,\n"), expected)
@@ -721,6 +976,344 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `structure manifest byte reader matches strict tree reader acceptance and projection`() {
+        val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "manifest-byte-reader-")
+        val manifest = SourceTreeGenerator.generate(model(), project)
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val bytes = manifest.toJson().toByteArray(Charsets.UTF_8)
+        val limits = StrictJsonLimits(
+            maximumInputBytes = 16 * 1024 * 1024,
+            maximumCanonicalBytes = 16 * 1024 * 1024,
+            maximumDepth = 32,
+            maximumNodes = 1_000_000,
+            maximumStringBytes = 16 * 1024,
+            maximumTotalStringBytes = 16 * 1024 * 1024,
+        )
+
+        fun treeResult(candidate: ByteArray, candidateLimits: StrictJsonLimits = limits): Result<String> = runCatching {
+            val root = OracleJson.parse(candidate, candidateLimits) as? JsonObject
+                ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
+            SourceTreeManifestReader.parse(root, profile).toJson()
+        }
+        fun byteResult(candidate: ByteArray, candidateLimits: StrictJsonLimits = limits): Result<String> = runCatching {
+            SourceTreeManifestByteReader.parse(candidate, candidateLimits).also { document ->
+                require(document.isObject) { "Source catalog manifest is invalid." }
+            }.validate(profile, null).toJson()
+        }
+        fun ByteArray.indexOfSubArray(needle: ByteArray): Int {
+            if (needle.isEmpty()) return 0
+            for (start in 0..this.size - needle.size) {
+                var matches = true
+                for (offset in needle.indices) if (this[start + offset] != needle[offset]) {
+                    matches = false
+                    break
+                }
+                if (matches) return start
+            }
+            return -1
+        }
+        fun replaceOnce(candidate: ByteArray, old: String, replacement: String): ByteArray {
+            val needle = old.toByteArray(Charsets.UTF_8)
+            val start = candidate.indexOfSubArray(needle)
+            check(start >= 0) { "fixture marker not found: $old" }
+            return candidate.copyOfRange(0, start) + replacement.toByteArray(Charsets.UTF_8) +
+                candidate.copyOfRange(start + needle.size, candidate.size)
+        }
+        fun replaceGeneratorPayload(candidate: ByteArray, payload: ByteArray): ByteArray {
+            val marker = "\"generator\": \"".toByteArray(Charsets.UTF_8)
+            val start = candidate.indexOfSubArray(marker)
+            check(start >= 0) { "generator marker not found" }
+            val payloadStart = start + marker.size
+            var end = payloadStart
+            while (end < candidate.size && candidate[end] != '"'.code.toByte()) end++
+            check(end < candidate.size) { "generator string did not terminate" }
+            return candidate.copyOfRange(0, payloadStart) + payload + candidate.copyOfRange(end, candidate.size)
+        }
+        fun treeFailure(candidate: ByteArray): String? = treeResult(candidate).exceptionOrNull()?.message
+        fun byteFailure(candidate: ByteArray): String? = byteResult(candidate).exceptionOrNull()?.message
+
+        assertEquals(treeResult(bytes).getOrThrow(), byteResult(bytes).getOrThrow())
+        val decodedRoot = OracleJson.parse(bytes, limits) as JsonObject
+        val reversedRoot = JsonObject(decodedRoot.entries.reversed().associate { it.key to it.value })
+        assertEquals(treeResult(reversedRoot.toString().toByteArray()).getOrThrow(),
+            byteResult(reversedRoot.toString().toByteArray()).getOrThrow(), "root field order")
+        val firstFile = decodedRoot.getValue("files").jsonArray.first().jsonObject
+        val reorderedFile = JsonObject(firstFile.entries.reversed().associate { it.key to it.value })
+        val reorderedNestedRoot = JsonObject(decodedRoot.toMutableMap().apply {
+            put("files", JsonArray(listOf(reorderedFile) + decodedRoot.getValue("files").jsonArray.drop(1)))
+        })
+        val reorderedNestedBytes = reorderedNestedRoot.toString().toByteArray(Charsets.UTF_8)
+        assertEquals(treeResult(reorderedNestedBytes).getOrThrow(), byteResult(reorderedNestedBytes).getOrThrow(),
+            "file record field order")
+        val unicodeGenerator = replaceGeneratorPayload(bytes, "π😃".toByteArray(Charsets.UTF_8))
+        assertEquals(treeResult(unicodeGenerator).getOrThrow(), byteResult(unicodeGenerator).getOrThrow(),
+            "valid multibyte and supplementary UTF-8")
+        val malformed = listOf(
+            bytes + " trailing".toByteArray(),
+            replaceOnce(bytes, "\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"\\u0073chemaVersion\": 3,"),
+            replaceOnce(bytes, "\"schemaVersion\": 3", "\"schemaVersion\": \"3\""),
+            bytes.copyOf().also { copy -> copy[copy.lastIndex] = 0xFF.toByte() },
+            bytes.copyOf().also { copy ->
+                val marker = "\"generator\": \"".toByteArray()
+                val at = copy.indexOfSubArray(marker)
+                check(at >= 0)
+                copy[at + marker.size] = 0xC0.toByte()
+            },
+            replaceOnce(bytes, "\"acceptedImplementation\": false", "\"acceptedImplementation\": \"false\""),
+            replaceOnce(bytes, "archive-payload", "unknown-role"),
+            replaceOnce(bytes, "\"path\": \"Makefile\"", "\"path\": \"../Makefile\""),
+            replaceOnce(bytes, "\"files\": [", "\"files\": {"),
+            replaceOnce(bytes, "\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"ignored\": false,"),
+            replaceOnce(bytes, "\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"ignored\": {\"a\": [true, null]},"),
+            replaceOnce(bytes, "\"schemaVersion\": 3", "\"schemaVersion\": 3.0"),
+            replaceOnce(bytes, "\"schemaVersion\": 3", "\"schemaVersion\": 03"),
+            replaceGeneratorPayload(bytes, "\\uD800".toByteArray(Charsets.UTF_8)),
+            replaceGeneratorPayload(bytes, "\\uDC00".toByteArray(Charsets.UTF_8)),
+            replaceGeneratorPayload(bytes, "\\uD800x".toByteArray(Charsets.UTF_8)),
+            replaceGeneratorPayload(bytes, "\\uZZZZ".toByteArray(Charsets.UTF_8)),
+            replaceGeneratorPayload(bytes, byteArrayOf(0xC0.toByte(), 0xAF.toByte())), // overlong
+            replaceGeneratorPayload(bytes, byteArrayOf(0xED.toByte(), 0xA0.toByte(), 0x80.toByte())), // encoded surrogate
+            replaceGeneratorPayload(bytes, byteArrayOf(0xE2.toByte(), 0x82.toByte())), // truncated sequence
+            replaceGeneratorPayload(bytes, byteArrayOf(0xF4.toByte(), 0x90.toByte(), 0x80.toByte(), 0x80.toByte())), // > U+10FFFF
+        )
+        malformed.forEachIndexed { index, candidate ->
+            assertEquals(treeResult(candidate).isSuccess, byteResult(candidate).isSuccess, "case $index")
+        }
+
+        val tightStringLimits = limits.copy(maximumStringBytes = 8)
+        assertEquals(treeResult(bytes, tightStringLimits).isSuccess,
+            byteResult(bytes, tightStringLimits).isSuccess, "per-string byte limit")
+        val tightAggregateLimits = limits.copy(maximumTotalStringBytes = 128)
+        assertEquals(treeResult(bytes, tightAggregateLimits).isSuccess,
+            byteResult(bytes, tightAggregateLimits).isSuccess, "aggregate string byte limit")
+        val tightDepthLimits = limits.copy(maximumDepth = 2)
+        assertEquals(treeResult(bytes, tightDepthLimits).isSuccess,
+            byteResult(bytes, tightDepthLimits).isSuccess, "depth limit")
+        val tightNodeLimits = limits.copy(maximumNodes = 8)
+        assertEquals(treeResult(bytes, tightNodeLimits).isSuccess,
+            byteResult(bytes, tightNodeLimits).isSuccess, "node limit")
+
+        fun measure(element: kotlinx.serialization.json.JsonElement, depth: Int = 1): Triple<Int, Int, Int> = when (element) {
+            is JsonObject -> {
+                val keys = element.keys.map { it.toByteArray(Charsets.UTF_8).size }
+                val children = element.values.map { measure(it, depth + 1) }
+                Triple(
+                    maxOf(depth, children.maxOfOrNull { it.first } ?: depth),
+                    keys.maxOrNull()?.let { maxOf(it, children.maxOfOrNull { child -> child.second } ?: 0) }
+                        ?: (children.maxOfOrNull { it.second } ?: 0),
+                    keys.sum() + children.sumOf { it.third },
+                )
+            }
+            is JsonArray -> {
+                val children = element.map { measure(it, depth + 1) }
+                Triple(maxOf(depth, children.maxOfOrNull { it.first } ?: depth),
+                    children.maxOfOrNull { it.second } ?: 0, children.sumOf { it.third })
+            }
+            else -> {
+                val stringBytes = if (element is JsonPrimitive && element.isString) {
+                    element.content.toByteArray(Charsets.UTF_8).size
+                } else 0
+                Triple(0, stringBytes, stringBytes)
+            }
+        }
+        fun countValues(element: kotlinx.serialization.json.JsonElement): Int = when (element) {
+            is JsonObject -> 1 + element.values.sumOf(::countValues)
+            is JsonArray -> 1 + element.sumOf(::countValues)
+            else -> 1
+        }
+        val (maximumDepth, maximumStringBytes, totalStringBytes) = measure(decodedRoot)
+        val exactLimits = limits.copy(
+            maximumInputBytes = bytes.size,
+            maximumDepth = maximumDepth,
+            maximumNodes = countValues(decodedRoot),
+            maximumStringBytes = maximumStringBytes,
+            maximumTotalStringBytes = totalStringBytes,
+        )
+        assertTrue(treeResult(bytes, exactLimits).isSuccess,
+            "tree reader must accept exact limits: ${treeResult(bytes, exactLimits).exceptionOrNull()}")
+        assertTrue(byteResult(bytes, exactLimits).isSuccess,
+            "byte reader must accept exact limits: ${byteResult(bytes, exactLimits).exceptionOrNull()}")
+        val oneByteShort = exactLimits.copy(maximumInputBytes = bytes.size - 1)
+        assertFalse(treeResult(bytes, oneByteShort).isSuccess, "tree reader must reject input limit minus one")
+        assertFalse(byteResult(bytes, oneByteShort).isSuccess, "byte reader must reject input limit minus one")
+        val oneStringByteShort = exactLimits.copy(maximumStringBytes = maximumStringBytes - 1)
+        assertFalse(treeResult(bytes, oneStringByteShort).isSuccess, "tree reader must reject string limit minus one")
+        assertFalse(byteResult(bytes, oneStringByteShort).isSuccess, "byte reader must reject string limit minus one")
+        val aggregateByteShort = exactLimits.copy(maximumTotalStringBytes = totalStringBytes - 1)
+        assertFalse(treeResult(bytes, aggregateByteShort).isSuccess, "tree reader must reject aggregate limit minus one")
+        assertFalse(byteResult(bytes, aggregateByteShort).isSuccess, "byte reader must reject aggregate limit minus one")
+        val oneLevelShort = exactLimits.copy(maximumDepth = maximumDepth - 1)
+        assertFalse(treeResult(bytes, oneLevelShort).isSuccess, "tree reader must reject depth limit minus one")
+        assertFalse(byteResult(bytes, oneLevelShort).isSuccess, "byte reader must reject depth limit minus one")
+        val oneNodeShort = exactLimits.copy(maximumNodes = countValues(decodedRoot) - 1)
+        assertFalse(treeResult(bytes, oneNodeShort).isSuccess, "tree reader must reject node limit minus one")
+        assertFalse(byteResult(bytes, oneNodeShort).isSuccess, "byte reader must reject node limit minus one")
+
+        val missingInput = JsonObject(decodedRoot.filterKeys { it != "inputSha256" })
+        val wrongRoleRoot = JsonObject(decodedRoot.toMutableMap().apply {
+            val records = getValue("files").jsonArray
+            val first = records.first().jsonObject
+            put("files", JsonArray(listOf(JsonObject(first.toMutableMap().apply {
+                put("roles", JsonArray(listOf(JsonPrimitive("unknown-role"))))
+            }))))
+        })
+        val precedence = JsonObject(wrongRoleRoot.filterKeys { it != "inputSha256" })
+        val precedenceBytes = precedence.toString().toByteArray(Charsets.UTF_8)
+        assertEquals(treeFailure(precedenceBytes), byteFailure(precedenceBytes), "semantic refusal precedence")
+        assertTrue(treeFailure(missingInput.toString().toByteArray()) != null)
+
+        val cancellation = CancellationException("cancel source manifest parse")
+        val manyNodes = "{\"values\":[${List(1100) { "null" }.joinToString(",")}] }"
+            .toByteArray(Charsets.UTF_8)
+        val syntaxCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(manyNodes, limits) { stage ->
+                if (stage == "while validating source manifest JSON values") throw cancellation
+            }
+        }
+        assertSame(cancellation, syntaxCancellation, "syntax-pass cancellation must retain its identity")
+        val manyFiles = JsonObject(decodedRoot.toMutableMap().apply {
+            put("files", JsonArray(List(300) { decodedRoot.getValue("files").jsonArray.first() }))
+        }).toString().toByteArray(Charsets.UTF_8)
+        val typedCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(manyFiles, limits) { stage ->
+                if (stage == "while parsing source manifest files") throw cancellation
+            }
+        }
+        assertSame(cancellation, typedCancellation, "typed-pass cancellation must retain its identity")
+        val validationCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(bytes, limits).validate(profile, null) { stage ->
+                if (stage == "while validating source manifest files") throw cancellation
+            }
+        }
+        assertSame(cancellation, validationCancellation, "semantic-pass cancellation must retain its identity")
+
+        val manyOrderedFiles = JsonObject(decodedRoot.toMutableMap().apply {
+            val template = decodedRoot.getValue("files").jsonArray.first().jsonObject
+            put("files", JsonArray(List(1_100) { index ->
+                JsonObject(template + ("path" to JsonPrimitive("manifest-entry-${index.toString().padStart(5, '0')}")))
+            }))
+        }).toString().toByteArray(Charsets.UTF_8)
+        val orderCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(manyOrderedFiles, limits).validate(profile, null) { stage ->
+                if (stage == "while checking source manifest file order") throw cancellation
+            }
+        }
+        assertSame(cancellation, orderCancellation, "sortedness cancellation must retain its identity")
+
+        val manyEntityIds = JsonObject(decodedRoot.toMutableMap().apply {
+            val template = decodedRoot.getValue("files").jsonArray.first().jsonObject
+            val ids = JsonArray(List(3_000) { index -> JsonPrimitive("entity-${index.toString().padStart(5, '0')}") })
+            put("files", JsonArray(listOf(JsonObject(template + ("entityIds" to ids)))))
+        }).toString().toByteArray(Charsets.UTF_8)
+        val constructionCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(manyEntityIds, limits).validate(profile, null) { stage ->
+                if (stage == "while constructing source manifest file evidence") throw cancellation
+            }
+        }
+        assertSame(cancellation, constructionCancellation, "record-construction cancellation must retain its identity")
+
+        Thread.currentThread().interrupt()
+        try {
+            assertFailsWith<InterruptedException> { SourceTreeManifestByteReader.parse(bytes, limits) }
+        } finally {
+            Thread.interrupted()
+        }
+        val parsed = SourceTreeManifestByteReader.parse(bytes, limits)
+        Thread.currentThread().interrupt()
+        try {
+            assertFailsWith<InterruptedException> { parsed.validate(profile, null) }
+        } finally {
+            Thread.interrupted()
+        }
+    }
+
+    @Test
+    fun `manifest collection ordering rejects descending and duplicate values without changing decode precedence`() {
+        val project = createTempDirectory("source-tree-manifest-order-")
+        val manifest = SourceTreeGenerator.generate(model(), project)
+        val expectedProfile = GeneratedCMakeReconstructionProfile.descriptor
+        val root = Json.parseToJsonElement(manifest.toJson()).jsonObject
+        val files = root.getValue("files").jsonArray
+        val multiRoleIndex = files.indexOfFirst { it.jsonObject.getValue("roles").jsonArray.size >= 2 }
+        val multiEntityIndex = files.indexOfFirst { it.jsonObject.getValue("entityIds").jsonArray.size >= 2 }
+        assertTrue(multiRoleIndex >= 0)
+        assertTrue(multiEntityIndex >= 0)
+        assertTrue(files.size >= 2)
+
+        fun fileCollection(index: Int, field: String, values: JsonArray): JsonArray = JsonArray(
+            files.mapIndexed { current, element ->
+                if (current != index) element else JsonObject(element.jsonObject.toMutableMap().apply { put(field, values) })
+            },
+        )
+        fun rootWith(name: String, values: JsonArray) = JsonObject(root.toMutableMap().apply { put(name, values) })
+        fun rejects(candidate: JsonObject, message: String) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                SourceTreeManifestReader.parse(candidate, expectedProfile)
+            }
+            assertEquals(message, failure.message)
+        }
+
+        assertEquals(
+            1,
+            SourceTreeManifestReader.parse(rootWith("files", JsonArray(files.take(1))), expectedProfile).files.size,
+        )
+
+        val roles = files[multiRoleIndex].jsonObject.getValue("roles").jsonArray
+        rejects(
+            rootWith("files", fileCollection(multiRoleIndex, "roles", JsonArray(roles.reversed()))),
+            "source tree manifest file roles must be unique and sorted",
+        )
+        rejects(
+            rootWith("files", fileCollection(multiRoleIndex, "roles", JsonArray(roles + roles.last()))),
+            "source tree manifest file roles must be unique and sorted",
+        )
+
+        val entityIds = files[multiEntityIndex].jsonObject.getValue("entityIds").jsonArray
+        rejects(
+            rootWith("files", fileCollection(multiEntityIndex, "entityIds", JsonArray(entityIds.reversed()))),
+            "source tree manifest entity IDs must be unique and sorted",
+        )
+        rejects(
+            rootWith("files", fileCollection(multiEntityIndex, "entityIds", JsonArray(entityIds + entityIds.last()))),
+            "source tree manifest entity IDs must be unique and sorted",
+        )
+
+        rejects(rootWith("files", JsonArray(files.reversed())), "source tree manifest files must be unique and sorted")
+        rejects(rootWith("files", JsonArray(files + files.last())), "source tree manifest files must be unique and sorted")
+
+        // String.compareTo sorts supplementary code points by their UTF-16 surrogate pair.
+        val unicodeSortedIds = listOf("ascii", "\uD83D\uDE00", "\uE000")
+        for (name in listOf("unresolvedEntityIds", "unresolvedImplementationIds")) {
+            val message = "source tree manifest $name must be unique and sorted"
+            val parsedEmpty = SourceTreeManifestReader.parse(rootWith(name, JsonArray(emptyList())), expectedProfile)
+            assertTrue(if (name == "unresolvedEntityIds") parsedEmpty.unresolvedEntityIds.isEmpty() else parsedEmpty.unresolvedImplementationIds.isEmpty())
+            val parsedSingleton = SourceTreeManifestReader.parse(rootWith(name, JsonArray(listOf(JsonPrimitive("one")))), expectedProfile)
+            assertEquals(
+                listOf("one"),
+                if (name == "unresolvedEntityIds") parsedSingleton.unresolvedEntityIds else parsedSingleton.unresolvedImplementationIds,
+            )
+            val unicode = JsonArray(unicodeSortedIds.map(::JsonPrimitive))
+            val parsedUnicode = SourceTreeManifestReader.parse(rootWith(name, unicode), expectedProfile)
+            assertEquals(
+                unicodeSortedIds,
+                if (name == "unresolvedEntityIds") parsedUnicode.unresolvedEntityIds else parsedUnicode.unresolvedImplementationIds,
+            )
+            rejects(rootWith(name, JsonArray(unicodeSortedIds.reversed().map(::JsonPrimitive))), message)
+            rejects(rootWith(name, JsonArray((unicodeSortedIds + unicodeSortedIds.last()).map(::JsonPrimitive))), message)
+        }
+
+        val mixedInvalidEntityIds = JsonArray(listOf(entityIds.last(), entityIds.first(), JsonPrimitive(7)))
+        val mixedInvalid = rootWith(
+            "files",
+            fileCollection(multiEntityIndex, "entityIds", mixedInvalidEntityIds),
+        )
+        val failure = assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(mixedInvalid, expectedProfile)
+        }
+        assertEquals("source tree manifest entity IDs must be strings", failure.message)
+    }
+
+    @Test
     fun `LLM reconstruction is restricted to the planned module path`() {
         val project = createTempDirectory("source-tree-llm-")
         val harness = object : AgentHarness {
@@ -729,17 +1322,13 @@ class SourceTreeTest {
                 onEvent: (AgentExecutionEvent) -> Unit,
             ): AgentExecutionResult {
                 assertTrue(request.objective.contains("src/modules/parse.c"))
-                assertTrue(request.contextInputs.single { it.id == "observed-behavior" }.content.contains("case default: stdout=ok"))
+                assertTrue(request.contextInputs.single { it.id == "observed-behavior" }.content.contains("legacy or opaque exploration is unscoped"))
                 val instructions = request.objective
                 assertTrue(instructions.contains("-Werror"))
                 assertTrue(instructions.contains("-c src/modules/parse.c -o /dev/null"))
                 val path = AgentWorkspacePath("project", "src/modules/parse.c")
                 val expectedRules = mapOf(
-                    "include/decomp_types.h" to setOf(AgentOperation.READ_FILE),
-                    "include/modules/parse.h" to setOf(AgentOperation.READ_FILE),
-                    "src/modules/parse_internal.h" to setOf(AgentOperation.READ_FILE),
                     "src/modules/parse.c" to setOf(
-                        AgentOperation.READ_FILE,
                         AgentOperation.WRITE_FILE,
                         AgentOperation.CREATE_FILE,
                     ),
@@ -810,21 +1399,12 @@ class SourceTreeTest {
             error("a profile-hidden context file must not be sent to the agent")
         }
 
-        val manifest = SourceTreeGenerator.generate(
-            oneModuleModel(),
-            project,
-            reconstructor = BoundedLlmModuleReconstructor(harness),
-            profile = alternateProfile,
-        )
-
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeGenerator.generate(oneModuleModel(), project,
+                reconstructor = BoundedLlmModuleReconstructor(harness), profile = alternateProfile)
+        }
         assertFalse(called)
-        assertTrue("fn_0000000000401000" in manifest.unresolvedImplementationIds)
-        assertFalse(
-            ProjectFileRole.VIEWABLE in manifest.files.single { it.path == "src/modules/parse_internal.h" }.roles,
-        )
-        val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("\"accepted\": false"))
-        assertTrue(checkpoint.contains("\"code\": \"reconstruction-failed\""))
+        assertFalse(project.resolve("reports/modules/parse.json").exists())
     }
 
     @Test
@@ -861,8 +1441,8 @@ class SourceTreeTest {
             assertTrue(request.accessPolicy.allows(target, AgentOperation.WRITE_FILE))
             assertTrue(request.accessPolicy.allows(target, AgentOperation.CREATE_FILE))
             val continuation = requireNotNull(request.sessionContinuation)
-            assertFalse(target in continuation.workspaceFiles)
-            assertTrue(continuation.workspaceFiles.keys.all { request.accessPolicy.allows(it, AgentOperation.READ_FILE) })
+            assertEquals(setOf(target), continuation.workspaceFiles.keys)
+            assertTrue(continuation.workspaceFiles.keys.none { request.accessPolicy.allows(it, AgentOperation.READ_FILE) })
             val source = "#include \"modules/parse.h\"\n/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n"
             target.resolve(request.workspaceRoots).writeText(source)
             AgentExecutionResult(
@@ -956,9 +1536,10 @@ class SourceTreeTest {
         assertNull(first.acceptedRevisionSha256)
         assertFalse(first.directory.startsWith(project))
         assertTrue(AgentWorkspacePath("project", "src/modules/parse.c") in first.workspaceFiles)
-        assertTrue(first.workspaceFiles.keys.all { requests[0].accessPolicy.allows(it, AgentOperation.READ_FILE) })
-        assertNotEquals(first.workflowSha256, second.workflowSha256)
-        assertNotEquals(first.directory, second.directory)
+        assertTrue(first.workspaceFiles.keys.none { requests[0].accessPolicy.allows(it, AgentOperation.READ_FILE) })
+        // Different opaque whole-program observations supply no selected module evidence.
+        assertEquals(first.workflowSha256, second.workflowSha256)
+        assertEquals(first.directory, second.directory)
     }
 
     @Test
@@ -1232,7 +1813,16 @@ class SourceTreeTest {
             override fun cacheIdentity(): String = "agent-free"
         }
 
-        SourceTreeGenerator.generate(input, project, reconstructor = refusing)
+        val reused = mutableListOf<Pair<String, String>>()
+        val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+            override fun checkpointReused(moduleId: String, sourceSha256: String) {
+                reused += moduleId to sourceSha256
+            }
+        }
+
+        SourceTreeGenerator.generate(input, project, reconstructor = refusing, progress = progress)
+        assertEquals(listOf("parse"), reused.map { it.first })
+        assertTrue(reused.single().second.matches(Regex("[0-9a-f]{64}")))
     }
 
     @Test

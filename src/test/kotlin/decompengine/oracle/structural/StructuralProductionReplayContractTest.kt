@@ -2,6 +2,7 @@ package decompengine.oracle.structural
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.Path
@@ -290,6 +291,95 @@ class StructuralProductionReplayContractTest {
                 .filter { it.name.contains("testOnlyFixture") }
                 .none { method -> method.parameterTypes.any { it.name.contains("Adapter") } },
         )
+    }
+
+    @Test
+    fun `selected assessment and scores accept only the existing live capability with no replacement inputs`() {
+        val contract = StructuralProductionReplayContract::class.java
+        val receipts = ReplayFixture().receipts()
+        val replacements = listOf(
+            receipts,
+            receipts.identity,
+            receipts.model,
+            receipts.identity.canonicalBytes,
+            receipts.model.canonicalBytes,
+            receipts.identity.document,
+            JsonObject(mapOf("productionVerified" to JsonPrimitive(true))),
+        )
+        for (name in listOf("assessSelectedFunctions", "scoreSelectedBoundary", "scoreFunctionAccuracy")) {
+            // Include mangled/default/synthetic overloads: an alternate JVM entry point must not
+            // accept replacement model, oracle, receipts, overlay bytes, callbacks, or flags.
+            val methods = contract.declaredMethods.filter { it.name.startsWith(name) }
+            assertEquals(1, methods.size, name)
+            val method = methods.single()
+            assertEquals(name, method.name)
+            assertTrue(Modifier.isPublic(method.modifiers) && Modifier.isFinal(method.modifiers), name)
+            assertFalse(method.isSynthetic || method.isBridge || method.isVarArgs, name)
+            assertEquals(listOf(VerifiedStructuralInputsV1::class.java), method.parameterTypes.toList(), name)
+            assertEquals(ByteArray::class.java, method.returnType, name)
+
+            val absent = assertFailsWith<InvocationTargetException>(name) {
+                method.invoke(StructuralProductionReplayContract, null as Any?)
+            }
+            assertTrue(absent.cause is NullPointerException, "$name must reject missing live authority")
+            for (replacement in replacements) {
+                assertFailsWith<IllegalArgumentException>("$name cannot consume ${replacement.javaClass.name}") {
+                    method.invoke(StructuralProductionReplayContract, replacement)
+                }
+            }
+        }
+        assertTrue(contract.methods.none { it.returnType == VerifiedStructuralInputsV1::class.java })
+    }
+
+    @Test
+    fun `assessment adds no raw constructor or factory around the owned admission chain`() {
+        val capability = VerifiedStructuralInputsV1::class.java
+        val admission = StructuralReplayAdapterRegistry.SelectedBoundaryAdmission::class.java
+        val operation = decompengine.oracle.gcc.GccBundledStructuralReplayOperation::class.java
+        for ((type, requiredInput, factoryName) in listOf(
+            Triple(capability, admission, "fromOwnedAdmission"),
+            Triple(admission, operation, "capture"),
+        )) {
+            assertTrue(Modifier.isFinal(type.modifiers), type.name)
+            val ordinary = type.declaredConstructors.filterNot { it.isSynthetic }
+            assertEquals(1, ordinary.size, type.name)
+            assertTrue(Modifier.isPrivate(ordinary.single().modifiers), type.name)
+            assertEquals(listOf(requiredInput), ordinary.single().parameterTypes.toList(), type.name)
+            for (constructor in type.declaredConstructors.filter { it.isSynthetic }) {
+                assertEquals(listOf(requiredInput.name, "kotlin.jvm.internal.DefaultConstructorMarker"),
+                    constructor.parameterTypes.map { it.name }, type.name)
+            }
+            for (constructor in type.constructors) {
+                assertTrue(constructor.isSynthetic, "${type.name} exposes an ordinary public constructor")
+                val absent = assertFailsWith<InvocationTargetException>(type.name) {
+                    constructor.newInstance(*arrayOfNulls<Any>(constructor.parameterCount))
+                }
+                assertTrue(absent.cause is NullPointerException, type.name)
+                assertFailsWith<IllegalArgumentException>(type.name) {
+                    constructor.newInstance(*Array<Any?>(constructor.parameterCount) { if (it == 0) Any() else null })
+                }
+            }
+            assertTrue(type.declaredFields.filterNot { Modifier.isStatic(it.modifiers) }.all {
+                Modifier.isPrivate(it.modifiers) && Modifier.isFinal(it.modifiers)
+            }, "${type.name} must retain its admitted snapshot privately")
+            assertTrue(type.methods.none { it.returnType == type }, "${type.name} must not expose a copy or alternate factory")
+            val companionType = type.declaredClasses.single { it.simpleName == "Companion" }
+            val factories = companionType.methods.filter { it.returnType == type }
+            assertEquals(1, factories.size, type.name)
+            val factory = factories.single()
+            assertEquals(factoryName, factory.name, type.name)
+            assertEquals(listOf(requiredInput), factory.parameterTypes.toList(), type.name)
+            val companion = type.getField("Companion").get(null)
+            val absent = assertFailsWith<InvocationTargetException>(type.name) {
+                factory.invoke(companion, null as Any?)
+            }
+            assertTrue(absent.cause is NullPointerException, type.name)
+            assertFailsWith<IllegalArgumentException>(type.name) { factory.invoke(companion, Any()) }
+        }
+        val registryFactories = StructuralReplayAdapterRegistry::class.java.methods.filter { it.returnType == capability }
+        assertEquals(1, registryFactories.size)
+        assertTrue(registryFactories.single().name.startsWith("admitSelectedBoundary"))
+        assertEquals(listOf(operation), registryFactories.single().parameterTypes.toList())
     }
 
     @Test
