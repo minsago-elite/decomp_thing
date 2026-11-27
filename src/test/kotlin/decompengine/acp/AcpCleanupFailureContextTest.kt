@@ -85,9 +85,15 @@ class AcpCleanupFailureContextTest {
         val diagnostic = diagnosticType.getDeclaredConstructor(phaseType, outcomeType,
             Int::class.javaObjectType, Int::class.javaObjectType, Int::class.javaObjectType)
             .apply { isAccessible = true }.newInstance(phase, outcome, 1, 10, null) as Throwable
+        val timing = "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=-10 " +
+            "admittedNs=NA lastCleanNs=NA firstObservedNs=-1 cleanPolls=0"
+        diagnostic.javaClass.getDeclaredField("timingContext").apply { isAccessible = true }.set(diagnostic, timing)
         failure.initCause(diagnostic)
         val context = targetMutationFailureContext(failure)
         assertTrue(context.startsWith("ACP_TARGET_MUTATION_V1 hook=NOT_OBSERVED "))
+        assertTrue("mountTimingRecord=$timing" in context)
+        assertSame(diagnostic, failure.cause)
+        assertTrue(failure.suppressed.isEmpty())
         assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context)
         assertTrue("recordedPhase=MISSING recordedCleanup=MISSING" in context)
         assertTrue(context.length <= 1100)
