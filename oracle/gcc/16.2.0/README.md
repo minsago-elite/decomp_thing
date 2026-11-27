@@ -186,6 +186,9 @@ and version output `Docker version 29.7.2, build a7dcaa6`. The upstream
 `docker-29.7.2.tgz` at
 `https://download.docker.com/linux/static/stable/x86_64/` has SHA-256
 `803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f`.
+The same authenticated archive's daemon member is 99,870,816 bytes with SHA-256
+`c3ecdc8ac9e56b9a53ffd9fd4aece65432814597046f8d188a538be18c000df8`;
+CI checks this separate daemon fingerprint as well as the client fingerprint.
 CI also requires the archive's daemon version output
 `Docker version 29.7.2, build 6a43e3d` and places the authenticated static
 distribution first on the daemon launcher's `PATH`; runner-preinstalled

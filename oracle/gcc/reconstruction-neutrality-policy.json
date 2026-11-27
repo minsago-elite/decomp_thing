@@ -29,7 +29,8 @@
     "scripts/run-gcc-behavior-corpus.py",
     "scripts/verify-gcc-oracle-source.py",
     ".github/workflows/gcc-signed-source.yml",
-    "scripts/ci-fetch-gcc-signed-source.py"
+    "scripts/ci-fetch-gcc-signed-source.py",
+    "scripts/ci-gcc-toolchain-builder.sh"
   ],
   "adapterFiles": [
     {
