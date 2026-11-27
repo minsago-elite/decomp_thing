@@ -20,7 +20,7 @@ const labels = {
 
 type JobFacts = Pick<Job, 'acceptedRevisionId'>;
 
-function CapabilityReport({ capability, job }: { capability: Capability; job?: JobFacts | undefined }) {
+function CapabilityReport({ capability, job, attemptHistory }: { capability: Capability; job?: JobFacts | undefined; attemptHistory?: string | undefined }) {
   return <li>
     <p class="capability-heading">{message(copy.capabilityReport, {
       identity: <code>{capability.id}</code>, state: <StateMark tone={capabilityTone(capability.state)}>{capability.state}</StateMark>,
@@ -37,7 +37,9 @@ function CapabilityReport({ capability, job }: { capability: Capability; job?: J
         <dt>{copy.launchRequiredTools}</dt>
         <dd>{capability.launch.requiredTools.join(', ') || copy.launchNoRequiredTools}</dd>
         <dt>{copy.launchRecordedInput}</dt>
-        <dd>{inputPrerequisite(capability.launch.input, job)}</dd>
+        <dd>{inputPrerequisite(capability.launch.input, job)}
+          {capability.launch.input === 'recorded-required' && attemptHistory
+            && <> <a href={attemptHistory}>{copy.launchInputAttemptHistory}</a></>}</dd>
       </>}
     </dl>
     {job && !capability.launch && <p>{copy.launchIntentNotReported}</p>}
@@ -52,12 +54,16 @@ function inputPrerequisite(input: NonNullable<Capability['launch']>['input'], jo
       ? message(copy.launchInputOptionalPresent, { revision: <code>{revision}</code> }) : copy.launchInputOptionalAbsent;
     case 'recorded-required': return revision
       ? message(copy.launchInputRequiredPresent, { revision: <code>{revision}</code> })
-      : copy.launchInputRequiredUnknown;
+      : copy.launchInputRequiredAbsent;
   }
 }
 
 /** Display the last authenticated report. It cannot admit work or select a harness. */
-export function WorkflowAvailability({ runtime, receipt, job }: { runtime: RuntimeSnapshot; receipt?: ReceiptTime; job?: JobFacts }) {
+export function WorkflowAvailability({ runtime, receipt, job, attemptHistory }: {
+  runtime: RuntimeSnapshot; receipt?: ReceiptTime; job?: JobFacts;
+  /** Existing attempt-history route where completed attempts' recorded revisions are listed. */
+  attemptHistory?: string;
+}) {
   const generalCapabilities = runtime.capabilities.filter(capability => capability.workflows.length === 0);
   return <section aria-labelledby="job-workflow-availability-title">
     <h3 id="job-workflow-availability-title">{copy.workflowAvailabilityForThisJob}</h3>
@@ -81,7 +87,7 @@ export function WorkflowAvailability({ runtime, receipt, job }: { runtime: Runti
           <div>
             <p><StateMark tone="blocked">{copy.startUnavailable}</StateMark></p>
             {capabilities.length === 0 ? <p>{copy.noCapabilityForThisWorkflow}</p> : <ul class="capability-reports">
-              {capabilities.map(capability => <CapabilityReport key={capability.id} capability={capability} job={job} />)}
+              {capabilities.map(capability => <CapabilityReport key={capability.id} capability={capability} job={job} attemptHistory={attemptHistory} />)}
             </ul>}
           </div>
         </li>;
