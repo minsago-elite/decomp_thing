@@ -68,6 +68,27 @@ class WebExplorationReportTest {
         }
     }
 
+    @Test fun `every captured nonavailable state retains exact raw byte provenance without numeric fallback`() {
+        for ((saved, expectedState) in listOf("{}" to "partial", "{" to "invalid",
+            "{\"schemaVersion\":999}" to "unsupported")) {
+            val bytes = saved.toByteArray(Charsets.UTF_8)
+            val result = report(saved)
+            assertEquals(expectedState, result.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, result.getValue("summary"))
+            val artifact = result.getValue("sourceArtifact").jsonObject
+            assertEquals(bytes.size.toString(), artifact.getValue("sizeBytes").jsonPrimitive.content)
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+                .joinToString("") { "%02x".format(it.toInt() and 255) }
+            assertEquals(digest, artifact.getValue("sha256").jsonPrimitive.content)
+            assertEquals("raw-evidence", artifact.getValue("role").jsonPrimitive.content)
+            assertEquals("not-evaluated", result.getValue("acceptance").jsonPrimitive.content)
+            assertEquals(JsonNull, result.getValue("acceptanceArtifactId"))
+        }
+        val missing = report(null)
+        assertEquals("unknown", missing.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonNull, missing.getValue("sourceArtifact"))
+    }
+
     @Test fun `legacy capture reads once and distinguishes unavailable bytes from malformed captures`() {
         var reads = 0
         val captured = captureWebExploration {
