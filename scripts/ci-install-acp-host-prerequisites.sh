@@ -2,6 +2,38 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+mode="${1:-acp}"
+case "$mode" in
+  acp)
+    if [[ $# -ne 0 ]]; then
+      echo "usage: $0 [browser <browser-dependencies-file>]" >&2
+      exit 2
+    fi
+    ;;
+  browser)
+    if [[ $# -ne 2 || ! -r "$2" ]]; then
+      echo "usage: $0 browser <readable-browser-dependencies-file>" >&2
+      exit 2
+    fi
+    mapfile -t web_browser_dependencies < "$2"
+    if ((${#web_browser_dependencies[@]} == 0)); then
+      echo "browser dependency file is empty: $2" >&2
+      exit 2
+    fi
+    for dependency in "${web_browser_dependencies[@]}"; do
+      if [[ ! "$dependency" =~ [^[:space:]] ]]; then
+        echo "browser dependency file contains an empty expression: $2" >&2
+        exit 2
+      fi
+    done
+    ;;
+  *)
+    echo "usage: $0 [browser <browser-dependencies-file>]" >&2
+    exit 2
+    ;;
+esac
+
 apt_root="$repo_root/build/acp-host-apt"
 keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg
 
@@ -30,5 +62,11 @@ apt_options=(
   -o "Dir::State::lists=$lists_dir"
 )
 sudo apt-get "${apt_options[@]}" update
-sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
-  bubblewrap binutils build-essential dbus-user-session python3 systemd util-linux
+
+if [[ "$mode" == browser ]]; then
+  sudo apt-get "${apt_options[@]}" satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
+  sudo apt-get "${apt_options[@]}" install -y --no-install-recommends xvfb
+else
+  sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
+    bubblewrap binutils build-essential dbus-user-session python3 systemd util-linux
+fi
