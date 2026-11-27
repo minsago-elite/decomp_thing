@@ -34,6 +34,8 @@ class GhidraInvocationQualificationControlsTest {
             val count = (counts[name] ?: 0) + 1; counts[name] = count
             hook(name, count); return count
         }
+        var descendants = emptyList<Long>()
+        override fun workerChildren(pid: Long) = descendants
         override fun children(): List<Long> { call("children"); return childrenValue }
         override fun stat(pid: Long) = statValue(pid, call("stat"))
         override fun alive(pid: Long) = liveValue(call("alive"))
@@ -48,6 +50,109 @@ class GhidraInvocationQualificationControlsTest {
     }
     private fun sampler(source: ScriptProc, records: MutableList<JsonObject> = mutableListOf()) =
         InvocationQualification.ProcSampler(source, 1, "WORKER", "INPUT", "run-authored", sink = records::add)
+
+    private class HeldProcess : Synthetic() {
+        var live = true
+        override fun pid() = 101L
+        override fun isAlive() = live
+    }
+
+    @Test fun `owned samples refuse every second or missing child even between coherent snapshots`() {
+        for (ordinal in 1..6) for (children in listOf(emptyList(), listOf(102L), listOf(101L, 102L))) {
+            val source = ScriptProc().apply {
+                hook = { op, count -> if (op == "children") childrenValue = if (count == ordinal) children else listOf(101) }
+            }
+            val sample = sampler(source)
+            val failure = assertFails { sample.observeOwned(HeldProcess()) {} }
+            assertSame(failure, assertFails { sample.finish() })
+        }
+    }
+
+    @Test fun `owned binding is exclusive and final cleanup distinguishes absence from unknown`() {
+        assertFails { sampler(ScriptProc()).confirmReaped() }
+        for (same in listOf(false, true)) {
+            val sample = sampler(ScriptProc())
+            val process = HeldProcess()
+            sample.observeOwned(process) {}
+            assertFails { sample.observeOwned(if (same) process else HeldProcess()) {} }
+        }
+        for (scenario in listOf("absent", "zombie", "reused", "denied", "extra", "enumeration")) {
+            val source = ScriptProc()
+            val sample = sampler(source)
+            val process = HeldProcess()
+            sample.observeOwned(process) {}
+            process.live = false
+            source.childrenValue = if (scenario == "extra") listOf(999) else emptyList()
+            source.statValue = { pid, _ -> when (scenario) {
+                "zombie" -> ScriptProc.statBytes(pid, state = "Z")
+                "reused" -> ScriptProc.statBytes(pid, start = 77)
+                "denied" -> throw java.nio.file.AccessDeniedException("private")
+                else -> throw java.nio.file.NoSuchFileException("private")
+            } }
+            source.hook = { op, _ -> if (op == "children" && scenario == "enumeration") error("private") }
+            if (scenario in setOf("absent", "reused")) sample.confirmReaped() else assertFails { sample.confirmReaped() }
+        }
+    }
+
+    @Test fun `invalid binding sample cannot recover at the first inventory`() {
+        for (mode in listOf("zombie", "parent", "dead", "reused")) {
+            val source = ScriptProc().apply {
+                statValue = { pid, count -> ScriptProc.statBytes(pid,
+                    start = if (mode == "reused" && count == 1) 6 else 7,
+                    ppid = if (mode == "parent" && count == 1) 99 else 1,
+                    state = if (mode == "zombie" && count == 1) "Z" else "S") }
+                liveValue = { count -> mode != "dead" || count != 1 }
+            }
+            assertFails { sampler(source).observeOwned(HeldProcess()) {} }
+        }
+    }
+
+    @Test fun `held sampling accepts the exact byte and element limits`() {
+        val source = ScriptProc()
+        val remaining = q.CHILD_LIMIT - source.command.count { it == 0.toByte() }
+        val padding = q.ARTIFACT_LIMIT - source.command.size - remaining
+        source.command += ByteArray(padding) { 'x'.code.toByte() } + ByteArray(remaining)
+        val sample = sampler(source)
+        sample.observeOwned(HeldProcess()) {}
+        assertEquals(q.CHILD_LIMIT, sample.observed!!.command.size)
+    }
+
+    @Test fun `owned identity and validation cannot change between admission and release`() {
+        for (change in listOf("stat", "argv", "cwd", "key", "parent", "child", "validation")) {
+            val source = ScriptProc()
+            val sample = sampler(source)
+            assertFails {
+                sample.observeOwned(HeldProcess()) {
+                    when (change) {
+                        "stat" -> source.statValue = { pid, _ -> ScriptProc.statBytes(pid, start = 8) }
+                        "parent" -> source.statValue = { pid, _ -> ScriptProc.statBytes(pid, ppid = 999) }
+                        "argv" -> source.command = "pre-exec\u0000".toByteArray()
+                        "cwd" -> source.cwdValue = { Path.of("/different") }
+                        "key" -> source.keyValue = { "1:9" }
+                        "child" -> source.descendants = listOf(104L)
+                        else -> error("private")
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun `legacy whole pipeline polls 93 and 94 retain nonmatching then zombie refusal`() {
+        val source = ScriptProc()
+        val sample = sampler(source)
+        source.childrenValue = emptyList()
+        repeat(92) { sample.poll() }
+        source.childrenValue = listOf(4036)
+        source.command = "private-helper\u0000".toByteArray()
+        sample.poll()
+        source.statValue = { pid, _ -> ScriptProc.statBytes(pid, state = "Z") }
+        assertFails { sample.poll() }
+        val record = sample.fault.get()!!.record
+        assertEquals(JsonPrimitive(93), record["priorLivePoll"])
+        assertEquals(JsonPrimitive(94), record["poll"])
+        assertEquals(JsonPrimitive(0), record["priorWorkerTokenCount"])
+        assertEquals(JsonPrimitive("unknown"), record["workerCleanup"])
+    }
 
     @Test fun `sampler ordered coherent snapshot continues and pre exec identities stay unresolved`() {
         val source = ScriptProc()

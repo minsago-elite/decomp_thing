@@ -7,6 +7,7 @@ This is diagnostic build provenance, never oracle authorization. No build is run
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -202,7 +203,11 @@ def helper_closure(pin, jars):
     for jar in jars:
         with zipfile.ZipFile(jar) as archive:
             need(len(archive.infolist()) <= 65536)
-            need(not any(helper_name(name) for name in archive.namelist()))
+            entries = archive.namelist()
+            need(not any(helper_name(name) for name in entries))
+            for name in entries:
+                if name.startswith('decompengine/') and name.endswith('.class'):
+                    need(not (root / name).exists())
     return dict(directory=directory, classes=classes, sources=sources,
                 closureSha256=hashlib.sha256(json.dumps(classes, sort_keys=True).encode()).hexdigest())
 
@@ -286,6 +291,12 @@ def verify():
     library = Path('build/install/llm_bin_patch/lib')
     sealed_jars = {name for name in pin['artifacts'] if Path(name).parent == library and Path(name).suffix == '.jar'}
     need({path.relative_to(ROOT).as_posix() for path in jars} == sealed_jars)
+    bundle = Path('build/install/llm_bin_patch/libexec/ghidra')
+    script_classes = (ROOT / 'ghidra-bridge/build/classes/java/main').glob('*.class')
+    required = {(bundle / 'scripts' / item.name).as_posix() for item in script_classes
+                if item.name == 'RunBundledExports.class' or item.name.startswith('ExportNativeCallsV1')}
+    required.update((bundle / name).as_posix() for name in ('decomp-ghidra-bridge.jar', 'bundle.sha256'))
+    need(set(pin['artifacts']) == sealed_jars | required)
     need(helper_closure(pin, jars) == pin['testHelpers'])
     print('invocation-build-provenance-verified')
 
@@ -296,10 +307,41 @@ def verify_uploaded(expected, downloaded):
     for name in names:
         need(digest(expected / name, LIMIT) == digest(downloaded / name, LIMIT))
     provenance = read(downloaded / 'provenance.json')
-    need(provenance['schemaVersion'] == 1 and set(provenance['evidence']) == set(names[:-1]))
+    need(provenance['schemaVersion'] == 2 and set(provenance['evidence']) == set(names[:-1]))
     for name in names[:-1]:
         need(provenance['evidence'][name] == digest(downloaded / name, LIMIT))
-    need(read(downloaded / 'observed-worker.json')['runId'] == provenance['runId'])
+    worker = read(downloaded / 'observed-worker.json')
+    report = read(downloaded / 'retained-invocation.json')
+    receipt = report['invocation']
+    need(report['schemaVersion'] == 2 and report['analysisOutcome'] == 'succeeded')
+    fixed = dict(status='captured', commandKind='bundled-java', processStarterKind='default-process-builder',
+                 observation='process-starter-returned-and-exit-value', commandDisclosure='qualified-worker-fields-only',
+                 analysisArgumentOffset=2, exitCode=0)
+    for key, value in fixed.items():
+        need(type(receipt[key]) is type(value) and receipt[key] == value)
+    fields = ('executable', 'mainClass', 'workerArguments', 'workingDirectory')
+    need(worker['osInvocation'] == {key: receipt[key] for key in fields})
+    need(worker['schemaVersion'] == 2 and worker['runId'] == provenance['runId'])
+    need(worker['interval'] == 'owned-exporter-pre-permit' and worker['coverage'] == 'sampled-direct-children-only')
+    need(worker['samples'] == 3 and worker['finalDirectChildren'] == 0)
+    need(all(worker[key] is True for key in ('lifecycleInstrumented', 'observerSettledBeforePermit',
+                                             'processReaped', 'retainedIdentityAbsent')))
+    need(worker['pid'] == provenance['exporterPid'] and worker['parentPid'] == provenance['probePid'])
+    need(worker['startTicks'] == provenance['exporterStartTicks'] and worker['pid'] != worker['parentPid'])
+    need(worker['projectIdentity'] == provenance['projectIdentityAfter'] and re.fullmatch(r'[0-9]+:[0-9]+', worker['projectIdentity']))
+    args = receipt['workerArguments']
+    cwd = Path(worker['cwd'])
+    need(str(cwd) == receipt['workingDirectory'] and cwd.is_absolute())
+    need(cwd.parts[-6:] == (worker['runId'], '.decomp_engine', 'jobs', 'authored', 'reports', 'analysis'))
+    need(len(args) == 15 and receipt['mainClass'] == 'decompengine.ghidra.BundledGhidraWorker')
+    need(args[1:5] == ['await-parent-launch', 'analyze', '/proc/self/cwd/ghidra_project', 'archival_reconstruction'])
+    need(worker['projectArgument'] == args[3] and worker['projectAliasTarget'] == str(cwd / 'ghidra_project'))
+    need(report['binary'] == args[5] == str(cwd.parents[4] / 'authored-input.elf'))
+    need(report['metadataInputSha256'] == worker['inputSha256'])
+    encoded_build = (json.dumps(provenance['build'], sort_keys=True, separators=(',', ':')) + '\n').encode()
+    need(hashlib.sha256(encoded_build).hexdigest() == provenance['buildManifestSha256'])
+    exporter = provenance['build']['sources']['src/main/resources/ghidra_scripts/ExportProgramModelOwned.java']
+    need(args[9] == exporter == provenance['activeExporterSha256'] == provenance['stagedExporterSha256'])
     print('invocation-uploaded-evidence-verified')
 
 

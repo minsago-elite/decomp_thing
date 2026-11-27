@@ -184,6 +184,7 @@ internal object InvocationQualification {
     /** Injected ordered reads. Only the hosted adapter touches /proc; controls supply authored bytes. */
     interface ProcSource {
         fun children(): List<Long>
+        fun workerChildren(pid: Long): List<Long>
         fun stat(pid: Long): ByteArray
         fun alive(pid: Long): Boolean
         fun cmdline(pid: Long): ByteArray
@@ -207,7 +208,7 @@ internal object InvocationQualification {
     enum class SampleOperation { ENUMERATE, STAT_BEFORE, LIVE_BEFORE, CMDLINE, FRAME, UTF8, ARGUMENT_COUNT,
         SELECT, STAT_AFTER_COMMAND, LIVE_AFTER_COMMAND, COHERENCE, CWD, PROJECT, PROJECT_KEY,
         COMMAND_RECHECK, CWD_RECHECK, PROJECT_RECHECK, KEY_RECHECK, STAT_AFTER_PROJECT, LIVE_AFTER_PROJECT,
-        INVENTORY, FINISH, WAIT }
+        INVENTORY, FINISH, WAIT, BIND, QUALIFY, FINAL_ABSENCE }
     enum class SampleOutcome { READ, PREDICATE, INVALIDATED, OVERFLOW, UNRESOLVED, AMBIGUOUS, INTERRUPTED }
     data class WorkerSnapshot(val identity: Identity, val command: List<String>, val cwd: Path,
         val project: Path, val projectKey: String)
@@ -329,7 +330,45 @@ internal object InvocationQualification {
                 }
             }
         }
-        fun poll() = guard {
+        private val owner = AtomicReference<Process?>()
+
+        /** Three coherent samples bracket the qualification predicate while the worker is held. */
+        fun observeOwned(process: Process, validate: (WorkerSnapshot) -> Unit) = guard {
+            step(SampleOperation.BIND, SampleOutcome.AMBIGUOUS) {
+                requireProof(owner.compareAndSet(null, process))
+            }
+            val pid = process.pid()
+            reset(pid)
+            val binding = step(SampleOperation.STAT_BEFORE) { procStat(pid, source.stat(pid)) }
+            before = binding
+            liveBefore = step(SampleOperation.LIVE_BEFORE) { source.alive(pid) }
+            coherent(binding, binding, liveBefore!!)
+            val identity = binding.identity
+            repeat(3) { index ->
+                poll(identity)
+                finish()
+                if (index == 1) step(SampleOperation.QUALIFY, SampleOutcome.PREDICATE) {
+                    validate(checkNotNull(observed))
+                }
+            }
+            requireProof(process.isAlive)
+        }
+
+        fun confirmReaped() = guard {
+            val process = checkNotNull(owner.get())
+            val identity = checkNotNull(observed).identity
+            step(SampleOperation.FINAL_ABSENCE, SampleOutcome.UNRESOLVED) {
+                requireProof(process.pid() == identity.pid && !process.isAlive && process.exitValue() == 0)
+                try {
+                    requireProof(procStat(identity.pid, source.stat(identity.pid)).identity != identity)
+                } catch (_: java.nio.file.NoSuchFileException) {
+                    // Only ENOENT establishes absence without a readable replacement identity.
+                }
+                requireProof(source.children().isEmpty())
+            }
+        }
+
+        fun poll(bound: Identity? = null) = guard {
             reset(null); childCount = null
             step(SampleOperation.ENUMERATE) { requireProof(poll < Long.MAX_VALUE); poll++ }
             val children = step(SampleOperation.ENUMERATE) { source.children() }
@@ -349,6 +388,9 @@ internal object InvocationQualification {
                 step(SampleOperation.COHERENCE, SampleOutcome.INVALIDATED) { requireProof(first.ppid == parentPid) }
                 first
             }
+            if (bound != null) step(SampleOperation.INVENTORY, SampleOutcome.AMBIGUOUS) {
+                requireProof(candidates.singleOrNull()?.identity == bound && source.workerChildren(bound.pid).isEmpty())
+            }
             candidates.forEach { first ->
                 reset(first.identity.pid); before = first; prior = seen[first.identity]; unboundSighting = false
                 val child = first.identity.pid
@@ -363,9 +405,9 @@ internal object InvocationQualification {
                     try { Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString().also { utf8 = true } }
                     catch (problem: java.nio.charset.CharacterCodingException) { utf8 = false; throw problem }
                 }
+                argumentCount = text.count { it == '\u0000' }
+                step(SampleOperation.ARGUMENT_COUNT, SampleOutcome.OVERFLOW) { requireProof(argumentCount!! <= CHILD_LIMIT) }
                 val command = text.dropLast(1).split('\u0000')
-                argumentCount = command.size
-                step(SampleOperation.ARGUMENT_COUNT, SampleOutcome.OVERFLOW) { requireProof(command.size <= CHILD_LIMIT) }
                 after = step(SampleOperation.STAT_AFTER_COMMAND) { procStat(child, source.stat(child)) }
                 liveAfter = step(SampleOperation.LIVE_AFTER_COMMAND) { source.alive(child) }
                 coherent(first, after!!, liveAfter!!)
@@ -410,6 +452,10 @@ internal object InvocationQualification {
                     }
                 }
                 seen[first.identity] = LiveSample(poll, indexes.size, hasInput)
+                if (bound != null) step(SampleOperation.INVENTORY, SampleOutcome.INVALIDATED) {
+                    requireProof(source.workerChildren(child).isEmpty() && source.children() == listOf(child))
+                    requireProof(observed?.identity == bound && unresolved.isEmpty())
+                }
                 // A non-worker vector cannot prove that this identity never execs a worker.
             }
         }
