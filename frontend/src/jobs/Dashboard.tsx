@@ -13,7 +13,7 @@ import type { DraftOwner } from './filterDraft';
 import { JobSummary } from './JobSummary';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
-import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { MetadataReceipt, StaleMetadataNotice } from '../shared/MetadataReceipt';
 import { RecoverySummary } from './RecoverySummary';
 import { onLibraryChange } from './libraryChannel';
 
@@ -41,6 +41,8 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const [refresh, setRefresh] = useState(0);
   const [observation, setData] = useState<Received<Jobs> | null>(null);
   const data = observation?.value;
+  const currentData = useRef(data);
+  currentData.current = data;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
   const [validationError, setValidationError] = useState<JobFilterError | null>(retainedDraft?.validationError ?? null);
@@ -55,6 +57,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const results = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
   const errorNotice = useRef<HTMLParagraphElement>(null);
+  const retainedFocusPosition = useRef<{ target: HTMLElement; top: number; stage: 'error' | 'retained' } | null>(null);
   // Transfer focus after the accepted page has committed, including cached pages
   // whose rows are replaced synchronously without a loading render.
   useLayoutEffect(() => {
@@ -67,7 +70,11 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     if (validationError) form.current?.querySelector<HTMLElement>(`[name="${validationError.field}"]`)?.focus();
   }, [validationError]);
   useEffect(() => {
-    if (error && moveFocus.current) {
+    if (error && data && moveFocus.current) {
+      moveFocus.current = false;
+      return;
+    }
+    if (error && !data && moveFocus.current) {
       moveFocus.current = false;
       errorNotice.current?.focus();
     }
@@ -116,6 +123,10 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     return true;
   }, [binding, client, selection]);
   const failRead = useCallback((failure: unknown) => {
+    const active = document.activeElement;
+    retainedFocusPosition.current = currentData.current && active instanceof HTMLElement && list.current?.contains(active)
+      ? { target: active, top: active.getBoundingClientRect().top, stage: 'error' }
+      : null;
     setPhase('error');
     if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
       firstPage.current = null;
@@ -131,6 +142,23 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     } else setError(withApiFailureReference(copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable, failure));
     pageTransition.current = null;
   }, []);
+  useLayoutEffect(() => {
+    const retained = retainedFocusPosition.current;
+    if (!retained || !data) return;
+    if (!retained.target.isConnected || document.activeElement !== retained.target) {
+      retainedFocusPosition.current = null;
+      return;
+    }
+    if (retained.stage === 'error' && (phase !== 'error' || !error)) return;
+    if (retained.stage === 'retained' && phase !== 'loading' && (phase !== 'ready' || error !== '')) return;
+    const delta = retained.target.getBoundingClientRect().top - retained.top;
+    if (Number.isFinite(delta) && Math.abs(delta) > 1) {
+      const scroller = document.scrollingElement ?? document.documentElement;
+      scroller.scrollTop += delta;
+    }
+    if (retained.stage === 'error') retained.stage = 'retained';
+    else if (phase === 'ready') retainedFocusPosition.current = null;
+  }, [error, phase, data]);
   const reloadLatest = useRef(reload);
   reloadLatest.current = reload;
   // Another tab deleted or reorganized a job: read a fresh first page instead of trusting this snapshot.
@@ -304,6 +332,9 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   }
   function reload() {
     if (location.pathname !== dashboardPath.current || pageTransition.current !== null) return;
+    const retained = retainedFocusPosition.current;
+    if (retained?.stage === 'retained' && retained.target.isConnected && document.activeElement === retained.target)
+      retained.top = retained.target.getBoundingClientRect().top;
     activeBinding.current = null;
     const current = currentFilters(), query = filterSearch(selection.filters);
     if (data && snapshotPagination(data.page) && current.valid && !current.invalidCursor &&
@@ -317,7 +348,8 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       history.pushState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
       setSelection({ ...selection, cursor: null, invalidCursor: false });
     }
-    moveFocus.current = true; setPageNotice(''); setCursors([null]); setPageIndex(0); setRefresh(value => value + 1);
+    // Refreshing retained rows must not move focus to the results heading.
+    setPageNotice(''); setCursors([null]); setPageIndex(0); setRefresh(value => value + 1);
   }
   function field(key: keyof JobFilters, value: string) { setDraft(previous => ({ ...previous, [key]: value })); }
   function fieldA11y(key: keyof JobFilters) {
@@ -331,7 +363,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     ? filtered
       ? copy.thePreviousFilteredResultHadNoMatchesCurrentResultsAre
       : copy.thePreviousLibrarySnapshotWasEmptyCurrentResultsAreUnknown
-    : copy.previouslyLoadedRowsAreShownBelowTheirStateMayBe;
+    : '';
   const loadingStatus = retainedEmpty ? copy.loadingJobsThePreviousEmptyResultMayBeOutdated
     : data ? copy.loadingJobsPreviouslyLoadedRowsRemainBelow : copy.loadingJobs;
   return <section aria-labelledby="job-library-title">
@@ -360,6 +392,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     {pageNotice && <p role="status">{pageNotice}</p>}
     {phase === 'ready' && data && !snapshotPage && <p>{copy.snapshotHistoryUnavailable}</p>}
     {error && <p ref={errorNotice} role="alert" tabIndex={-1} class="notice notice-error">{error}{retainedNotice}</p>}
+    {error && data && <StaleMetadataNotice />}
     <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>{copy.refreshJobs}</button>
       <button type="button" aria-pressed={livePaused} disabled={phase !== 'ready' || pageIndex !== 0 || Boolean(cursor)}
         onClick={() => setLivePaused(value => !value)}>{livePaused ? copy.resumeLiveUpdates : copy.pauseLiveUpdates}</button>

@@ -1,6 +1,7 @@
 export const receiptCopy = {
   received: 'Received in this tab {time} ({age}). Source observation age and current server state may differ.',
   unknown: 'Receipt time was not recorded in this tab.',
+  retainedMetadataMayBeOutdated: 'Previously loaded metadata may be outdated. Refresh to read current details.',
   labels: {
     library: 'Displayed job library', job: 'Job metadata', run: 'Attempt metadata', history: 'Attempt history',
     runtime: 'Runtime report', recovery: 'Recovery inventory', pin: 'Progress pin policy', upload: 'Upload progress',
