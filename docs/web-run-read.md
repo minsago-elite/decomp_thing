@@ -134,11 +134,26 @@ The job overview has a **Current and accepted work** section that keeps the two 
 - **Accepted reconstruction** reads at most two newest-first history pages (100 attempts)
   to find the attempt whose own recorded acceptance is exactly the job's
   `acceptedRevisionId`. A candidate with the same revision identity but no recorded
-  acceptance, or an attempt accepted for another revision, is never substituted. When
-  found, it links that attempt, its evidence and report snapshots, and the accepted
-  revision's sources. Otherwise it states that the attempt is not among the newest 100
-  and points to attempt history. A read failure is an alert with an explicit retry and
-  shows no attempt. With no accepted revision, no history read is made.
+  acceptance, or an attempt accepted for another revision, is never substituted.
+- The lookup is bound to the job observation it answers. History may be read after the
+  job, so attempts listed before the observed `latestRunId` are newer than that
+  observation and are skipped: a same-revision reacceptance by a newer attempt never
+  appears next to the observed latest attempt. Older accepted attempts behind a running
+  or failed latest attempt are still found. If the observed latest attempt is not listed
+  within the bound, or the job was observed with no attempt but history lists some, the
+  section says history changed after the job was read, shows no attempt, and offers retry
+  and attempt history.
+- When found, it links that attempt, its evidence and report snapshots, and the accepted
+  revision's sources. Otherwise the wording separates the two outcomes: when the **cap**
+  is reached (a further page exists), the attempt is "not among the newest 100"; when
+  history is **exhausted** (no further page), none of the counted attempts records the
+  acceptance, or history has none yet. Both point to attempt history. A read failure is an
+  alert with an explicit retry and shows no attempt. With no accepted revision, no
+  history read is made.
+- Focus moves only when the person causes it. Retry moves focus to the status and then
+  to the outcome, unless focus has moved elsewhere in the meantime. If a background
+  refresh removes the focused accepted link, focus goes to the status that replaces it,
+  but only when focus would otherwise drop to the page.
 
 Browser history restores the saved history page after opening an earlier attempt or one
 of its named views, and Forward returns to that view. This is covered by

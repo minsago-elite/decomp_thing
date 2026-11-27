@@ -103,7 +103,7 @@ it('makes no history read without an accepted revision and recovers a failed loo
   let accepted: string | null = null;
   let fail = true;
   transport.get.mockImplementation((kind) => {
-    if (kind === 'job') return Promise.resolve({ data: { ...sampleJob, latestRunId: null, acceptedRevisionId: accepted } });
+    if (kind === 'job') return Promise.resolve({ data: { ...sampleJob, latestRunId: accepted === null ? null : 'run_accepted', acceptedRevisionId: accepted } });
     if (fail) return Promise.reject(new ApiClientError('http_error', { status: 500 }));
     return Promise.resolve(page([run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' })]));
   });
@@ -144,7 +144,10 @@ it('lets each earlier attempt open its evidence and sources and restores the his
       .toBe(sourceDirectoryPath('/nested', { jobId, runId: 'run_earlier', revisionId: 'revision_of_run_earlier' }));
     const failed = within(screen.getByRole('link', { name: 'reconstruct: run_failed' }).closest('li')!);
     expect(failed.getByText(runHistoryCopy.noResultRevision)).toBeTruthy();
-    expect(failed.queryByRole('link', { name: /^Sources of/ })).toBeNull();
+    // The same query finds the sources link of a row that records a revision, so its absence above is meaningful.
+    expect(within(screen.getByRole('link', { name: 'reconstruct: run_earlier' }).closest('li')!)
+      .getAllByRole('link', { name: /^Result revision sources/ })).toHaveLength(1);
+    expect(failed.queryByRole('link', { name: /^Result revision sources/ })).toBeNull();
     fireEvent.click(screen.getByRole('link', { name: 'Evidence and report snapshots for attempt run_earlier' }));
     await screen.findByRole('heading', { name: 'Attempt evidence' });
     await screen.findByText('Validation panel run_earlier');
@@ -161,6 +164,7 @@ it('lets each earlier attempt open its evidence and sources and restores the his
   } finally { auth.dispose(); }
 });
 
+const latestRunning = run('run_latest', { state: 'running', resultRevisionId: null });
 const acceptedJob = (extra: Partial<Job> = {}) => ({ data: { ...sampleJob, latestRunId: 'run_latest', acceptedRevisionId: 'revision_accepted', ...extra } });
 
 it('locates the accepted attempt on the second bounded page and names each link by its identities', async () => {
@@ -168,7 +172,7 @@ it('locates the accepted attempt on the second bounded page and names each link 
   transport.get.mockImplementation((kind, path) => {
     if (kind === 'job') return Promise.resolve(acceptedJob());
     if (path.includes('cursor=cursor_2')) return Promise.resolve(page([run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' })], 'cursor_3'));
-    return Promise.resolve(page(Array.from({ length: 50 }, (_, index) => run(`run_${index}`)), 'cursor_2'));
+    return Promise.resolve(page([run('run_latest'), ...Array.from({ length: 49 }, (_, index) => run(`run_${index}`))], 'cursor_2'));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {
@@ -231,7 +235,7 @@ it('keeps intentional focus through Retry onto the subsequent result', async () 
   transport.get.mockImplementation((kind) => {
     if (kind === 'job') return Promise.resolve(acceptedJob());
     if (calls++ === 0) return Promise.reject(new ApiClientError('http_error', { status: 500 }));
-    return new Promise(resolve => { release = () => resolve(page([run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' })])); });
+    return new Promise(resolve => { release = () => resolve(page([latestRunning, run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' })])); });
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {
@@ -248,11 +252,11 @@ it('keeps intentional focus through Retry onto the subsequent result', async () 
 });
 
 it.each([
-  [[] as Run[], 'Accepted revision revision_accepted is recorded, but attempt history has no recorded attempts yet. Browse attempt history to check again.'],
-  [[run('run_a'), run('run_b')], 'Accepted revision revision_accepted is recorded, but none of the 2 recorded attempts in history records its acceptance. Browse attempt history to review them.'],
-])('states exhausted history of %# attempts naturally and apart from the lookup cap', async (items, expected) => {
+  [[] as Run[], null, 'Accepted revision revision_accepted is recorded, but attempt history has no recorded attempts yet. Browse attempt history to check again.'],
+  [[run('run_latest'), run('run_b')], 'run_latest', 'Accepted revision revision_accepted is recorded, but none of the 2 recorded attempts in history records its acceptance. Browse attempt history to review them.'],
+])('states exhausted history of %# attempts naturally and apart from the lookup cap', async (items, latestRunId, expected) => {
   const auth = await session();
-  transport.get.mockImplementation((kind) => Promise.resolve(kind === 'job' ? acceptedJob() : page(items)));
+  transport.get.mockImplementation((kind) => Promise.resolve(kind === 'job' ? acceptedJob({ latestRunId }) : page(items)));
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {
     render(<App basePath="/nested" session={auth} />);
@@ -269,7 +273,7 @@ it('leaves focus where the person moved it when a retried lookup settles', async
   transport.get.mockImplementation((kind) => {
     if (kind === 'job') return Promise.resolve(acceptedJob());
     if (calls++ === 0) return Promise.reject(new ApiClientError('http_error', { status: 500 }));
-    return new Promise(resolve => { release = () => resolve(page([run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' })])); });
+    return new Promise(resolve => { release = () => resolve(page([latestRunning, run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' })])); });
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {
@@ -315,4 +319,140 @@ it('never renders accepted links of a superseded observation while the new looku
     expect(staleWithNew).toBe(false);
     expect(section().queryByRole('link', { name: /run_old/ })).toBeNull();
   } finally { auth.dispose(); }
+});
+
+const accepted = (runId: string) => run(runId, { acceptance: 'accepted', resultRevisionId: 'revision_accepted' });
+
+it('binds an older accepted attempt while the observed latest attempt is still running', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind) => Promise.resolve(kind === 'job' ? acceptedJob()
+    : page([latestRunning, run('run_middle', { state: 'failed', resultRevisionId: null }), accepted('run_old')])));
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const link = await screen.findByRole('link', { name: 'Open the accepted attempt run_old' });
+    expect(link.getAttribute('href')).toBe(runPath('/nested', jobId, 'run_old'));
+    expect(section().getByText(/Latest recorded attempt:/).textContent).toContain('run_latest');
+  } finally { auth.dispose(); }
+});
+
+it('ignores a same-revision reacceptance listed newer than the observed latest attempt', async () => {
+  const auth = await session();
+  // The job was read with latest run_a; history read afterwards also lists run_b, which reaccepted the revision.
+  transport.get.mockImplementation((kind) => Promise.resolve(kind === 'job' ? acceptedJob({ latestRunId: 'run_a', version: 'version_a' })
+    : page([accepted('run_b'), accepted('run_a')])));
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const link = await screen.findByRole('link', { name: 'Open the accepted attempt run_a' });
+    expect(link.getAttribute('href')).toBe(runPath('/nested', jobId, 'run_a'));
+    expect(document.querySelector('a[href*="run_b"]')).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  ['a history read before the observed latest attempt was listed', 'run_new', [accepted('run_old')]],
+  ['a history that is newer than a job observed without attempts', null, [accepted('run_b')]],
+])('shows no accepted attempt for %s and offers retry and history', async (_name, latestRunId, items) => {
+  const auth = await session();
+  let bound = false;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob({ latestRunId }));
+    return Promise.resolve(bound ? page([accepted(latestRunId ?? 'run_b')]) : page(items));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const status = await screen.findByText(/attempt history changed after this job was read/);
+    expect(status.textContent).toBe(acceptedWorkCopy.unbound.replace('{revisionId}', 'revision_accepted'));
+    expect(section().queryByRole('link', { name: new RegExp(`^${acceptedWorkCopy.acceptedAttempt}`) })).toBeNull();
+    expect(section().getByRole('link', { name: acceptedWorkCopy.history })).toBeTruthy();
+    if (latestRunId === null) return;
+    bound = true;
+    const retry = section().getByRole('button', { name: acceptedWorkCopy.retry });
+    retry.focus();
+    fireEvent.click(retry);
+    const result = await screen.findByText(/was recorded by attempt/);
+    await waitFor(() => expect(document.activeElement).toBe(result));
+  } finally { auth.dispose(); }
+});
+
+it('skips newer attempts across pages and stays within the two-page bound', async () => {
+  const auth = await session();
+  const newer = Array.from({ length: 50 }, (_, index) => run(`run_newer_${index}`, index === 0 ? { acceptance: 'accepted', resultRevisionId: 'revision_accepted' } : {}));
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob({ latestRunId: 'run_a' }));
+    if (path.includes('cursor=cursor_2')) return Promise.resolve(page([run('run_a'), accepted('run_found')], 'cursor_3'));
+    return Promise.resolve(page(newer, 'cursor_2'));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'Open the accepted attempt run_found' });
+    expect(document.querySelector('a[href*="run_newer_0"]')).toBeNull();
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'runs')).toHaveLength(2);
+  } finally { auth.dispose(); }
+});
+
+it('treats an observed latest attempt beyond the two-page bound as unbound rather than not found', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob({ latestRunId: 'run_a' }));
+    return Promise.resolve(page([run(path.includes('cursor=') ? 'run_x2' : 'run_x1')], path.includes('cursor=') ? 'cursor_3' : 'cursor_2'));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(/attempt history changed after this job was read/);
+    expect(section().queryByText(/is not among the newest/)).toBeNull();
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'runs')).toHaveLength(2);
+  } finally { auth.dispose(); }
+});
+
+it('moves focus from a removed accepted evidence link to the replacing status on a background refresh', async () => {
+  const auth = await session();
+  const channel = new BroadcastChannel('decomp-jobs-v1:/nested');
+  let version = 'version_one';
+  let hold = false;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob({ version }));
+    if (hold) return new Promise(() => undefined);
+    return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const link = await screen.findByRole('link', { name: 'Accepted attempt evidence and report snapshots for attempt run_accepted' });
+    link.focus();
+    version = 'version_two';
+    hold = true;
+    channel.postMessage({ version: 1, type: 'jobs-changed' });
+    const status = await screen.findByText(/Locating the attempt/);
+    await waitFor(() => expect(document.activeElement).toBe(status));
+  } finally { channel.close(); auth.dispose(); }
+});
+
+it('leaves focus where the person moved it before a background refresh removed the accepted link', async () => {
+  const auth = await session();
+  const channel = new BroadcastChannel('decomp-jobs-v1:/nested');
+  let version = 'version_one';
+  let hold = false;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob({ version }));
+    if (hold) return new Promise(() => undefined);
+    return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const link = await screen.findByRole('link', { name: 'Accepted attempt evidence and report snapshots for attempt run_accepted' });
+    link.focus();
+    const elsewhere = screen.getByRole('button', { name: 'Refresh job' });
+    elsewhere.focus();
+    version = 'version_two';
+    hold = true;
+    channel.postMessage({ version: 1, type: 'jobs-changed' });
+    await screen.findByText(/Locating the attempt/);
+    expect(document.activeElement).toBe(elsewhere);
+  } finally { channel.close(); auth.dispose(); }
 });

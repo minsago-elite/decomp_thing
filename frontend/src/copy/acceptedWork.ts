@@ -21,6 +21,7 @@ export const acceptedWorkCopy = {
   "exhausted": "Accepted revision {revisionId} is recorded, but none of the {count} recorded attempts in history records its acceptance. Browse attempt history to review them.",
   "exhaustedOne": "Accepted revision {revisionId} is recorded, but the only recorded attempt in history does not record its acceptance. Browse attempt history to review it.",
   "exhaustedEmpty": "Accepted revision {revisionId} is recorded, but attempt history has no recorded attempts yet. Browse attempt history to check again.",
+  "unbound": "Accepted revision {revisionId} is recorded, but attempt history changed after this job was read, so no attempt is shown for it. Retry, or refresh the job to read both again.",
   "history": "Browse attempt history",
   "lookupFailed": "The attempt that recorded the accepted revision could not be read. The accepted revision identity above is unchanged.",
   "lookupSession": "Reconnect the local session to locate the accepted attempt.",
