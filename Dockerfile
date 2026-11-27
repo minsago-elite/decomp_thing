@@ -11,6 +11,7 @@ RUN apt-get update \
         build-essential \
         ca-certificates \
         clang \
+        llvm \
         curl \
         ninja-build \
         python3 \
