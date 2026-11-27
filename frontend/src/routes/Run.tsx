@@ -23,6 +23,7 @@ import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
+import { focusSurvivingNotice, useDepartingFocus } from '../shared/departingFocus';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
 import { jobCopy } from '../copy/job';
@@ -30,7 +31,7 @@ import { jobCopy } from '../copy/job';
 function Details({ jobId, runId, basePath, session, view, navigation, onDeleted }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
   /** A confirmed RESOURCE_GONE tombstone from the attempt read or any panel ends the whole routed attempt (#512). */
-  onDeleted: (failure?: unknown) => void;
+  onDeleted: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
@@ -122,10 +123,10 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
             run={run} onChanged={() => { setRefresh(value => value + 1); }} />
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.progressPin}>
-          <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
+          <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} onDeleted={onDeleted} />
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.activity}>
-          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={() => { onDeleted(); }} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
         </PanelBoundary>
       </>}
       {view !== 'activity' && <>
@@ -162,28 +163,33 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
   const valid = /^[0-9a-f]{32}$/.test(jobId) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId);
   // A tombstone belongs to one authenticated view of one attempt; every view of that attempt then shows only recovery (#512).
   const viewKey = state?.status === 'authenticated' ? `${state.generation}/${jobId}/${runId}` : null;
-  // The notice keeps a vetted reference ID only when the route's own read supplied one; a panel callback supplies none.
+  // The notice keeps the confirmed failure's reference ID only after `withApiFailureReference` vets it, whether the route's
+  // own read or a panel (Activity, progress pin) confirmed the tombstone.
   const [gone, setGone] = useState<{ key: string; message: string } | null>(null);
   const departing = useRef<Element | null>(null);
   const notice = useRef<HTMLParagraphElement>(null);
   const deleted = viewKey !== null && gone?.key === viewKey;
-  // When the transition removed the focused control, land on the surviving notice; leave surviving focus alone.
+  const routeRoot = useRef<HTMLElement>(null);
+  const departingFocus = useDepartingFocus(routeRoot);
+  // When the transition removed the focused control, or the control the page disabled under it, land on the
+  // surviving notice; leave surviving focus alone.
   useLayoutEffect(() => {
     if (!deleted) return;
     const from = departing.current; departing.current = null;
-    if (from && from !== document.body && !from.isConnected) notice.current?.focus();
+    focusSurvivingNotice(from, notice.current);
   }, [deleted]);
   const title = <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>;
-  if (deleted) return <section aria-labelledby="attempt-title">{title}
+  if (deleted) return <section aria-labelledby="attempt-title" ref={routeRoot}>{title}
     <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{gone.message}</p>
       <a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></div>
   </section>;
-  const markDeleted = (failure?: unknown) => {
-    if (viewKey === null || gone?.key === viewKey) return;
-    departing.current = document.activeElement;
-    setGone({ key: viewKey, message: failure === undefined ? copy.thisJobWasDeleted : withApiFailureReference(copy.thisJobWasDeleted, failure) });
+  const markDeleted = (failure: unknown) => {
+    // Only the shared discriminator can prove deletion; any other failure leaves the attempt to its own panel.
+    if (viewKey === null || gone?.key === viewKey || !isDeletedJob(failure)) return;
+    departing.current = departingFocus();
+    setGone({ key: viewKey, message: withApiFailureReference(copy.thisJobWasDeleted, failure) });
   };
-  return <section aria-labelledby="attempt-title">
+  return <section aria-labelledby="attempt-title" ref={routeRoot}>
     {title}
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>{copy.returnToJobOverview}</a>

@@ -28,7 +28,7 @@ type ActivityDisplay = { position: ActivityPosition; receipt: ActivityReceiptTim
 export function Activity({ jobId, runId, basePath, navigation, onDeleted }: {
   jobId: string; runId: string; basePath: string; navigation?: ActivityNavigation;
   /** A confirmed RESOURCE_GONE tombstone (never an ordinary EVENT_GAP) ends the whole routed attempt. */
-  onDeleted?: () => void;
+  onDeleted?: (failure: unknown) => void;
 }) {
   let window: ReturnType<typeof activityWindowLocation>;
   try { window = activityWindowLocation(navigation?.search ?? ''); }
@@ -43,7 +43,7 @@ export function Activity({ jobId, runId, basePath, navigation, onDeleted }: {
     : <LiveActivity jobId={jobId} runId={runId} basePath={basePath} windowLinks={navigation !== undefined} {...(onDeleted ? { onDeleted } : {})} />;
 }
 
-function LiveActivity({ jobId, runId, basePath, windowLinks, onDeleted }: { jobId: string; runId: string; basePath: string; windowLinks: boolean; onDeleted?: () => void }) {
+function LiveActivity({ jobId, runId, basePath, windowLinks, onDeleted }: { jobId: string; runId: string; basePath: string; windowLinks: boolean; onDeleted?: (failure: unknown) => void }) {
   const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const session = useContext(PrivateSessionContext);
   const { client, stream } = usePrivateTransport(basePath);
@@ -183,7 +183,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks, onDeleted }: { jobI
         if (isDeletedJob(failure)) {
           position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
           setDeleted(true); setError(withApiFailureReference(runCopy.thisJobWasDeleted, failure)); setFollowing(false);
-          deletedHandler.current?.();
+          deletedHandler.current?.(failure);
           return;
         }
         if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {

@@ -1,7 +1,7 @@
 // #512: a confirmed RESOURCE_GONE on attempt history ends the routed history like Job and Run do.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/preact';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Job, Run, Snapshot } from '../src/api/generated';
@@ -93,6 +93,63 @@ it('leaves surviving focus outside the history alone when it is tombstoned', asy
     await act(async () => { notifyLibraryChanged('/nested/'); await Promise.resolve(); });
     await screen.findByText(runHistoryCopy.thisJobWasDeleted);
     expect(document.activeElement).toBe(surviving);
+  } finally { auth.dispose(); }
+});
+
+// Chrome blurs Refresh history once the outstanding read disables it, leaving the document focused while the
+// button stays in the page (#1978 R3). jsdom neither does nor allows that blur, so reproduce the state.
+function chromeBlurDisabled(control: HTMLElement) {
+  const actual = Object.getOwnPropertyDescriptor(Document.prototype, 'activeElement')!;
+  Object.defineProperty(document, 'activeElement', { configurable: true,
+    get(this: Document) { const focused = actual.get!.call(this) as Element | null; return focused === control ? this.body : focused; } });
+  control.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+  control.dispatchEvent(new FocusEvent('blur'));
+}
+afterEach(() => { Reflect.deleteProperty(document, 'activeElement'); });
+async function heldHistoryRefresh() {
+  const auth = await session();
+  let settle!: (error: unknown) => void;
+  transport.get.mockResolvedValueOnce(page).mockImplementation(() => new Promise((_ok, fail) => { settle = fail; }));
+  history.replaceState(null, '', historyPath);
+  render(<App basePath="/nested" session={auth} />);
+  await screen.findByRole('link', { name: new RegExp(run.runId) });
+  const refresh = screen.getByRole('button', { name: runHistoryCopy.refreshHistory });
+  refresh.focus(); fireEvent.click(refresh);
+  await waitFor(() => expect(refresh.matches(':disabled')).toBe(true));
+  chromeBlurDisabled(refresh);
+  expect(document.activeElement).toBe(document.body);
+  return { auth, gone: (error: unknown) => act(async () => { settle(error); await Promise.resolve(); await Promise.resolve(); }) };
+}
+
+it('hands focus from Refresh history, blurred when the read disabled it, to the deletion notice', async () => {
+  const { auth, gone } = await heldHistoryRefresh();
+  try {
+    await gone(failure(410, 'RESOURCE_GONE'));
+    await screen.findByText(runHistoryCopy.thisJobWasDeleted);
+    expectRecoveryOnly();
+    expect(document.activeElement?.textContent).toBe(runHistoryCopy.thisJobWasDeleted);
+  } finally { auth.dispose(); }
+});
+
+it('never steals focus the user moved elsewhere while the disabled Refresh history read is held', async () => {
+  const { auth, gone } = await heldHistoryRefresh();
+  try {
+    const surviving = screen.getByRole('button', { name: 'Sign out' });
+    surviving.focus();
+    await gone(failure(410, 'RESOURCE_GONE'));
+    await screen.findByText(runHistoryCopy.thisJobWasDeleted);
+    expect(document.activeElement).toBe(surviving);
+  } finally { auth.dispose(); }
+});
+
+it('keeps the history and leaves focus alone when the held Refresh history read returns an ordinary 410', async () => {
+  const { auth, gone } = await heldHistoryRefresh();
+  try {
+    await gone(failure(410, 'EVENT_GAP'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(runHistoryCopy.attemptHistoryIsUnavailableCheckTheJobAndLocalSession));
+    expect(screen.queryByText(runHistoryCopy.thisJobWasDeleted)).toBeNull();
+    expect(screen.getByRole('button', { name: runHistoryCopy.refreshHistory })).toBeTruthy();
+    expect(document.activeElement).toBe(document.body);
   } finally { auth.dispose(); }
 });
 

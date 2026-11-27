@@ -12,6 +12,7 @@ import { jobCopy, jobDeletionCopy } from '../src/copy/job';
 import { JobDeletion } from '../src/jobs/JobLifecycle';
 import { activityWindowSearch } from '../src/jobs/activityNavigation';
 import { createBrowserSession } from '../src/session/session';
+import { progressPinCopy } from '../src/copy/attempt';
 
 const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
@@ -390,3 +391,284 @@ it('shows only recovery on another attempt view reached after the tombstone, wit
     expect(transport.put).not.toHaveBeenCalled();
   } finally { auth.dispose(); }
 });
+
+it('an unverified 410 from the deletion preview never creates a job tombstone', async () => {
+  const { auth } = await jobRoute(deferred<Operation>());
+  try {
+    transport.get.mockImplementation((kind: string) => kind === 'jobDeletionPreview'
+      ? Promise.reject(new ApiClientError('invalid_headers', { status: 410 }))
+      : Promise.resolve({ data: job }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
+    await waitFor(() => expect(transport.get.mock.calls.some(([kind]) => kind === 'jobDeletionPreview')).toBe(true));
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('the confirmed live Activity tombstone carries its vetted reference to the route notice', async () => {
+  const failure = new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE', requestId: '62c73a23-4064-43b9-ada4-da1d82d4f546' });
+  const auth = await routedActivity(failure);
+  try {
+    fireEvent.click(await screen.findByRole('button', { name: 'Follow activity' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(runCopy.thisJobWasDeleted));
+    expect(screen.getByRole('alert').textContent).toContain('Reference ID: 62c73a23-4064-43b9-ada4-da1d82d4f546.');
+  } finally { auth.dispose(); }
+});
+
+it('a confirmed DELETE tombstone during the remounted initial read outlasts that read failing', async () => {
+  const del = deferred<Operation>(); const { auth, view } = await jobRoute(del);
+  try {
+    await arm();
+    view.unmount();
+    const read = deferred<Job>();
+    const start = transport.get.mock.calls.length;
+    transport.get.mockImplementation((kind: string) => kind === 'job' ? read.promise : Promise.reject(unavailable()));
+    render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(transport.get.mock.calls.slice(start).some(([kind]) => kind === 'job')).toBe(true));
+    await del.settle({ err: gone('RESOURCE_GONE') });
+    await read.settle({ err: unavailable() });
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+// R3 Sol repros (#1978): pin tombstone, Chrome focus loss on disabled refresh, discriminator-only deletion,
+// registry rejections owned by one view, and vetted references from Activity.
+const canonicalId = '62c73a23-4064-43b9-ada4-da1d82d4f546';
+const goneWith = (requestId: string) => new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE', requestId });
+// Chrome blurs a focused control once the page disables it, leaving the document focused, while the control
+// stays in the page. jsdom neither blurs a disabled control nor lets a test do so, so reproduce that state.
+const chromeBlurIfDisabled = (control: HTMLElement) => {
+  if (!control.matches(':disabled') || document.activeElement !== control) return;
+  const actual = Object.getOwnPropertyDescriptor(Document.prototype, 'activeElement')!;
+  Object.defineProperty(document, 'activeElement', { configurable: true,
+    get(this: Document) { const focused = actual.get!.call(this) as Element | null; return focused === control ? this.body : focused; } });
+  control.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+  control.dispatchEvent(new FocusEvent('blur'));
+};
+afterEach(() => { Reflect.deleteProperty(document, 'activeElement'); });
+async function pinRoute(failure: ApiClientError) {
+  const auth = await session();
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: run })
+    : kind === 'snapshot' ? Promise.resolve({ data: snapshot })
+    : kind === 'progressPin' ? Promise.reject(failure) : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}/activity`);
+  render(<App basePath="/nested" session={auth} />);
+  // Activity stays paused: only the pin read observes the tombstone.
+  await screen.findByRole('button', { name: 'Follow activity' });
+  return auth;
+}
+
+it('ends the whole attempt when the progress pin read confirms RESOURCE_GONE while Activity is paused', async () => {
+  const auth = await pinRoute(goneWith(canonicalId));
+  try {
+    const read = screen.getByRole('button', { name: progressPinCopy.readProgressPin });
+    read.focus();
+    fireEvent.click(read);
+    chromeBlurIfDisabled(read);
+    await screen.findByText(runCopy.thisJobWasDeleted, { exact: false });
+    const notice = screen.getByRole('alert');
+    expect(notice.textContent).toContain(`Reference ID: ${canonicalId}.`);
+    expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
+    expect(screen.queryByRole('button', { name: progressPinCopy.readProgressPin })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Follow activity' })).toBeNull();
+    expect(screen.queryByText(run.runId)).toBeNull();
+    expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+  } finally { auth.dispose(); }
+});
+
+for (const [name, failure] of [['EVENT_GAP', gone('EVENT_GAP')], ['an unverified 410', new ApiClientError('invalid_headers', { status: 410 })]] as const) {
+  it(`keeps the attempt and its pin controls for ${name} from the progress pin read`, async () => {
+    const auth = await pinRoute(failure);
+    try {
+      fireEvent.click(screen.getByRole('button', { name: progressPinCopy.readProgressPin }));
+      await waitFor(() => expect(document.body.textContent).toContain(progressPinCopy.theCurrentPinPolicyCouldNotBeVerifiedCheckThe));
+      expect(screen.queryByText(runCopy.thisJobWasDeleted)).toBeNull();
+      expect(screen.getByRole('button', { name: runCopy.refreshAttempt })).toBeTruthy();
+      expect(screen.getByRole('button', { name: progressPinCopy.readProgressPin })).toBeTruthy();
+    } finally { auth.dispose(); }
+  });
+}
+
+it('hands focus from Refresh attempt, blurred when the read disabled it, to the deletion notice', async () => {
+  const auth = await session();
+  const held = deferred<Run>();
+  let reads = 0;
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? (reads++ === 0 ? Promise.resolve({ data: run }) : held.promise)
+    : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}/evidence`);
+  render(<App basePath="/nested" session={auth} />);
+  try {
+    const refresh = await screen.findByRole('button', { name: runCopy.refreshAttempt });
+    await screen.findByText(run.runId);
+    refresh.focus(); fireEvent.click(refresh);
+    await waitFor(() => expect(refresh.matches(':disabled')).toBe(true));
+    chromeBlurIfDisabled(refresh);
+    expect(document.activeElement).toBe(document.body);
+    await held.settle({ err: gone('RESOURCE_GONE') });
+    await screen.findByText(runCopy.thisJobWasDeleted);
+    expect(document.activeElement?.closest('[role="alert"]')).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+async function heldJobRefresh() {
+  const del = deferred<Operation>(); const route = await jobRoute(del);
+  const held = deferred<Job>();
+  transport.get.mockImplementation((kind: string) => kind === 'job' ? held.promise : Promise.reject(unavailable()));
+  const refresh = screen.getByRole('button', { name: jobCopy.refreshJob });
+  refresh.focus(); fireEvent.click(refresh);
+  await waitFor(() => expect(refresh.matches(':disabled')).toBe(true));
+  chromeBlurIfDisabled(refresh);
+  expect(document.activeElement).toBe(document.body);
+  return { ...route, held, refresh };
+}
+
+it('hands focus from Refresh job, blurred when the read disabled it, to the deletion notice', async () => {
+  const { auth, held } = await heldJobRefresh();
+  try {
+    await held.settle({ err: gone('RESOURCE_GONE') });
+    await screen.findByText(jobCopy.thisJobWasDeleted);
+    expect(document.activeElement?.textContent).toBe(jobCopy.thisJobWasDeleted);
+  } finally { auth.dispose(); }
+});
+
+it('never steals focus the user moved elsewhere after the page disabled Refresh job', async () => {
+  const { auth, held } = await heldJobRefresh();
+  try {
+    const surviving = screen.getByRole('button', { name: 'Sign out' });
+    surviving.focus();
+    await held.settle({ err: gone('RESOURCE_GONE') });
+    await screen.findByText(jobCopy.thisJobWasDeleted);
+    expect(document.activeElement).toBe(surviving);
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus on the document when the user blurred an enabled control before the tombstone', async () => {
+  const { auth, tombstone } = await jobRoute(deferred<Operation>());
+  try {
+    const link = screen.getByRole('link', { name: jobCopy.browseAttemptHistory });
+    link.focus(); link.blur();
+    expect(document.activeElement).toBe(document.body);
+    tombstone(); fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await screen.findByText(jobCopy.thisJobWasDeleted);
+    expect(document.activeElement).toBe(document.body);
+  } finally { auth.dispose(); }
+});
+
+for (const [name, failure] of [['EVENT_GAP', gone('EVENT_GAP')], ['an unverified 410', new ApiClientError('invalid_headers', { status: 410 })]] as const) {
+  it(`keeps the job and reports an ordinary failure when the deletion preview returns ${name}`, async () => {
+    const { auth } = await jobRoute(deferred<Operation>());
+    try {
+      transport.get.mockImplementation((kind: string) => kind === 'jobDeletionPreview' ? Promise.reject(failure) : Promise.resolve({ data: job }));
+      fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
+      await waitFor(() => expect(document.body.textContent).toContain(jobDeletionCopy.previewFailed));
+      expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+      expect(screen.getByRole('button', { name: jobCopy.refreshJob })).toBeTruthy();
+    } finally { auth.dispose(); }
+  });
+
+  it(`keeps the job when the DELETE itself returns ${name}`, async () => {
+    const del = deferred<Operation>(); const { auth } = await jobRoute(del);
+    try {
+      await arm();
+      await del.settle({ err: failure });
+      expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+      expect(document.body.textContent).not.toContain(jobDeletionCopy.deletedElsewhere);
+      expect(document.body.textContent).toContain(jobDeletionCopy.failed);
+      expect(screen.getByRole('button', { name: jobCopy.refreshJob })).toBeTruthy();
+      expect(transport.put).toHaveBeenCalledOnce();
+    } finally { auth.dispose(); }
+  });
+
+  it(`a remounted form observing the pending DELETE does not report deletion for ${name}`, async () => {
+    const del = deferred<Operation>(); transport.get.mockResolvedValue({ data: preview }); transport.put.mockReturnValue(del.promise);
+    const first = vi.fn(), second = vi.fn();
+    const view = render(form('a', first)); await arm();
+    view.rerender(form('b', second));
+    await del.settle({ err: failure });
+    expect(first).not.toHaveBeenCalled(); expect(second).not.toHaveBeenCalled();
+    expect(screen.getByRole('status').textContent).not.toContain(jobDeletionCopy.deletedElsewhere);
+    expect(transport.put).toHaveBeenCalledOnce();
+  });
+
+  it(`a remounted job route with its first read held never tombstones for a DELETE ${name}`, async () => {
+    const del = deferred<Operation>(); const { auth, view } = await jobRoute(del);
+    try {
+      await arm();
+      view.unmount();
+      const read = deferred<Job>();
+      const start = transport.get.mock.calls.length;
+      transport.get.mockImplementation((kind: string) => kind === 'job' ? read.promise : Promise.reject(unavailable()));
+      render(<App basePath="/nested" session={auth} />);
+      await waitFor(() => expect(transport.get.mock.calls.slice(start).some(([kind]) => kind === 'job')).toBe(true));
+      await del.settle({ err: failure });
+      await read.settle({ err: unavailable() });
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(jobCopy.jobMetadataCouldNotBeLoadedCheckTheLocalSession));
+      expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+      expect(transport.put).toHaveBeenCalledOnce();
+    } finally { auth.dispose(); }
+  });
+}
+
+it('a remounted form reports the confirmed DELETE tombstone it observes exactly once', async () => {
+  const del = deferred<Operation>(); transport.get.mockResolvedValue({ data: preview }); transport.put.mockReturnValue(del.promise);
+  const first = vi.fn(), second = vi.fn();
+  const view = render(form('a', first)); await arm();
+  view.rerender(form('b', second));
+  await del.settle({ err: gone('RESOURCE_GONE') });
+  expect(first).not.toHaveBeenCalled();
+  expect(second).toHaveBeenCalledExactlyOnceWith(null);
+  expect(transport.put).toHaveBeenCalledOnce();
+});
+
+it('a confirmed DELETE tombstone never reaches a newer authenticated view of the same session object', async () => {
+  const del = deferred<Operation>(); const { auth } = await jobRoute(del);
+  try {
+    await arm();
+    await act(async () => { await auth.refresh(); });
+    await screen.findByRole('button', { name: 'Review what would be deleted' });
+    await del.settle({ err: gone('RESOURCE_GONE') });
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+    expect(transport.put).toHaveBeenCalledOnce();
+  } finally { auth.dispose(); }
+});
+
+it('a confirmed DELETE tombstone never reaches a sibling job route mounted while it is pending', async () => {
+  const del = deferred<Operation>(); const { auth, view } = await jobRoute(del);
+  try {
+    await arm();
+    view.unmount();
+    const sibling = { ...job, jobId: 'fedcba0987654321fedcba0987654321' };
+    const read = deferred<Job>();
+    const start = transport.get.mock.calls.length;
+    transport.get.mockImplementation((kind: string) => kind === 'job' ? read.promise : Promise.reject(unavailable()));
+    history.replaceState(null, '', `/nested/jobs/${sibling.jobId}`);
+    render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(transport.get.mock.calls.slice(start).some(([kind]) => kind === 'job')).toBe(true));
+    await del.settle({ err: gone('RESOURCE_GONE') });
+    await read.settle({ ok: sibling });
+    await screen.findByRole('button', { name: 'Review what would be deleted' });
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Review what would be deleted' }).hasAttribute('disabled')).toBe(false);
+    expect(transport.put).toHaveBeenCalledOnce();
+  } finally { auth.dispose(); }
+});
+
+it('the confirmed saved-window Activity tombstone carries its vetted reference to the route notice', async () => {
+  const auth = await routedActivity(goneWith(canonicalId), savedSearch);
+  try {
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(runCopy.thisJobWasDeleted));
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('alert').textContent).toContain(`Reference ID: ${canonicalId}.`);
+  } finally { auth.dispose(); }
+});
+
+for (const [name, search] of [['live', ''], ['saved window', savedSearch]] as const) {
+  it(`drops an untrusted reference from a ${name} Activity tombstone on the route notice`, async () => {
+    const auth = await routedActivity(goneWith('request_example_1'), search);
+    try {
+      if (!search) fireEvent.click(await screen.findByRole('button', { name: 'Follow activity' }));
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(runCopy.thisJobWasDeleted));
+      expect(screen.getByRole('alert').textContent).not.toContain('Reference ID');
+      expect(document.body.textContent).not.toContain('request_example_1');
+    } finally { auth.dispose(); }
+  });
+}

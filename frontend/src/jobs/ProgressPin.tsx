@@ -9,11 +9,15 @@ import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { isDeletedJob } from '../shared/retainMetadata';
 
 /** Pin policy is separate from workflow state and activity delivery. */
-export function ProgressPin({ jobId, runId, basePath, session }: {
+export function ProgressPin({ jobId, runId, basePath, session, onDeleted }: {
   jobId: string; runId: string; basePath: string; session: Pick<BrowserSession, 'csrf'>;
+  /** A confirmed RESOURCE_GONE tombstone from a pin read or change ends the whole routed attempt (#512). */
+  onDeleted?: (failure: unknown) => void;
 }) {
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const { client } = usePrivateTransport(basePath);
   const availability = useBrowserAvailability();
   const active = useRef<AbortController | null>(null);
@@ -52,6 +56,7 @@ export function ProgressPin({ jobId, runId, basePath, session }: {
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
       setPolicy(null);
+      if (isDeletedJob(failure) && deletedHandler.current) { deletedHandler.current(failure); return; }
       setMessage(withApiFailureReference(failure instanceof ApiClientError && [401, 403].includes(failure.status ?? 0)
         ? copy.progressRetentionAccessWasDeniedReconnectTheLocalSession
         : failure instanceof ApiClientError && failure.status === 412

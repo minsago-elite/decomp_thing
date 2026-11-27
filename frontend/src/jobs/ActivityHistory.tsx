@@ -15,7 +15,7 @@ import { activityWindowCapacity, activityWindowLocation, activityWindowPageLimit
 
 /** Saved windows are read-only. They never enter the live follower or its reconnect loop. */
 export function ActivityHistory({ jobId, runId, basePath, navigation, window, onDeleted }: {
-  jobId: string; runId: string; basePath: string; navigation: ActivityNavigation; window: ActivityWindow; onDeleted?: () => void;
+  jobId: string; runId: string; basePath: string; navigation: ActivityNavigation; window: ActivityWindow; onDeleted?: (failure: unknown) => void;
 }) {
   const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const { client } = usePrivateTransport(basePath);
@@ -65,7 +65,7 @@ export function ActivityHistory({ jobId, runId, basePath, navigation, window, on
           rows: previous.binding === binding && canRetainMetadata(failure) ? previous.rows : [],
           snapshot: previous.binding === binding && canRetainMetadata(failure) ? previous.snapshot : null,
           loading: false, deleted: isDeletedJob(failure), error: withApiFailureReference(message, failure) }));
-        if (isDeletedJob(failure)) deletedHandler.current?.();
+        if (isDeletedJob(failure)) deletedHandler.current?.(failure);
       }
     };
     void read();

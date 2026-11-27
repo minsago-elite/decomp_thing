@@ -12,6 +12,7 @@ import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { formatExactBytes } from './metadataFormat';
 import { notifyLibraryChanged } from './libraryNotify';
 import { pendingDeletion, trackDeletion } from './deletionAcknowledgement';
+import { isDeletedJob } from '../shared/retainMetadata';
 
 // These contracts are decoded only on this lazily loaded route.
 registerContractExtension(lazyContractSchema);
@@ -95,7 +96,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
 function failureNotice(failure: unknown) {
   const copy = jobDeletionCopy;
   return status(failure) === 412 ? copy.changed : status(failure) === 409 && code(failure) === 'RETENTION_PROTECTED' ? copy.conflict
-    : status(failure) === 410 ? copy.deletedElsewhere
+    : isDeletedJob(failure) ? copy.deletedElsewhere
     : [401, 403].includes(status(failure)) ? copy.denied
     : code(failure) === 'STORAGE_UNAVAILABLE' ? copy.storage : copy.failed;
 }
@@ -152,7 +153,7 @@ export function JobDeletion({ job, client, basePath, session, generation = 0, on
         if (!owns()) return;
         mutation.current = null; setBusy(false);
         setNotice(withApiFailureReference(failureNotice(failure), failure));
-        if (status(failure) === 410) onDeleted(null);
+        if (isDeletedJob(failure)) onDeleted(null);
       });
     }
     return () => {
@@ -173,7 +174,8 @@ export function JobDeletion({ job, client, basePath, session, generation = 0, on
     } catch (failure: unknown) {
       if ((signal ?? controller!.signal).aborted) return;
       setPreview(null);
-      if (status(failure) === 410) { onDeleted(null); return; }
+      // Only the shared discriminator proves deletion; a bare or unverified 410 is an ordinary preview failure.
+      if (isDeletedJob(failure)) { onDeleted(null); return; }
       if (controller) setNotice(withApiFailureReference([401, 403].includes(status(failure)) ? copy.denied : copy.previewFailed, failure));
     } finally {
       if (controller && active.current === controller) { active.current = null; setBusy(false); }
@@ -213,7 +215,7 @@ export function JobDeletion({ job, client, basePath, session, generation = 0, on
       const conflict = status(failure) === 409 && code(failure) === 'RETENTION_PROTECTED';
       setNotice(withApiFailureReference(failureNotice(failure), failure));
       setConfirm('');
-      if (status(failure) === 410) onDeleted(null);
+      if (isDeletedJob(failure)) onDeleted(null);
       // The readback is observation: skip it once unavailable, and abort it if availability changes.
       else if (conflict && !controller.signal.aborted && active.current === controller) await review(controller.signal);
       else setPreview(null);
