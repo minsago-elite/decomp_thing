@@ -153,6 +153,7 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory
     void (async () => {
       let cursor: string | null = null;
       let read = 0;
+      const seenRuns = new Set<string>();
       // History newer than this observation lists attempts before its latest one; those are skipped, and
       // a history that never shows the observed latest attempt cannot be bound to it at all.
       let reachedLatest = latestRunId === null;
@@ -183,6 +184,16 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory
         // Pages of one walk share a snapshot; the server expires a cursor rather than mixing two.
         if (snapshot !== null && data.page.snapshotVersion !== snapshot) throw new ApiClientError('invalid_response');
         snapshot = data.page.snapshotVersion;
+        const next = data.page.nextCursor;
+        // WebRunPages continues only a full page and every continuation starts inside the snapshot.
+        if ((next !== null && (next === cursor || data.items.length !== pageLimit)) || (cursor !== null && data.items.length === 0)) {
+          throw new ApiClientError('invalid_response');
+        }
+        // Check the whole page before publishing a match, including rows preceding the observed latest attempt.
+        for (const run of data.items) {
+          if (seenRuns.has(run.runId)) throw new ApiClientError('invalid_response');
+          seenRuns.add(run.runId);
+        }
         let items = data.items;
         if (latestRunId === null) {
           // No attempt was observed, so any listed attempt is newer than this observation.
@@ -195,7 +206,7 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory
         const found = items.find(run => run.acceptance === 'accepted' && run.resultRevisionId === acceptedRevisionId);
         if (found) { await settle({ status: 'found', run: found }); return; }
         read += items.length;
-        cursor = data.page.nextCursor;
+        cursor = next;
         if (cursor === null) { await settle(reachedLatest ? { status: 'not-found', exhausted: true, read } : { status: 'unbound' }); return; }
       }
       await settle(reachedLatest ? { status: 'not-found', exhausted: false, read } : { status: 'unbound' });
@@ -248,7 +259,9 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory
       <p tabIndex={-1} ref={outcome}>{lookup.exhausted
         ? displayMessage(lookup.read === 0 ? copy.exhaustedEmpty : lookup.read === 1 ? copy.exhaustedOne : copy.exhausted,
           { revisionId: <code>{acceptedRevisionId}</code>, count: String(lookup.read) })
-        : displayMessage(copy.notFound, { revisionId: <code>{acceptedRevisionId}</code>, count: String(acceptedLookupPages * pageLimit) })}</p>
+        : lookup.read === acceptedLookupPages * pageLimit
+          ? displayMessage(copy.notFound, { revisionId: <code>{acceptedRevisionId}</code>, count: String(lookup.read) })
+          : displayMessage(copy.searchLimit, { revisionId: <code>{acceptedRevisionId}</code> })}</p>
       <p class="job-actions"><a href={`${jobPath(basePath, jobId)}/runs`}>{copy.history}</a></p>
     </>}
     {lookup.status === 'unbound' && acceptedRevisionId !== null && <>

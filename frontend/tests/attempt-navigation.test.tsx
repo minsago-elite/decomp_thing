@@ -31,6 +31,10 @@ const bootstrap = fixture('bootstrap.json') as Bootstrap;
 const jobId = sampleJob.jobId;
 const run = (runId: string, extra: Partial<Run> = {}): Run => ({ ...sampleRun, jobId, runId, resultRevisionId: `revision_of_${runId}`, ...extra });
 const page = (items: Run[], nextCursor: string | null = null, snapshotVersion = snapshotOne) => ({ data: { jobId, items, page: { limit: 50, snapshotVersion, nextCursor } } });
+// WebRunPages issues a continuation only after a full page.
+const continuedPage = (leading: Run[], nextCursor: string, snapshotVersion = snapshotOne) =>
+  page([...leading, ...Array.from({ length: 50 - leading.length }, (_, i) => run(`run_filler_${nextCursor}_${i}`))],
+    nextCursor, snapshotVersion);
 beforeEach(() => { transport.get.mockReset(); transport.put.mockReset(); });
 
 async function session() {
@@ -51,7 +55,7 @@ it('separates the latest attempt from the accepted reconstruction and links each
   const job = { ...sampleJob, latestRunId: 'run_latest', acceptedRevisionId: 'revision_accepted' };
   transport.get.mockImplementation((kind, path) => {
     if (kind === 'job' && path === `/jobs/${jobId}`) return Promise.resolve({ data: job });
-    if (kind === 'runs' && path === `/jobs/${jobId}/runs?limit=50`) return Promise.resolve(page([
+    if (kind === 'runs' && path === `/jobs/${jobId}/runs?limit=50`) return Promise.resolve(continuedPage([
       run('run_latest', { state: 'running', resultRevisionId: null }),
       // A different accepted revision recorded by another attempt is not the job's current acceptance.
       run('run_superseded', { acceptance: 'accepted', resultRevisionId: 'revision_superseded' }),
@@ -86,10 +90,10 @@ it('reads at most two history pages and states an unlocated accepted attempt wit
   const job = { ...sampleJob, latestRunId: 'run_latest', acceptedRevisionId: 'revision_accepted' };
   transport.get.mockImplementation((kind, path) => {
     if (kind === 'job') return Promise.resolve({ data: job });
-    if (path.includes('cursor=cursor_2')) return Promise.resolve(page([
+    if (path.includes('cursor=cursor_2')) return Promise.resolve(continuedPage([
       // Same revision identity without recorded acceptance never identifies the accepted attempt.
       run('run_candidate', { resultRevisionId: 'revision_accepted' })], 'cursor_3'));
-    return Promise.resolve(page([run('run_latest')], 'cursor_2'));
+    return Promise.resolve(continuedPage([run('run_latest')], 'cursor_2'));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {
@@ -175,7 +179,7 @@ it('locates the accepted attempt on the second bounded page and names each link 
   const auth = await session();
   transport.get.mockImplementation((kind, path) => {
     if (kind === 'job') return Promise.resolve(acceptedJob());
-    if (path.includes('cursor=cursor_2')) return Promise.resolve(page([run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' })], 'cursor_3'));
+    if (path.includes('cursor=cursor_2')) return Promise.resolve(continuedPage([run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' })], 'cursor_3'));
     return Promise.resolve(page([run('run_latest'), ...Array.from({ length: 49 }, (_, index) => run(`run_${index}`))], 'cursor_2'));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
@@ -218,6 +222,67 @@ it.each([
     const paths = transport.get.mock.calls.filter(([kind]) => kind === 'runs').map(([, path]) => path);
     const firstPath = `/jobs/${jobId}/runs?limit=50`;
     expect(paths).toEqual(pageNumber === 1 ? [firstPath] : [firstPath, firstPath + '&cursor=cursor_2']);
+  } finally { auth.dispose(); }
+});
+
+it.each(['replayed page', 'overlapping row', 'unchanged cursor', 'empty continuation', 'short continued page'] as const)(
+  'rejects history with this defect (%s) before publishing an accepted match or a history absence, and recovers on Retry', async defect => {
+    const auth = await session();
+    const first = continuedPage([latestRunning], 'cursor_2');
+    const match = run('run_at_55', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' });
+    const last = page([run('run_51'), run('run_52'), run('run_53'), run('run_54'), match]);
+    const invalidPages = {
+      'replayed page': first,
+      'overlapping row': page([match, first.data.items[49]!]),
+      'unchanged cursor': page([match, ...Array.from({ length: 49 }, (_, i) => run(`run_other_${i}`))], 'cursor_2'),
+      'empty continuation': page([]),
+      'short continued page': page([match], 'cursor_3'),
+    };
+    let recovered = false;
+    const paths: string[] = [];
+    transport.get.mockImplementation((kind, path) => {
+      if (kind === 'job') return Promise.resolve(acceptedJob());
+      paths.push(path);
+      if (!path.includes('cursor=')) return Promise.resolve(first);
+      return Promise.resolve(recovered ? last : invalidPages[defect]);
+    });
+    history.replaceState(null, '', `/nested/jobs/${jobId}`);
+    try {
+      render(<App basePath="/nested" session={auth} />);
+      await screen.findByRole('heading', { name: acceptedWorkCopy.title });
+      const retry = await section().findByRole('button', { name: acceptedWorkCopy.retry });
+      expect(section().getByRole('alert').textContent).toContain(acceptedWorkCopy.lookupUnverified);
+      expect(section().queryByText(/not among the newest|none of the .* recorded attempts/)).toBeNull();
+      expect(section().queryByRole('link', { name: /^Open the accepted attempt/ })).toBeNull();
+      expect(section().getByRole('link', { name: acceptedWorkCopy.latestEvidence }).getAttribute('href'))
+        .toBe(runViewPath('/nested', jobId, 'run_latest', 'evidence'));
+      const initial = `/jobs/${jobId}/runs?limit=50`;
+      const next = initial + '&cursor=cursor_2';
+      expect(paths).toEqual([initial, next]);
+      recovered = true;
+      retry.focus();
+      fireEvent.click(retry);
+      await screen.findByRole('link', { name: 'Open the accepted attempt run_at_55' });
+      await waitFor(() => expect(document.activeElement?.textContent).toContain('was recorded by attempt run_at_55'));
+      expect(paths).toEqual([initial, next, initial, next]);
+    } finally { auth.dispose(); }
+  });
+
+it('states the two-page limit without claiming 100 eligible attempts when the observed latest starts on page two', async () => {
+  const auth = await session();
+  const newer = continuedPage([run('run_newer')], 'cursor_2');
+  const observed = continuedPage([latestRunning], 'cursor_3');
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob());
+    return Promise.resolve(path.includes('cursor=') ? observed : newer);
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(/two-page limit/);
+    expect(section().queryByText(/not among the newest 100/)).toBeNull();
+    expect(section().getByRole('link', { name: acceptedWorkCopy.history })).toBeTruthy();
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'runs')).toHaveLength(2);
   } finally { auth.dispose(); }
 });
 
@@ -591,7 +656,7 @@ it.each([
   const auth = await session();
   transport.get.mockImplementation((kind, path) => {
     if (kind === 'job') return Promise.resolve(acceptedJob());
-    if (continued && !path.includes('cursor=')) return Promise.resolve(page([latestRunning], 'cursor_2'));
+    if (continued && !path.includes('cursor=')) return Promise.resolve(continuedPage([latestRunning], 'cursor_2'));
     return Promise.reject(gone());
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
@@ -755,7 +820,7 @@ it('skips newer attempts across pages and stays within the two-page bound', asyn
   const newer = Array.from({ length: 50 }, (_, index) => run(`run_newer_${index}`, index === 0 ? { acceptance: 'accepted', resultRevisionId: 'revision_accepted' } : {}));
   transport.get.mockImplementation((kind, path) => {
     if (kind === 'job') return Promise.resolve(acceptedJob({ latestRunId: 'run_a' }));
-    if (path.includes('cursor=cursor_2')) return Promise.resolve(page([run('run_a'), accepted('run_found')], 'cursor_3'));
+    if (path.includes('cursor=cursor_2')) return Promise.resolve(continuedPage([run('run_a'), accepted('run_found')], 'cursor_3'));
     return Promise.resolve(page(newer, 'cursor_2'));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
@@ -771,7 +836,7 @@ it('treats an observed latest attempt beyond the two-page bound as unbound rathe
   const auth = await session();
   transport.get.mockImplementation((kind, path) => {
     if (kind === 'job') return Promise.resolve(acceptedJob({ latestRunId: 'run_a' }));
-    return Promise.resolve(page([run(path.includes('cursor=') ? 'run_x2' : 'run_x1')], path.includes('cursor=') ? 'cursor_3' : 'cursor_2'));
+    return Promise.resolve(continuedPage([run(path.includes('cursor=') ? 'run_x2' : 'run_x1')], path.includes('cursor=') ? 'cursor_3' : 'cursor_2'));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {
@@ -1399,7 +1464,7 @@ it('recovers an expired history cursor with one Retry that reads the job before 
       current = b;
       return Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED', requestId: '4d42dcf1-1dad-439e-8e9f-23f09e83017b' }));
     }
-    if (current === a) return Promise.resolve(page([latestRunning], cursor, a));
+    if (current === a) return Promise.resolve(continuedPage([latestRunning], cursor, a));
     return Promise.resolve(page([latestRunning, accepted('run_accepted')], null, b));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
@@ -1431,7 +1496,7 @@ it.each(['retry', 'moved'] as const)('ends the overview on a confirmed deletion 
       return new Promise((_resolve, reject) => { rejectRead = reject; });
     }
     if (path.includes('cursor=')) return Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }));
-    return Promise.resolve(page([latestRunning], 'cursor_2', v('A')));
+    return Promise.resolve(continuedPage([latestRunning], 'cursor_2', v('A')));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {

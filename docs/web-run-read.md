@@ -177,13 +177,17 @@ The job overview has a **Current and accepted work** section that keeps the two 
   that newer observation instead of reporting a failure. The order resets with the page on session change
   or unmount. If the Retry job read fails, the next Retry repeats that job read before
   any history read.
-- When found, it links that attempt, its evidence and report snapshots, and the accepted
-  revision's sources. Otherwise the wording separates the two outcomes: when the **cap**
-  is reached (a further page exists), the attempt is "not among the newest 100"; when
-  history is **exhausted** (no further page), none of the counted attempts records the
-  acceptance, or history has none yet. Both point to attempt history. A read failure is an
-  alert with an explicit retry and shows no attempt. With no accepted revision, no
-  history read is made.
+- Before using a page, the lookup checks that each attempt ID appears once across the
+  pages read. A page with a next cursor must be full. A continuation must contain at
+  least one row and its next cursor must differ from the cursor used to request it.
+  A failed check shows the lookup alert and offers Retry.
+- When the lookup finds the accepted attempt, it links that attempt, its evidence and report
+  snapshots, and the accepted revision's sources. If another page exists after the first
+  two, the overview reports absence from the newest 100 only when it examined 100
+  distinct attempts from the observed latest attempt onward. If it skipped newer rows,
+  it reports reaching the two-page limit. When the history ends, it reports how many
+  attempts it examined. Each absence message links to attempt history. With no accepted
+  revision, the page makes no history read.
 - Focus moves only when the person causes it. Retry moves focus to the status and then
   to the outcome, unless focus has moved elsewhere in the meantime; moving it out of the
   section withdraws that for good, even when the control it went to (such as **Refresh
