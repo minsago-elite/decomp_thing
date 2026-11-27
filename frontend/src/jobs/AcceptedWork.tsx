@@ -18,7 +18,7 @@ type Lookup =
   | { status: 'not-found'; exhausted: boolean; read: number }
   /** History does not contain this observation's latest attempt where it must be, so no attempt can be bound to it. */
   | { status: 'unbound' }
-  /** `recovery` marks a failed Retry job read, which the next Retry repeats before any history read. */
+  /** A failed job read or expired history cursor requires a fresh job observation before looking up history. */
   | { status: 'failed'; message: string; recovery?: true };
 
 function failureMessage(failure: unknown) {
@@ -189,6 +189,11 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob }: {
       await settle(reachedLatest ? { status: 'not-found', exhausted: false, read } : { status: 'unbound' });
     })().catch((failure: unknown) => {
       if (controller.signal.aborted) return;
+      if (failure instanceof ApiClientError && failure.code === 'http_error' && failure.status === 410 && failure.serverCode === 'CURSOR_EXPIRED') {
+        const message = textMessage(copy.unbound, { revisionId: acceptedRevisionId });
+        setLookup({ status: 'failed', message: withApiFailureReference(message, failure), recovery: true });
+        return;
+      }
       setLookup({ status: 'failed', message: failureMessage(failure) });
     });
     return () => { controller.abort(); };

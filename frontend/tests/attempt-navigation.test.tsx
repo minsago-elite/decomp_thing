@@ -1207,3 +1207,36 @@ it('drops a held accepted-work Retry when the person follows a link to another r
     expect(errors).not.toHaveBeenCalled();
   } finally { errors.mockRestore(); auth.dispose(); }
 });
+
+it('recovers an expired history cursor with one Retry that reads the job before its new history', async () => {
+  const auth = await session();
+  const a = v('A');
+  const b = v('B');
+  let current = a;
+  const cursor = 'cursor_2';
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob({ latestRunId: 'run_latest', version: current }));
+    if (path.includes('cursor=')) {
+      current = b;
+      return Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED', requestId: '4d42dcf1-1dad-439e-8e9f-23f09e83017b' }));
+    }
+    if (current === a) return Promise.resolve(page([latestRunning], cursor, a));
+    return Promise.resolve(page([latestRunning, accepted('run_accepted')], null, b));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const retry = await screen.findByRole('button', { name: acceptedWorkCopy.retry });
+    const failure = section().getByRole('alert');
+    expect(failure.textContent).toContain('attempt history changed after this job was read');
+    expect(failure.textContent).toContain('4d42dcf1-1dad-439e-8e9f-23f09e83017b');
+    expect(section().queryByRole('link', { name: /Open the accepted attempt/ })).toBeNull();
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'runs']);
+    retry.focus();
+    fireEvent.click(retry);
+    await waitFor(() => expect(transport.get.mock.calls.length).toBeGreaterThan(3));
+    expect(transport.get.mock.calls[3]?.[0]).toBe('job');
+    await section().findByRole('link', { name: 'Open the accepted attempt run_accepted' });
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'runs', 'job', 'runs']);
+  } finally { auth.dispose(); }
+});
