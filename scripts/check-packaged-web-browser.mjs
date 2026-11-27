@@ -1101,6 +1101,7 @@ try {
       await delay(5000);
       semantics.results.checkSessionAfterQuietWindow = await semantics.verifyActivationQuiet(authenticated, checkActivation);
 
+      let reconnectStart;
       // A real browser-side connection failure exercises unavailable/connection without inventing a server response.
       await cdp.call('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
         connectionType: 'none' }, authenticated.sessionId);
@@ -1122,10 +1123,22 @@ try {
         semantics.results.offlineAfterQuietWindow = await semantics.verifyActivationQuiet(authenticated, offlineActivation);
         semantics.results.unavailableConnection = { browserOffline: true, bootstrapGets: 1, noFabricatedResponse: true };
       } finally {
+        reconnectStart = authenticated.requests.length;
         await cdp.call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
           connectionType: 'wifi' }, authenticated.sessionId);
       }
-      await ready(authenticated, `navigator.onLine === true`, 'browser network restored');
+      // Reconnect schedules a background session read. Its HTTP response and rendered outcome
+      // must precede the request window attributed to the explicit keyboard activation.
+      const bootstrapEndpoint = browserOrigin + '/nested/api/v1/bootstrap';
+      const automaticRead = await waitFor(() => authenticated.requests.slice(reconnectStart)
+        .find(request => request.method === 'GET' && request.url === bootstrapEndpoint), 'automatic reconnect bootstrap GET');
+      await waitFor(() => authenticated.responses.some(response => response.requestId === automaticRead.requestId
+        && response.url === bootstrapEndpoint && response.status === 401), 'automatic reconnect bootstrap 401');
+      await ready(authenticated, `navigator.onLine && document.querySelector('aside.session-notice [role="status"]')
+        ?.textContent.includes('To access private work, open the sign-in link')`, 'automatic reconnect session state settled');
+      const reconnectReads = authenticated.requests.slice(reconnectStart).filter(request => request.url === bootstrapEndpoint);
+      assert.deepEqual(reconnectReads.map(request => request.method), ['GET']);
+      semantics.results.automaticReconnect = { bootstrapGets: reconnectReads.length, status: 401 };
       const reconnectActivation = await semantics.activate(authenticated, 'Check session', { allowed: { mutations: [], reads: ['GET /nested/api/v1/bootstrap'], requiredReads: ['GET /nested/api/v1/bootstrap'] },
         settled: `document.querySelector('aside.session-notice [role="status"]')?.textContent.includes('To access private work, open the sign-in link')` });
       await semantics.checkpoint(authenticated, 'required-after-reconnect', { statusText: 'To access private work, open the sign-in link',
