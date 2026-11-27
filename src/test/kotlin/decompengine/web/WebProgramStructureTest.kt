@@ -230,6 +230,21 @@ class WebProgramStructureTest {
         assertEquals(before, revision.records.mapValues { sha(it.value) }, "redaction must not rewrite committed model/plan bytes")
     }
 
+    @Test fun `function search matches dotted I in the original recorded name and identity`() {
+        val byName = functions[1].copy(name = "İ")
+        val byId = functions[2].copy(id = "fn_İ", name = "second")
+        val other = functions[3].copy(name = "other")
+        val rows = listOf(byName, byId, other)
+        val revision = Revision(model(rows), plan(planned("core", rows.map { it.id })), listOf("core"))
+
+        val page = revision.pages.functions("owner", jobId, runId, revisionId, "search=%C4%B0")
+        assertEquals(listOf(byName.name, byId.name), page.items().map { it.text("name") })
+        assertEquals("İ", page.getValue("query").jsonObject.text("search"))
+
+        val address = revision.pages.functions("owner", jobId, runId, revisionId, "search=0X4011")
+        assertEquals(listOf(byName.id), address.items().map { it.text("entityId") })
+    }
+
     @Test fun `functions keep recorded identity exact addresses ownership and evidence references`() {
         val revision = standard()
         val page = revision.pages.functions("owner", jobId, runId, revisionId, null)

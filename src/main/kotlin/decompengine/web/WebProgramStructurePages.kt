@@ -101,8 +101,7 @@ internal class WebProgramStructurePages(
                 val table = index.table(WebStructureKind.FUNCTION)
                 val module = query.fields["module"]?.let { selector -> index.moduleIndex[selector] ?: -100 }
                 val orderRows = when (sort) { "name" -> table.byName; "id" -> table.byId; else -> table.byAddress }
-                val lowered = search?.lowercase(Locale.ROOT)
-                val addressPrefix = lowered?.takeIf { it.matches(Regex("0x[0-9a-f]{1,16}")) }
+                val addressPrefix = search?.lowercase(Locale.ROOT)?.takeIf { it.matches(Regex("0x[0-9a-f]{1,16}")) }
                 val matches = IntArray(table.size)
                 var matched = 0
                 for (position in orderRows.indices) {
@@ -111,7 +110,7 @@ internal class WebProgramStructurePages(
                     if (evidence != null && table.evidence(row) != evidence) continue
                     if (ownership != null && table.ownership(row) != ownership) continue
                     if (module != null && table.owners[row] != module) continue
-                    if (lowered != null && !(table.ids[row].contains(lowered, true) || table.names[row]?.contains(lowered, true) == true ||
+                    if (search != null && !(table.ids[row].contains(search, ignoreCase = true) || table.names[row]?.contains(search, ignoreCase = true) == true ||
                             (addressPrefix != null && table.address(row)?.startsWith(addressPrefix) == true))) continue
                     matches[matched++] = row
                 }
