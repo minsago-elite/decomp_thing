@@ -197,6 +197,7 @@ jobs:
           node --test scripts/packaged-browser-upload.test.mjs
           node --check scripts/packaged-browser-restart.mjs
           node --test scripts/packaged-browser-restart.test.mjs
+          node --test scripts/packaged-browser-lifecycle.test.mjs
           node --check scripts/packaged-browser-cdp-diagnostics.mjs
           node --test scripts/packaged-browser-cdp-diagnostics.test.mjs
           node --test scripts/packaged-browser-native-download.test.mjs
