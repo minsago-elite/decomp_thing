@@ -12,6 +12,7 @@ import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { AttemptControls } from '../jobs/AttemptControls';
+import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
@@ -187,6 +188,8 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
     // Only the shared discriminator can prove deletion; any other failure leaves the attempt to its own panel.
     if (viewKey === null || gone?.key === viewKey || !isDeletedJob(failure)) return;
     departing.current = departingFocus();
+    // A command retained for the deleted job can never be answered; one for any other job stays (#512).
+    forgetAttemptCommandForDeletedJob(basePath, jobId);
     setGone({ key: viewKey, message: withApiFailureReference(copy.thisJobWasDeleted, failure) });
   };
   return <section aria-labelledby="attempt-title" ref={routeRoot}>

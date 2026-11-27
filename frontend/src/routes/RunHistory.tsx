@@ -16,6 +16,7 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
+import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
 import { focusSurvivingNotice, useDepartingFocus } from '../shared/departingFocus';
 
 function History({ jobId, basePath, session, onDeleted }: { jobId: string; basePath: string; session: BrowserSession; onDeleted: (failure: unknown) => void }) {
@@ -135,6 +136,7 @@ export default function RunHistory({ jobId, basePath, session }: { jobId: string
   const markDeleted = (failure: unknown) => {
     if (viewKey === null || gone?.key === viewKey || !isDeletedJob(failure)) return;
     departing.current = departingFocus();
+    forgetAttemptCommandForDeletedJob(basePath, jobId);
     setGone({ key: viewKey, message: withApiFailureReference(copy.thisJobWasDeleted, failure) });
   };
   return <section aria-labelledby="history-title" ref={route}>

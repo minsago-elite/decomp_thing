@@ -18,6 +18,7 @@ import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
 import { pendingDeletion } from '../jobs/deletionAcknowledgement';
+import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
@@ -37,8 +38,10 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
   const notice = useRef<HTMLParagraphElement>(null);
   const departing = useRef<Element | null>(null);
   const departingFocus = useDepartingFocus(route);
+  /** Called only for a confirmed tombstone or this view's own accepted deletion of this job. */
   function markDeleted(failure?: unknown) {
     departing.current = departingFocus();
+    forgetAttemptCommandForDeletedJob(basePath, jobId);
     const message = withApiFailureReference(copy.thisJobWasDeleted, failure);
     // A later acknowledgement supplies cleanup details but carries no tombstone reference.
     setDeletionMessage(previous => message === copy.thisJobWasDeleted ? previous ?? message : message);
