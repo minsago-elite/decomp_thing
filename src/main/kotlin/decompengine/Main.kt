@@ -10,6 +10,7 @@ import decompengine.doctor.DoctorReport
 import decompengine.doctor.DoctorToolKind
 import decompengine.doctor.parseDoctorInvocation
 import decompengine.doctor.requireDoctorActive
+import decompengine.mvp.MvpVulnerabilityCase
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.MvpArtifactRedactor
@@ -540,7 +541,7 @@ internal enum class WorkflowCliCommand(val usage: String, val failurePrefix: Str
         "reconstruction failed",
     ),
     PATCH(
-        "usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]",
+        "usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--case 01..10] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]",
         "patch failed",
     ),
     REPAIR(
@@ -680,6 +681,8 @@ private fun runPatch(args: List<String>) {
     var input: Path? = null
     var output: Path? = null
     var assumeYes = false
+    var vulnerabilityCase = MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE
+    var caseSelected = false
     var harnessOverride: String? = null
     var profile = ReconstructionProfiles.default
     var profileSelected = false
@@ -691,6 +694,13 @@ private fun runPatch(args: List<String>) {
                 output = Path.of(args[index + 1]); index += 2
             }
             "--yes" -> { assumeYes = true; index++ }
+            "--case" -> {
+                if (caseSelected || index + 1 >= args.size) patchUsageError("--case requires one built-in case identifier")
+                vulnerabilityCase = try { MvpVulnerabilityCase.named(args[index + 1]) }
+                    catch (failure: IllegalArgumentException) { patchUsageError(failure.message ?: "unsupported vulnerability case") }
+                caseSelected = true
+                index += 2
+            }
             "--harness" -> {
                 if (index + 1 >= args.size) patchUsageError("--harness requires acp or legacy-openai")
                 harnessOverride = args[index + 1]; index += 2
@@ -724,7 +734,7 @@ private fun runPatch(args: List<String>) {
             harness = strategy.harness,
             environment = environment,
             harnessProvenance = strategy.harnessProvenance,
-        ).run(MvpPatchOptions(input, output, assumeYes), profile)
+        ).run(MvpPatchOptions(input, output, assumeYes, vulnerabilityCase), profile)
     }
     if (exitCode != 0) kotlin.system.exitProcess(exitCode)
 }
@@ -979,7 +989,7 @@ private fun printHelp() {
         Usage:
           llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>] [--auth-methods]
           llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]
-          llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]
+          llm_bin_patch patch <input-elf> --output <directory> [--yes] [--case 01..10] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch repair-history <project-dir> [--page N] [--case-page N] [--graph SHA256]

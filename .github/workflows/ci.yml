@@ -11,6 +11,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  c-vulnerability-repairs:
+    name: Ten C vulnerability reference repairs
+    uses: ./.github/workflows/c-vul-qualification.yml
+    permissions:
+      contents: read
+
   frontend:
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
@@ -348,6 +354,8 @@ jobs:
             bubblewrap \
             binutils \
             build-essential \
+            clang \
+            llvm \
             dbus-user-session \
             e2fsprogs \
             bzip2 \
@@ -503,6 +511,14 @@ jobs:
             build/reports/tests/gccCompilerEnginePlanningIsolated
             build/test-results/gccCompilerEnginePlanningIsolated
             build/analysis-native-installed-verification.txt
+      - name: Retain bounded ACP integration failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: acp-required-contract-diagnostics-${{ matrix.shard }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: build/acp-required-contract-diagnostics/
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh
