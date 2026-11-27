@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 2,
+  "inputSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "functions": [
+    {
+      "id": "fn_main",
+      "name": "main",
+      "address": "0x1000",
+      "prototype": "int main(void)",
+      "extractionStatus": "recovered",
+      "recoveryAssessment": "unassessed",
+      "calls": [],
+      "referencedGlobals": ["global_pointer"],
+      "strings": [],
+      "decompiledC": "int main(void) { return 0; }"
+    }
+  ],
+  "globals": [
+    {
+      "id": "global_pointer",
+      "name": "PTR_00103fe8",
+      "address": "0x3000",
+      "type": "pointer",
+      "initializer": "00105048",
+      "extractionStatus": "recovered",
+      "recoveryAssessment": "unassessed"
+    }
+  ],
+  "types": [
+  ]
+}

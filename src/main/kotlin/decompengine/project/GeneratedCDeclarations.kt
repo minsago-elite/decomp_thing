@@ -109,14 +109,8 @@ internal fun globalDeclaration(
     external: Boolean,
     context: GeneratedCDeclarationContext = GeneratedCDeclarationContext.EMPTY,
 ): String = declarationFor(global.id) {
-    val type = CDeclarationParser(global.type.trim()).parse(allowAbstract = true)
-    require(type.name == null) { "global type must be an abstract declarator without an object name" }
-    val kind = context.classify(type.specifiers, type.derived, type.atomicType)
+    val type = globalObjectType(global, external, context)
     val retained = global.initializer?.takeUnless(String::isBlank)
-    require(kind != GeneratedCTypeKind.FUNCTION) { "global type denotes a function, not an object" }
-    require(external || retained != null || kind != GeneratedCTypeKind.INCOMPLETE_ARRAY) {
-        "an unsized array requires retained initializer evidence; a zero placeholder would invent its extent"
-    }
     val declaration = type.source.substring(0, type.nameOffset).trimEnd() + " " + safeCName(global.name) +
         type.source.substring(type.nameOffset)
     if (external) "extern $declaration;"
@@ -131,6 +125,34 @@ internal fun globalDeclaration(
         }
         "$declaration = $initializer;"
     }
+}
+
+private fun globalObjectType(global: RecoveredGlobal, external: Boolean, context: GeneratedCDeclarationContext): CDeclaration {
+    require(global.type.length <= 1024 * 1024) { "global type exceeds the declaration source bound" }
+    val type = CDeclarationParser(global.type.trim()).parse(allowAbstract = true)
+    require(type.name == null) { "global type must be an abstract declarator without an object name" }
+    val kind = context.classify(type.specifiers, type.derived, type.atomicType)
+    require(kind != GeneratedCTypeKind.FUNCTION) { "global type denotes a function, not an object" }
+    require(external || !global.initializer.isNullOrBlank() || kind != GeneratedCTypeKind.INCOMPLETE_ARRAY) {
+        "an unsized array requires retained initializer evidence; a zero placeholder would invent its extent"
+    }
+    return type
+}
+
+internal class GlobalDeclarationRefusal(private val global: RecoveredGlobal, typeName: String) {
+    // Model IDs are retained verbatim in structured evidence. Only safe, bounded text enters C comments.
+    private val label = global.id.takeIf { it.length <= 128 && it.all { ch -> ch.isLetterOrDigit() || ch in "_.-" } }
+        ?: "sha256:${sha256(global.id.toByteArray())}"
+    private val typeLabel = if (typeName.length <= 128) typeName else "sha256:${sha256(typeName.toByteArray())}"
+    val detail = "$label @ 0x${global.address.toString(16)}; refusal=UNDECLARED_TYPE_NAME; type-name=$typeLabel"
+    val comment = "/* declaration-refused $detail; ${extractionProvenance(global.status)} */"
+    fun issue() = ModuleReconstructionIssue("global-declaration-refused", detail, listOf(global.id))
+}
+
+internal fun globalDeclarationRefusal(global: RecoveredGlobal, context: GeneratedCDeclarationContext,
+    external: Boolean): GlobalDeclarationRefusal? = declarationFor(global.id) {
+    val type = globalObjectType(global, external, context)
+    context.missingTypeName(type)?.let { GlobalDeclarationRefusal(global, it) }
 }
 
 internal enum class GeneratedCTypeKind { VOID, INTEGER, POINTER, ARRAY, INCOMPLETE_ARRAY, FUNCTION, OTHER, UNKNOWN }
@@ -181,6 +203,19 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
                 }
             }
         }
+    }
+
+    /** Tagged and implementation-reserved names still need the profile compiler's semantic checks. */
+    fun missingTypeName(type: CDeclaration): String? {
+        type.typedefName?.let { name ->
+            val reserved = name.startsWith("__") || name.startsWith("_") && name.length > 1 && name[1] in 'A'..'Z'
+            if (!reserved && name !in aliases && name !in standardIntegerAliases && name != "max_align_t") return name
+        }
+        type.atomicType?.let { missingTypeName(it) }?.let { return it }
+        for (operator in type.derived) if (operator is CDerived.Function) {
+            for (parameter in operator.parameters) missingTypeName(parameter)?.let { return it }
+        }
+        return null
     }
 
     @Synchronized
@@ -1002,6 +1037,7 @@ internal data class CDeclaration(
     val derived: List<CDerived>,
     /** Parsed type-name of an atomic specifier, distinct from the `_Atomic` qualifier. */
     val atomicType: CDeclaration? = null,
+    val typedefName: String? = null,
 )
 
 /**
@@ -1022,6 +1058,7 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
         val specifiers = mutableListOf<String>()
         val storageSpecifiers = mutableListOf<CToken>()
         var atomicType: CDeclaration? = null
+        var typedefName: String? = null
         var hasType = false
         while (cursor < tokens.size) {
             work?.step()
@@ -1054,7 +1091,7 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
                     specifiers += tokens[cursor++].text
                     hasType = true
                 }
-                !hasType && token.matches(identifier) -> { specifiers += token; hasType = true; cursor++ }
+                !hasType && token.matches(identifier) -> { typedefName = token; specifiers += token; hasType = true; cursor++ }
                 else -> break
             }
         }
@@ -1066,7 +1103,7 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
         if (semicolon != null) cursor++
         require(cursor == tokens.size) { "unexpected token ${tokens[cursor].text}" }
         val source = if (semicolon == null) raw else raw.removeRange(semicolon.start, semicolon.end)
-        return CDeclaration(source, specifiers, storageSpecifiers, declaratorOffset, declarator.name, declarator.nameOffset, declarator.derived, atomicType)
+        return CDeclaration(source, specifiers, storageSpecifiers, declaratorOffset, declarator.name, declarator.nameOffset, declarator.derived, atomicType, typedefName)
     }
 
     private data class Declarator(val name: CToken?, val nameOffset: Int, val derived: List<CDerived>)

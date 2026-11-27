@@ -64,7 +64,9 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_H"
         append("#ifndef $guard\n#define $guard\n\n#include \"decomp_types.h\"\n\n")
         module.globalIds.map { id -> globals.getValue(id) }.forEach { global ->
-            append(globalDeclaration(global, external = true, context = declarationContext))
+            val refusal = globalDeclarationRefusal(global, declarationContext, external = true)
+            if (refusal != null) appendLine(refusal.comment)
+            else append(globalDeclaration(global, external = true, context = declarationContext))
                 .append(" /* ${global.id} @ 0x${global.address.toString(16)}; ${extractionProvenance(global.status)} */\n")
         }
         if (module.globalIds.isNotEmpty()) append('\n')
@@ -95,7 +97,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         generatedCMakeBuildDefinition(sources, profile)
 }
 
-private fun extractionProvenance(status: RecoveryStatus): String =
+internal fun extractionProvenance(status: RecoveryStatus): String =
     "extraction-status=${status.name.lowercase(Locale.ROOT)}; recovery-assessment=unassessed"
 
 internal fun generatedCMakeBuildDefinition(sources: List<String>, profile: ReconstructionProfile): String {

@@ -64,6 +64,9 @@ internal object GeneratedCModuleContext {
         }
         val base = GeneratedCModulePrompt.render(request)
         val graph = buildString {
+            for (issue in GeneratedCCandidateValidation.interfaceRefusals(module, model)) {
+                if (issue.code == "dependency-declaration-refused") append("\nRequired global interface refused: ").append(issue.message)
+            }
             append("\n\nRecovered graph context (identity and interface evidence, not additional implementation ownership):")
             append("\nincoming callers into this module:\n")
             append(incoming.joinToString("\n") { caller ->
