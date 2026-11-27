@@ -89,7 +89,7 @@ internal fun parseWebRevisionSourceInputs(
         val evidence = expected[path] ?: revisionSourceChanged()
         if (text("sha256") != evidence.sha256) revisionSourceChanged()
         val size = item["bytes"] as? JsonPrimitive ?: error("Source input descriptor is invalid.")
-        require(!size.isString && size.content.matches(Regex("0|[1-9][0-9]{0,18}")))
+        require(!size.isString && isCanonicalNonNegativeLong(size.content))
         val bytes = requireNotNull(size.longOrNull)
         paths += path
         WebRevisionSourceFile(evidence, bytes)
@@ -105,6 +105,14 @@ internal fun parseWebRevisionSourceInputs(
 internal fun revisionSourceChanged(): Nothing = throw WebAccessDenied(409, "SOURCE_REVISION_CHANGED",
     "The selected revision could not be captured consistently. Refresh its source listing.")
 
+private fun isCanonicalNonNegativeLong(value: String): Boolean {
+    if (value.isEmpty() || value.length > 19) return false
+    if (value == "0") return true
+    if (value[0] !in '1'..'9') return false
+    for (index in 1 until value.length) if (value[index] !in '0'..'9') return false
+    return value.toLongOrNull() != null
+}
+
 private fun revisionSourceHex(bytes: ByteArray, length: Int = bytes.size): String = buildString(length * 2) {
     val hex = "0123456789abcdef"
     for (index in 0 until length) {
@@ -113,8 +121,12 @@ private fun revisionSourceHex(bytes: ByteArray, length: Int = bytes.size): Strin
     }
 }
 
+// A page emits up to 200 IDs and the D0 fixture has 25,000 files. Keep the mutable
+// digest confined to the request thread; MessageDigest.digest() resets it for reuse.
+private val revisionSourceDigests = ThreadLocal.withInitial { MessageDigest.getInstance("SHA-256") }
+
 internal fun revisionSourceDigest(text: String): String = revisionSourceHex(
-    MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8)))
+    revisionSourceDigests.get().digest(text.toByteArray(Charsets.UTF_8)))
 
 internal fun revisionSourceFileId(reference: WebRevisionSourceReference, index: Int, path: String): String =
     "file_${index}_${revisionSourceDigest(listOf("revision-source-file-v1", reference.jobId, reference.runId,

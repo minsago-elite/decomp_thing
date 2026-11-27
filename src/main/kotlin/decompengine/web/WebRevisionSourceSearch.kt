@@ -301,7 +301,9 @@ internal class WebRevisionSourceSearch(
     }
 
     companion object {
-        const val DEFAULT_DEADLINE_MS = 2_000L
+        // Keep scan completion below the public two-second first-response ceiling. This
+        // leaves bounded headroom for capture, JSON encoding, and HTTP delivery on a busy host.
+        const val DEFAULT_DEADLINE_MS = 1_500L
         const val MAXIMUM_SCANNED_BYTES = 32L * 1024 * 1024
         const val CONTEXT_CODE_POINTS = 80
         private const val DEADLINE_CHECK_BYTES = 64L * 1024

@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.jobs.Job
+import decompengine.jobs.ArtifactChangedException
 import decompengine.jobs.JobStore
 import decompengine.jobs.NewWorkflowAttempt
 import decompengine.jobs.WorkflowAttempt
@@ -301,7 +302,8 @@ class WebJobService(
     private var legacyListingEpoch = Any()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     @Volatile private var uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
-    private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
+    private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact,
+        ::readSourceCatalogInputDigest, ::readArtifactDigest)
 
     /** Installs a deterministic retained-byte ceiling before tests admit any upload. */
     @Synchronized internal fun configureUploadStorageLimitForTests(maximumBytes: Long) {
@@ -810,12 +812,26 @@ class WebJobService(
         return store.readInput(jobId)
     }
 
+    @Synchronized
+    private fun readSourceCatalogInputDigest(jobId: String): decompengine.repair.StableFileDigest {
+        requireInitializedRead()
+        return store.readInputDigest(jobId, ::checkSourceMetadataHashCancellation)
+    }
+
+    private fun checkSourceMetadataHashCancellation() {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("source metadata hashing was interrupted")
+    }
+
     /** Authorize before capture and again before returning, without locking jobs during JSON parsing. */
     internal fun readSourceCatalog(jobId: String, runId: String): WebSourceCatalogSnapshot {
         val attempt = getAttempt(jobId, runId)
         val snapshot = try { sourceCatalogEvidence.read(jobId, attempt.runId) }
             catch (changed: WebAccessDenied) { throw changed }
-            catch (_: Exception) {
+            catch (_: ArtifactChangedException) {
+                throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "Source catalog changed during capture. Refresh its first page.")
+            }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
                 throw WebAccessDenied(503, "SOURCE_CATALOG_UNAVAILABLE", "The source catalog is unavailable or exceeds its metadata limits.")
             }
         if (getAttempt(jobId, runId).version != attempt.version) {
@@ -836,7 +852,9 @@ class WebJobService(
         val reference = revisionSourceReference(jobId, runId, revisionId)
         val snapshot = try { sourceCatalogEvidence.readRevision(reference) }
             catch (changed: WebAccessDenied) { throw changed }
-            catch (_: Exception) {
+            catch (_: ArtifactChangedException) { revisionSourceChanged() }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
                 throw WebAccessDenied(503, "SOURCE_REVISION_UNAVAILABLE", "The revision source input metadata is unavailable or exceeds its limits.")
             }
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
@@ -850,6 +868,7 @@ class WebJobService(
         val reference = revisionSourceReference(jobId, runId, revisionId)
         val captured = try { sourceCatalogEvidence.readFileMetadata(reference, fileId) }
             catch (changed: WebAccessDenied) { throw changed }
+            catch (_: ArtifactChangedException) { revisionSourceChanged() }
             catch (failure: Exception) {
                 if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
                 throw WebAccessDenied(503, "SOURCE_REVISION_UNAVAILABLE", "The revision metadata is unavailable or exceeds its limits.")
@@ -863,9 +882,11 @@ class WebJobService(
         purpose: WebSourceReadPurpose, expectedMetadataVersion: String? = null): WebRevisionSourceContent {
         revisionSourceFileIndex(fileId) // Reject malformed selectors before metadata or source IO.
         val reference = revisionSourceReference(jobId, runId, revisionId)
-        val content = try { sourceCatalogEvidence.readFile(reference, fileId, purpose, expectedMetadataVersion, ::readSourceInput) }
+        val content = try { sourceCatalogEvidence.readFile(reference, fileId, purpose, expectedMetadataVersion, ::readBoundSourceInput) }
             catch (changed: WebAccessDenied) { throw changed }
-            catch (_: Exception) {
+            catch (_: ArtifactChangedException) { revisionSourceChanged() }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
                 throw WebAccessDenied(503, "SOURCE_FILE_UNAVAILABLE", "The selected source file is unavailable or cannot be captured within its limits.")
             }
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
@@ -877,8 +898,9 @@ class WebJobService(
         scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> kotlinx.serialization.json.JsonObject,
     ): kotlinx.serialization.json.JsonObject {
         val reference = revisionSourceReference(jobId, runId, revisionId)
-        val result = try { sourceCatalogEvidence.search(reference, ::readSourceInput, scan) }
+        val result = try { sourceCatalogEvidence.search(reference, ::readBoundSourceInput, scan) }
             catch (changed: WebAccessDenied) { throw changed }
+            catch (_: ArtifactChangedException) { revisionSourceChanged() }
             catch (failure: Exception) {
                 if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
                 throw WebAccessDenied(503, "SOURCE_SEARCH_UNAVAILABLE", "The revision sources could not be searched within their limits.")
@@ -887,10 +909,15 @@ class WebJobService(
         return result
     }
 
+    /**
+     * Read one member bound to the source snapshot already selected by the surrounding operation.
+     * The caller checks the attempt/revision before and after the complete read or scan, so re-parsing
+     * job.json and workflow state for every member would add no binding and makes large searches
+     * repeatedly materialize the same durable state.
+     */
     @Synchronized
-    private fun readSourceInput(jobId: String, runId: String, path: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
+    private fun readBoundSourceInput(jobId: String, runId: String, path: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
         requireInitializedRead()
-        getAttempt(jobId, runId)
         return store.readSourceInput(jobId, runId, path, maximumBytes)
     }
 
@@ -1004,6 +1031,20 @@ class WebJobService(
         val segments = canonicalReportSegments(relativePath)
         if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
         return store.readArtifact(jobId, relativePath, maximumBytes)
+    }
+
+    /**
+     * Stream a stable digest for the source-catalog capture already bound to an authorized attempt.
+     * The surrounding readRevisionSources/readRevisionFileMetadata/searchRevisionSources operation
+     * authenticates the selected attempt before capture and rechecks it before returning. Reopening
+     * job.json and workflow state for each metadata receipt would duplicate that binding and allocate
+     * heavily across every paginated directory request.
+     */
+    @Synchronized
+    private fun readArtifactDigest(jobId: String, relativePath: String, maximumBytes: Long): decompengine.repair.StableFileDigest {
+        requireInitializedRead()
+        canonicalReportSegments(relativePath)
+        return store.readArtifactDigest(jobId, relativePath, maximumBytes, ::checkSourceMetadataHashCancellation)
     }
 
     @Synchronized

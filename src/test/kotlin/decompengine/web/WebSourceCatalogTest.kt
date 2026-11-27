@@ -29,7 +29,26 @@ class WebSourceCatalogTest {
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) },
         LinuxFileIdentity(LinuxFileKey(1, inode), 0x8180, 1000, 1000, 1, 1, true, false, false))
 
+    private fun digest(file: StableRegularFile) = decompengine.repair.digestOfStableRegularFile(file)
+
     private fun cursor(page: JsonObject): String? = page.getValue("page").jsonObject.getValue("nextCursor").jsonPrimitive.contentOrNull
+
+    @Test fun `materialized digest receipts preserve commitments identity and strict UTF8 validity`() {
+        val valid = listOf(byteArrayOf(), "ASCII".toByteArray(), "é한😀".toByteArray())
+        val invalid = listOf(byteArrayOf(0xc3.toByte()), byteArrayOf(0xe2.toByte(), 0x82.toByte()),
+            byteArrayOf(0xf0.toByte(), 0x9f.toByte(), 0x98.toByte()), byteArrayOf(0x80.toByte()),
+            byteArrayOf(0xc0.toByte(), 0xaf.toByte()), byteArrayOf(0xed.toByte(), 0xa0.toByte(), 0x80.toByte()))
+        for ((expected, samples) in listOf(true to valid, false to invalid)) for (bytes in samples) {
+            val file = captured(bytes, 17)
+            val before = bytes.copyOf()
+            val receipt = digest(file)
+            assertEquals(expected, receipt.validUtf8)
+            assertEquals(MessageDigest.getInstance("SHA-256").digest(before).joinToString("") { "%02x".format(it) }, receipt.sha256)
+            assertEquals(before.size.toLong(), receipt.size)
+            assertSame(file.identity, receipt.identity)
+            assertContentEquals(before, file.bytes)
+        }
+    }
 
     @Test fun `25000 manifest files are captured without reading source bodies and paged exactly once`() {
         val files = (0 until 25_000).map { file(it) }
@@ -45,6 +64,7 @@ class WebSourceCatalogTest {
             })
         val snapshot = evidence.read(jobId, runId)
         assertEquals(listOf("input", "reports/runs/run_1/source-tree/source_tree_manifest.json",
+            "reports/runs/run_1/source-tree/source_tree_manifest.json",
             "reports/runs/run_1/source-tree/source_tree_manifest.json", "input"), reads)
         val pages = WebSourceCatalogPages { job, run -> assertEquals(jobId, job); assertEquals(runId, run); snapshot }
         val seen = mutableListOf<String>()
@@ -65,7 +85,7 @@ class WebSourceCatalogTest {
             next = cursor(page)
         } while (next != null)
         assertEquals(files.map { it.path }, seen)
-        assertEquals(4, reads.size) // Paging this capture performs no hidden file read.
+        assertEquals(5, reads.size) // Includes the start digest, bounded parse read and end digest.
     }
 
     @Test fun `cursor scope is checked before capture and changed manifests expire explicitly`() {
@@ -126,6 +146,47 @@ class WebSourceCatalogTest {
         assertFailsWith<IllegalArgumentException> {
             WebSourceCatalogEvidence(listOf(profile), { input }, { _, _, _ -> foreign }).read(jobId, runId)
         }
+    }
+
+    @Test fun `cached parsed manifest is reused only behind fresh start and end digest checks`() {
+        val document = manifest(listOf(file(0), file(1)))
+        var currentManifest = document
+        var fullManifestReads = 0
+        var inputDigestReads = 0
+        var manifestDigestReads = 0
+        val evidence = WebSourceCatalogEvidence(listOf(profile), { input }, { _, path, _ ->
+            assertEquals("reports/runs/run_1/source-tree/source_tree_manifest.json", path)
+            fullManifestReads++
+            currentManifest
+        }, { inputDigestReads++; digest(input) }, { _, _, _ ->
+            manifestDigestReads++
+            digest(currentManifest)
+        })
+
+        val first = evidence.read(jobId, runId)
+        val second = evidence.read(jobId, runId)
+        assertSame(first, second)
+        assertEquals(first.manifestSha256, second.manifestSha256)
+        assertEquals(first.files.map { it.path }, second.files.map { it.path })
+        assertEquals(1, fullManifestReads)
+        assertEquals(4, inputDigestReads) // Each capture hashes input before and after projection.
+        assertEquals(4, manifestDigestReads)
+
+        // An atomic same-byte replacement misses the identity-bound memo but preserves the public content version.
+        currentManifest = captured(document.bytes.copyOf(), 99)
+        val third = evidence.read(jobId, runId)
+        assertEquals(first.manifestSha256, third.manifestSha256)
+        assertEquals(2, fullManifestReads)
+
+        // A same-size in-place content change during a capture is detected by the ending digest.
+        val replacement = manifest(listOf(file(2)))
+        var digestPass = 0
+        val changing = WebSourceCatalogEvidence(listOf(profile), { input }, { _, _, _ -> document },
+            { digest(input) }, { _, _, _ ->
+                digestPass++
+                if (digestPass <= 1) digest(document) else digest(replacement)
+            })
+        assertEquals("SOURCE_CATALOG_CHANGED", assertFailsWith<WebAccessDenied> { changing.read(jobId, runId) }.code)
     }
 
     @Test fun `catalog capture owns its metadata list and rejects duplicate or excess records`() {
