@@ -433,12 +433,43 @@ p.tasks.matching {{ it.name == "installDist" }}.configureEach {{ install ->
     return text
 
 
-def install(generation, *, fail=False, replay=False):
+def require_failed_update(command, command_id, target, code, output):
+    """Verify the failure at the publisher callback using this invocation's persisted evidence."""
+    prepared.require(code != 0 and command.get("exitCode") == code and command.get("status") == "failed",
+                     "injected update did not fail")
+    config = command["initConfig"]
+    prepared.require(command.get("commandId") == config.get("commandId") == command_id and
+                     config.get("runRoot") == str(WORK) and config.get("generation") == "B" and
+                     config.get("failBeforeRename") is True and config.get("replay") is False,
+                     "injected update command configuration differs")
+    path = WORK / f"command-{command_id:02d}-events.json"
+    prepared.require(command.get("taskReceipt") == str(path) and
+                     digest(path, prepared.MAX_JSON) == command.get("taskReceiptSha256"),
+                     "injected update receipt path or digest differs")
+    receipt = prepared.read_json(path)
+    prepared.require(receipt.get("commandId") == command_id and receipt.get("runRoot") == str(WORK),
+                     "injected update receipt belongs to another invocation")
+    tasks = [task for task in receipt["tasks"] if task["path"] == ":installDist"]
+    prepared.require(len(tasks) == 1 and tasks[0]["executed"] is True and tasks[0]["failure"] is True and
+                     receipt.get("actionsStarted") is True and receipt.get("publisherCompleted") is False,
+                     "injected update lacks the failed installDist action")
+    events = receipt["events"]
+    renames = [event for event in events if event["phase"] == "before-rename"]
+    prepared.require(len(renames) == 1 and renames[0] == events[-1] and renames[0]["path"] == str(target),
+                     "injected update did not stop at the first rename of the live application JAR")
+    summary = (f"installDist atomic publication failed during rename {target}; "
+               "completed renames=0, prunes=0, rename attempts=0, prune attempts=0;")
+    prepared.require(summary in output, "injected update lacks the zero-mutation publisher result")
+
+
+def install(generation, *, fail_before=None, replay=False):
+    fail = fail_before is not None
+    command_id = len(RECORD["commands"])
     write_init(generation, fail, replay=replay)
     log = WORK / f"install-{generation}-{time.monotonic_ns()}.log"
     code, output = gradle("-I", INIT, "installDist", *(prepared.EXCLUSIONS if replay else []), log=log, allow_failure=fail)
-    if fail and (code == 0 or "atomic-probe injected before first rename" not in output or "completed renames=0" not in output):
-        raise RuntimeError("failed-update control did not reach the intended production pre-rename seam")
+    if fail:
+        require_failed_update(RECORD["commands"][-1], command_id, fail_before, code, output)
     return code, output
 
 
@@ -648,7 +679,7 @@ def main():
         set_phase("failed-before-rename live A")
         child, release, ready, jar = launch_blocked("A")
         before = protected_snapshot()
-        install("B", fail=True)
+        install("B", fail_before=jar)
         if protected_snapshot() != before: raise RuntimeError("pre-rename failure changed protected targets")
         RECORD["failedBeforeRename"] = release_and_reap(child, release, "A", "unchanged")
         for old, new in (("A", "B"), ("B", "A")):
