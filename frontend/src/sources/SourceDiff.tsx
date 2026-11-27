@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import type { Run, SourceDiff as SourceDiffPage, SourceDiffFile, SourceFileDiff as SourceFileDiffPage } from '../api/generated';
 import { ApiClientError } from '../api/errors';
@@ -149,7 +149,9 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
   }, [client, key]);
   const current = base ? currentSourceRead(read, key) : null;
   const data = current?.state === 'ready' ? current.value : null;
-  useEffect(() => {
+  // Focus moves in the commit that shows an explicitly requested result, before its links are interactive; a
+  // deferred effect could otherwise run after the reader has already focused one of them.
+  useLayoutEffect(() => {
     if (current && current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
   }, [current?.state, key]);
   if (!selection) return <p role="alert">{copy.diffInvalid}</p>;
@@ -221,7 +223,9 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
   }, [client, key]);
   const current = selection ? currentSourceRead(read, key) : null;
   const data = current?.state === 'ready' ? current.value : null;
-  useEffect(() => {
+  // Focus moves in the commit that shows an explicitly requested result, before its links are interactive; a
+  // deferred effect could otherwise run after the reader has already focused one of them.
+  useLayoutEffect(() => {
     if (current && current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
   }, [current?.state, key]);
   if (!selection) return <p role="alert">{copy.diffInvalid}</p>;
