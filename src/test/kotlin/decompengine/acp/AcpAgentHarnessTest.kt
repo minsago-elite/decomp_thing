@@ -219,9 +219,13 @@ class AcpAgentHarnessTest {
             val diagnostic = constructor.newInstance(
                 phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
                 outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+            val timing = "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=-5 " +
+                "admittedNs=NA lastCleanNs=NA firstObservedNs=-1 cleanPolls=0"
+            diagnostic.javaClass.getDeclaredField("timingContext").apply { isAccessible = true }.set(diagnostic, timing)
             val bounded = sessionPreferencePhaseFailureContext("known-case", AgentExecutionException(
                 decompengine.agent.AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), diagnostic), null)
             assertTrue(requireNotNull(contextMountWitness().message) in bounded, bounded)
+            assertTrue(timing in bounded, bounded)
             if (admission == constructing || admission == admitted) assertTrue(requireNotNull(admission) in bounded, bounded)
             else assertFalse("mount-admission-v1" in bounded, bounded)
             assertFalse("PRIVATE" in bounded || "/" in bounded, bounded)
@@ -1704,7 +1708,8 @@ class AcpAgentHarnessTest {
             (observed.javaClass.getDeclaredField("admissionContext").apply { isAccessible = true }.get(observed) as? String)
                 ?.takeIf { it.length <= 256 && preparationMountAdmissionPattern.matches(it) }
         } catch (_: Throwable) { null }
-        return witness + (admission?.let { ";$it" } ?: "")
+        return witness + (admission?.let { ";$it" } ?: "") +
+            (validatedAcpMountTiming((observed as? AcpMountEventWitness)?.timingRecord)?.let { ";$it" } ?: "")
     }
 
     @Test
@@ -1720,7 +1725,11 @@ class AcpAgentHarnessTest {
             val owned = constructor.newInstance(
                 phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
                 outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+            val timing = "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=-5 " +
+                "admittedNs=NA lastCleanNs=NA firstObservedNs=-1 cleanPolls=0"
+            owned.javaClass.getDeclaredField("timingContext").apply { isAccessible = true }.set(owned, timing)
             val rendered = boundedPreparationCauseForTest(java.io.IOException("PRIVATE /PRIVATE/path", owned))
+            assertTrue(timing in rendered, rendered)
             assertTrue(expectedWitness in rendered, rendered)
             assertEquals(admission == validAdmission, "mount-admission-v1" in rendered, rendered)
             if (admission == validAdmission) assertTrue(validAdmission in rendered, rendered)
@@ -3214,6 +3223,9 @@ class AcpAgentHarnessTest {
                             ?.takeIf { value -> value.length <= 256 && preparationMountAdmissionPattern.matches(value) }
                     } catch (_: Throwable) { null }
                     if (admissionRecord != null) append(";admission=").append(admissionRecord)
+                    validatedAcpMountTiming((observed as? AcpMountEventWitness)?.timingRecord)?.let { timing ->
+                        append(";timing=").append(timing)
+                    }
                 }
             }
             observed.cause?.let { if (pending.size < 16) pending.add(it) }

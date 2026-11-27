@@ -13,8 +13,12 @@ import decompengine.mvp.RECONSTRUCTION_AGENT_EVIDENCE
 import decompengine.mvp.RECONSTRUCTION_AGENT_ASSESSMENT
 import decompengine.project.sha256
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
+import java.util.Comparator
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -45,6 +49,7 @@ import org.junit.jupiter.api.Timeout
 class MvpPatchAcpIntegrationTest {
     @Test
     fun `default ACP patch turns use captured filesystem callbacks and archive both executions`() {
+        clearFailedReconstructionEvidence()
         requireLiveSandboxHost()
         val temporary = createTempDirectory("mvp-patch-acp-")
         val config = writeProvisioning(temporary.resolve("acp.json"))
@@ -60,16 +65,23 @@ class MvpPatchAcpIntegrationTest {
 
         val input = compileC(temporary, "original", originalSource())
         val output = temporary.resolve("output")
-        MvpPatchWorkflow(
-            harness = strategy.harness,
-            environment = environment,
-            approve = { true },
-            decompiler = BinaryDecompiler { _, _, _, raw ->
-                raw.writeText("int main(void) { /* authenticated Ghidra fixture */ }\n")
-            },
-            binaryExecution = testExecutionBoundary(),
-            harnessProvenance = strategy.harnessProvenance,
-        ).run(MvpPatchOptions(input, output))
+        try {
+            MvpPatchWorkflow(
+                harness = strategy.harness,
+                environment = environment,
+                approve = { true },
+                decompiler = BinaryDecompiler { _, _, _, raw ->
+                    raw.writeText("int main(void) { /* authenticated Ghidra fixture */ }\n")
+                },
+                binaryExecution = testExecutionBoundary(),
+                harnessProvenance = strategy.harnessProvenance,
+            ).run(MvpPatchOptions(input, output))
+        } catch (failure: Throwable) {
+            runCatching { retainFailedReconstructionEvidence(output) }
+                .exceptionOrNull()
+                ?.let(failure::addSuppressed)
+            throw failure
+        }
 
         val reconstruction = executionEvidence(output, RECONSTRUCTION_AGENT_EVIDENCE)
         val patch = executionEvidence(output, PATCH_AGENT_EVIDENCE)
@@ -223,6 +235,104 @@ class MvpPatchAcpIntegrationTest {
 
     private fun executionEvidence(output: Path, name: String): JsonObject =
         Json.parseToJsonElement(output.resolve("evidence/$name").readText()).jsonObject
+
+    /**
+     * Keep only the bounded, redacted invocation receipt and its assessment when the live ACP
+     * integration fails. The normal test report intentionally omits their detailed contents, but
+     * without these files a CONFIGURATION classification cannot distinguish host, fixture, or
+     * boundary failures. Never copy requests, prompts, process output, or ambient temporary paths.
+     */
+    private fun retainFailedReconstructionEvidence(output: Path) {
+        val evidenceDirectory = output.resolve("evidence")
+        val fileNames = listOf(RECONSTRUCTION_AGENT_EVIDENCE, RECONSTRUCTION_AGENT_ASSESSMENT)
+        val available = fileNames.filter { name ->
+            val source = evidenceDirectory.resolve(name)
+            Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)
+        }
+        val destination = failedReconstructionEvidenceDirectory()
+        Files.createDirectories(destination.parent)
+        Files.createDirectory(
+            destination,
+            PosixFilePermissions.asFileAttribute(
+                setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE),
+            ),
+        )
+        try {
+            val retained = mutableListOf<Pair<String, ByteArray>>()
+            var retainedBytes = 0L
+            for (name in available) {
+                val source = evidenceDirectory.resolve(name)
+                val size = Files.size(source)
+                require(size in 1..MAXIMUM_DIAGNOSTIC_EVIDENCE_BYTES) {
+                    "ACP failure evidence exceeds its diagnostic retention bound"
+                }
+                val bytes = Files.readAllBytes(source)
+                require(bytes.size.toLong() == size) { "ACP failure evidence changed during diagnostic capture" }
+                retainedBytes += bytes.size
+                require(retainedBytes <= MAXIMUM_DIAGNOSTIC_EVIDENCE_TOTAL_BYTES) {
+                    "ACP failure evidence exceeds its aggregate diagnostic retention bound"
+                }
+                retained += name to bytes
+            }
+            retained.forEach { (name, bytes) ->
+                val target = destination.resolve(name)
+                Files.createFile(
+                    target,
+                    PosixFilePermissions.asFileAttribute(
+                        setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                    ),
+                )
+                Files.write(target, bytes, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)
+            }
+            val manifest = buildJsonObject {
+                put("schemaVersion", 1)
+                put("stage", "mvp-patch-acp-reconstruction")
+                put("sourceRevision", System.getenv("GITHUB_SHA")?.takeIf { it.matches(Regex("[0-9a-f]{40}")) }.orEmpty())
+                put("workflowRunId", System.getenv("GITHUB_RUN_ID").orEmpty())
+                put("workflowRunAttempt", System.getenv("GITHUB_RUN_ATTEMPT").orEmpty())
+                putJsonArray("retained") {
+                    retained.forEach { (name, bytes) ->
+                        add(buildJsonObject {
+                            put("name", name)
+                            put("sizeBytes", bytes.size)
+                            put("sha256", sha256(bytes))
+                        })
+                    }
+                }
+                putJsonArray("missing") {
+                    (fileNames - retained.map { it.first }.toSet()).forEach { add(it) }
+                }
+            }
+                .toString()
+            val manifestPath = destination.resolve("capture.json")
+            Files.createFile(
+                manifestPath,
+                PosixFilePermissions.asFileAttribute(
+                    setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                ),
+            )
+            Files.writeString(manifestPath, "$manifest\n", StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)
+        } catch (failure: Throwable) {
+            runCatching { deleteDiagnosticTree(destination) }
+                .exceptionOrNull()
+                ?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    private fun clearFailedReconstructionEvidence() {
+        deleteDiagnosticTree(failedReconstructionEvidenceDirectory())
+    }
+
+    private fun deleteDiagnosticTree(destination: Path) {
+        if (!Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) return
+        Files.walk(destination).use { paths ->
+            paths.sorted(Comparator.reverseOrder<Path>()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    private fun failedReconstructionEvidenceDirectory(): Path =
+        Path.of("build", "acp-required-contract-diagnostics", "mvp-patch-acp-reconstruction")
 
     private fun writeProvisioning(path: Path, mode: String = "mvp-patch"): Path {
         val runtime = PYTHON_RUNTIME.getOrThrow()
@@ -384,6 +494,8 @@ class MvpPatchAcpIntegrationTest {
     private fun fileSha256(path: Path): String = sha256(Files.readAllBytes(path))
 
     private companion object {
+        const val MAXIMUM_DIAGNOSTIC_EVIDENCE_BYTES = 64L * 1024 * 1024
+        const val MAXIMUM_DIAGNOSTIC_EVIDENCE_TOTAL_BYTES = 65L * 1024 * 1024
         val BWRAP: Path = Path.of("/usr/bin/bwrap")
         val PRLIMIT: Path = Path.of("/usr/bin/prlimit")
         val SYSTEMD_RUN: Path = Path.of("/usr/bin/systemd-run")

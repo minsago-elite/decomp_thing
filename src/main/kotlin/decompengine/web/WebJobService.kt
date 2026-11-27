@@ -330,8 +330,17 @@ class WebJobService(
     private var startupCollectionSeed: WebJobCollectionSeed? = null
     /** Sidecars whose per-file metadata must be checked; absent sidecars rely on job-directory ctime/mtime. */
     @Volatile private var dashboardOrganizationIds: Set<String>? = null
-    private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
+    @Volatile private var uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
+
+    /** Installs a deterministic retained-byte ceiling before tests admit any upload. */
+    @Synchronized internal fun configureUploadStorageLimitForTests(maximumBytes: Long) {
+        check(!closed && !stopping && uploads.isEmpty()) { "Upload storage limit can only change while upload admission is idle." }
+        uploadStorage = WebUploadStorage(store.storageRoot, maximumBytes)
+    }
+    internal var uploadStorageMeasureObserver: () -> Unit
+        get() = uploadStorage.beforeMeasureObserver
+        set(value) { uploadStorage.beforeMeasureObserver = value }
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
