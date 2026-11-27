@@ -294,7 +294,7 @@ jobs:
         with:
           version: v29.7.2
           set-host: true
-          daemon-config: '{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}'
+          daemon-config: '{"features":{"containerd-snapshotter":false},"storage-driver":"vfs"}'
           runtime-basedir: ${{ github.workspace }}/.d
       - name: Capture GCC reproduction builder identity
         env:
@@ -360,6 +360,7 @@ jobs:
           fi
           python3 -B scripts/capture-gcc-reproduction-inspect.py \
             --endpoint "$DOCKER_HOST" \
+            --expected-driver vfs \
             --executed-commit "$(git rev-parse HEAD)" \
             --executed-tree "$(git rev-parse HEAD^{tree})"
           observed="$(python3 -B -c 'import json; print(json.load(open("build/gcc-reproduction-adapter/capture/image-inspect.json"))[0]["Id"])')"
