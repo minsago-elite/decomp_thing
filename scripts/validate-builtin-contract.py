@@ -33,7 +33,9 @@ def main():
     summary.unlink(missing_ok=True)
     environment = dict(os.environ, DECOMP_REQUIRE_LIVE_ACP_CONTRACT="1")
     result = subprocess.run(
-        [str(ROOT / "gradlew"), "--no-daemon", "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
+        [str(ROOT / "gradlew"), "--no-daemon",
+         "-Dorg.gradle.internal.repository.max.tentatives=5", "-Dorg.gradle.internal.repository.initial.backoff=2000",
+         "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
          "--tests", "decompengine.agent.*", "--console=plain"], cwd=ROOT, env=environment,
     )
     suites, failures = [], []
