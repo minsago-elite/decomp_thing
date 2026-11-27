@@ -708,8 +708,11 @@ try {
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin, undefined,
-    { connectionNotice: false, interactionPages: auditFixtures(repo, installation.manifest.buildId).pages,
-      extraInteractionContexts: engineSupplementalInteractionContexts }); // #1896 trusted-network evidence is qualified by Chrome DevTools only.
+    // Chrome-only connection, explicit-filter and source-file-open timings are qualified by DevTools
+    // (#1896, #623); this runner does not measure them, so their verdicts are omitted rather than claimed.
+    { connectionNotice: false, jobFilter: false, fileOpen: false,
+      interactionPages: auditFixtures(repo, installation.manifest.buildId).pages,
+      extraInteractionContexts: engineSupplementalInteractionContexts });
   const records = [smoked.record, ...audited.records];
   const cspEvents = records.flatMap((record) => record.csp);
   const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);

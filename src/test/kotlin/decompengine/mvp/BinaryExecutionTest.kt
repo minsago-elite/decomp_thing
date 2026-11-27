@@ -15,6 +15,57 @@ import kotlin.test.assertTrue
 
 class BinaryExecutionTest {
     @Test
+    fun `private bubblewrap process namespace permits leak and argument evidence`() {
+        for ((filename, case) in listOf(
+            "09_memory_leak.c" to MvpVulnerabilityCase.MEMORY_LEAK,
+            "10_command_injection.c" to MvpVulnerabilityCase.COMMAND_INJECTION,
+        )) {
+            val temp = createTempDirectory("binary-real-boundary-${case.id}-")
+            val source = temp.resolve("decompiled.c")
+            source.writeText(java.nio.file.Path.of("benchmarks/fixtures/c-vul/src/$filename").readText())
+            val executable = temp.resolve("probe")
+            val compiler = ProcessBuilder("clang", "-O1", "-g", "-fsanitize=address,undefined", source.toString(), "-o", executable.toString())
+                .redirectErrorStream(true).start()
+            val diagnostic = compiler.inputStream.bufferedReader().readText()
+            assertEquals(0, compiler.waitFor(), diagnostic)
+            val result = BubblewrapBinaryExecutionBoundary().execute(executable, temp, case.environment, case.arguments)
+            result.isolation.requireSecure()
+            assertTrue(case.matchesFinding(result.exitCode, result.combined), result.combined)
+        }
+    }
+
+    @Test
+    fun `arguments retain literal boundaries across the spool without shell expansion`() {
+        val temp = createTempDirectory("binary-runner-argv-")
+        val root = temp.resolve("root").createDirectories()
+        val control = temp.resolve("control")
+        val executable = root.resolve("probe.sh")
+        executable.writeText("#!/bin/sh\nprintf '<%s>\\n' \"${'$'}@\"\n")
+        executable.toFile().setExecutable(true)
+        val arguments = listOf("", "two words", "literal; printf OTHER", "${'$'}(printf OTHER)", "quotes'\"")
+        val runner = BinaryRunnerService(control, listOf(root), networkIsolated = true)
+        val boundary = SpoolBinaryExecutionBoundary(control, Duration.ofSeconds(3))
+        val future = CompletableFuture.supplyAsync { boundary.execute(executable, root, emptyMap(), arguments) }
+        while (!future.isDone) { runner.processOne(); Thread.sleep(10) }
+        val result = future.get()
+        assertEquals(0, result.exitCode)
+        assertEquals(arguments.joinToString("") { "<$it>\n" }, result.stdout)
+        assertEquals("", result.stderr)
+    }
+
+    @Test
+    fun `invalid arguments refuse before queuing and legacy boundaries never drop arguments`() {
+        val temp = createTempDirectory("binary-runner-argv-refusal-")
+        val boundary = SpoolBinaryExecutionBoundary(temp.resolve("control"))
+        for (arguments in listOf(List(33) { "x" }, listOf("nul\u0000value"), listOf("é".repeat(2049)), List(5) { "x".repeat(4096) })) {
+            assertFailsWith<IllegalArgumentException> { boundary.execute(temp.resolve("program"), temp, emptyMap(), arguments) }
+        }
+        assertTrue(Files.list(temp.resolve("control/requests")).use { it.findAny().isEmpty })
+        val legacy = BinaryExecutionBoundary { _, _, _ -> error("must not silently omit arguments") }
+        assertFailsWith<IllegalArgumentException> { legacy.execute(temp.resolve("program"), temp, emptyMap(), listOf("input")) }
+    }
+
+    @Test
     fun `spool runner executes with no inherited credentials and attests network isolation`() {
         val temp = createTempDirectory("binary-runner-")
         val root = temp.resolve("root").createDirectories()
