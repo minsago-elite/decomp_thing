@@ -205,6 +205,18 @@ const HUNK_PAGE_FALLBACK = 20;
  */
 const HUNK_OFFSET_MAXIMUM = 100_000;
 type HunkHistory = { scope: string; versions: string; previous: Map<number, number> };
+/** The predecessor recorded on the browser history entry itself, so revisits of one offset keep their own way back. */
+type HunkEntry = { scope: string; versions: string; offset: number; previous: number };
+const HUNK_ENTRY_KEY = 'decompSourceHunkPrevious';
+
+function hunkEntry(): HunkEntry | null {
+  const state: unknown = typeof history === 'undefined' ? null : history.state;
+  const entry = state && typeof state === 'object' ? (state as Record<string, unknown>)[HUNK_ENTRY_KEY] : null;
+  if (!entry || typeof entry !== 'object') return null;
+  const { scope, versions, offset, previous } = entry as Record<string, unknown>;
+  return typeof scope === 'string' && typeof versions === 'string' && Number.isInteger(offset) && Number.isInteger(previous)
+    && (previous as number) >= 0 && (previous as number) < (offset as number) ? { scope, versions, offset: offset as number, previous: previous as number } : null;
+}
 
 function lineLabel(value: number | null): string { return value === null ? '' : String(value); }
 
@@ -216,6 +228,13 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
   const moveFocus = useRef(true);
   const [refresh, setRefresh] = useState(0);
   const hunkHistory = useRef<HunkHistory>({ scope: '', versions: '', previous: new Map() });
+  // Two entries can share one URL; the router does not re-render between them, so the entry's own predecessor must.
+  const [, setEntryTurn] = useState(0);
+  useEffect(() => {
+    const changed = () => setEntryTurn(value => value + 1);
+    window.addEventListener('popstate', changed);
+    return () => window.removeEventListener('popstate', changed);
+  }, []);
   let selection: SourceFileDiffSelection | null;
   try { selection = sourceFileDiffSelection(search); } catch { selection = null; }
   const key = [selected.jobId, selected.runId, selected.revisionId, search, refresh].join('/');
@@ -237,11 +256,18 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
   if (!selection) return <p role="alert">{copy.diffInvalid}</p>;
   const chosen = selection;
   // Hunk pages carry both observed metadata versions, so an offset is never applied to a changed comparison.
-  function hunk(value: number) {
+  function hunk(value: number, from?: number) {
     if (!data) return;
     moveFocus.current = true;
-    location.route(sourceFileDiffPath(basePath, selected, { ...chosen, hunk: value,
-      pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } }));
+    const target = sourceFileDiffPath(basePath, selected, { ...chosen, hunk: value,
+      pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } });
+    location.route(target);
+    // The router pushes the entry synchronously; annotate only that entry, never one the reader reached otherwise.
+    if (from !== undefined && window.location.href === new URL(target, window.location.origin).href) {
+      const state: unknown = history.state;
+      const entry: HunkEntry = { scope, versions: versions ?? '', offset: value, previous: from };
+      history.replaceState({ ...(state && typeof state === 'object' ? state : {}), [HUNK_ENTRY_KEY]: entry }, '');
+    }
   }
   const name = data ? (data.headFile ?? data.baseFile)!.displayName : null;
   // History belongs to one file comparison at one observed pair of metadata versions; any other view starts fresh.
@@ -253,13 +279,15 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
   }
   const visited = hunkHistory.current.previous;
   const fallback = (offset: number) => Math.max(0, offset - HUNK_PAGE_FALLBACK);
-  const previous = data ? visited.get(data.hunkOffset) ?? fallback(data.hunkOffset) : 0;
+  const entry = hunkEntry();
+  const own = data && entry && entry.scope === scope && entry.versions === versions && entry.offset === data.hunkOffset ? entry.previous : undefined;
+  const previous = data ? own ?? visited.get(data.hunkOffset) ?? fallback(data.hunkOffset) : 0;
   function next(from: number, to: number) {
     if (to > from && to <= HUNK_OFFSET_MAXIMUM) {
       if (from === fallback(to)) visited.delete(to);
       else visited.set(to, from);
     }
-    hunk(to);
+    hunk(to, from);
   }
   return <section class="source-diff" aria-labelledby="source-file-diff-title" aria-busy={current?.state === 'loading'}>
     <Revisions selected={selected} base={chosen.base} data={data} />
@@ -304,7 +332,7 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
       {data.representation === 'text' && data.nextHunk === null && data.unchangedAfter !== null && data.unchangedAfter > 0
         && <p class="source-diff-omitted">{message(copy.diffOmittedAfter, { count: data.unchangedAfter })}</p>}
       {data.totalHunks > 0 && <nav aria-label={copy.diffHunks}>
-        <button type="button" disabled={data.hunkOffset === 0} onClick={() => hunk(previous)}>{copy.diffPreviousHunks}</button>
+        <button type="button" disabled={data.hunkOffset === 0} onClick={() => hunk(previous, previous > 0 ? visited.get(previous) ?? fallback(previous) : undefined)}>{copy.diffPreviousHunks}</button>
         <button type="button" disabled={data.nextHunk === null} onClick={() => { if (data.nextHunk !== null) next(data.hunkOffset, data.nextHunk); }}>{copy.diffNextHunks}</button>
       </nav>}
     </>}

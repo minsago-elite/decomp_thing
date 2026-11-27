@@ -44,6 +44,11 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const bufferRef = useRef<LogBuffer | null>(null);
   const pendingScroll = useRef<'end' | bigint | null>(null);
   const mounted = useRef(true);
+  // A held retry owns the initial read until it settles; same-turn activations cannot supersede it.
+  const retrying = useRef(false);
+  // Set only when the reader's focus was on Retry, so a repeated failure can return focus to it.
+  const retryFocus = useRef<'off' | 'held' | 'reading'>('off');
+  const retryButton = useRef<HTMLButtonElement>(null);
   const [attemptState, setAttemptState] = useState<string | null>(null);
   // Each completed follow read schedules the next one, including consecutive missing responses.
   const [followTick, setFollowTick] = useState(0);
@@ -164,6 +169,17 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     setScrollTop(element.scrollTop);
   });
 
+  // A layout effect runs at commit, so focus is back before the reader (or assistive technology) sees the failure.
+  useLayoutEffect(() => {
+    // Only the settlement of this retry's own read may restore focus, never an earlier status still being published.
+    if (status.state === 'loading') { if (retryFocus.current === 'held') retryFocus.current = 'reading'; return; }
+    if (retryFocus.current !== 'reading') return;
+    retryFocus.current = 'off';
+    // Restore focus only if it fell to the document when Retry was removed; a reader who moved on keeps their place.
+    const active = document.activeElement;
+    if (status.state === 'error' && (active === null || active === document.body)) retryButton.current?.focus();
+  }, [status.state]);
+
   const onScroll = () => {
     const element = viewport.current;
     if (!element) return;
@@ -200,10 +216,13 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     {status.state === 'oversized' && <p role="status">{displayMessage(copy.oversized, { limit: status.limit })}</p>}
     {error && <p role="alert">{error}</p>}
     {status.state === 'error' && <div class="job-actions">
-      <button type="button" onClick={() => {
+      <button type="button" ref={retryButton} onClick={event => {
         // One deliberate read per activation; a failure leaves this action in place, never replays.
+        if (retrying.current) return;
+        retrying.current = true;
+        retryFocus.current = document.activeElement === event.currentTarget ? 'held' : 'off';
         setError(''); setStatus({ state: 'loading' });
-        void read({ tail: 'true', limit: '200' }, 'end', () => 'end');
+        void read({ tail: 'true', limit: '200' }, 'end', () => 'end').finally(() => { retrying.current = false; });
       }}>{copy.retry}</button>
     </div>}
     {buffer && meta && <>
@@ -239,7 +258,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
           pendingScroll.current = buffer.firstLine;
           setFind(event.currentTarget.value);
         }} /></label>
-        <p>{find ? displayMessage(copy.findScope, { count: displayed.length, first: buffer.firstLine.toString(), last: lastLine(buffer).toString() }) : copy.findEmpty}</p>
+        {lines.length > 0 && <p>{find ? displayMessage(copy.findScope, { count: displayed.length, first: buffer.firstLine.toString(), last: lastLine(buffer).toString() }) : copy.findEmpty}</p>}
         <form onSubmit={event => {
           event.preventDefault();
           if (!query) return;
