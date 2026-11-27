@@ -79,6 +79,21 @@ class GeneratedCTypeEmissionOrderTest {
         assertFailsWith<IllegalArgumentException> { generatedCTypeEmissionOrder(listOf(prototypeOnly, type("z", "struct Local { int value; };"))) }
     }
 
+    @Test fun `qualified unspecified callback array bounds retain their declarations`() {
+        for (bound in listOf("const", "const *", "volatile restrict *", "const volatile")) {
+            val callback = type("fn", "typedef int (*Fn)(int values[$bound]);")
+            assertEquals(listOf(callback), generatedCTypeEmissionOrder(listOf(callback)), bound)
+            val model = RecoveredProgramModel(inputSha256 = "bounds", functions = emptyList(), types = listOf(callback))
+            val header = GeneratedCProjectRendering(model, ModulePlan(modules = emptyList())).sharedInterface()
+            assertTrue(header.contains(callback.declaration), header)
+        }
+        val record = type("z", "struct T { int field; };")
+        val alias = type("0", "typedef struct T T;")
+        val sized = type("a", "typedef int (*Fn)(int values[const static sizeof(T)]);")
+        assertEquals(listOf(alias, record, sized), generatedCTypeEmissionOrder(listOf(sized, record, alias)))
+        assertFailsWith<IllegalArgumentException> { generatedCTypeEmissionOrder(listOf(alias, sized)) }
+    }
+
     @Test fun `direct parameter operands use their bound declaration shapes`() {
         val alias = type("0", "typedef struct T T, *P;")
         val body = type("z", "struct T { int value; };")
