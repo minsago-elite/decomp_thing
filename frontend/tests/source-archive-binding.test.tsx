@@ -155,3 +155,30 @@ it('binds every poll to the POST operation ID through success and failure', asyn
   expect(log.filter(entry => entry.includes('/archive-verifications/')))
     .toEqual([`get ${root}/archive-verifications/operation_1`, `get ${root}/archive-verifications/operation_1`]);
 });
+
+it('announces the polling limit and checks the result on request without submitting a second operation', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  button(panel!, copy.verify).click(); await microtasks();
+  await settle(operation('running'));
+  for (let i = 0; i < 120; i++) {
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pending[0]?.path).toBe(root + '/archive-verifications/operation_1');
+    await settle(operation('running'));
+  }
+  const notice = () => panel!.querySelector('#source-archive-operation')?.textContent;
+  expect(notice()).toMatch(/automatic.*stopped/i);
+  expect(button(panel!, copy.verify).getAttribute('aria-disabled')).toBe('true');
+  button(panel!, copy.verify).click();
+  await vi.advanceTimersByTimeAsync(10_000); paint(); await microtasks();
+  expect(pending).toHaveLength(0);
+  expect(transport.post).toHaveBeenCalledOnce();
+  await inspect(panel!, variant({ state: 'running', operationId: 'operation_1', verifiedAt: null }), copy.refresh);
+  expect(notice()).toMatch(/automatic.*stopped/i);
+  expect(result(panel!)?.dataset.archiveState).toBe('running');
+  await inspect(panel!, verified, copy.refresh);
+  expect(notice()).toBe('');
+  expect(button(panel!, copy.verify).hasAttribute('aria-disabled')).toBe(false);
+  expect(transport.post).toHaveBeenCalledOnce();
+  expect(log.filter(entry => entry.includes('/archive-verifications/'))).toHaveLength(120);
+});

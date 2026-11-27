@@ -92,3 +92,35 @@ it('restores focus to the same Retry action after a second failure', async () =>
   expect(document.activeElement).toBe(again);
   expect(transport.get).toHaveBeenCalledTimes(2);
 });
+
+it.each(['ready', 'missing', 'oversized'] as const)('gives a keyboard retry a useful focus target when it settles as %s', async state => {
+  transport.get.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503 }));
+  let complete!: (response: unknown) => void;
+  transport.get.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  mount();
+  const retry = await screen.findByRole('button', { name: 'Try reading the log again' });
+  retry.focus();
+  fireEvent.click(retry);
+  await screen.findByText('Reading the build log.');
+  complete({ data: state === 'ready' ? fixture : { ...fixture, state, maximumBytes: '1024' } });
+  const target = state === 'ready' ? await screen.findByRole('region', { name: 'Build log lines' })
+    : state === 'missing' ? await screen.findByRole('button', { name: 'Check again' }) : await screen.findByText(/exceeds the reading limit/);
+  expect(document.activeElement).toBe(target);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+});
+
+it('keeps intervening focus on a successful retry', async () => {
+  transport.get.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503 }));
+  let complete!: (response: unknown) => void;
+  transport.get.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  const { container } = mount();
+  const elsewhere = container.appendChild(document.createElement('button'));
+  const retry = await screen.findByRole('button', { name: 'Try reading the log again' });
+  retry.focus();
+  fireEvent.click(retry);
+  await screen.findByText('Reading the build log.');
+  elsewhere.focus();
+  complete({ data: fixture });
+  await screen.findByRole('region', { name: 'Build log lines' });
+  expect(document.activeElement).toBe(elsewhere);
+});

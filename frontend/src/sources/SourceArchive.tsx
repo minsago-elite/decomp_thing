@@ -14,7 +14,8 @@ import { archiveOperationRoute, archiveStatusRoute, archiveVerificationsRoute, b
 export const ARCHIVE_POLL_MS = 1000;
 export const ARCHIVE_POLL_LIMIT = 120;
 const terminal = (operation: Operation) => operation.state === 'completed' || operation.state === 'failed' || operation.state === 'interrupted';
-type Progress = { state: 'submitting' } | { state: 'running'; value: Operation } | { state: 'done'; value: Operation } | { state: 'failed'; failure: unknown };
+type Progress = { state: 'submitting' } | { state: 'running' | 'done'; value: Operation }
+  | { state: 'paused'; readKey: string } | { state: 'failed'; failure: unknown };
 
 /**
  * Revision-bound source archive panel. Reading status and verifying are separate explicit actions; the panel shows
@@ -90,6 +91,8 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
     if (data && waiting) result.current?.focus();
   }, [current?.key, current?.state, data]);
   const running = progress?.state === 'submitting' || progress?.state === 'running';
+  // A fresh archive read can establish a final outcome after automatic operation polling stops.
+  const paused = progress?.state === 'paused' && (progress.readKey === key || !data || data.verification.state === 'running');
   function verify(archiveSha256: string, control: HTMLElement | null) {
     if (busy.current) return;
     const csrfToken = session.csrf();
@@ -118,6 +121,11 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
         }
         if (controller.signal.aborted) return;
         busy.current = false;
+        if (!terminal(value)) {
+          awaiting.current = null;
+          setProgress({ state: 'paused', readKey: key });
+          return;
+        }
         setProgress({ state: 'done', value });
         setRefresh(count => {
           focusResult.current = [selected.jobId, selected.runId, selected.revisionId, count + 1].join('/');
@@ -158,13 +166,14 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
           && <> {message(copy.stale, { digest: verification.previousVerifiedSha256 })}</>}
       </p>
       <p>{copy.boundary}</p>
-      {data.archive.sha256 !== null && <button type="button" aria-disabled={running ? 'true' : undefined}
-        aria-describedby="source-archive-operation" onClick={event => { if (!running) verify(data.archive.sha256!, event.currentTarget); }}>{copy.verify}</button>}
+      {data.archive.sha256 !== null && <button type="button" aria-disabled={running || paused ? 'true' : undefined}
+        aria-describedby="source-archive-operation" onClick={event => { if (!running && !paused) verify(data.archive.sha256!, event.currentTarget); }}>{copy.verify}</button>}
       {data.archive.contentHref !== null && <p><a ref={link} href={data.archive.contentHref} download="source-tree.zip">
         {verification.state === 'verified' ? copy.downloadVerified : copy.downloadUnverified}</a></p>}
     </>}
-    <p id="source-archive-operation" role="status">{progress?.state === 'submitting' ? copy.submitting : progress?.state === 'running' ? message(copy.operation, { state: copy.operationStates[progress.value.state] })
-      : progress?.state === 'done' ? message(copy.operation, { state: copy.operationStates[progress.value.state] }) : ''}</p>
+    <p id="source-archive-operation" role="status">{paused ? message(copy.pollingStopped, { count: ARCHIVE_POLL_LIMIT })
+      : progress?.state === 'submitting' ? copy.submitting : progress?.state === 'running' || progress?.state === 'done'
+        ? message(copy.operation, { state: copy.operationStates[progress.value.state] }) : ''}</p>
     {progress?.state === 'failed' && <p role="alert">{sourceReadMessage(progress.failure)}</p>}
   </section>;
 }

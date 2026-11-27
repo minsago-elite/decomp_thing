@@ -46,9 +46,9 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const mounted = useRef(true);
   // A held retry owns the initial read until it settles; same-turn activations cannot supersede it.
   const retrying = useRef(false);
-  // Set only when the reader's focus was on Retry, so a repeated failure can return focus to it.
-  const retryFocus = useRef<'off' | 'held' | 'reading'>('off');
-  const retryButton = useRef<HTMLButtonElement>(null);
+  const focusedRetryGeneration = useRef<number | null>(null);
+  const recoveryButton = useRef<HTMLButtonElement>(null);
+  const oversizedNotice = useRef<HTMLParagraphElement>(null);
   const [attemptState, setAttemptState] = useState<string | null>(null);
   // Each completed follow read schedules the next one, including consecutive missing responses.
   const [followTick, setFollowTick] = useState(0);
@@ -169,16 +169,16 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     setScrollTop(element.scrollTop);
   });
 
-  // A layout effect runs at commit, so focus is back before the reader (or assistive technology) sees the failure.
+  // Restore keyboard focus when the retry's result commits, including immediate settlements.
   useLayoutEffect(() => {
-    // Only the settlement of this retry's own read may restore focus, never an earlier status still being published.
-    if (status.state === 'loading') { if (retryFocus.current === 'held') retryFocus.current = 'reading'; return; }
-    if (retryFocus.current !== 'reading') return;
-    retryFocus.current = 'off';
-    // Restore focus only if it fell to the document when Retry was removed; a reader who moved on keeps their place.
+    if (focusedRetryGeneration.current === null || status.state === 'loading') return;
+    const ownsRead = focusedRetryGeneration.current === generation.current;
+    focusedRetryGeneration.current = null;
     const active = document.activeElement;
-    if (status.state === 'error' && (active === null || active === document.body)) retryButton.current?.focus();
-  }, [status.state]);
+    if (!ownsRead || (active !== null && active !== document.body)) return;
+    const target = viewport.current ?? recoveryButton.current ?? oversizedNotice.current;
+    target?.focus();
+  }, [status]);
 
   const onScroll = () => {
     const element = viewport.current;
@@ -208,21 +208,23 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     {status.state === 'missing' && <>
       <p role="status">{copy.missing}</p>
       <div class="job-actions">
-        <button type="button" onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.checkAgain}</button>
+        <button type="button" ref={recoveryButton} onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.checkAgain}</button>
         {!finished && <button type="button" onClick={() => { pause(follow === 'on' ? 'off' : 'on'); }}>{follow === 'on' ? copy.pause : copy.follow}</button>}
       </div>
       {follow === 'on' && !finished && <p>{copy.waitingForLog}</p>}
     </>}
-    {status.state === 'oversized' && <p role="status">{displayMessage(copy.oversized, { limit: status.limit })}</p>}
+    {status.state === 'oversized' && <p role="status" tabIndex={-1} ref={oversizedNotice}>{displayMessage(copy.oversized, { limit: status.limit })}</p>}
     {error && <p role="alert">{error}</p>}
     {status.state === 'error' && <div class="job-actions">
-      <button type="button" ref={retryButton} onClick={event => {
+      <button type="button" ref={recoveryButton} onClick={event => {
         // One deliberate read per activation; a failure leaves this action in place, never replays.
         if (retrying.current) return;
         retrying.current = true;
-        retryFocus.current = document.activeElement === event.currentTarget ? 'held' : 'off';
+        const focused = document.activeElement === event.currentTarget;
         setError(''); setStatus({ state: 'loading' });
-        void read({ tail: 'true', limit: '200' }, 'end', () => 'end').finally(() => { retrying.current = false; });
+        const request = read({ tail: 'true', limit: '200' }, 'end', () => 'end');
+        focusedRetryGeneration.current = focused ? generation.current : null;
+        void request.finally(() => { retrying.current = false; });
       }}>{copy.retry}</button>
     </div>}
     {buffer && meta && <>

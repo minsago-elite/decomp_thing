@@ -23,12 +23,13 @@ function browser(onClick) {
       calls.push([method, params]);
       if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'frame' } } };
       if (method === 'Browser.setDownloadBehavior' && params.downloadPath) state.dir = params.downloadPath;
-      if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased') await onClick({ emit, state });
+      if ((method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased')
+        || (method === 'Input.dispatchKeyEvent' && params.key === 'Enter' && params.type === 'keyDown')) await onClick({ emit, state });
       return {};
     },
   };
   const evaluate = async (_tab, expression) => expression.includes('scrollIntoView')
-    ? { count: 1, href, x: 5, y: 5, url: page, history: 3 } : { url: state.url, history: state.history };
+    ? { count: 1, href, focused: true, x: 5, y: 5, url: page, history: 3 } : { url: state.url, history: state.history };
   const waitFor = async (check, label) => { for (let i = 0; i < 20; i++) { const v = await check(); if (v) return v; await new Promise((r) => setTimeout(r, 5)); } throw new Error(`Timed out waiting for ${label}`); };
   return { cdp, evaluate, waitFor, calls, listeners, state, tab: { sessionId: 's', targetId: 'target' } };
 }
@@ -38,10 +39,10 @@ const download = (bytes, extra = {}) => async ({ emit, state }) => {
   await fs.writeFile(join(state.dir, 'g'), bytes);
   emit('Browser.downloadProgress', { guid: 'g', state: 'completed', receivedBytes: bytes.length });
 };
-async function run(onClick, name) {
+async function run(onClick, name, activation = 'pointer') {
   await fs.mkdir(root, { recursive: true });
   const b = browser(onClick);
-  const result = nativeDownloadByClick({ ...b, directory: join(root, name), text: 'Download', expected });
+  const result = nativeDownloadByClick({ ...b, directory: join(root, name), text: 'Download', expected, expectedFilename: 'x.patch', activation });
   return { result, b };
 }
 
@@ -78,4 +79,15 @@ test('canceled download, other frame, other URL', async () => {
 });
 test('a download stuck in progress never qualifies', async () => {
   await assert.rejects((await run(async ({ emit }) => { emit('Browser.downloadWillBegin', { guid: 'g', url: href, frameId: 'frame' }); emit('Browser.downloadProgress', { guid: 'g', state: 'inProgress' }); }, 'stuck')).result, /native download/);
+});
+
+test('Enter on the focused link completes a native download', async () => {
+  const { result, b } = await run(download(expected), 'keyboard', 'keyboard');
+  assert.equal((await result).activation, 'keyboard');
+  assert.deepEqual(b.calls.filter(([method]) => method === 'Input.dispatchKeyEvent').map(([, event]) => event.type), ['keyDown', 'keyUp']);
+  assert.ok(!b.calls.some(([method]) => method === 'Input.dispatchMouseEvent'));
+});
+test('a completed download with a different suggested filename fails qualification', async () => {
+  const { result } = await run(download(expected, { suggestedFilename: 'wrong.patch' }), 'filename');
+  await assert.rejects(result, /suggested download filename/);
 });

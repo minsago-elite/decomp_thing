@@ -265,8 +265,10 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   assert.match(patch.disposition, /^attachment;/);
   assert.equal(patch.text, expectedCorePatch(fixture.trees).toString(), 'Direct HTTP attachment body differs from the fixture patch');
   const downloads = join(fixture.directory, '..', '..', 'source downloads');
-  const patchDownload = await nativeDownloadByClick({ cdp, tab, evaluate, waitFor, directory: downloads,
-    text: 'Download the complete unified diff', expected: expectedCorePatch(fixture.trees) });
+  const patchAttachment = { cdp, tab, evaluate, waitFor, directory: downloads, text: 'Download the complete unified diff',
+    expected: expectedCorePatch(fixture.trees), expectedFilename: 'core.c.diff' };
+  const patchDownload = await nativeDownloadByClick(patchAttachment);
+  const keyboardPatchDownload = await nativeDownloadByClick({ ...patchAttachment, activation: 'keyboard' });
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 320, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
   assert.ok(await evaluate(tab, `document.documentElement.scrollWidth <= document.documentElement.clientWidth`), 'File comparison must fit 320 px');
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
@@ -288,8 +290,10 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   await ready(tab, `document.querySelector('[data-archive-state]')?.dataset.archiveState === 'not-verified'`, 'unverified archive status');
   assert.ok(await evaluate(tab, `document.querySelector('[aria-label="Source archive identity"]').textContent.includes(${JSON.stringify(fixture.archiveSha256)})`));
   assert.ok(await evaluate(tab, `[...document.querySelectorAll('a[download]')].some(a => a.textContent === 'Download the source archive (ZIP, not verified)')`));
-  const archiveDownload = await nativeDownloadByClick({ cdp, tab, evaluate, waitFor, directory: downloads,
-    text: 'Download the source archive (ZIP, not verified)', expected: fixture.archive });
+  const archiveAttachment = { cdp, tab, evaluate, waitFor, directory: downloads, text: 'Download the source archive (ZIP, not verified)',
+    expected: fixture.archive, expectedFilename: 'source-tree.zip' };
+  const archiveDownload = await nativeDownloadByClick(archiveAttachment);
+  const keyboardArchiveDownload = await nativeDownloadByClick({ ...archiveAttachment, activation: 'keyboard' });
   assert.equal(archiveDownload.sha256, fixture.archiveSha256, 'Saved archive digest differs from the fixture archive');
   assert.equal(await evaluate(tab, `document.querySelector('[data-archive-state]')?.dataset.archiveState`), 'not-verified');
   await activate(cdp, ready, tab, 'button', 'Verify archive integrity');
@@ -303,6 +307,6 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   return { directoryKeyboardNavigation: true, opaqueLinks: true, manifestOnlyEntries: ['reports/confidence.json', 'UNRESOLVED.md'],
     emptyDirectoriesExplained: true, markupInert: true, lineLinkReload: true, hexFallback: 'invalid-utf8',
     workerAsset: workerAsset.path, workerExitedAfterAnswer: true, workerTerminatedOnLeave: true,
-    diff: { statuses: 5, parentSuggested: true, patchHttpAttachment: true, patchDownload: true, nativePatchDownload: patchDownload, narrowViewport: 320, historicalBase: true },
-    archive: { explicitStatusRead: true, digestShown: true, archiveDownload, verification: 'failed', verifiedLabelWithheld: true }, mutationRequests: 1 };
+    diff: { statuses: 5, parentSuggested: true, patchHttpAttachment: true, patchDownload: true, nativePatchDownload: patchDownload, keyboardPatchDownload, narrowViewport: 320, historicalBase: true },
+    archive: { explicitStatusRead: true, digestShown: true, archiveDownload, keyboardArchiveDownload, verification: 'failed', verifiedLabelWithheld: true }, mutationRequests: 1 };
 }
