@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { record, publish } from './packaged-browser-live.mjs';
@@ -22,6 +23,33 @@ async function press(cdp, tab, name) {
 }
 const deletedNotice = `document.querySelector('[role="alert"]')?.textContent.includes('This job was deleted. Its files were removed and cannot be recovered')`;
 
+export function readDeletionAcknowledgement(response, payload, jobId, jobApiUrl) {
+  assert.equal(response.status, 202, 'DELETE did not acknowledge the operation');
+  assert.equal(response.url, jobApiUrl);
+  const headers = Object.fromEntries(Object.entries(response.headers).map(([key, value]) => [key.toLowerCase(), value]));
+  const body = Buffer.from(payload.body, payload.base64Encoded ? 'base64' : 'utf8');
+  const acknowledged = JSON.parse(body.toString('utf8')).data;
+  assert.equal(acknowledged.jobId, jobId);
+  assert.equal(acknowledged.action, 'job.delete');
+  assert.match(acknowledged.operationId, /^jobdel_[0-9a-f]{32}$/);
+  assert.equal(headers.location, new URL(jobApiUrl).pathname + '/operations/' + acknowledged.operationId);
+  assert.ok(['running', 'completed'].includes(acknowledged.state), 'Unexpected DELETE acknowledgement state');
+  return { acknowledged, location: headers.location, bodySha256: createHash('sha256').update(body).digest('hex') };
+}
+
+export function assertDeletionAlert(state, rendered) {
+  assert.ok(['running', 'completed'].includes(state));
+  const lines = [
+    'This job was deleted. Its files were removed and cannot be recovered; only a deletion record is kept for at least 24 hours.',
+    ...(state === 'running' ? [
+      'The deletion is running.',
+      'The job is gone from the library. File cleanup is still running and resumes after a restart if interrupted.',
+    ] : ['The job and its stored files were permanently deleted.']),
+    'Return to jobs',
+  ];
+  assert.deepEqual(rendered.split(/\n+/), lines, 'Deleting tab must show the exact state acknowledged by DELETE');
+}
+
 async function listed(tab, evaluate, id, archived) {
   return evaluate(tab, `(async () => {
     const response = await fetch('/nested/api/v1/jobs?limit=100${archived ? '&archived=' + archived : ''}');
@@ -40,9 +68,21 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   const jobUrl = browserOrigin + '/nested/jobs/' + job.id;
 
   const tab = await makeTarget();
-  // Keep DELETE response headers so the test follows the server's own operation Location.
-  const responseHeaders = new Map();
-  cdp.on('Network.responseReceived', event => responseHeaders.set(event.requestId, event.response.headers), tab.sessionId);
+  const jobApiUrl = browserOrigin + '/nested/api/v1/jobs/' + job.id;
+  const deleteResponses = new Map();
+  const deleteBodies = new Map();
+  cdp.on('Network.responseReceived', ({ requestId, response }) => {
+    if (tab.requests.some(request => request.requestId === requestId && request.method === 'DELETE')) {
+      deleteResponses.set(requestId, response);
+    }
+  }, tab.sessionId);
+  cdp.on('Network.loadingFinished', ({ requestId }) => {
+    // Read the original body before Chrome can evict it. A later GET can already be completed.
+    if (deleteResponses.has(requestId)) {
+      deleteBodies.set(requestId, cdp.call('Network.getResponseBody', { requestId }, tab.sessionId)
+        .catch(error => ({ error: String(error) })));
+    }
+  }, tab.sessionId);
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
   await cdp.call('Page.navigate', { url: jobUrl }, tab.sessionId);
   await ready(tab, `document.querySelector('h2')?.textContent === 'lifecycle-fixture.elf' && document.querySelector('input[name="label"]:not(:disabled)') !== null`, 'lifecycle job route');
@@ -64,7 +104,10 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.equal(JSON.parse(await fs.readFile(join(directory, 'organization.json'), 'utf8')).archived, true);
   assert.equal(await listed(tab, evaluate, job.id, ''), false, 'Archived job remained in the default listing');
   assert.equal(await listed(tab, evaluate, job.id, 'only'), true, 'Archived job missing from archived listing');
-  assert.deepEqual((await fs.readdir(directory)).sort(), ['input.elf', 'job.json', 'organization.json']);
+  const files = (await fs.readdir(directory)).sort();
+  assert.deepEqual(files, ['input.elf', 'job.json', 'organization.json']);
+  const sizes = await Promise.all(files.map(async name => (await fs.stat(join(directory, name))).size));
+  const purgeBytes = sizes.reduce((total, size) => total + size, 0);
 
   // A second tab holds the same deep link while the first deletes it.
   const peer = await makeTarget();
@@ -90,17 +133,19 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.equal(await evaluate(tab, deleteDisabled), true, 'Delete accepted the label instead of the file name');
   await evaluate(tab, setInput('input[name="confirm"]', 'lifecycle-fixture.elf'));
   assert.equal(await evaluate(tab, deleteDisabled), false);
-  const deletesBefore = tab.requests.filter(request => request.method === 'DELETE').length;
   await evaluate(tab, click('Delete permanently'));
   await ready(tab, deletedNotice, 'deleted notice in deleting tab');
-  const deleteRequests = tab.requests.filter(request => request.method === 'DELETE').slice(deletesBefore);
+  const deleteRequests = tab.requests.filter(request => request.method === 'DELETE');
   assert.equal(deleteRequests.length, 1);
-  assert.equal(new URL(deleteRequests[0].url).pathname, '/nested/api/v1/jobs/' + job.id);
-  await waitFor(async () => responseHeaders.has(deleteRequests[0].requestId), 'DELETE response headers', 10_000);
-  const headers = Object.fromEntries(Object.entries(responseHeaders.get(deleteRequests[0].requestId)).map(([name, value]) => [name.toLowerCase(), value]));
-  const location = headers.location;
-  assert.match(location ?? '', new RegExp(`^/nested/api/v1/jobs/${job.id}/operations/jobdel_[0-9a-f]{32}$`), 'DELETE did not return an operation Location');
-  const operationId = location.split('/').pop();
+  const [{ requestId, url }] = deleteRequests;
+  assert.equal(url, jobApiUrl);
+  await waitFor(() => deleteBodies.has(requestId), 'original DELETE body', 10_000);
+  const payload = await deleteBodies.get(requestId);
+  assert.ok(!payload.error, 'Original DELETE body unavailable: ' + payload.error);
+  const { acknowledged, location, bodySha256 } = readDeletionAcknowledgement(deleteResponses.get(requestId), payload, job.id, jobApiUrl);
+  const { operationId } = acknowledged;
+  const rendered = await evaluate(tab, `${deletedAlert}?.innerText`);
+  assertDeletionAlert(acknowledged.state, rendered);
   // Disappearance from the library is not completion: await the server's completed operation.
   let operation = null;
   await waitFor(async () => {
@@ -114,7 +159,8 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.equal(operation.jobId, job.id);
   assert.equal(operation.action, 'job.delete');
   assert.equal(operation.recoveryRequired, false);
-  assert.match(operation.message, /^The job and its stored files were permanently deleted \(\d+ bytes in \d+ entries\)\. This cannot be undone; only this deletion record is retained\.$/);
+  assert.equal(operation.message, `The job and its stored files were permanently deleted (${purgeBytes} bytes in ${files.length} entries). `
+    + 'This cannot be undone; only this deletion record is retained.');
   // The detached purge staging for this operation is gone, as is the job directory itself.
   assert.ok(!(await fs.readdir(fixture.root)).includes(job.id), 'job directory remained after completed deletion');
   const staged = await fs.readdir(join(fixture.root, '.job-deletions'));
@@ -124,7 +170,6 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   // 4. Recovery and consistency: truthful copy, peer tab, deep-link reload, API 410, focusable return.
   // The permanent message itself says "cannot be undone"; what must be absent is any control offering to undo.
-  await ready(tab, `${deletedAlert}?.textContent.includes(${JSON.stringify(operation.message)})`, 'permanent deletion message in alert');
   assert.deepEqual(await evaluate(tab, `[...document.querySelectorAll('button, a[href], [role="button"], [role="link"], input, select, textarea')]
     .filter(control => /undo|restore|trash|recover/i.test((control.textContent || '') + ' ' + (control.value || '') + ' ' + (control.getAttribute('aria-label') || '') + ' ' + (control.getAttribute('title') || '')))
     .map(control => control.outerHTML)`), [], 'Deleted job offers an undo, restore or trash control');
@@ -160,7 +205,8 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.deepEqual(peer.exceptions, []);
   return { realBackend: true, labelEditedEvidenceUnchanged: true, archiveOrganizationOnly: true, archiveDistinctFromExport: true,
     defaultListingHidesArchived: true, typedConfirmationRequiresFileName: true, deleteRequests: 1, jobDirectoryRemoved: true,
-    deletionOperation: { location, state: operation.state }, detachedDataPurged: true, previewInputBytes: 64,
+    deletionOperation: { location, operationId, jobId: job.id, action: acknowledged.action, status: 202, bodySha256,
+      acknowledgedState: acknowledged.state, rendered, state: operation.state, message: operation.message }, detachedDataPurged: true, previewInputBytes: 64,
     peerTabReconciled: true, deepLinkReloadShowsDeleted: true, apiGone: 410, noUndoPromised: true,
     keyboardReturnFocus: landingFocus, mutationRequests: methods.length, executionStarted: false };
 }
