@@ -7,7 +7,7 @@ import { readFile, mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promi
 import { createHash } from 'node:crypto';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
+import { structureServerTimingSummary, COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
   verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 
 function gitBlob(bytes) { return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex'); }
@@ -414,4 +414,28 @@ test('missing, over-cap and failed child reports keep the first actual failure i
   assert.ok(result.samples.every(sample => sample.status === 'failed' && sample.shutdownConfirmed === true));
   assert.equal(result.passed, false);
   assert.ok(!JSON.stringify(result).includes('private'));
+});
+
+test('server timings preserve legacy phases and explicit IDs across interleaved requests', () => {
+  const id = '9223372036854775807';
+  const records = [
+    'web-structure-timing phase=project-page elapsedNanos=7',
+    `web-structure-timing phase=read-input elapsedNanos=1 invocationId=${id}`,
+    'web-structure-timing-terminal invocationId=2 status=refused',
+    `web-structure-manifest-timing stage=manifest-root elapsedNanos=3 segments=2 invocationId=${id}`,
+    `web-structure-timing-terminal invocationId=${id} status=ok`,
+  ];
+  const malformed = [records[1] + '1', records[3] + 'x', records[4] + 'ay', 'noise ' + records[0]];
+  const r = structureServerTimingSummary([...records, ...malformed].join('\r\n'));
+  assert.deepEqual(r.timings, [{phase:'project-page',elapsedNanos:7}, {phase:'read-input',elapsedNanos:1,invocationId:id}]);
+  assert.deepEqual(r.manifestStages, [{stage:'manifest-root',elapsedNanos:3,segments:2,invocationId:id}]);
+  assert.deepEqual(r.terminals, [{invocationId:'2',status:'refused'}, {invocationId:id,status:'ok'}]);
+  const over = structureServerTimingSummary((records.slice(1,4).join('\n') + '\n').repeat(514) +
+    'web-structure-timing phase=project-page elapsedNanos=9007199254740992\n');
+  assert.deepEqual([over.timings.length,over.manifestStages.length,over.terminals.length], [512,512,512]);
+  assert.deepEqual([over.overflow,over.manifestOverflow,over.terminalOverflow], [3,2,2]);
+  const unsafe = structureServerTimingSummary(records[0].replace("elapsedNanos=7","elapsedNanos=9007199254740992"));
+  assert.equal(unsafe.timings.length,0);
+  assert.equal(unsafe.overflow,1);
+  assert.equal(structureServerTimingSummary(records[3].replace('segments=2','segments=9007199254740992')).manifestStages.length,0);
 });

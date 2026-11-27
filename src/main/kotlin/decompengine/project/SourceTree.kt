@@ -1947,13 +1947,13 @@ internal fun SourceTreeManifestProbe.endSafely() {
     try { end() } catch (failure: Throwable) { rethrowManifestProbeCancellation(failure) }
 }
 
-private fun rethrowManifestProbeCancellation(failure: Throwable) {
+internal fun rethrowManifestProbeCancellation(failure: Throwable) {
     if (failure is InterruptedException || failure is InterruptedIOException) {
         Thread.currentThread().interrupt()
         throw failure
     }
     if (failure is java.util.concurrent.CancellationException || failure is VirtualMachineError
-        || failure is ThreadDeath || Thread.currentThread().isInterrupted) throw failure
+        || failure is ThreadDeath || failure is LinkageError || Thread.currentThread().isInterrupted) throw failure
     // Ordinary diagnostic failures cannot change validation results or refusals.
 }
 

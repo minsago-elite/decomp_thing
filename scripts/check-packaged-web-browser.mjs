@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedStructure, qualifyStructure, qualifyStructureColdSample } from './packaged-browser-structure.mjs';
-import { structureProfile, verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
+import { structureServerTimingSummary, structureProfile, verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
@@ -78,16 +78,6 @@ const safeDiagnostic = (value) => {
   let safe = String(value).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
   for (const sensitive of sensitiveValues) if (sensitive) safe = safe.replaceAll(sensitive, '[redacted]');
   return safe;
-};
-const structureServerTimingSummary = (output) => {
-  const timings = [];
-  let overflow = 0;
-  for (const match of output.matchAll(/web-structure-timing phase=([a-z0-9-]{1,64}) elapsedNanos=(\d{1,16})/g)) {
-    const elapsedNanos = Number(match[2]);
-    if (timings.length >= 512 || !Number.isSafeInteger(elapsedNanos)) { overflow++; continue; }
-    timings.push({ phase: match[1], elapsedNanos });
-  }
-  return { timings, limit: 512, overflow };
 };
 const safeEvidence = (value) => {
   if (Array.isArray(value)) return value.map(safeEvidence);

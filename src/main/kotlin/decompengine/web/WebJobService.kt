@@ -15,8 +15,6 @@ import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowTransition
 import decompengine.jobs.recoveryDisposition
-import decompengine.project.SourceTreeManifestProbe
-import decompengine.project.SourceTreeManifestStage
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -894,38 +892,32 @@ class WebJobService(
     /** Recorded model/plan projection of the actual persisted candidate, rechecked after projection. */
     internal fun <T> readProgramStructure(jobId: String, runId: String, revisionId: String,
         project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T {
-        val reference = revisionSourceReference(jobId, runId, revisionId)
-        val structureTiming = java.lang.Boolean.getBoolean("decompengine.web.structureTiming")
-        val timing = if (structureTiming) { phase: String, elapsedNanos: Long ->
-            System.err.println("web-structure-timing phase=$phase elapsedNanos=$elapsedNanos")
-        } else null
-        val manifestProbe = if (structureTiming) object : SourceTreeManifestProbe {
-            private var active: SourceTreeManifestStage? = null
-            private var startedNanos = 0L
-
-            override fun start(stage: SourceTreeManifestStage) {
-                end()
-                active = stage
-                startedNanos = System.nanoTime()
+        val timing = if (java.lang.Boolean.getBoolean("decompengine.web.structureTiming")) WebStructureTiming() else null
+        var status = "failed"
+        try {
+            val reference = revisionSourceReference(jobId, runId, revisionId)
+            val result = try {
+                sourceCatalogEvidence.readStructureDiagnosed(reference, programStructureCache, timing?.phase, null, timing, project)
             }
-
-            override fun end() {
-                val stage = active ?: return
-                val elapsedNanos = System.nanoTime() - startedNanos
-                active = null
-                System.err.println("web-structure-manifest-timing stage=${stage.marker} elapsedNanos=$elapsedNanos")
+                catch (changed: WebAccessDenied) { throw changed }
+                catch (failure: Exception) {
+                    if (failure is java.util.concurrent.CancellationException || failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+                    throw WebAccessDenied(503, "PROGRAM_STRUCTURE_UNAVAILABLE", "The revision structure records are unavailable or exceed their limits.")
+                }
+            if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+            status = "ok"
+            return result
+        } catch (failure: Throwable) {
+            status = when {
+                failure is InterruptedException || Thread.currentThread().isInterrupted -> "interrupted"
+                failure is java.util.concurrent.CancellationException -> "cancelled"
+                failure is WebAccessDenied -> "refused"
+                else -> "failed"
             }
-        } else null
-        val result = try {
-            sourceCatalogEvidence.readStructureDiagnosed(reference, programStructureCache, timing, null, manifestProbe, project)
+            throw failure
+        } finally {
+            timing?.finish(status)
         }
-            catch (changed: WebAccessDenied) { throw changed }
-            catch (failure: Exception) {
-                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
-                throw WebAccessDenied(503, "PROGRAM_STRUCTURE_UNAVAILABLE", "The revision structure records are unavailable or exceed their limits.")
-            }
-        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
-        return result
     }
 
     /** Generation declarations use the same current-candidate and bounded metadata capture boundary. */

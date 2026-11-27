@@ -459,3 +459,32 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(error => { console.error(String(error?.stack ?? error).slice(0, 4096)); process.exitCode = 1; });
 }
+
+// The caller supplies the retained stderr tail. IDs stay decimal strings across the JVM/JS boundary.
+export function structureServerTimingSummary(output) {
+  const limit = 512;
+  const timings = [], manifestStages = [], terminals = [];
+  let overflow = 0, manifestOverflow = 0, terminalOverflow = 0;
+  const phases = /^web-structure-timing phase=([a-z0-9-]{1,64}) elapsedNanos=(\d{1,19})(?: invocationId=([1-9]\d{0,18}))?\r?$/gm;
+  for (const [,phase,duration,invocationId] of output.matchAll(phases)) {
+    const elapsedNanos = Number(duration);
+    if (timings.length === limit || !Number.isSafeInteger(elapsedNanos)) { overflow++; continue; }
+    timings.push(invocationId ? { phase, elapsedNanos, invocationId } : { phase, elapsedNanos });
+  }
+  const stages = /^web-structure-manifest-timing stage=(manifest-(?:root|file-fields|file-evidence-init|path-order|construct|profile-policy)) elapsedNanos=(\d{1,19}) segments=([1-9]\d{0,18}) invocationId=([1-9]\d{0,18})\r?$/gm;
+  for (const [,stage,duration,count,invocationId] of output.matchAll(stages)) {
+    const elapsedNanos = Number(duration), segments = Number(count);
+    if (manifestStages.length === limit || !Number.isSafeInteger(elapsedNanos) || !Number.isSafeInteger(segments)) {
+      manifestOverflow++;
+      continue;
+    }
+    manifestStages.push({ stage, elapsedNanos, segments, invocationId });
+  }
+  const outcomes = /^web-structure-timing-terminal invocationId=([1-9]\d{0,18}) status=(ok|failed|refused|interrupted|cancelled)\r?$/gm;
+  for (const [,invocationId,status] of output.matchAll(outcomes)) {
+    if (terminals.length === limit) { terminalOverflow++; continue; }
+    terminals.push({ invocationId, status });
+  }
+  return { timings, limit, overflow, manifestStages, manifestLimit: limit, manifestOverflow,
+    terminals, terminalLimit: limit, terminalOverflow };
+}
