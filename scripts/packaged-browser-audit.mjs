@@ -43,8 +43,10 @@ export function engineSupplementalInteractionContexts(pages) {
 }
 export const auditProfileEvidence = (profile) => {
   if (profile === 'reference') return { name: 'reference', cpuThrottlingRate: 1, network: 'browser-default' };
+  // docs/web-delivery.md constrained profile: 4x CPU, 10 Mbit/s down, 2 Mbit/s up, 100 ms
+  // round trip. CDP throughput is bytes per second; latency is the added request-to-headers delay.
   if (profile === 'constrained') return { name: 'constrained', cpuThrottlingRate: 4,
-    network: { offline: false, latency: 0, downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 } };
+    network: { offline: false, latency: 100, downloadThroughput: 1_250_000, uploadThroughput: 250_000 } };
   throw new Error(`Unknown packaged audit profile: ${profile}`);
 };
 export async function applyAuditProfile(cdp, sessionId, profile) {
