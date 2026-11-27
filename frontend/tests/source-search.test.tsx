@@ -196,6 +196,25 @@ it.each(['root', directory])('refuses oversized bookmarked searches in %s and le
   expect(new URLSearchParams(window.location.search).get('path')).toBe('src');
 });
 
+it.each([
+  { files: 1, matches: 0, summary: 'No matches in the one searchable file in scope.' },
+  { files: 1, matches: 1, summary: 'Showing 1 match on this page.' },
+  { files: 1, matches: 2, summary: 'Showing 2 matches on this page.' },
+  { files: 2, matches: 1, summary: 'Showing 1 match on this page.' },
+])('reports independent counts for a completed search (files=$files, matches=$matches)', async ({ files, matches, summary }) => {
+  const result = fixture('source-search-complete');
+  result.data.scope = { ...result.data.scope, filesInScope: files, searchableFiles: files };
+  result.data.progress.scannedFiles = files;
+  // These matches all belong to the same fixture file.
+  result.data.items = result.data.items.slice(1, 1 + matches);
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(result)));
+  mount('?q=needle');
+  await waitFor(() => expect(document.querySelector('.source-search-status-complete')).toBeTruthy());
+  const status = document.querySelector('.source-search-status-complete')!;
+  expect(status.querySelector('strong')?.textContent).toBe(summary);
+  expect(status.textContent).toContain(files === 1 ? 'The only searchable file in scope was checked.' : 'All 2 searchable files in scope were checked.');
+});
+
 it.each([1, 5])('describes one unreadable file among %i searchable files', async total => {
   const result = fixture('source-search-no-matches');
   result.data.scope = { filesInScope: total, searchableFiles: total, notViewable: 0, declaredBinary: 0, tooLarge: 0 };
