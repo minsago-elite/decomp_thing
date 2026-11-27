@@ -155,8 +155,8 @@ it('reports an accepted revision without guaranteeing availability of its retain
   const view = render(<WorkflowAvailability runtime={launchSnapshot()} job={{ acceptedRevisionId: 'revision_accepted_1' }} />);
   const repair = within(view.getByRole('heading', { name: 'Repair' }).closest('li')!);
   const input = repair.getByText('revision_accepted_1').parentElement!.textContent;
-  expect(input).toContain('Source availability is unverified here.');
-  expect(input).toContain('The server rechecks the revision and source before starting work.');
+  expect(input).toContain('Source is unverified here.');
+  expect(input).toContain('Launch rechecks the revision and source.');
   expect(input).not.toMatch(/only when work starts|until work starts/);
   view.rerender(<WorkflowAvailability runtime={snapshot([])} job={{ acceptedRevisionId: 'revision_accepted_1' }} />);
   expect(view.queryByText('revision_accepted_1')).toBeNull();

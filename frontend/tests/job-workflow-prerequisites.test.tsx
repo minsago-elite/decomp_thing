@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
-import type { Bootstrap, Capability, Job, Run, Runs } from '../src/api/generated';
+import type { Bootstrap, Capability, Job, RevisionDirectory, Run, Runs } from '../src/api/generated';
 import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
@@ -51,7 +51,7 @@ it('keeps retained revision facts through a transient job refresh and clears the
     const required = inputValue('Repair');
     expect(within(required).getByText(old)).toBeTruthy();
     expect(required.textContent).toContain('or the result of a completed attempt.');
-    expect(required.textContent).toContain('and use its Result revision.');
+    expect(required.textContent).toContain('use its Result revision. If it has none, check another attempt.');
     expect(within(required).getByRole('link', { name: 'attempt history' }).getAttribute('href'))
       .toBe(`/nested/jobs/${sample.jobId}/runs`);
     expect(within(inputValue('Validation')).getByText(old)).toBeTruthy();
@@ -67,7 +67,7 @@ it('keeps retained revision facts through a transient job refresh and clears the
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     await waitFor(() => expect(screen.queryByText(old)).toBeNull());
     expect(inputValue('Repair').textContent).toContain('names no accepted revision, so use the result of a completed attempt.');
-    expect(inputValue('Repair').textContent).toContain('and use its Result revision.');
+    expect(inputValue('Repair').textContent).toContain('use its Result revision. If it has none, check another attempt.');
     expect(inputValue('Repair').textContent).not.toMatch(/until work starts|only when work starts/);
     expect(within(inputValue('Repair')).getByRole('link', { name: 'attempt history' })).toBeTruthy();
     expect(inputValue('Validation').textContent).toBe('Optional. This workflow can start from the uploaded binary alone. The last job report names no accepted revision to specify.');
@@ -79,7 +79,7 @@ it('keeps retained revision facts through a transient job refresh and clears the
   } finally { session.dispose(); }
 });
 
-it('leads from the required-input guidance through history to the completed attempt\'s Result revision', async () => {
+it.each(['metadata', 'missing-metadata'])('leads from the required-input guidance through history to the completed attempt\'s Result revision (%s)', async (mode) => {
   const { session, bootstrap } = await launchSession();
   const completed = fixture<Run>('run-completed-unaccepted.json');
   // Distinct input and result IDs so following the guidance to the wrong field fails.
@@ -87,11 +87,16 @@ it('leads from the required-input guidance through history to the completed atte
   const result = 'Z_9-' + 'X-9_'.repeat(31);
   const run = { ...completed, inputRevisionId: startedFrom, resultRevisionId: result };
   const page = { ...fixture<Runs>('runs-page.json'), items: [run] };
-  transport.get.mockImplementation(kind => {
+  const resultDirectoryPath = `/jobs/${sample.jobId}/runs/${run.runId}/revisions/${result}/source-directories/root?limit=50`;
+  const directory = fixture<RevisionDirectory>('revision-directory-root.json');
+  transport.get.mockImplementation((kind, path) => {
     if (kind === 'job') return Promise.resolve({ data: sample });
     if (kind === 'runs') return Promise.resolve({ data: page });
     if (kind === 'run') return Promise.resolve({ data: run });
-    if (kind === 'revisionDirectory') return Promise.reject(new ApiClientError('http_error', { status: 404, serverCode: 'SOURCE_REVISION_UNAVAILABLE' }));
+    if (kind === 'revisionDirectory' && path === resultDirectoryPath) {
+      if (mode === 'missing-metadata') return Promise.reject(new ApiClientError('http_error', { status: 503, serverCode: 'SOURCE_REVISION_UNAVAILABLE' }));
+      return Promise.resolve({ data: { ...directory, binding: { jobId: sample.jobId, runId: run.runId, revisionId: result } } });
+    }
     return Promise.reject(new ApiClientError('timeout'));
   });
   history.replaceState(null, '', '/nested/jobs/' + sample.jobId);
@@ -100,8 +105,8 @@ it('leads from the required-input guidance through history to the completed atte
     await screen.findByRole('heading', { name: 'Workflow availability for this job' });
     // The overview reads only the job record and names the field, not any attempt's IDs.
     expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job']);
-    expect(inputValue('Repair').textContent).toContain('Open a completed attempt in attempt history and use its Result revision.');
-    expect(inputValue('Repair').textContent).toContain('Source availability is unverified here.');
+    expect(inputValue('Repair').textContent).toContain('Open a completed attempt in attempt history and use its Result revision. If it has none, check another attempt.');
+    expect(inputValue('Repair').textContent).toContain('Source is unverified here.');
     expect(screen.queryByText(result)).toBeNull();
 
     fireEvent.click(within(inputValue('Repair')).getByRole('link', { name: 'attempt history' }));
@@ -118,10 +123,40 @@ it('leads from the required-input guidance through history to the completed atte
     expect(field('Input revision')).toBe(startedFrom);
     expect(field('Result revision')).not.toBe(field('Input revision'));
 
-    // The attempt page is where recorded source is inspected. Its read reports the source as unavailable.
+    // Both source outcomes must come from the directory bound to the result revision.
     fireEvent.click(screen.getByRole('link', { name: 'Browse recorded source inputs' }));
-    await screen.findByText(/The recorded inputs could not be read|This recorded input or snapshot is unavailable/);
+    if (mode === 'missing-metadata') {
+      expect((await screen.findByRole('alert')).textContent).toContain('The recorded inputs could not be read.');
+    } else {
+      expect(await screen.findByRole('link', { name: 'Makefile' })).toBeTruthy();
+    }
+    expect(transport.get.mock.calls.filter(call => call[0] === 'revisionDirectory').map(call => call[1])).toEqual([resultDirectoryPath]);
     expect(transport.get.mock.calls.map(call => call[0])).toEqual(expect.arrayContaining(['runs', 'run', 'revisionDirectory']));
     expect(bootstrap).toHaveBeenCalledTimes(1);
+  } finally { session.dispose(); }
+});
+
+it('renders a completed exploration attempt without a result candidate', async () => {
+  const { session } = await launchSession();
+  const completed = fixture<Run>('run-completed-unaccepted.json');
+  const run = { ...completed, workflow: 'explore', resultRevisionId: null };
+  const page = { ...fixture<Runs>('runs-page.json'), items: [run] };
+  transport.get.mockImplementation(kind => {
+    if (kind === 'job') return Promise.resolve({ data: sample });
+    if (kind === 'runs') return Promise.resolve({ data: page });
+    if (kind === 'run') return Promise.resolve({ data: run });
+    return Promise.reject(new ApiClientError('timeout'));
+  });
+  history.replaceState(null, '', '/nested/jobs/' + sample.jobId);
+  try {
+    render(<App basePath="/nested" session={session} />);
+    await screen.findByRole('heading', { name: 'Workflow availability for this job' });
+    expect(inputValue('Repair').textContent).toContain('Open a completed attempt in attempt history and use its Result revision. If it has none, check another attempt.');
+    fireEvent.click(within(inputValue('Repair')).getByRole('link', { name: 'attempt history' }));
+    const attempt = await screen.findByRole('link', { name: new RegExp(run.runId) });
+    expect(within(attempt.closest('li')!).getByText(/Attempt state: completed/)).toBeTruthy();
+    fireEvent.click(attempt);
+    await screen.findByText('No result revision recorded');
+    expect(screen.queryByRole('link', { name: 'Browse recorded source inputs' })).toBeNull();
   } finally { session.dispose(); }
 });
