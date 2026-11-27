@@ -24,7 +24,7 @@ import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
-import { focusSurvivingNotice, useDepartingFocus } from '../shared/departingFocus';
+import { focusSurvivingNotice, restoreSettledFocus, useDepartingFocus } from '../shared/departingFocus';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
 import { jobCopy } from '../copy/job';
@@ -43,18 +43,28 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
   const [refresh, setRefresh] = useState(0);
   const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
+  // Refresh is disabled while its read is outstanding; a browser that blurred it gets focus back once the read settles.
+  const refreshControl = useRef<HTMLButtonElement>(null);
+  const departingRefresh = useDepartingFocus(refreshControl);
+  const settledFrom = useRef<Element | null>(null);
+  useLayoutEffect(() => {
+    const from = settledFrom.current; settledFrom.current = null;
+    restoreSettledFocus(from, null);
+  });
   useEffect(() => {
     const controller = new AbortController();
+    const settle = () => { const from = departingRefresh(); settledFrom.current = from === refreshControl.current ? from : null; };
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
     void client.get('run', `/jobs/${jobId}/runs/${runId}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
       if (response.data.jobId !== jobId || response.data.runId !== runId) {
-        setStored({ binding, data: null, error: copy.theResponseDoesNotBelongToTheRequestedJobAnd, loading: false }); return;
+        settle(); setStored({ binding, data: null, error: copy.theResponseDoesNotBelongToTheRequestedJobAnd, loading: false }); return;
       }
-      setStored({ binding, data: receive(response.data), error: '', loading: false });
+      settle(); setStored({ binding, data: receive(response.data), error: '', loading: false });
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted && isDeletedJob(failure)) { deletedHandler.current(failure); return; }
-      if (!controller.signal.aborted) setStored(previous => ({ binding,
+      if (controller.signal.aborted) return;
+      settle(); setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
         error: withApiFailureReference({
           session: copy.reconnectToReadThisAttempt, denied: copy.attemptAccessDenied,
@@ -69,7 +79,7 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
     {loading && <p role="status">{run ? copy.refreshingAttempt : copy.loadingAttempt}</p>}
     {error && <p role="alert">{error}</p>}
     {error && run && <p>{copy.previousAttemptMetadataMayBeOutdated}</p>}
-    <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshAttempt}</button>
+    <button type="button" ref={refreshControl} disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshAttempt}</button>
     {run && <>
       <MetadataReceipt kind="run" receipt={observation?.receipt} />
       {view !== 'overview' && <dl class="job-facts">
@@ -98,7 +108,7 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
       <p>{copy.recordedHarnessBoundary}</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
-      {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} />}
+      {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} />}
       <h2>{copy.recordedLimits}</h2>
       <p>{displayMessage(outcomeCopy.limitsSource, { time: <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time> })}</p>
       <dl class="job-facts">

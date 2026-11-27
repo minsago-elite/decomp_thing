@@ -1,6 +1,6 @@
 import { attemptControlReasonCopy as reasons, attemptControlsCopy as copy } from '../copy/attempt';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { AttemptControls as Controls, Run } from '../api/generated';
 import { runPath } from '../app/paths';
@@ -8,6 +8,7 @@ import type { BrowserSession } from '../session/session';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { isDeletedJob } from '../shared/retainMetadata';
+import { restoreSettledFocus, useDepartingFocus } from '../shared/departingFocus';
 import { createAttemptCommandRecovery, type AttemptCommand, type AttemptCommandRecovery } from './attemptCommandRecovery';
 
 const reason = (code: string | null) => textMessage(copy.unavailable, { reason: (code && reasons[code]) || copy.reasonUnknown });
@@ -50,7 +51,21 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   const busy = activity !== null;
   const [status, setStatus] = useState<string>(copy.readFirst);
   const [created, setCreated] = useState<string | null>(null);
-  useEffect(() => {
+  const section = useRef<HTMLElement>(null);
+  const statusLine = useRef<HTMLParagraphElement>(null);
+  const departingFocus = useDepartingFocus(section);
+  /**
+   * The control focus departed from when this panel's read or command settled. After the settling render a removed
+   * control (Replay once acknowledged, spent eligibility) hands focus to the persistent status line, and a re-enabled
+   * one gets it back, so a later route deletion still departs from an owned element rather than the document.
+   */
+  const settledFrom = useRef<Element | null>(null);
+  const settle = () => { const from = departingFocus(); settledFrom.current = from && section.current?.contains(from) ? from : null; };
+  useLayoutEffect(() => {
+    const from = settledFrom.current; settledFrom.current = null;
+    restoreSettledFocus(from, statusLine.current);
+  });
+  useLayoutEffect(() => {
     setControls(null); setSpent(null); setActivity(null); setStatus(copy.readFirst); setCreated(null); setRetained(recovery.read());
     return () => { active.current?.abort(); active.current = null; };
   }, [jobId, runId, client, recovery]);
@@ -80,7 +95,7 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
     } catch (failure: unknown) {
       if (!controller.signal.aborted && !escalated(failure)) setStatus(withApiFailureReference(copy.unverified, failure));
     } finally {
-      if (active.current === controller) { active.current = null; setActivity(null); }
+      if (active.current === controller) { settle(); active.current = null; setActivity(null); }
     }
   }
 
@@ -138,7 +153,7 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
         : textMessage(copy.refused, { reason: (code && reasons[code === 'CANCELLATION_RECEIPT_CAPACITY' ? 'RECEIPT_CAPACITY' : code]) || copy.reasonUnknown }), failure));
     } finally {
       if (active.current === controller) {
-        active.current = null; setActivity(null);
+        settle(); active.current = null; setActivity(null);
         // The command consumed that read's eligibility; only a fresh server read shows actions again.
         if (sentFrom !== null) setControls(current => current === sentFrom ? null : current);
       }
@@ -158,14 +173,14 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   const command = (action: AttemptCommand['action'], label: string) => <button type="button" disabled={!held && !canSend}
     aria-disabled={held ? 'true' : undefined} aria-describedby={describedBy} onClick={() => { start(action); }}>{label}</button>;
   const input = (controls?.inputRevisionId ?? run.inputRevisionId) ?? copy.originalInput;
-  return <section aria-labelledby={`attempt-controls-title-${runId}`}>
+  return <section aria-labelledby={`attempt-controls-title-${runId}`} ref={section}>
     <h2 id={`attempt-controls-title-${runId}`}>{copy.title}</h2>
     <p id={describedBy}>{textMessage(copy.scope, { runId, version: controls?.runVersion ?? run.version })}</p>
     {run.state === 'cancelling' && <p class="notice">{copy.cancelling}</p>}
     {run.recovery && run.previousRunId && <p>{displayMessage(run.recovery.mode === 'retry' ? copy.retriedFrom
       : run.recovery.restores === 'agent-session' ? copy.resumedAgent : copy.resumedEvidence,
       { runId: <a href={runPath(basePath, jobId, run.previousRunId)}><code>{run.previousRunId}</code></a> })}</p>}
-    <p role="status">{!available ? copy.paused : stale ? copy.stale : status}</p>
+    <p role="status" ref={statusLine} tabIndex={-1}>{!available ? copy.paused : stale ? copy.stale : status}</p>
     {created && <p><a href={runPath(basePath, jobId, created)}>{textMessage(copy.createdLink, { runId: created })}</a></p>}
     {(pendingHere || activity === 'replay') && <div class="notice">
       {pendingHere && <p>{textMessage(copy.unknown, { action: actionName[pending.action], runId: pending.runId })}</p>}

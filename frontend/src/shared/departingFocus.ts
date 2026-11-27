@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'preact/hooks';
+import { useLayoutEffect, useRef } from 'preact/hooks';
 import type { RefObject } from 'preact';
 
 /**
@@ -10,7 +10,7 @@ import type { RefObject } from 'preact';
 export function useDepartingFocus(root: RefObject<Element>) {
   // The last control focused inside `root`, kept only while losing focus can be explained by the page disabling it.
   const disabledFrom = useRef<Element | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const inside = (target: EventTarget | null): target is Element => target instanceof Element && (root.current?.contains(target) ?? false);
     const into = (event: FocusEvent) => { disabledFrom.current = inside(event.target) ? event.target : null; };
     // A browser may or may not report the blur of a control it disabled; a blur of an enabled control is the user's.
@@ -39,4 +39,18 @@ export function focusSurvivingNotice(from: Element | null, notice: HTMLElement |
   const active = document.activeElement;
   if (active && active !== document.body) return;
   notice?.focus();
+}
+
+/**
+ * Keyboard recovery once a panel's own read or command settles. `from` is the departing control captured before the
+ * settling render. Focus still owned anywhere, including by a user who moved it, is left alone. A control the page only
+ * disabled gets focus back once it is enabled again; one the settlement removed hands focus to `fallback`, a persistent
+ * destination that carries the outcome. A later route deletion then departs from that destination like any other control.
+ */
+export function restoreSettledFocus(from: Element | null, fallback: HTMLElement | null) {
+  if (!(from instanceof HTMLElement)) return;
+  const active = document.activeElement;
+  if (active && active !== document.body) return;
+  if (from.isConnected) { if (!from.matches(':disabled')) from.focus(); return; }
+  fallback?.focus();
 }

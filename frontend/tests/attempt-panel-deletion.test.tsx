@@ -4,11 +4,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
-import type { AttemptControls as Controls, Bootstrap, Report, Run, ValidationHistory } from '../src/api/generated';
+import type { AttemptControls as Controls, Bootstrap, QueuePosition as QueueSample, Report, Run, ValidationHistory } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { attemptControlsCopy, explorationEvidenceCopy, recordedValidationCopy, runCopy } from '../src/copy/attempt';
 import { runHistoryCopy } from '../src/copy/history';
 import { jobCopy } from '../src/copy/job';
+import { queuePositionCopy } from '../src/copy/attemptOutcome';
 import { createBrowserSession } from '../src/session/session';
 import { createAttemptCommandRecovery, forgetAttemptCommandForDeletedJob, type AttemptCommand } from '../src/jobs/attemptCommandRecovery';
 
@@ -284,7 +285,7 @@ for (const [label, move] of [
   });
 }
 
-it('does not move focus when a held retry reply is an ordinary refusal', async () => {
+it('focuses the refusal status when Retry is removed after a held command reply', async () => {
   const auth = await commandRoute();
   chromeBlurOnRemoval();
   try {
@@ -294,7 +295,8 @@ it('does not move focus when a held retry reply is an ordinary refusal', async (
     retry.focus(); fireEvent.click(retry);
     await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
     await held.settle({ err: new ApiClientError('http_error', { status: 409, serverCode: 'WORKSPACE_UNVERIFIED' }) });
-    await screen.findByText(/The server refused the command: the workspace differs/);
+    const refusal = await screen.findByText(/The server refused the command: the workspace differs/);
+    await waitFor(() => expect(document.activeElement).toBe(refusal));
     expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
     expect(screen.queryByRole('button', { name: attemptControlsCopy.retry })).toBeNull();
     expect(document.activeElement?.closest('.notice, [role="alert"]') ?? null).toBeNull();
@@ -538,4 +540,283 @@ it('never forgets a command whose slot storage is unavailable', () => {
   expect(forgetAttemptCommandForDeletedJob('/nested', run.jobId, storage)).toBe(false);
   const failing = { getItem: () => JSON.stringify(foreign(run.jobId)), removeItem: () => { throw new Error('denied'); } } as unknown as Storage;
   expect(forgetAttemptCommandForDeletedJob('/nested', run.jobId, () => failing)).toBe(false);
+});
+
+/**
+ * Chrome's blur of a control the page disabled (as `chromeBlurIfDisabled`), except that focusing that control again ends
+ * the simulated blur, so a page returning focus to it is observable (jsdom neither blurs nor re-focuses a disabled control).
+ */
+const blurIfDisabled = (control: HTMLElement) => {
+  if (!control.matches(':disabled') || document.activeElement !== control) return;
+  chromeBlurIfDisabled(control);
+  const focus = HTMLElement.prototype.focus; // eslint-disable-line @typescript-eslint/unbound-method -- re-bound with call below
+  control.focus = function (this: HTMLElement, options?: FocusOptions) {
+    Reflect.deleteProperty(document, 'activeElement'); Reflect.deleteProperty(control, 'focus');
+    control.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); focus.call(this, options);
+  };
+};
+// Round 10 of #512: a queued attempt's queue-position read is a panel like any other, and an acknowledged Replay's two
+// follow-up reads (attempt metadata and controls) may settle in either order without leaving the document focused.
+const queued = fixture<Run>('run-queued');
+const sample: QueueSample = { ...fixture<QueueSample>('queue-position-queued'), jobId: queued.jobId, runId: queued.runId };
+async function queuedRoute(answer: () => Promise<unknown>) {
+  const auth = await session();
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: queued })
+    : kind === 'queuePosition' ? answer() : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${queued.jobId}/runs/${queued.runId}`);
+  render(<App basePath="/nested" session={auth} />);
+  const read = await screen.findByRole('button', { name: queuePositionCopy.read });
+  return { auth, read };
+}
+
+it('a queue-position read that confirms RESOURCE_GONE ends the stale queued attempt, forgets its command and lands on the notice', async () => {
+  const command = foreign(queued.jobId);
+  sessionStorage.setItem(slot, JSON.stringify(command));
+  const { auth, read } = await queuedRoute(() => Promise.reject(gone()));
+  try {
+    read.focus(); fireEvent.click(read); chromeBlurIfDisabled(read);
+    const notice = await screen.findByText(runCopy.thisJobWasDeleted, { exact: false });
+    expect(notice.textContent).toContain(`Reference ID: ${reference}.`);
+    expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
+    expect(screen.queryByRole('button', { name: queuePositionCopy.read })).toBeNull();
+    expect(screen.queryByText(queuePositionCopy.failed, { exact: false })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Return to jobs' })).toBeTruthy();
+    expect(document.activeElement).toBe(notice);
+    expect(recovery().read()).toEqual({ kind: 'empty' });
+    expect(reads('queuePosition')).toBe(1);
+  } finally { auth.dispose(); }
+});
+
+it('a queue-position tombstone keeps a command retained for another job', async () => {
+  const command = foreign();
+  sessionStorage.setItem(slot, JSON.stringify(command));
+  const { auth, read } = await queuedRoute(() => Promise.reject(gone()));
+  try {
+    fireEvent.click(read);
+    await screen.findByText(runCopy.thisJobWasDeleted, { exact: false });
+    expect(recovery().read()).toEqual({ kind: 'pending', command });
+  } finally { auth.dispose(); }
+});
+
+for (const [label, failure] of [['EVENT_GAP 410', gone('EVENT_GAP')], ['unverified 410', new ApiClientError('invalid_headers', { status: 410 })],
+  ['404', new ApiClientError('http_error', { status: 404, serverCode: 'NOT_FOUND' })], ['503', unavailable()], ['transport loss', new ApiClientError('network_error')]] as const) {
+  it(`a queue-position read failing with ${label} stays a panel failure on the live queued attempt`, async () => {
+    const command = foreign(queued.jobId);
+    sessionStorage.setItem(slot, JSON.stringify(command));
+    const { auth, read } = await queuedRoute(() => Promise.reject(failure));
+    try {
+      fireEvent.click(read);
+      await screen.findByText(queuePositionCopy.failed, { exact: false });
+      expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
+      expect(screen.getByRole('button', { name: runCopy.refreshAttempt })).toBeTruthy();
+      expect(recovery().read()).toEqual({ kind: 'pending', command });
+    } finally { auth.dispose(); }
+  });
+}
+
+for (const [label, leave] of [
+  ['after the session ended', () => { fireEvent.click(screen.getByRole('button', { name: 'Sign out' })); }],
+  ['after the view was left', () => navigate(`/nested/jobs/${queued.jobId}/runs/${queued.runId}/evidence`)],
+] as const) {
+  it(`ignores a stale queue-position tombstone settling ${label}`, async () => {
+    const command = foreign(queued.jobId);
+    sessionStorage.setItem(slot, JSON.stringify(command));
+    const held = deferred<never>();
+    const { auth, read } = await queuedRoute(() => held.promise);
+    try {
+      fireEvent.click(read);
+      await leave();
+      await held.settle({ err: gone() });
+      expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
+      expect(recovery().read()).toEqual({ kind: 'pending', command });
+    } finally { auth.dispose(); }
+  });
+}
+
+it('returns focus to the queue-position control a browser blurred while it was disabled, once the sample arrives', async () => {
+  const held = deferred<QueueSample>();
+  const { auth, read } = await queuedRoute(() => held.promise);
+  try {
+    read.focus(); fireEvent.click(read);
+    await waitFor(() => expect(read.matches(':disabled')).toBe(true));
+    blurIfDisabled(read);
+    expect(document.activeElement).toBe(document.body);
+    await held.settle({ ok: sample });
+    await screen.findByText(/About \d+ of \d+ queued tasks/);
+    expect(read.matches(':disabled')).toBe(false);
+    expect(document.activeElement).toBe(read);
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus the user moved while the queue-position read was outstanding', async () => {
+  const held = deferred<QueueSample>();
+  const { auth, read } = await queuedRoute(() => held.promise);
+  try {
+    read.focus(); fireEvent.click(read);
+    await waitFor(() => expect(read.matches(':disabled')).toBe(true));
+    blurIfDisabled(read);
+    const other = screen.getByRole('button', { name: 'Sign out' }); other.focus();
+    await held.settle({ ok: sample });
+    await screen.findByText(/About \d+ of \d+ queued tasks/);
+    expect(document.activeElement).toBe(other);
+  } finally { auth.dispose(); }
+});
+
+/** An unconfirmed retry left Replay; the Replay is acknowledged and its metadata and controls reads are held. */
+async function acknowledgedReplay() {
+  const auth = await commandRoute();
+  chromeBlurOnRemoval();
+  transport.post.mockRejectedValueOnce(new ApiClientError('network_error'));
+  fireEvent.click(screen.getByRole('button', { name: attemptControlsCopy.retry }));
+  const replay = await screen.findByRole('button', { name: attemptControlsCopy.replay });
+  const created: Run = { ...fixture<Run>('run-retry'), jobId: run.jobId, previousRunId: run.runId };
+  const metadata = deferred<Run>(), follow = deferred<Controls>();
+  transport.post.mockResolvedValue({ data: created });
+  transport.get.mockImplementation((kind: string) => kind === 'attemptControls' ? follow.promise
+    : kind === 'run' ? metadata.promise : Promise.reject(unavailable()));
+  replay.focus(); fireEvent.click(replay);
+  await screen.findByRole('link', { name: `Open new attempt ${created.runId}` });
+  await waitFor(() => expect(reads('run')).toBe(2));
+  // Storage is cleared at the bound acknowledgement, before either follow-up read settles.
+  expect(sessionStorage.getItem(slot)).toBeNull();
+  expect(document.activeElement).toBe(replay);
+  const statusLine = () => screen.getAllByRole('status').find(node => node.closest('section')?.querySelector('h2')?.textContent === attemptControlsCopy.title) ?? null;
+  return { auth, replay, created, metadata, follow, statusLine };
+}
+const spentControls = (runVersion = controls.runVersion): Controls => ({ ...controls, runVersion, successorRunId: 'run_retry_2', retry: { available: false, reason: 'ATTEMPT_SUPERSEDED' } });
+
+it('lands on the notice when Replay controls settle first and the parallel metadata read then confirms deletion', async () => {
+  const { auth, metadata, follow, statusLine } = await acknowledgedReplay();
+  try {
+    await follow.settle({ ok: controls });
+    await waitFor(() => expect(screen.queryByRole('button', { name: attemptControlsCopy.replay })).toBeNull());
+    expect(document.activeElement).toBe(statusLine());
+    await metadata.settle({ err: gone() });
+    const notice = await screen.findByText(runCopy.thisJobWasDeleted, { exact: false });
+    expect(notice.textContent).toContain(reference);
+    expect(document.activeElement).toBe(notice);
+    expect(transport.post).toHaveBeenCalledTimes(2);
+  } finally { auth.dispose(); }
+});
+
+it('lands on the notice when the Replay metadata read confirms deletion while its controls read is still held', async () => {
+  const { auth, replay, metadata, follow } = await acknowledgedReplay();
+  try {
+    await metadata.settle({ err: gone() });
+    const notice = await screen.findByText(runCopy.thisJobWasDeleted, { exact: false });
+    expect(replay.isConnected).toBe(false);
+    expect(document.activeElement).toBe(notice);
+    await follow.settle({ ok: controls });
+    expect(document.activeElement).toBe(notice);
+    expect(transport.post).toHaveBeenCalledTimes(2);
+    expect(sessionStorage.getItem(slot)).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+for (const order of ['controls first', 'metadata first'] as const) {
+  it(`keeps keyboard focus on the outcome when both Replay reads succeed, ${order}`, async () => {
+    const { auth, created, metadata, follow, statusLine } = await acknowledgedReplay();
+    try {
+      const updated: Run = { ...run, version: 'run_version_3' };
+      if (order === 'controls first') { await follow.settle({ ok: spentControls(updated.version) }); await metadata.settle({ ok: updated }); }
+      else { await metadata.settle({ ok: updated }); await follow.settle({ ok: spentControls(updated.version) }); }
+      await waitFor(() => expect(screen.queryByRole('button', { name: attemptControlsCopy.replay })).toBeNull());
+      expect(document.activeElement).toBe(statusLine());
+      expect(statusLine()?.textContent).toContain(created.runId);
+      expect(screen.getByRole('link', { name: `Open new attempt ${created.runId}` })).toBeTruthy();
+      expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
+      expect(transport.post).toHaveBeenCalledTimes(2);
+    } finally { auth.dispose(); }
+  });
+}
+
+for (const [label, failure] of [['503', unavailable()], ['EVENT_GAP 410', gone('EVENT_GAP')], ['unverified 410', new ApiClientError('invalid_headers', { status: 410 })]] as const) {
+  it(`keeps the Replay outcome and focus when its controls read fails with ${label}, and still lands on a later deletion notice`, async () => {
+    const { auth, metadata, follow, statusLine } = await acknowledgedReplay();
+    try {
+      await follow.settle({ err: failure });
+      await waitFor(() => expect(screen.queryByRole('button', { name: attemptControlsCopy.replay })).toBeNull());
+      expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
+      expect(document.activeElement).toBe(statusLine());
+      await metadata.settle({ err: gone() });
+      expect(document.activeElement).toBe(await screen.findByText(runCopy.thisJobWasDeleted, { exact: false }));
+      expect(transport.post).toHaveBeenCalledTimes(2);
+    } finally { auth.dispose(); }
+  });
+}
+
+for (const [label, move] of [
+  ['a deliberate blur to the document', () => { (document.activeElement as HTMLElement).blur(); return document.body; }],
+  ['focus moved to another control', () => { const other = screen.getByRole('button', { name: 'Sign out' }); other.focus(); return other; }],
+] as const) {
+  it(`respects ${label} while acknowledged Replay reads are outstanding, through success and later deletion`, async () => {
+    const { auth, metadata, follow } = await acknowledgedReplay();
+    try {
+      const expected = move();
+      await follow.settle({ ok: controls });
+      await waitFor(() => expect(screen.queryByRole('button', { name: attemptControlsCopy.replay })).toBeNull());
+      expect(document.activeElement).toBe(expected);
+      await metadata.settle({ err: gone() });
+      await screen.findByText(runCopy.thisJobWasDeleted, { exact: false });
+      expect(document.activeElement).toBe(expected);
+    } finally { auth.dispose(); }
+  });
+}
+
+it('returns focus to Check controls a browser blurred while it was disabled, once the read succeeds', async () => {
+  const auth = await session();
+  const held = deferred<Controls>();
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: run })
+    : kind === 'attemptControls' ? held.promise : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}`);
+  render(<App basePath="/nested" session={auth} />);
+  try {
+    const read = await screen.findByRole('button', { name: attemptControlsCopy.read });
+    read.focus(); fireEvent.click(read);
+    await waitFor(() => expect(read.matches(':disabled')).toBe(true));
+    blurIfDisabled(read);
+    expect(document.activeElement).toBe(document.body);
+    await held.settle({ ok: controls });
+    await screen.findByRole('button', { name: attemptControlsCopy.retry });
+    expect(document.activeElement).toBe(read);
+  } finally { auth.dispose(); }
+});
+
+it('returns focus to Refresh attempt a browser blurred while it was disabled, once the attempt is read again', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: run }) : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}`);
+  render(<App basePath="/nested" session={auth} />);
+  try {
+    const refresh = await screen.findByRole('button', { name: runCopy.refreshAttempt });
+    await waitFor(() => expect(refresh.matches(':disabled')).toBe(false));
+    const held = deferred<Run>();
+    transport.get.mockImplementation((kind: string) => kind === 'run' ? held.promise : Promise.reject(unavailable()));
+    refresh.focus(); fireEvent.click(refresh);
+    await waitFor(() => expect(refresh.matches(':disabled')).toBe(true));
+    blurIfDisabled(refresh);
+    expect(document.activeElement).toBe(document.body);
+    await held.settle({ ok: run });
+    await waitFor(() => expect(refresh.matches(':disabled')).toBe(false));
+    expect(document.activeElement).toBe(refresh);
+  } finally { auth.dispose(); }
+});
+
+it('does not pull focus back to Check controls when the user moved focus while the read was outstanding', async () => {
+  const auth = await session();
+  const held = deferred<Controls>();
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: run })
+    : kind === 'attemptControls' ? held.promise : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}`);
+  render(<App basePath="/nested" session={auth} />);
+  try {
+    const read = await screen.findByRole('button', { name: attemptControlsCopy.read });
+    read.focus(); fireEvent.click(read);
+    await waitFor(() => expect(read.matches(':disabled')).toBe(true));
+    blurIfDisabled(read);
+    const other = screen.getByRole('link', { name: runCopy.returnToJobOverview }); other.focus(); other.blur();
+    await held.settle({ ok: controls });
+    await screen.findByRole('button', { name: attemptControlsCopy.retry });
+    expect(document.activeElement).toBe(document.body);
+  } finally { auth.dispose(); }
 });

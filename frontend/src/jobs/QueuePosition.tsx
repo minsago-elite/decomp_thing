@@ -1,14 +1,29 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { queuePositionCopy as copy } from '../copy/attemptOutcome';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from './metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { withApiFailureReference } from '../api/client';
 import type { QueuePosition as QueueSample } from '../api/generated';
+import { isDeletedJob } from '../shared/retainMetadata';
+import { restoreSettledFocus, useDepartingFocus } from '../shared/departingFocus';
 
 /** A sampled, approximate observation of one queued attempt; never scheduling authority. */
-export function QueuePosition({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
+export function QueuePosition({ jobId, runId, basePath, onDeleted }: {
+  jobId: string; runId: string; basePath: string;
+  /** A confirmed RESOURCE_GONE tombstone ends the routed attempt (#512); any other failure stays with this panel. */
+  onDeleted?: (failure: unknown) => void;
+}) {
   const { client } = usePrivateTransport(basePath);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
+  const section = useRef<HTMLElement>(null);
+  const departingFocus = useDepartingFocus(section);
+  /** The control focus departed from when the read settled; recovered after the settling render. */
+  const settledFrom = useRef<Element | null>(null);
+  useLayoutEffect(() => {
+    const from = settledFrom.current; settledFrom.current = null;
+    restoreSettledFocus(from, null);
+  });
   const [read, setRead] = useState(0);
   const [state, setState] = useState<{ sample: QueueSample | null; loading: boolean; error: string }>({ sample: null, loading: false, error: '' });
   useEffect(() => {
@@ -16,18 +31,22 @@ export function QueuePosition({ jobId, runId, basePath }: { jobId: string; runId
     if (read === 0) return;
     const controller = new AbortController();
     setState(previous => ({ ...previous, loading: true, error: '' }));
+    const settle = () => { const from = departingFocus(); settledFrom.current = from && section.current?.contains(from) ? from : null; };
     void client.get('queuePosition', `/jobs/${jobId}/runs/${runId}/queue-position`, { signal: controller.signal }).then(({ data }) => {
       if (controller.signal.aborted) return;
       if (data.jobId !== jobId || data.runId !== runId) throw new Error('binding');
-      setState({ sample: data, loading: false, error: '' });
+      settle(); setState({ sample: data, loading: false, error: '' });
     }).catch((failure: unknown) => {
+      if (controller.signal.aborted) return;
+      // The job behind this queued attempt is gone: the route, not this panel, owns that outcome.
+      if (isDeletedJob(failure) && deletedHandler.current) { deletedHandler.current(failure); return; }
       // An older sample would misstate the queue, so a failed read discards it.
-      if (!controller.signal.aborted) setState({ sample: null, loading: false, error: withApiFailureReference(copy.failed, failure) });
+      settle(); setState({ sample: null, loading: false, error: withApiFailureReference(copy.failed, failure) });
     });
     return () => { controller.abort(); };
   }, [client, jobId, runId, read]);
   const sample = state.sample;
-  return <section aria-labelledby="queue-position-title" aria-busy={state.loading}>
+  return <section aria-labelledby="queue-position-title" aria-busy={state.loading} ref={section}>
     <h2 id="queue-position-title">{copy.title}</h2>
     {state.loading && <p role="status">{copy.reading}</p>}
     {state.error && <p role="alert">{state.error}</p>}
