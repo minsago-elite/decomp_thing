@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import type { Run, SourceDiff as SourceDiffPage, SourceDiffFile, SourceFileDiff as SourceFileDiffPage } from '../api/generated';
 import { ApiClientError } from '../api/errors';
@@ -16,6 +16,34 @@ import type { SourceDiffBase, SourceFileDiffSelection } from './diff';
 import { visibleSourceText } from './viewer';
 
 type Identity = Pick<SourceDiffPage, 'sourceSha256' | 'metadataVersion' | 'baseSourceSha256' | 'baseMetadataVersion'>;
+
+function ComparisonRefresh({ readKey, loading, heading, onRefresh }: {
+  readKey: string; loading: boolean; heading: { current: HTMLHeadingElement | null }; onRefresh: () => void;
+}) {
+  const pending = useRef<{ from: string; url: string; button: HTMLButtonElement | null } | null>(null);
+  useEffect(() => {
+    const cancel = () => { pending.current = null; };
+    window.addEventListener('popstate', cancel);
+    return () => window.removeEventListener('popstate', cancel);
+  }, []);
+  useLayoutEffect(() => {
+    const request = pending.current;
+    if (!request || loading || request.from === readKey) return;
+    pending.current = null;
+    if (request.button && request.url === window.location.href && request.button === document.activeElement) heading.current?.focus();
+  }, [loading, readKey, heading]);
+  return <button type="button" aria-disabled={loading ? 'true' : undefined}
+    onBlur={() => { if (pending.current) pending.current.button = null; }}
+    onClick={event => {
+      if (loading || pending.current) return;
+      const button = event.currentTarget;
+      const request = { from: readKey, url: window.location.href, button: button === document.activeElement ? button : null };
+      pending.current = request;
+      onRefresh();
+      // Refreshing a continuation routes synchronously to its unpinned first page.
+      request.url = window.location.href;
+    }}>{copy.diffRefresh}</button>;
+}
 
 function Revisions({ selected, base, data }: { selected: SourceSelection; base: SourceDiffBase; data: Identity | null }) {
   return <dl class="job-facts" aria-label={copy.diffRevisions}>
@@ -170,9 +198,11 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
     <p><a href={sourceDiffPath(basePath, selected)}>{copy.diffChooseAnother}</a> <a href={sourceDirectoryPath(basePath, selected)}>{copy.diffBrowseHead}</a></p>
     <h2 id="source-diff-results" ref={heading} tabIndex={-1}>{copy.diffChanged}</h2>
     {/* An expired continuation cannot be refreshed in place; refreshing restarts from the first page. */}
-    <button type="button" disabled={current?.state === 'loading'} onClick={() => {
-      if (cursor !== null) go(null); else { moveFocus.current = true; setRefresh(value => value + 1); }
-    }}>{copy.diffRefresh}</button>
+    <ComparisonRefresh readKey={key} loading={current?.state === 'loading'} heading={heading} onRefresh={() => {
+      moveFocus.current = false;
+      if (cursor !== null) location.route(sourceDiffPath(basePath, selected, base, null));
+      else setRefresh(value => value + 1);
+    }} />
     {current?.state === 'loading' && <p role="status">{copy.diffLoading}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && <>
@@ -328,11 +358,11 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
     <p><a href={sourceDiffPath(basePath, selected, chosen.base)}>{copy.diffReturn}</a></p>
     <h2 id="source-file-diff-title" ref={heading} tabIndex={-1}>{name ? <bdi>{name}</bdi> : copy.diffFileTitle}</h2>
     {/* A pinned page of an expired comparison restarts from its first change group without the old pin. */}
-    <button type="button" disabled={current?.state === 'loading'} onClick={() => {
-      moveFocus.current = true;
+    <ComparisonRefresh readKey={key} loading={current?.state === 'loading'} heading={heading} onRefresh={() => {
+      moveFocus.current = false;
       if (chosen.pin || chosen.hunk > 0) location.route(sourceFileDiffPath(basePath, selected, { base: chosen.base, baseFileId: chosen.baseFileId, headFileId: chosen.headFileId }));
       else setRefresh(value => value + 1);
-    }}>{copy.diffRefresh}</button>
+    }} />
     {current?.state === 'loading' && <p role="status">{copy.diffLoading}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && <>

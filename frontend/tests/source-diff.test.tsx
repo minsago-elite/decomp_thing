@@ -37,6 +37,39 @@ function mount(component: 'list' | 'file', search: string) {
 }
 afterEach(() => { vi.unstubAllGlobals(); });
 
+it.each(['list', 'file'] as const)('keeps %s Refresh focus during the read and respects the reader’s next focus choice', async view => {
+  const file = fixture('source-file-diff-text', 'sourceFileDiff');
+  const list = fixture('source-diff-page', 'sourceDiff');
+  list.data.page.limit = 50;
+  const page = view === 'file' ? file : list;
+  const search = '?baseRunId=run_1&baseRevisionId=revision_1' + (view === 'file'
+    ? `&baseFileId=${file.data.baseFile!.fileId}&headFileId=${file.data.headFile!.fileId}` : '');
+  let finish!: (result: Response) => void;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(page))
+    .mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  vi.stubGlobal('fetch', fetcher);
+  mount(view, search);
+  const readyText = view === 'file' ? /Showing change groups 1–1 of 2/u : /4 changed files/u;
+  await screen.findByText(readyText, {}, { timeout: 1250 });
+  const refresh = screen.getByRole('button', { name: 'Refresh comparison' });
+  const other = screen.getAllByRole('link')[0]!;
+  for (const choice of ['move', 'blur', 'stay']) {
+    refresh.focus();
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    await waitFor(() => expect(refresh.getAttribute('aria-disabled')).toBe('true'), { timeout: 1250 });
+    expect(refresh.hasAttribute('disabled')).toBe(false);
+    expect(document.activeElement).toBe(refresh);
+    if (choice === 'move') other.focus();
+    if (choice === 'blur') refresh.blur();
+    finish(response(page));
+    await screen.findByText(readyText, {}, { timeout: 1250 });
+    const target = choice === 'move' ? other : choice === 'blur' ? document.body : screen.getByRole('heading', { level: 2 });
+    await waitFor(() => expect(document.activeElement).toBe(target), { timeout: 1250 });
+  }
+  expect(fetcher).toHaveBeenCalledTimes(4);
+});
+
 it('keeps comparison addresses closed and always names both exact revisions', () => {
   expect(sourceDiffSelection('')).toEqual({ base: null, cursor: null });
   expect(sourceDiffSelection('?baseRunId=run_1&baseRevisionId=revision_1')).toEqual({ base, cursor: null });
@@ -127,7 +160,9 @@ it('lists changed files with explicit status, both revisions and pinned historic
   const status = await screen.findByText(/4 changed files: 1 added, 1 removed, 1 modified, 1 renamed\. 3 unchanged files are not listed\./u);
   expect(status.getAttribute('role')).toBe('status');
   // An explicit refresh returns keyboard focus to the result heading once the new page is ready.
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh comparison' }));
+  const refresh = screen.getByRole('button', { name: 'Refresh comparison' });
+  refresh.focus();
+  fireEvent.click(refresh);
   await waitFor(() => { expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Changed files' })); });
   expect(await screen.findByText(/A rename is reported only when/u)).toBeTruthy();
   const entries = screen.getByRole('list', { name: 'Changed files' }).querySelectorAll('li');
