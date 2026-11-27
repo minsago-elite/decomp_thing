@@ -53,7 +53,10 @@ export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
   const bounded = structuredClone(report);
   if (bounded.requests) bounded.requests = Object.fromEntries(Object.entries(bounded.requests)
     .map(([name, list]) => [name, Array.isArray(list) ? { count: list.length, truncated: true } : list]));
-  assert.ok(Buffer.byteLength(JSON.stringify(bounded), 'utf8') <= maxBytes, 'Report exceeds its byte bound after truncation');
+  const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
+  const largestFields = Object.entries(bounded).map(([name, value]) => [name, Buffer.byteLength(JSON.stringify(value), 'utf8')])
+    .sort((left, right) => right[1] - left[1]).slice(0, 5);
+  assert.ok(boundedBytes <= maxBytes, `Report exceeds its byte bound after truncation (${boundedBytes}/${maxBytes} bytes; largest fields ${JSON.stringify(largestFields)})`);
   return bounded;
 }
 
