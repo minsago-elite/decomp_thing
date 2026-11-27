@@ -13,12 +13,23 @@ sentences, never server text. Source reads use the same classes after their sour
 outcomes (invalid address, busy, invalid range, expired continuation).
 
 The table describes those metadata views' vocabulary, not a universal contract for every
-private read. The dashboard still uses listing-specific handling: unsupported-contract,
-malformed-response and network failures can share generic guidance, and some hard failures
-retain previous rows. Source views use latest-only read state rather than the metadata views'
-stale-data retention. The four-route matrix below does not qualify the dashboard or all other
-panels. Full route-by-state acceptance remains open in #628; this PR is not closure evidence
-for that issue.
+private read. The dashboard now uses the shared session, denied, missing, unsupported,
+unverified and failed classes for listing failures, with listing-specific guidance for busy,
+limit and expired-cursor outcomes. Only transient transport/server failures and the explicit
+busy/limit/cursor cases retain a previously verified page; unverified collection results clear
+the old rows and page controls. Fixed dashboard copy includes only the safe request reference,
+never server text. Source views use latest-only read state rather than the metadata views'
+stale-data retention. The shared route-state matrix covers eight routes: the job library, job
+overview, attempt history, attempt overview, attempt evidence, saved activity window, source
+directory, and source file. It does not qualify every panel or every state on every route. Full
+route-by-state acceptance remains open in #628; this focused slice is not closure evidence for that
+issue.
+
+The job overview's managed Git repository panel also classifies its read failures as session,
+denied, missing, unsupported, unverified, or server failure. A failed read keeps the refresh action
+available and does not expose repository initialization until a candidate revision is verified.
+`git-repository-panel.test.tsx` checks these distinct messages, safe reference handling, and that a
+read failure sends no initialization request.
 
 | State | Trigger | What the view shows |
 | --- | --- | --- |
@@ -34,10 +45,9 @@ for that issue.
 
 A failure that came from an HTTP 400–599 response with a canonical server UUID appends
 `Reference ID: <uuid>.` (`withApiFailureReference`); no server code, message, stack, URL or
-token is displayed. `frontend/tests/resilience.test.tsx` drives every class through the job,
-attempt, source directory and source file routes, requires six distinct messages per route,
-the reference only where one exists, no leaked diagnostics, and a still-navigable route
-(route heading and main navigation present).
+token is displayed. `frontend/tests/resilience.test.tsx` drives every class through the job library, job overview, attempt history, attempt overview, saved activity window, source directory and source file
+routes. It requires six distinct messages per route, the reference only where one exists, no
+leaked diagnostics, and a still-navigable route (route heading and main navigation present).
 
 ## Partial results and panel isolation
 
@@ -48,7 +58,8 @@ hide validation evidence or activity. Panels are also wrapped in `PanelBoundary`
 sibling panels, shows no exception text, and offers "Show this section again", which only
 re-renders the panel (repeating its own reads). Wrapped panels: upload, the job list, workflow
 availability, attempt actions, progress pin, activity, exploration and validation evidence,
-the source preview and the download digest check. `frontend/tests/panel-isolation.test.tsx`
+source preview, download digest check, runtime scheduler summary, runtime progress-retention
+summary, and runtime storage summary. `frontend/tests/panel-isolation.test.tsx`
 forces a panel to throw and checks the notice, the absence of private detail, the surviving
 siblings, axe, and that retry sends no command.
 

@@ -231,6 +231,38 @@ it('reads exploration evidence only on request and preserves producer limitation
   view.unmount(); expect(signal.aborted).toBe(true);
 });
 
+it('distinguishes exploration report read failures with sanitized correlation', async () => {
+  const { ExplorationEvidence } = await import('../src/jobs/ExplorationEvidence');
+  const report = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration.json'), 'utf8')) as { data: Report };
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  const failures: [ApiClientError, string, boolean][] = [
+    [new ApiClientError('http_error', { status: 401, requestId, serverCode: 'SESSION_EXPIRED' }), 'Reconnect the local session', true],
+    [new ApiClientError('http_error', { status: 403, requestId, serverCode: 'ACCESS_DENIED' }), 'cannot read exploration evidence', true],
+    [new ApiClientError('http_error', { status: 404, requestId, serverCode: 'NOT_FOUND' }), 'unavailable at this server address', true],
+    [new ApiClientError('unsupported_contract', { serverCode: 'PRIVATE_DIAGNOSTIC' }), 'cannot read the exploration response format', false],
+    [new ApiClientError('invalid_response', { serverCode: 'CORRUPT_WORKFLOW_STATE' }), 'could not be verified', false],
+    [new ApiClientError('http_error', { status: 503, requestId, serverCode: 'INTERNAL_ERROR' }), 'could not be read', true],
+  ];
+  const messages = new Set<string>();
+  for (const [failure, expected, hasReference] of failures) {
+    transport.get.mockRejectedValueOnce(failure);
+    const mounted = render(<ExplorationEvidence jobId={report.data.binding.jobId} runId={report.data.binding.runId!} basePath="/nested" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+    const alert = await screen.findByRole('alert');
+    const text = alert.textContent ?? '';
+    expect(text).toContain(expected);
+    expect(text.includes(`Reference ID: ${requestId}.`)).toBe(hasReference);
+    for (const leaked of ['SESSION_EXPIRED', 'ACCESS_DENIED', 'CORRUPT_WORKFLOW_STATE', 'INTERNAL_ERROR', 'PRIVATE_DIAGNOSTIC', 'ApiClientError', 'Web API request failed'])
+      expect(text).not.toContain(leaked);
+    messages.add(text.replace(` Reference ID: ${requestId}.`, ''));
+    expect(screen.getByRole('heading', { name: 'Exploration evidence' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Refresh exploration evidence' })).toBeTruthy();
+    mounted.unmount();
+  }
+  expect(messages.size).toBe(failures.length);
+  expect(transport.get).toHaveBeenCalledTimes(failures.length);
+});
+
 it('refuses evidence for another attempt without presenting its summary', async () => {
   const { ExplorationEvidence } = await import('../src/jobs/ExplorationEvidence');
   const data = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration.json'), 'utf8')) as { data: Report };
@@ -429,6 +461,7 @@ it.each([
   ['401', new ApiClientError('http_error', { status: 401 }), 'Reconnect the local session to read attempt history', false],
   ['403', new ApiClientError('http_error', { status: 403 }), 'Access to attempt history was denied', false],
   ['404', new ApiClientError('http_error', { status: 404 }), 'Attempt history is unavailable', false],
+  ['deleted-job', new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' }), 'This job was deleted. Its attempt history was removed', false],
   ['expired-cursor', new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }), 'Attempt history changed or this page expired', false],
   ['corrupt-storage', new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_WORKFLOW_STATE' }), 'Attempt history could not be verified', true],
   ['invalid-response', new ApiClientError('invalid_response'), 'Attempt history could not be verified', true],

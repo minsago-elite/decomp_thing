@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner } from '../api/generated';
-import { withApiFailureReference } from '../api/errors';
+import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { recordedValidationCopy as copy } from '../copy/attempt';
 import { commonCopy } from '../copy/common';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -14,6 +14,7 @@ import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { message, textMessage } from '../shared/messages';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 function requestedValidation(search: string, preserveRouteContext = false) {
   try {
@@ -71,8 +72,24 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
   function failed(controller: AbortController, failure: unknown, restoring = false) {
     if (current(controller)) {
       setSavedBaseline(null); setComparisonPage(1);
+      const kind = failure instanceof ApiClientError ? metadataFailureKind(failure) : 'unverified';
+      const message = restoring ? {
+        session: copy.savedSelectionSession,
+        denied: copy.savedSelectionDenied,
+        missing: copy.savedSelectionMissing,
+        unsupported: copy.savedSelectionUnsupported,
+        unverified: copy.savedSelectionUnverified,
+        failed: copy.savedSelectionFailed,
+      }[kind] : {
+        session: copy.sessionExpired,
+        denied: copy.accessDenied,
+        missing: copy.missing,
+        unsupported: copy.unsupported,
+        unverified: copy.unverified,
+        failed: copy.readFailed,
+      }[kind];
       setStored({ binding, locationKey: requested.key, history: null, selected: null, report: null, loading: false,
-        error: withApiFailureReference(restoring ? copy.savedSelectionUnavailable : copy.failed, failure) });
+        error: withApiFailureReference(message, failure) });
     }
   }
   function publish(history: ValidationHistory, owner: ValidationOwner | null, report: Report | null, saved: Baseline | null, window = 1): string | null {

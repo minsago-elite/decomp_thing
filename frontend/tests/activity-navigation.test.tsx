@@ -85,6 +85,30 @@ it('retains an expired address without fallback and clears saved content on deni
   expect(screen.queryAllByRole('listitem')).toHaveLength(0); expect(transport.get).toHaveBeenCalledTimes(5); expect(transport.stream).not.toHaveBeenCalled();
 });
 
+it('retains a saved window only for transient failures and classifies unsupported event reads', async () => {
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page(0, 1, 2)); render(view());
+  expect(await screen.findByText('Selected observation')).toBeTruthy();
+  expect(screen.getAllByRole('listitem')).toHaveLength(3);
+
+  transport.get.mockResolvedValueOnce(snapshot).mockRejectedValueOnce(new ApiClientError('http_error', {
+    status: 503, requestId: '123e4567-e89b-42d3-a456-426614174000', serverCode: 'INTERNAL_ERROR',
+  }));
+  fireEvent.click(screen.getByRole('button', { name: 'Retry saved activity window' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent',
+    'The requested activity window could not be verified within its read limits. No other window was substituted. Reference ID: 123e4567-e89b-42d3-a456-426614174000.');
+  expect(screen.getAllByRole('listitem')).toHaveLength(3);
+  expect(screen.getByText('Previously verified observations may be stale.')).toBeTruthy();
+
+  transport.get.mockResolvedValueOnce(snapshot).mockRejectedValueOnce(new ApiClientError('unsupported_contract'));
+  fireEvent.click(screen.getByRole('button', { name: 'Retry saved activity window' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent',
+    'This server version cannot verify the saved activity window. No other window was substituted.');
+  expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  expect(screen.queryByText(/Current snapshot state:/)).toBeNull();
+  expect(transport.stream).not.toHaveBeenCalled();
+  expect(transport.get.mock.calls.every(([kind]) => kind === 'snapshot' || kind === 'events')).toBe(true);
+});
+
 it('makes no read for malformed selection and stops after four incomplete event pages', async () => {
   search = '?after=before&event=cursor_1'; const mounted = render(view());
   expect(screen.getByRole('alert')).toBeTruthy(); expect(transport.get).not.toHaveBeenCalled();

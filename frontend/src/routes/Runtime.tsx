@@ -2,12 +2,14 @@ import { runtimeCopy as copy } from '../copy/runtime';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactBytes } from '../copy/format';
 import { commonCopy } from '../copy/common';
+import { panelBoundaryCopy } from '../copy/shell';
 import { useLayoutEffect, useState } from 'preact/hooks';
 import type { BrowserSession } from '../session/session';
 import { SchedulerSummary } from '../jobs/SchedulerSummary';
 import { ProgressRetentionSummary } from '../jobs/ProgressRetentionSummary';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { StorageSummary } from '../jobs/StorageSummary';
+import { PanelBoundary } from '../shared/PanelBoundary';
 import type { BuildIdentity } from '../app/buildIdentity';
 
 export default function Runtime({ identity, session = null, basePath = '' }: { identity: BuildIdentity; session?: BrowserSession | null; basePath?: string }) {
@@ -45,9 +47,9 @@ export default function Runtime({ identity, session = null, basePath = '' }: { i
           <dt>{copy.git}</dt><dd>{snapshot.runtime.gitVersion ?? copy.notReported}</dd>
           <dt>{copy.maximumUpload}</dt><dd>{snapshot.limits.maxUploadBytes === '0' ? copy.uploadsUnavailable : formatExactBytes(snapshot.limits.maxUploadBytes)}</dd>
         </dl>
-        <SchedulerSummary scheduler={snapshot.runtime.scheduler} />
-        <ProgressRetentionSummary retention={snapshot.runtime.progressRetention} />
-        <StorageSummary basePath={basePath} />
+        <PanelBoundary name={panelBoundaryCopy.names.scheduler}><SchedulerSummary scheduler={snapshot.runtime.scheduler} /></PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.progressRetention}><ProgressRetentionSummary retention={snapshot.runtime.progressRetention} /></PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.storage}><StorageSummary basePath={basePath} /></PanelBoundary>
         <h3>{copy.workflowCapabilities}</h3>
         {snapshot.capabilities.length === 0 ? <p>{copy.noCapabilitiesReported}</p> : <ul>
           {snapshot.capabilities.map(capability => <li key={capability.id}>

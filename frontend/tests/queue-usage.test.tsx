@@ -68,6 +68,28 @@ it('discards an earlier sample when a refresh fails or answers for another attem
   expect(screen.queryByText(/About 3 of 5/)).toBeNull();
 });
 
+it.each([
+  [new ApiClientError('http_error', { status: 401, serverCode: 'SESSION_EXPIRED', requestId: '0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f' }), 'Reconnect the local session before checking queue position.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  [new ApiClientError('http_error', { status: 403, serverCode: 'ACCESS_DENIED', requestId: '0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f' }), 'This session cannot inspect queue position. Check local permissions.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  [new ApiClientError('http_error', { status: 404, serverCode: 'NOT_FOUND', requestId: '0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f' }), 'Queue position is unavailable for this attempt. Check the job and attempt.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  [new ApiClientError('unsupported_contract'), 'This interface cannot read the queue-position response format. Update the application before retrying.', null],
+  [new ApiClientError('http_error', { status: 500, serverCode: 'CORRUPT_WORKFLOW_STATE', requestId: '0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f' }), 'Queue position could not be verified. The attempt state above remains the authority.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+  [new ApiClientError('http_error', { status: 503, serverCode: 'INTERNAL_ERROR', requestId: '0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f' }), 'Queue position could not be read. The attempt state above remains the authority. Retry this read.', 'Reference ID: 0b6f3c1e-2d4a-4b8c-9e1f-3a5b7c9d1e2f'],
+] as const)('shows fixed %o queue-read guidance and keeps diagnostics out of the panel', async (failure, message, reference) => {
+  transport.get.mockRejectedValueOnce(failure);
+  render(<QueuePosition jobId={queued.jobId} runId={queued.runId} basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Check queue position' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(message);
+  if (reference) expect(alert.textContent).toContain(reference);
+  else expect(alert.textContent).not.toContain('Reference ID:');
+  expect(alert.textContent).not.toContain('INTERNAL_ERROR');
+  expect(alert.textContent).not.toContain('CORRUPT_WORKFLOW_STATE');
+  expect(alert.textContent).not.toContain('Web API request failed');
+  expect(screen.getByRole('button', { name: 'Check queue position' })).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledTimes(1);
+});
+
 it('rejects queue samples whose counts disagree or that name other attempts', () => {
   const decode = (data: unknown) => decodeContract(JSON.stringify({ apiVersion: 1, kind: 'queuePosition', requestId: 'request_1', data }), { basePath: '/nested' });
   expect(decode(queued)).toBeTruthy();
