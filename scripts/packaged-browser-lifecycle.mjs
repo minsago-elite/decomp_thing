@@ -50,12 +50,61 @@ export function assertDeletionAlert(state, rendered) {
   assert.deepEqual(rendered.split(/\n+/), lines, 'Deleting tab must show the exact state acknowledged by DELETE');
 }
 
-async function listed(tab, evaluate, id, archived) {
-  return evaluate(tab, `(async () => {
-    const response = await fetch('/nested/api/v1/jobs?limit=100${archived ? '&archived=' + archived : ''}');
-    if (response.status !== 200) throw new Error('job listing ' + response.status);
-    return (await response.json()).data.items.some(job => job.jobId === '${id}');
-  })()`);
+// A first-page collection admits one snapshot at a time; a competing read gets
+// 503 LISTING_BUSY and should retry shortly (WebJobPages, docs/web-job-pagination.md).
+// Only that bound refusal is retried, a few times; every other reply fails at once.
+export const LISTING_BUSY_RETRY_DELAYS_MS = Object.freeze([250, 500, 1000, 2000, 2000]);
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const excerpt = body => typeof body === 'string' ? JSON.stringify(body.slice(0, 300)) : String(body);
+
+function listingFailure(summary, reply, busy) {
+  const prior = busy.length ? '; LISTING_BUSY request ids: ' + busy.map(entry => entry.requestId).join(', ') : '';
+  const error = new Error(`job listing ${summary} (request id ${reply?.requestId ?? 'none'}, body ${excerpt(reply?.body)})${prior}`);
+  error.busy = busy;
+  return error;
+}
+
+/** The refusal is LISTING_BUSY only when the error envelope is bound to its own X-Request-ID. */
+function busyRefusal(reply) {
+  if (reply?.status !== 503 || typeof reply.requestId !== 'string' || reply.requestId === '') return null;
+  let body;
+  try { body = JSON.parse(reply.body); } catch { return null; }
+  if (body?.apiVersion !== 1 || body.kind !== 'error' || body.requestId !== reply.requestId || body.error?.code !== 'LISTING_BUSY') return null;
+  return { requestId: reply.requestId, message: String(body.error.message ?? '') };
+}
+
+function membership(reply, jobId, busy) {
+  let data;
+  try { data = JSON.parse(reply.body).data; } catch { throw listingFailure('200 body is not JSON', reply, busy); }
+  const items = data?.items;
+  if (!Array.isArray(items) || !items.every(item => typeof item?.jobId === 'string')) throw listingFailure('200 body has no identified items', reply, busy);
+  if (data.page?.nextCursor !== null) throw listingFailure('200 body is not one complete page', reply, busy);
+  return items.some(item => item.jobId === jobId);
+}
+
+export async function readListingMembership(read, jobId, { delays = LISTING_BUSY_RETRY_DELAYS_MS, sleep = pause } = {}) {
+  const busy = [];
+  for (let attempt = 0; ; attempt++) {
+    const reply = await read();
+    if (reply?.status === 200) return { listed: membership(reply, jobId, busy), busy };
+    const refusal = busyRefusal(reply);
+    if (!refusal) throw listingFailure(`${reply?.status} is not a bound LISTING_BUSY refusal`, reply, busy);
+    busy.push({ attempt: attempt + 1, ...refusal });
+    if (attempt >= delays.length) {
+      throw listingFailure(`LISTING_BUSY persisted for ${busy.length} reads over ${delays.reduce((total, delay) => total + delay, 0)} ms of backoff`, reply, busy);
+    }
+    await sleep(delays[attempt]);
+  }
+}
+
+async function listed(tab, evaluate, id, archived, busy) {
+  const path = '/nested/api/v1/jobs?limit=100' + (archived ? '&archived=' + archived : '');
+  const result = await readListingMembership(() => evaluate(tab, `(async () => {
+    const response = await fetch(${JSON.stringify(path)});
+    return { status: response.status, requestId: response.headers.get('X-Request-ID'), body: await response.text() };
+  })()`), id);
+  busy.push(...result.busy.map(entry => ({ archived: archived || 'exclude', ...entry })));
+  return result.listed;
 }
 
 export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin }) {
@@ -71,6 +120,7 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   const jobApiUrl = browserOrigin + '/nested/api/v1/jobs/' + job.id;
   const deleteResponses = new Map();
   const deleteBodies = new Map();
+  const listingBusy = [];
   cdp.on('Network.responseReceived', ({ requestId, response }) => {
     if (tab.requests.some(request => request.requestId === requestId && request.method === 'DELETE')) {
       deleteResponses.set(requestId, response);
@@ -102,8 +152,8 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   await ready(tab, `${status('job-organize-title')} === 'Saved. The job was read again from the server.' && document.querySelector('input[name="archived"]').checked`, 'archive saved and re-read');
   assert.deepEqual(await evidence(), original, 'Archive changed job evidence');
   assert.equal(JSON.parse(await fs.readFile(join(directory, 'organization.json'), 'utf8')).archived, true);
-  assert.equal(await listed(tab, evaluate, job.id, ''), false, 'Archived job remained in the default listing');
-  assert.equal(await listed(tab, evaluate, job.id, 'only'), true, 'Archived job missing from archived listing');
+  assert.equal(await listed(tab, evaluate, job.id, '', listingBusy), false, 'Archived job remained in the default listing');
+  assert.equal(await listed(tab, evaluate, job.id, 'only', listingBusy), true, 'Archived job missing from archived listing');
   const files = (await fs.readdir(directory)).sort();
   assert.deepEqual(files, ['input.elf', 'job.json', 'organization.json']);
   const sizes = await Promise.all(files.map(async name => (await fs.stat(join(directory, name))).size));
@@ -180,7 +230,7 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, deletedNotice, 'deleted deep link after reload');
   assert.equal(await evaluate(tab, `fetch('/nested/api/v1/jobs/${job.id}').then(response => response.status)`), 410);
-  assert.equal(await listed(tab, evaluate, job.id, 'all'), false, 'Deleted job still listed');
+  assert.equal(await listed(tab, evaluate, job.id, 'all', listingBusy), false, 'Deleted job still listed');
   // Reach the alert's own recovery link by sequential Tab navigation from the top of the document.
   const recoveryLink = `${deletedAlert}?.querySelector('a[href="/nested/"]')`;
   assert.equal(await evaluate(tab, `${recoveryLink}?.textContent`), 'Return to jobs', 'Deleted alert has no recovery link');
@@ -208,5 +258,5 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
     deletionOperation: { location, operationId, jobId: job.id, action: acknowledged.action, status: 202, bodySha256,
       acknowledgedState: acknowledged.state, rendered, state: operation.state, message: operation.message }, detachedDataPurged: true, previewInputBytes: 64,
     peerTabReconciled: true, deepLinkReloadShowsDeleted: true, apiGone: 410, noUndoPromised: true,
-    keyboardReturnFocus: landingFocus, mutationRequests: methods.length, executionStarted: false };
+    keyboardReturnFocus: landingFocus, mutationRequests: methods.length, listingBusyRetried: listingBusy, executionStarted: false };
 }
