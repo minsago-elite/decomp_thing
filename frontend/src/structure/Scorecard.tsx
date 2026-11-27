@@ -69,6 +69,7 @@ function Metrics({ metrics }: { metrics: readonly ScorecardMetric[] }) {
     <thead><tr>{Object.values(copy.columns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
     <tbody>{metrics.map(metric => <tr key={metric.id}>
       <th scope="row">{copy.metrics[metric.id]}</th>
+      <td>{copy.units[metric.unit]}</td>
       <StateCell measure={metric} />
       <td>{metric.value === null ? copy.notRecorded : <code>{metric.value}</code>}</td>
       <td>{fraction(metric)}</td>
@@ -244,7 +245,7 @@ function Comparison({ selected, basePath, query, version, focus, onRoute }: {
         <thead><tr>{Object.values(copy.comparisonColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
         <tbody>{data.metrics.map(metric => <tr key={metric.id}>
           <th scope="row">{copy.metrics[metric.id]}</th>
-          <td>{side(metric.current)}</td><td>{side(metric.baseline)}</td><td>{delta(metric.delta, metric.unit)}</td>
+          <td>{copy.units[metric.unit]}</td><td>{side(metric.current)}</td><td>{side(metric.baseline)}</td><td>{delta(metric.delta, metric.unit)}</td>
         </tr>)}</tbody>
       </table></div>}
       {data.modules.total > 0 && <>
@@ -276,6 +277,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
   const { client } = usePrivateTransport(basePath);
   const query = scorecardLocation(search);
   const results = useRef<HTMLHeadingElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
   const readKey = (value: ScorecardQuery) => [selected.jobId, selected.runId, selected.revisionId, value.sort, value.order,
     value.cursor ?? '', value.version ?? ''].join('/');
   const key = readKey(query);
@@ -305,7 +307,8 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
     return data.acceptance;
   });
   const acceptance = attempt.state === 'ready' ? attempt.value : null;
-  useRequestedFocus(moveFocus, 'scorecard', key, read, () => results.current);
+  // A failed or expired page has no module heading; Refresh, which returns to current first pages, keeps the keyboard.
+  useRequestedFocus(moveFocus, 'scorecard', key, read, () => results.current ?? refreshButton.current);
   // Every route replaces the pending request, so a later move by another owner, or one without focus, abandons it.
   const route = (next: ScorecardQuery, focus?: FocusRequest) => {
     moveFocus.current = focus && focus.key !== focus.origin ? { ...focus, from: document.activeElement, arrived: false } : null;
@@ -322,7 +325,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
     setOrder(query.order);
   }, [query.sort, query.order]);
   // Inventory links stay outside the read gate; refresh reads current first pages for the card and comparison.
-  return <Frame selected={selected} data={data} read={read} pinned={query.version !== undefined} boundary={copy.boundary}
+  return <Frame selected={selected} data={data} read={read} pinned={query.version !== undefined} boundary={copy.boundary} refreshRef={refreshButton}
     onRefresh={() => {
       moveFocus.current = null;
       refreshAttempt();

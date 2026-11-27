@@ -464,7 +464,35 @@ def check_scorecard(data: dict) -> None:
         raise ValueError("scorecard pages must be bound to the structure version")
 
 
+BLOCKING_COMPARISON_CHECKS = frozenset(("input-binary", "reconstruction-profile", "confidence-schema",
+                                        "score-interpretation", "score-formula", "model-schema"))
+
+
+def check_comparison_identities(data: dict) -> None:
+    """Each blocking identity is checked exactly once and the input-binary check states each recorded scope's input."""
+    checks, state = data["compatibility"]["checks"], data["compatibility"]["state"]
+    ids = [check["id"] for check in checks]
+    if len(set(ids)) != len(ids) or not BLOCKING_COMPARISON_CHECKS <= set(ids):
+        raise ValueError("a comparison states every blocking identity check exactly once")
+    for check in checks:
+        if check["blocking"] != (check["id"] in BLOCKING_COMPARISON_CHECKS):
+            raise ValueError("only the fixed identity checks block deltas")
+        recorded = check["current"] is not None and check["baseline"] is not None
+        if (check["state"] == "not-recorded") == recorded:
+            raise ValueError("an identity check is not recorded exactly when a side records no value")
+        if check["blocking"] and recorded and (check["state"] == "match") != (check["current"] == check["baseline"]):
+            raise ValueError("a blocking identity check matches exactly when its recorded values are equal")
+    current, baseline = data["current"]["scope"], data["baseline"]["scope"]
+    if (state == "unavailable") != (current is None or baseline is None):
+        raise ValueError("a comparison is unavailable exactly when a side has no scorecard scope")
+    check = next(check for check in checks if check["id"] == "input-binary")
+    if (current is not None and check["current"] != current["inputSha256"]) or \
+            (baseline is not None and check["baseline"] != baseline["inputSha256"]):
+        raise ValueError("the input-binary check must state each recorded scope's input")
+
+
 def check_comparison(data: dict) -> None:
+    check_comparison_identities(data)
     state = data["compatibility"]["state"]
     blocked = any(check["blocking"] and check["state"] != "match" for check in data["compatibility"]["checks"])
     if (state == "incompatible") != (blocked and state != "unavailable"):

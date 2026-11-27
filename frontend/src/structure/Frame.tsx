@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
-import type { ComponentChildren } from 'preact';
+import type { ComponentChildren, Ref } from 'preact';
 import { structureCopy as copy } from '../copy/structure';
 import { message } from '../shared/messages';
 import type { EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, StructureNeighborhood, StructureScorecard } from '../api/generated';
@@ -54,16 +54,16 @@ function States({ data }: { data: StructureHeader }) {
 
 /** Revision context, the boundary statement, refresh, read status and the recorded model/plan states. */
 /** Navigation stays outside the read gate so a failed or changed pinned read can still reach current records. */
-export function Frame({ selected, data, read, onRefresh, pinned, boundary = copy.boundary, navigation, children }: {
+export function Frame({ selected, data, read, onRefresh, pinned, boundary = copy.boundary, navigation, refreshRef, children }: {
   selected: SourceSelection; data: StructureHeader | null; read: SourceReadState<unknown>; onRefresh: () => void; pinned?: boolean;
-  boundary?: string; navigation?: ComponentChildren; children?: ComponentChildren;
+  boundary?: string; navigation?: ComponentChildren; refreshRef?: Ref<HTMLButtonElement>; children?: ComponentChildren;
 }) {
   return <>
     <Context selected={selected} data={data} />
     <p>{boundary}</p>
     {navigation}
     {pinned && <p>{copy.pinnedNotice}</p>}
-    <button type="button" aria-disabled={read.state === 'loading'} onClick={() => {
+    <button type="button" ref={refreshRef ?? null} aria-disabled={read.state === 'loading'} onClick={() => {
       if (read.state !== 'loading') onRefresh();
     }}>{copy.refresh}</button>
     {read.state === 'loading' && <p role="status">{copy.loading}</p>}

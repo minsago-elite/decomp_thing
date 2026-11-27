@@ -75,6 +75,32 @@ function checkMeasure(measure: Measure, unit: string): void {
   }
 }
 
+type Comparison = Extract<ContractDocument, { kind: 'scorecardComparison' }>['data'];
+
+/** The identities that block deltas. Each is compared by exact recorded value; the other checks are advisory. */
+const BLOCKING_CHECKS = new Set(['input-binary', 'reconstruction-profile', 'confidence-schema', 'score-interpretation',
+  'score-formula', 'model-schema']);
+
+/**
+ * Every blocking identity is checked exactly once, so a reply cannot be compatible by leaving one out. A side carries a
+ * scope exactly when its scorecard is available, and the input-binary check states the input each recorded scope names.
+ */
+function checkIdentityChecks(data: Comparison): void {
+  const { checks, state } = data.compatibility;
+  requireValue(new Set(checks.map(check => check.id)).size === checks.length);
+  requireValue([...BLOCKING_CHECKS].every(id => checks.some(check => check.id === id)));
+  for (const check of checks) {
+    requireValue(check.blocking === BLOCKING_CHECKS.has(check.id));
+    const recorded = check.current !== null && check.baseline !== null;
+    requireValue((check.state === 'not-recorded') === !recorded);
+    if (check.blocking && recorded) requireValue((check.state === 'match') === (check.current === check.baseline));
+  }
+  const input = checks.find(check => check.id === 'input-binary')!;
+  requireValue((state === 'unavailable') === (data.current.scope === null || data.baseline.scope === null));
+  if (data.current.scope) requireValue(input.current === data.current.scope.inputSha256);
+  if (data.baseline.scope) requireValue(input.baseline === data.baseline.scope.inputSha256);
+}
+
 /** Mirrors the shared verifier's structure rules for the lazily admitted response kinds. */
 function checkStructureDocument(document: ContractDocument): void {
   switch (document.kind) {
@@ -94,6 +120,7 @@ function checkStructureDocument(document: ContractDocument): void {
     }
     case 'scorecardComparison': {
       const { compatibility, metrics, modules } = document.data;
+      checkIdentityChecks(document.data);
       const blocked = compatibility.checks.some(check => check.blocking && check.state !== 'match');
       requireValue((compatibility.state === 'incompatible') === (blocked && compatibility.state !== 'unavailable'));
       requireValue(compatibility.state !== 'unavailable' || metrics.length === 0);

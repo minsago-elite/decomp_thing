@@ -1187,6 +1187,10 @@
       "valid": true
     },
     {
+      "file": "fixtures/scorecard-comparison-unavailable.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/structure-neighborhood-calls.json",
       "valid": true
     },
@@ -1248,6 +1252,30 @@
     },
     {
       "file": "fixtures/invalid-scorecard-comparison-unmeasured-delta.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-missing-input-check.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-advisory-identity-check.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-repeated-identity-check.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-foreign-scope-input.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-unequal-match.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-compatible-without-scope.json",
       "valid": false
     }
   ]

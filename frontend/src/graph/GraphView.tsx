@@ -192,26 +192,48 @@ export function GraphView({ response, selected, basePath, query, runtime }: {
   const [selection, setSelection] = useState<Selection>(null);
   const stop = useRef<(() => void) | null>(null);
   const details = useRef<HTMLHeadingElement>(null);
+  // Cancel drawing and Draw again replace each other, and a finished drawing replaces Cancel drawing. When the
+  // replaced control had keyboard focus, focus moves to the control that takes its place, or to the drawing heading.
+  const title = useRef<HTMLHeadingElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const againButton = useRef<HTMLButtonElement>(null);
+  // The layout state on screen when a focused control was replaced; a later state settles the hand-off.
+  const shown = useRef(layout);
+  shown.current = layout;
+  const handOff = useRef<LayoutState | null>(null);
+  const holdFocus = () => {
+    const active = document.activeElement;
+    if (active !== null && (active === cancelButton.current || active === againButton.current)) handOff.current = shown.current;
+  };
   const nodes = useMemo(() => data.nodes.map(node => ({ index: node.index, depth: node.depth })), [data]);
   useEffect(() => {
     setLayout({ status: 'running' });
-    const cancel = beginGraphLayout(nodes, data.edges, runtime, setLayout);
+    const cancel = beginGraphLayout(nodes, data.edges, runtime, result => { holdFocus(); setLayout(result); });
     stop.current = cancel;
     return () => { cancel(); stop.current = null; };
   }, [data, attempt, runtime]);
+  useEffect(() => {
+    // Effects of the state the control was shown in can still run; they leave the hand-off pending.
+    if (handOff.current === null || handOff.current === layout || layout.status === 'pending') return;
+    handOff.current = null;
+    // Focus the reader moved elsewhere in the meantime stays where they put it.
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active.isConnected) return;
+    (layout.status === 'running' ? cancelButton.current : layout.status === 'ready' ? title.current : againButton.current)?.focus();
+  }, [layout]);
   const select = (next: Selection) => { setSelection(next); };
   const focusDetails = (next: Selection) => { select(next); details.current?.focus(); };
   return <>
-    <h2>{copy.drawingTitle}</h2>
+    <h2 ref={title} tabIndex={-1}>{copy.drawingTitle}</h2>
     <p>{copy.legend}</p>
     {layout.status === 'running' && <div class="job-actions" role="status">
       <span>{copy.layoutRunning}</span>
-      <button type="button" onClick={() => { stop.current?.(); setLayout({ status: 'cancelled' }); }}>{copy.cancelLayout}</button>
+      <button type="button" ref={cancelButton} onClick={() => { holdFocus(); stop.current?.(); setLayout({ status: 'cancelled' }); }}>{copy.cancelLayout}</button>
     </div>}
     {layout.status === 'cancelled' && <p role="status">{copy.layoutCancelled}</p>}
     {layout.status === 'failed' && <p role="status">{copy.layoutFailed[layout.reason]}</p>}
     {(layout.status === 'cancelled' || layout.status === 'failed') && <p>
-      <button type="button" onClick={() => setAttempt(value => value + 1)}>{copy.drawAgain}</button></p>}
+      <button type="button" ref={againButton} onClick={() => { holdFocus(); setAttempt(value => value + 1); }}>{copy.drawAgain}</button></p>}
     {layout.status === 'ready' && <Drawing data={data} layout={layout.value} selection={selection} onSelect={select} />}
     <section aria-labelledby="graph-selection-title" class="graph-selection">
       <h2 id="graph-selection-title" ref={details} tabIndex={-1}>{copy.selectionTitle}</h2>

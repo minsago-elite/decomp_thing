@@ -813,3 +813,127 @@ it.each([
     await screen.findByRole('table', { name: copy.modulesTitle });
   } finally { auth.dispose(); }
 });
+
+it('states the recorded unit of every measure, for ratios and counts, in this attempt and in a comparison', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+    const [measures, compared] = screen.getAllByRole('table', { name: copy.measuresTitle }) as [HTMLElement, HTMLElement];
+    const metricRow = (table: HTMLElement, id: keyof typeof copy.metrics) =>
+      within(table).getByRole('row', { name: new RegExp(`^${copy.metrics[id].replace(/[()]/g, '\\$&')}`) });
+    for (const table of [measures, compared]) {
+      const headers = within(table).getAllByRole('columnheader').map(header => header.textContent);
+      expect(headers[1]).toBe(copy.columns.unit);
+      expect(within(metricRow(table, 'structural-recovery-score')).getByRole('cell', { name: copy.units.ratio })).toBeTruthy();
+      expect(within(metricRow(table, 'generation-completion')).getByRole('cell', { name: copy.units.count })).toBeTruthy();
+    }
+    // The count keeps its recorded numerator and denominator; it has no recorded ratio value.
+    expect(metricRow(measures, 'generation-completion').textContent).toContain('2 of 2');
+    for (const metric of card.scorecard!.metrics) {
+      expect(within(metricRow(measures, metric.id)).getByRole('cell', { name: copy.units[metric.unit] })).toBeTruthy();
+    }
+    for (const metric of comparison.metrics) {
+      expect(within(metricRow(compared, metric.id)).getByRole('cell', { name: copy.units[metric.unit] })).toBeTruthy();
+    }
+  } finally { auth.dispose(); }
+});
+
+/** A 51-module scorecard whose second page read is held until it is answered or failed. */
+function servePagedScorecard() {
+  serve();
+  const loaded = transport.get.getMockImplementation()!;
+  const cursor = `${card.structureVersion}_50_${'2'.repeat(32)}`;
+  const held: { resolve: (value: unknown) => void; reject: (reason: unknown) => void }[] = [];
+  transport.get.mockImplementation(async (...args) => {
+    if (args[0] !== 'structureScorecard') return loaded(...args);
+    if (args[1].includes('cursor=')) return new Promise((resolve, reject) => { held.push({ resolve, reject }); });
+    const first = card.scorecard!;
+    const items = Array.from({ length: 50 }, (_, index) => ({ ...first.modules.items[0]!, moduleId: `module_${index + 1}` }));
+    return { data: { ...card, scorecard: { ...first, modules: { ...first.modules, total: 51, items,
+      page: { ...first.modules.page, nextCursor: cursor } } } } };
+  });
+  return held;
+}
+
+const expired = () => new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' });
+
+async function pageScorecard(held: unknown[]) {
+  const next = within(await screen.findByRole('navigation', { name: copy.pages })).getByRole('button', { name: copy.next });
+  next.focus();
+  fireEvent.click(next);
+  await waitFor(() => expect(held).toHaveLength(1));
+}
+
+it('moves keyboard focus to Refresh when the requested module page has expired', async () => {
+  const auth = await session();
+  const held = servePagedScorecard();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await pageScorecard(held);
+    await act(() => { held[0]!.reject(expired()); });
+    await screen.findByRole('alert');
+    await afterPaint();
+    expect(screen.queryByRole('heading', { name: copy.modulesTitle })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: structureCopy.refresh }));
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus where it was deliberately moved while an expiring module page was pending', async () => {
+  const auth = await session();
+  const held = servePagedScorecard();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await pageScorecard(held);
+    const elsewhere = screen.getByRole('link', { name: structureCopy.browseModules });
+    elsewhere.focus();
+    await act(() => { held[0]!.reject(expired()); });
+    await screen.findByRole('alert');
+    await afterPaint();
+    expect(document.activeElement).toBe(elsewhere);
+  } finally { auth.dispose(); }
+});
+
+it('abandons the expired page focus request when Back interrupts its read', async () => {
+  const auth = await session();
+  const held = servePagedScorecard();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await pageScorecard(held);
+    const focus = recordFocus();
+    history.back();
+    await waitFor(() => expect(location.search).toBe(''));
+    await screen.findByRole('heading', { name: copy.modulesTitle });
+    await act(() => { held[0]!.reject(expired()); });
+    await afterPaint();
+    focus.stop();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(focus.events).toEqual([]);
+  } finally { auth.dispose(); }
+});
+
+it('refuses a comparison reply that omits a blocking identity check and moves the baseline to another input', async () => {
+  const auth = await session();
+  serve();
+  const loaded = transport.get.getMockImplementation()!;
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8')) as { data: ScorecardComparison };
+  envelope.data.compatibility.checks = envelope.data.compatibility.checks.filter(item => item.id !== 'input-binary');
+  envelope.data.baseline.scope!.inputSha256 = 'f'.repeat(64);
+  envelope.data.structureVersion = card.structureVersion;
+  envelope.data.current.structureVersion = card.structureVersion;
+  transport.get.mockImplementation(async (...args) => args[0] === 'scorecardComparison'
+    ? decodeResponse(JSON.stringify(envelope), 'scorecardComparison') : loaded(...args));
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const compare = await screen.findByRole('region', { name: copy.compareTitle });
+    await within(compare).findByRole('alert');
+    expect(within(compare).queryByText(copy.compatibility.compatible)).toBeNull();
+    expect(within(compare).queryByRole('table', { name: copy.measuresTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});

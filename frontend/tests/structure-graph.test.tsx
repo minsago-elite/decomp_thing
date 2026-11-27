@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, RevisionFile, StructureNeighborhood } from '../src/api/generated';
@@ -320,4 +320,71 @@ it('accepts an unavailable graph for any recorded focus, since it has no center 
   const envelope = neighborhoodEnvelope('structure-neighborhood-not-recorded');
   envelope.data.query.focus = 'fn_0000000000401010';
   expect(decodeResponse(JSON.stringify(envelope), 'structureNeighborhood').data.neighborhood).toBeNull();
+});
+
+/** Lets passive effects, which run after paint, settle before focus is inspected. */
+const afterPaint = () => act(async () => {
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+});
+
+/** Answers the held layout request of one fake worker. */
+async function answer(position: number) {
+  const worker = workers.list[position]!;
+  const request = worker.posted[0] as { nodes: { index: number; depth: number }[]; edges: { source: number; target: number }[] };
+  await act(() => { worker.onmessage?.({ data: { type: 'graph-layout', ...layoutGraph(request.nodes, request.edges) } }); });
+}
+
+it('keeps keyboard focus on the drawing controls as Cancel drawing, Draw again and a finished drawing replace them', async () => {
+  const auth = await session();
+  workers.answer = false;
+  transport.get.mockResolvedValue({ data: calls });
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const cancel = await screen.findByRole('button', { name: copy.cancelLayout });
+    cancel.focus();
+    fireEvent.click(cancel);
+    const again = await screen.findByRole('button', { name: copy.drawAgain });
+    await afterPaint();
+    expect(workers.list[0]!.terminated).toBe(true);
+    expect(screen.getByRole('table', { name: copy.nodesTitle })).toBeTruthy();
+    expect(document.activeElement).toBe(again);
+    fireEvent.click(again);
+    const next = await screen.findByRole('button', { name: copy.cancelLayout });
+    await afterPaint();
+    expect(document.activeElement).toBe(next);
+    await answer(1);
+    await screen.findByRole('img', { name: /relationships around main/ });
+    await afterPaint();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: copy.drawingTitle }));
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus the reader placed elsewhere when drawing is canceled or finishes', async () => {
+  const auth = await session();
+  workers.answer = false;
+  transport.get.mockResolvedValue({ data: calls });
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const cancel = await screen.findByRole('button', { name: copy.cancelLayout });
+    const inspect = screen.getAllByRole('button', { name: /Inspect/ })[0]!;
+    inspect.focus();
+    // A pointer activation that leaves focus on another control does not move it.
+    fireEvent.click(cancel);
+    await screen.findByRole('button', { name: copy.drawAgain });
+    await afterPaint();
+    expect(document.activeElement).toBe(inspect);
+    fireEvent.click(screen.getByRole('button', { name: copy.drawAgain }));
+    await screen.findByRole('button', { name: copy.cancelLayout });
+    await afterPaint();
+    expect(document.activeElement).toBe(inspect);
+    // Focus on Cancel drawing that the reader then moves away is left where they put it when the drawing finishes.
+    screen.getByRole('button', { name: copy.cancelLayout }).focus();
+    inspect.focus();
+    await answer(1);
+    await screen.findByRole('img', { name: /relationships around main/ });
+    await afterPaint();
+    expect(document.activeElement).toBe(inspect);
+  } finally { auth.dispose(); }
 });

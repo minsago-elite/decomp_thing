@@ -15,7 +15,7 @@ export const scorecardCopy = {
   acceptanceUnavailable: 'Not available',
   thresholds: 'No validator threshold applies to these measures (reason {code}); they cannot accept or reject an attempt.',
   measuresTitle: 'Measures',
-  columns: { measure: 'Measure', state: 'State', value: 'Recorded value', fraction: 'Numerator / denominator', recomputed: 'Reproduced from recorded labels', source: 'Recorded at' },
+  columns: { measure: 'Measure', unit: 'Unit', state: 'State', value: 'Recorded value', fraction: 'Numerator / denominator', recomputed: 'Reproduced from recorded labels', source: 'Recorded at' },
   metrics: {
     'structural-recovery-score': 'Structural recovery score (heuristic)',
     'module-structural-recovery-score': 'Module structural recovery score (heuristic)',
@@ -27,6 +27,7 @@ export const scorecardCopy = {
     'unresolved-implementation': 'Entities with an unresolved implementation',
     'excluded-entities': 'Entities the module plan assigns to no module',
   },
+  units: { ratio: 'Ratio', count: 'Count' },
   states: { measured: 'Measured', unmeasured: 'Not measured', unknown: 'Unknown', partial: 'Partial', failed: 'Failed check' },
   reasons: {
     EMPTY_POPULATION: 'the population is empty; the recorded 0.0000 is a placeholder, not a measured zero',
@@ -97,7 +98,7 @@ export const scorecardCopy = {
     'score-interpretation': 'Score interpretation', 'score-formula': 'Score formula', 'model-schema': 'Program model schema',
     'entity-population': 'Entity population', 'module-plan': 'Module plan' },
   checkStates: { match: 'Matches', differs: 'Differs', 'not-recorded': 'Not recorded' },
-  comparisonColumns: { measure: 'Measure', current: 'This attempt', baseline: 'Baseline', delta: 'Delta' },
+  comparisonColumns: { measure: 'Measure', unit: 'Unit', current: 'This attempt', baseline: 'Baseline', delta: 'Delta' },
   deltaStates: { computed: 'Computed', withheld: 'Withheld', 'not-comparable': 'Not comparable' },
   deltaValue: '{value} (numerator {numerator}, denominator {denominator})',
   deltaCount: 'numerator {numerator}, denominator {denominator}',
