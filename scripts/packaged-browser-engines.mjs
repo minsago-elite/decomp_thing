@@ -5,7 +5,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assertAudit, auditFixtures, auditProfileEvidence, auditViewports, captureOutputSignatureChart, chartCaptureSets, engineSupplementalInteractionContexts, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
+import { assertAudit, auditFixtures, clickJourneyLink, runGraphJourney, auditProfileEvidence, auditViewports, captureOutputSignatureChart, chartCaptureSets, engineSupplementalInteractionContexts, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
 import { createEngineDiagnostics, diagnosticOverflowFailure } from './packaged-browser-engine-diagnostics.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
@@ -376,7 +376,7 @@ async function context(options = {}) {
   created.on('page', (page) => {
     diag.page(page);
     page.on('pageerror', (error) => { record.exceptions.push(String(error)); diag.exception(error, page); });
-    page.on('worker', (worker) => record.workers.push({ url: worker.url(), responses: [] }));
+    page.on('worker', (worker) => record.workers.push({ url: worker.url(), purpose: record.workerPurpose ?? null, responses: [] }));
   });
   return { context: created, record };
 }
@@ -518,7 +518,7 @@ async function audit(packagedOrigin, manifest) {
 
 async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   const records = []; const interactions = [];
-  let highlightedTokens = 0; let keyboard = null;
+  let highlightedTokens = 0; let keyboard = null; let graph = null;
   const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
   const open = async (target, page, context, prepare = true) => {
@@ -673,8 +673,16 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       const saved = await fs.readFile(await download.path());
       assert.ok(saved.equals(fixtures.sourceBytes), 'Keyboard download bytes differ from the recorded input');
       keyboard.download = { suggestedFilename: download.suggestedFilename(), bytes: saved.length, matches: true };
+      record.workerPurpose = 'highlight';
       await open(target, source, 'worker/CSP qualification');
       highlightedTokens = await target.locator('.source-token').count();
+      // #644: the lazy scorecard and graph chunks and the layout worker, opened through the reader's links.
+      record.workerPurpose = 'graph-layout';
+      graph = await diagnostics.phase('graph-journey', () => runGraphJourney({ steps: fixtures.graphJourney, fulfilled,
+        navigate: path => target.goto(origin + path), click: text => target.evaluate(clickJourneyLink(text)),
+        ready: (expression, label) => target.waitForFunction(expression, undefined, { timeout: 20000 }).catch(failure => { throw new Error(`Timed out waiting for ${label}`, { cause: failure }); }),
+        evaluate: expression => target.evaluate(expression) }));
+      record.workerPurpose = null;
     });
     await created.close();
   });
@@ -718,7 +726,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
     layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
     workers: { highlightedTokens,
       targets: workerTargets.map((worker) => ({ ...worker, responses: responses.filter((response) => response.url === worker.url) })) },
-    keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+    graph, keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
       interactions: summary(interactionTimes), raw: { cold, feedback, data, interactions: interactionTimes } } };
   return { result, records, responses, origin };
 }

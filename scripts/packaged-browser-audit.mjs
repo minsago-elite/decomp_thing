@@ -246,6 +246,91 @@ export const renderedPreviewDigest = `(async () => {
 })()`;
 
 /** Contract fixtures bound to one job, attempt and revision, with long names and lines. */
+// #644 dynamic chunks and the graph layout worker. The journey starts from the attempt view through the same links a
+// reader follows; the drawing must equal the deterministic layout of the fixture neighborhood (layout.ts, checked by
+// the driver tests), which the packaged layout worker alone produces (there is no main-thread fallback).
+export const graphJourneyContract = Object.freeze({
+  focus: 'fn_0000000000401000', functionLink: 'main', defaultDepth: 1,
+  links: Object.freeze({ scorecard: 'Read the recorded scorecard', functions: 'Browse recovered functions', calls: 'Explore its recorded call neighborhood' }),
+  scorecardTitle: 'Recorded scorecard', scorecardPageLimit: 50, scorecardValue: '0.6500', graphTitle: 'Recorded relationships',
+  layout: Object.freeze({ x: [248, 480, 480, 16, 16], y: [40, 16, 64, 16, 64], width: 672, height: 114, edges: 5 }),
+  assets: Object.freeze({ scorecard: /^assets\/Scorecard-[^/]+\.js$/, graph: /^assets\/GraphRoute-[^/]+\.js$/,
+    layoutWorker: /^assets\/layout\.worker-[^/]+\.js$/, highlightWorker: /^assets\/highlight\.worker-[^/]+\.js$/ }),
+});
+
+const settled = `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
+  && !document.querySelector('main [role="alert"]')`;
+const headed = title => `${settled} && document.querySelector('main h1').textContent === ${JSON.stringify(title)}`;
+
+/** Driver-neutral steps: navigate to a path, or activate one visible link in main by its exact text. */
+function graphJourney(base, api, revisionId) {
+  const c = graphJourneyContract;
+  const revision = `${api}/revisions/${revisionId}`;
+  return [
+    { navigate: base, ready: `${settled} && document.body.innerText.includes('Attempt identity')` },
+    { link: c.links.scorecard, reads: [`${revision}/scorecard`, api],
+      ready: `${headed(c.scorecardTitle)} && [...document.querySelectorAll('main table')].some(table => table.textContent.includes(${JSON.stringify(c.scorecardValue)}))` },
+    { navigate: base, ready: `${settled} && document.body.innerText.includes('Attempt identity')` },
+    { link: c.links.functions, reads: [`${revision}/functions`], ready: `${settled} && document.body.innerText.includes('Showing 1–3 of 5 matching functions')` },
+    { link: c.functionLink, reads: [`${revision}/functions/${c.focus}`], ready: `${settled} && [...document.querySelectorAll('main a')].some(a => a.textContent.trim() === ${JSON.stringify(c.links.calls)})` },
+    { link: c.links.calls, reads: [`${revision}/graph`], ready: `${settled} && document.querySelector('main .graph-canvas svg[role="img"]') !== null` },
+  ];
+}
+
+/** Activates one link in main by exact text; returns false when it is absent or ambiguous. */
+export const clickJourneyLink = text => `(() => {
+  const links = [...document.querySelectorAll('main a')].filter(a => a.textContent.trim() === ${JSON.stringify(text)} && a.getClientRects().length > 0);
+  if (links.length !== 1) return false;
+  links[0].click(); return true;
+})()`;
+
+/** What the packaged layout worker drew, read from the rendered SVG. */
+export const measureGraphDrawing = `(() => {
+  const svg = document.querySelector('main .graph-canvas svg[role="img"]');
+  if (!svg) return null;
+  const nodes = [...svg.querySelectorAll('g.graph-node')].map(node => {
+    const match = /^translate\\((-?[0-9.]+) (-?[0-9.]+)\\)$/.exec(node.getAttribute('transform') ?? '');
+    return match ? [Number(match[1]), Number(match[2])] : null;
+  });
+  return { title: document.querySelector('main h1').textContent, width: Number(svg.getAttribute('width')), height: Number(svg.getAttribute('height')),
+    nodes, edges: svg.querySelectorAll('path.graph-edge').length, focusNodes: svg.querySelectorAll('g.graph-node.is-focus').length };
+})()`;
+
+/** Runs the journey with driver callbacks; records per-step reads and the measured drawing. */
+export async function runGraphJourney({ steps, navigate, click, ready, evaluate, fulfilled }) {
+  const evidence = { steps: [], drawing: null };
+  for (const step of steps) {
+    const before = fulfilled.length; const started = Date.now();
+    if (step.navigate) await navigate(step.navigate);
+    else assert.ok(await click(step.link), `graph journey: missing single link ${step.link}`);
+    await ready(step.ready, `graph journey: ${step.navigate ?? step.link}`);
+    const reads = (step.reads ?? []).map(path => ({ path, ok: fulfilled.slice(before).some(entry => entry.method === 'GET' && entry.path === path && entry.status === 200) }));
+    evidence.steps.push({ action: step.navigate ? 'navigate' : step.link, reads, elapsedMs: Date.now() - started });
+  }
+  evidence.drawing = await evaluate(measureGraphDrawing);
+  return evidence;
+}
+
+/** The drawing must be the fixture's deterministic layout, reached through every journey step and read. */
+export function graphJourneyFailures(graph) {
+  const c = graphJourneyContract;
+  if (!graph || !Array.isArray(graph.steps)) return ['graph journey: evidence missing'];
+  const failures = [];
+  const links = graph.steps.filter(step => step.action !== 'navigate').map(step => step.action);
+  const expectedLinks = [c.links.scorecard, c.links.functions, c.functionLink, c.links.calls];
+  if (JSON.stringify(links) !== JSON.stringify(expectedLinks)) failures.push(`graph journey: links ${JSON.stringify(links)}`);
+  for (const step of graph.steps) for (const read of step.reads ?? []) if (!read.ok) failures.push(`graph journey: ${step.action} did not read ${read.path}`);
+  const d = graph.drawing; const e = c.layout;
+  if (!d) failures.push('graph journey: no drawing');
+  else {
+    const nodes = Array.isArray(d.nodes) ? d.nodes : [];
+    const matches = nodes.length === e.x.length && nodes.every((node, index) => Array.isArray(node) && node[0] === e.x[index] && node[1] === e.y[index]);
+    if (d.title !== c.graphTitle || d.width !== e.width || d.height !== e.height || d.edges !== e.edges || d.focusNodes !== 1 || !matches)
+      failures.push(`graph journey: drawing differs from the deterministic layout ${JSON.stringify(d)}`);
+  }
+  return failures;
+}
+
 export function auditFixtures(repo, buildId) {
   const load = (name) => {
     const path = join(fixtureRoot(repo), `${name}.json`);
@@ -265,6 +350,9 @@ export function auditFixtures(repo, buildId) {
   const run = load('run-completed-unaccepted');
   const runId = run.data.runId;
   const revisionId = 'revision_1';
+  // The attempt's revision links (sources, structure, scorecard) name the audited revision, so the reader's own
+  // scorecard and function links reach the structure fixtures bound below.
+  run.data.resultRevisionId = revisionId;
   const selected = { jobId, runId, revisionId };
   const bound = (name, binding) => { const document = load(name); document.data.binding = binding; return document; };
   const directory = bound('revision-directory-root', selected);
@@ -339,6 +427,27 @@ export function auditFixtures(repo, buildId) {
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
   const functionInventory = bound('function-inventory', selected);
+  // #644 lazy structure views: tiny contract fixtures rebound to the audit revision. The graph link is pinned to the
+  // structure version of the function read, so the neighborhood restates that same version.
+  const functionDetail = bound('entity-detail-function-references', selected);
+  const neighborhood = bound('structure-neighborhood-calls', selected);
+  // The reader's first scorecard page asks for limit 50 and the client admits only that echoed limit; the smallest
+  // complete fixture page (no module rows, unknown total, no next cursor) restates the requested limit.
+  const scorecard = bound('structure-scorecard-unrecorded-plan', selected);
+  if (scorecard.data.scorecard.modules.items.length !== 0 || scorecard.data.scorecard.modules.page.nextCursor !== null)
+    throw new Error('Browser-audit scorecard fixture is no longer a complete single page');
+  scorecard.data.scorecard.modules.page.limit = graphJourneyContract.scorecardPageLimit;
+  if (functionDetail.data.structureVersion !== functionInventory.data.structureVersion
+    || functionDetail.data.entity.selector !== neighborhood.data.query.focus
+    || neighborhood.data.neighborhood.nodes[0].selector !== graphJourneyContract.focus
+    || !functionInventory.data.items.some(item => item.selector === graphJourneyContract.focus && item.name === graphJourneyContract.functionLink))
+    throw new Error('Browser-audit structure fixtures no longer describe the graph journey contract');
+  neighborhood.data.structureVersion = functionDetail.data.structureVersion;
+  // The reader's first graph read uses the UI defaults (depth 1). Every fixture node is within depth 1, so the same
+  // neighborhood answers that request; the echo restates the requested depth.
+  if (neighborhood.data.neighborhood.nodes.some(node => node.depth > graphJourneyContract.defaultDepth))
+    throw new Error('Browser-audit neighborhood fixture reaches beyond the default graph depth');
+  neighborhood.data.query.depth = graphJourneyContract.defaultDepth;
   const owner = history.data.items[0];
   const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
   const routes = [
@@ -364,6 +473,9 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions$`), () => ok(functionInventory)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions/${graphJourneyContract.focus}$`), () => ok(functionDetail)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/graph$`), () => ok(neighborhood)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/scorecard$`), () => ok(scorecard)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), (accept, query, pathname) => sourceFileFrom(pathname)
       ? ok(sourceFileFrom(pathname).chunk) : error(404, 'NOT_FOUND')],
@@ -415,7 +527,7 @@ export function auditFixtures(repo, buildId) {
     { name: 'structure', path: `${base}/revisions/${revisionId}/functions`, rendered: 'Showing 1–3 of 5 matching functions' },
   ];
   return {
-    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId, chartExpected,
+    pages, controls, graphJourney: graphJourney(base, api, revisionId), csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId, chartExpected,
     jobFilter, fileOpen: { ...fileOpenContract, directoryPath: `${base}/revisions/${revisionId}/sources/${fileOpenContract.directoryId}` },
     respond(method, pathname, accept, query = null) {
       const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
@@ -1097,9 +1209,10 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   // Dynamic assets: the explicit highlight action starts the packaged module worker under CSP.
   const sourcePage = fixtures.pages.find((page) => page.name === 'source file');
   const workers = [];
+  let workerPurpose = 'highlight';
   cdp.on('Target.attachedToTarget', ({ sessionId, targetInfo }) => {
     if (targetInfo.type !== 'worker') return;
-    const record = { url: targetInfo.url, responses: [] };
+    const record = { url: targetInfo.url, purpose: workerPurpose, responses: [] };
     workers.push(record);
     cdp.on('Network.responseReceived', (event) => record.responses.push({ url: event.response.url, status: event.response.status }), sessionId);
     void cdp.call('Network.enable', {}, sessionId).catch(() => undefined)
@@ -1110,6 +1223,13 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   await ready(tab, populated(sourcePage), 'source file for highlighting');
   await prepare(tab, sourcePage, 'worker/CSP qualification');
   const highlighted = await evaluate(tab, `document.querySelectorAll('.source-token').length`);
+  // #644: the lazy scorecard and graph chunks and the layout worker, opened through the reader's links.
+  workerPurpose = 'graph-layout';
+  const graph = await runGraphJourney({ steps: fixtures.graphJourney, fulfilled,
+    navigate: path => cdp.call('Page.navigate', { url: origin + path }, tab.sessionId),
+    click: text => evaluate(tab, clickJourneyLink(text)),
+    ready: (expression, label) => ready(tab, expression, label), evaluate: expression => evaluate(tab, expression) });
+  workerPurpose = null;
   await cdp.call('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }, tab.sessionId);
 
   // Keyboard completion: workflow commands and a download, reached with Tab and activated with
@@ -1360,7 +1480,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   const interactionTimes = interactions.map(({ elapsedMs }) => elapsedMs);
   return { profile: profileEvidence, fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
     layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
-    workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
+    workers: { highlightedTokens: highlighted, targets: workers }, graph, keyboard, connectionNotice,
     jobFilter: { ...fixtures.jobFilter, samples: filterSamples },
     fileOpen: { contract: fileOpenEvidenceContract(), samples: fileOpenSamples },
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
@@ -1453,7 +1573,8 @@ export function summarizeAuditEvidence(audit, evidence) {
     unmapped: audit.unmapped,
     interactions: audit.interactions,
     workers: { highlightedTokens: audit.workers.highlightedTokens,
-      targets: audit.workers.targets.map(({ url, responses }) => ({ url, responses })) },
+      targets: audit.workers.targets.map(({ url, purpose, responses }) => ({ url, purpose, responses })) },
+    graph: audit.graph,
     keyboard: audit.keyboard,
     timing: audit.timing,
   };
@@ -1468,6 +1589,8 @@ export function encodeAuditEvidence(audit, maxBytes = 8 * 1024 * 1024) {
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
+const declaredWorker = (manifest, path) => manifest.files.some(entry => entry.path === path);
+
 export function assertAudit(audit, manifest, responses, origin, budgets = {}, {
   connectionNotice = true, jobFilter = true, fileOpen = true, interactionPages = null, extraInteractionContexts = [], profile = 'reference',
 } = {}) {
@@ -1594,13 +1717,25 @@ export function assertAudit(audit, manifest, responses, origin, budgets = {}, {
   const assetBase = `${origin}/nested/assets/ui/`;
   const declared = manifest.files.map((entry) => entry.path).filter((path) => /\.(?:js|css|woff2?|ttf|otf)$/.test(path));
   const loaded = new Map(responses.filter((response) => response.url.startsWith(assetBase)).map((response) => [response.url.slice(assetBase.length), response.status]));
-  // A dedicated worker is its own DevTools target: its script counts as resolved when that target
-  // attached at the packaged URL and produced highlighting, which has no main-thread fallback.
+  // A dedicated worker is its own DevTools target: its script counts as resolved only when that target attached at the
+  // packaged URL during its own step and produced that step's result, neither of which has a main-thread fallback:
+  // highlighting for the highlight worker, the deterministic drawing for the layout worker.
+  const { highlightWorker, layoutWorker } = graphJourneyContract.assets;
+  for (const path of declared) {
+    if (highlightWorker.test(path) || layoutWorker.test(path)) loaded.delete(path);
+  }
+  const graphFailures = graphJourneyFailures(audit.graph);
+  failures.push(...graphFailures);
+  const workerProof = { highlight: [highlightWorker, audit.workers.highlightedTokens > 0],
+    'graph-layout': [layoutWorker, graphFailures.length === 0] };
   for (const worker of audit.workers.targets) {
     if (!worker.url.startsWith(assetBase)) failures.push(`worker outside the asset base: ${worker.url}`);
     const own = worker.responses.find((response) => response.url === worker.url);
     if (own && own.status !== 200) failures.push(`worker script status ${own.status}`);
-    if (audit.workers.highlightedTokens > 0 && (!own || own.status === 200)) loaded.set(worker.url.slice(assetBase.length), 200);
+    const path = worker.url.slice(assetBase.length);
+    const [identity, produced] = workerProof[worker.purpose] ?? [null, false];
+    if (identity && worker.url.startsWith(assetBase) && !identity.test(path)) failures.push(`${worker.purpose} worker has another identity: ${worker.url}`);
+    else if (identity && produced && (!own || own.status === 200) && declaredWorker(manifest, path)) loaded.set(path, 200);
   }
   const missing = declared.filter((path) => loaded.get(path) !== 200);
   if (missing.length) failures.push(`packaged assets not loaded under ${assetBase}: ${missing.join(', ')}`);
