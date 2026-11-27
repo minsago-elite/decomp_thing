@@ -142,8 +142,9 @@ it('shows job input and tool requirements alongside each workflow option in the 
   expect(workflow('Exploration').getByText('sandbox, angr')).toBeTruthy();
   expect(workflow('Exploration').getByText('This workflow uses the uploaded binary directly.')).toBeTruthy();
   expect(workflow('Reconstruction').getByText('HARNESS_NOT_CONFIGURED')).toBeTruthy();
-  expect(workflow('Repair').getByText(/work can start only from a revision recorded by a completed attempt/)).toBeTruthy();
-  // Without a route, the panel names no attempt-history link of its own.
+  expect(workflow('Repair').getByText(/names no accepted revision, so use the result of a completed attempt/)).toBeTruthy();
+  expect(workflow('Repair').getByText(/and use its Result revision\./)).toBeTruthy();
+  // Without a route, the panel names the attempt history in text but links nowhere of its own.
   expect(workflow('Repair').queryByRole('link')).toBeNull();
   expect(workflow('Build').getByText(/did not report the input or tools/)).toBeTruthy();
   expect(workflow('Validation').getByText(/No capability for this workflow/)).toBeTruthy();
@@ -153,7 +154,10 @@ it('shows job input and tool requirements alongside each workflow option in the 
 it('reports an accepted revision without guaranteeing availability of its retained source', () => {
   const view = render(<WorkflowAvailability runtime={launchSnapshot()} job={{ acceptedRevisionId: 'revision_accepted_1' }} />);
   const repair = within(view.getByRole('heading', { name: 'Repair' }).closest('li')!);
-  expect(repair.getByText('revision_accepted_1').parentElement?.textContent).toContain('checked only when work starts');
+  const input = repair.getByText('revision_accepted_1').parentElement!.textContent;
+  expect(input).toContain('Source availability is unverified here.');
+  expect(input).toContain('The server rechecks the revision and source before starting work.');
+  expect(input).not.toMatch(/only when work starts|until work starts/);
   view.rerender(<WorkflowAvailability runtime={snapshot([])} job={{ acceptedRevisionId: 'revision_accepted_1' }} />);
   expect(view.queryByText('revision_accepted_1')).toBeNull();
 });

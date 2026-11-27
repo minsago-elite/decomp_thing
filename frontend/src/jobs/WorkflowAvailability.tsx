@@ -38,8 +38,9 @@ function CapabilityReport({ capability, job, attemptHistory }: { capability: Cap
         <dd>{capability.launch.requiredTools.join(', ') || copy.launchNoRequiredTools}</dd>
         <dt>{copy.launchRecordedInput}</dt>
         <dd>{inputPrerequisite(capability.launch.input, job)}
-          {capability.launch.input === 'recorded-required' && attemptHistory
-            && <> <a href={attemptHistory}>{copy.launchInputAttemptHistory}</a></>}</dd>
+          {capability.launch.input === 'recorded-required' && <> {message(copy.launchInputAttemptResult, {
+            history: attemptHistory ? <a href={attemptHistory}>{copy.launchInputAttemptHistory}</a> : copy.launchInputAttemptHistory,
+          })} {copy.launchInputRetainedSource}</>}</dd>
       </>}
     </dl>
     {job && !capability.launch && <p>{copy.launchIntentNotReported}</p>}
@@ -61,7 +62,7 @@ function inputPrerequisite(input: NonNullable<Capability['launch']>['input'], jo
 /** Display the last authenticated report. It cannot admit work or select a harness. */
 export function WorkflowAvailability({ runtime, receipt, job, attemptHistory }: {
   runtime: RuntimeSnapshot; receipt?: ReceiptTime; job?: JobFacts;
-  /** Existing attempt-history route where completed attempts' recorded revisions are listed. */
+  /** Existing attempt-history route. Each listed attempt's page shows its Result revision. */
   attemptHistory?: string;
 }) {
   const generalCapabilities = runtime.capabilities.filter(capability => capability.workflows.length === 0);
