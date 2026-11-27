@@ -17,7 +17,7 @@ import { seedLogs, qualifyLogs, logsFailureEvidence } from './packaged-browser-l
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, publishReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { qualifyAudit, assertAudit, compactJobFilterAuditEvidence } from './packaged-browser-audit.mjs';
+import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence } from './packaged-browser-audit.mjs';
 import { TargetLifecycle, TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { createServerPhaseCollector, serverPhaseReport } from './packaged-browser-log-server-phases.mjs';
@@ -28,6 +28,7 @@ const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
+  profile: { type: 'string', default: 'reference' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
@@ -37,11 +38,12 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|logs|sources|scale|structure|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|logs|sources|scale|structure|live|proxy|upgrade|legacy|audit] [--profile reference|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; sources: session plus two preseeded retained candidates browsed, previewed, highlighted and compared by keyboard; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP, navigation timing budgets, 50 job-filter submissions, and 50 alternating source-file metadata/preview actions (100ms local feedback / 500ms first data).');
+  console.log('profile reference preserves browser defaults and enforces the documented navigation budgets; profile constrained applies 4x CPU throttling and symmetric 10 Mbit/s network throughput to audit targets, records timings without applying those budgets, and does not establish a new threshold.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh; then labels, archives and deliberately deletes one inert job with peer-tab, deep-link and focus recovery (#173).');
   console.log('logs: session plus real bounded hostile recordings, deep-scroll filtering, whole-log search/download redaction, atomic replacement and SPA teardown heap/DOM budgets. Inert terminal attempts; does not claim live-worker follow qualification.');
@@ -57,6 +59,8 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   await fs.access(values[option]);
 }
 assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'logs', 'sources', 'scale', 'structure', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, logs, sources, scale, structure, live, proxy, upgrade, legacy or audit');
+assert.ok(['reference', 'constrained'].includes(values.profile), '--profile must be reference or constrained');
+assert.ok(values.mode === 'audit' || values.profile === 'reference', '--profile constrained is only supported with --mode audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -711,10 +715,14 @@ try {
     report.jobDataCreated = true;
   }
   if (values.mode === 'audit') {
-    const audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay });
+    const audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay,
+      profile: values.profile });
     report.audit = audit;
     await delay(100); // Drain resource events from the last measured target.
-    report.auditVerdict = assertAudit(audit, manifest, targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin);
+    const interactionPages = auditFixtures(repo, manifest.buildId).pages;
+    report.auditVerdict = assertAudit(audit, manifest,
+      targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin, undefined,
+      { interactionPages, extraInteractionContexts: chromiumSupplementalInteractionContexts(interactionPages), profile: values.profile });
     const compact = compactJobFilterAuditEvidence(audit);
     if (compact !== audit) {
       // Keep the original windows and reads alongside their compact timing representation.
