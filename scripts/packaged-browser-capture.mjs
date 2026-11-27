@@ -114,12 +114,15 @@ export function validatePng(bytes, { width = SCREENSHOT_WIDTH, height = SCREENSH
  * before any DevTools call; the target is brought to front first; a failure
  * throws an error naming the label and phase. Session and ordinary captures
  * default to the fixed 1280x900 contract; audit callers supply their viewport's
- * device-pixel dimensions.
+ * device-pixel dimensions. capture.clipped(target, name, clip) shares the same
+ * ledger/foreground/validate/exclusive-write path for a page clip that stays
+ * inside the rendered viewport (captureBeyondViewport: false, which would
+ * otherwise resize the layout viewport and reflow the measured figure); its
+ * dimensions are checked by the caller, and it returns the written PNG bytes.
  */
 export function createCapture({ cdp, directory, ledger, targetIndex = () => null, now = Date.now }) {
-  return async function capture(target, name, phase = `screenshot:${name}`, expectedSize = undefined) {
+  async function shoot(target, name, phase, dimensions, params) {
     if (typeof name !== 'string' || basename(name) !== name || !name.endsWith('.png')) throw new Error(`Unsafe screenshot name: ${name}`);
-    const dimensions = expectedSize === undefined ? { width: SCREENSHOT_WIDTH, height: SCREENSHOT_HEIGHT } : expectedSize;
     if (dimensions !== null && (!Number.isSafeInteger(dimensions.width) || dimensions.width <= 0
       || !Number.isSafeInteger(dimensions.height) || dimensions.height <= 0)) {
       throw new Error(`Invalid expected screenshot dimensions for ${name}`);
@@ -130,7 +133,7 @@ export function createCapture({ cdp, directory, ledger, targetIndex = () => null
     try {
       await cdp.call(method, {}, target.sessionId, { label: name });
       method = 'Page.captureScreenshot';
-      const { data } = await cdp.call(method, { format: 'png' }, target.sessionId, { label: name });
+      const { data } = await cdp.call(method, params, target.sessionId, { label: name });
       method = 'validate';
       const bytes = Buffer.from(typeof data === 'string' ? data : '', 'base64');
       const { width, height } = validatePng(bytes, dimensions ?? { width: null, height: null });
@@ -138,12 +141,21 @@ export function createCapture({ cdp, directory, ledger, targetIndex = () => null
       await fs.writeFile(join(directory, name), bytes, { flag: 'wx' });
       Object.assign(entry, { outcome: 'written', bytes: bytes.length, width, height,
         sha256: createHash('sha256').update(bytes).digest('hex') });
-      return entry;
+      return { entry, bytes };
     } catch (cause) {
       Object.assign(entry, { outcome: cause?.code === 'EEXIST' ? 'duplicate' : 'failed', method, error: String(cause?.message ?? cause) });
       throw new Error(`Screenshot ${name} (${phase}) failed: ${cause?.message ?? cause}`, { cause });
     }
+  }
+  async function capture(target, name, phase = `screenshot:${name}`, expectedSize = undefined) {
+    const dimensions = expectedSize === undefined ? { width: SCREENSHOT_WIDTH, height: SCREENSHOT_HEIGHT } : expectedSize;
+    return (await shoot(target, name, phase, dimensions, { format: 'png' })).entry;
+  }
+  capture.clipped = async function clipped(target, name, clip) {
+    if (clip === null || typeof clip !== 'object') throw new Error(`Invalid screenshot clip for ${name}`);
+    return (await shoot(target, name, `chart-clip:${name}`, null, { format: 'png', clip, captureBeyondViewport: false })).bytes;
   };
+  return capture;
 }
 
 /** Pass gate: each required name has exactly one written entry whose on-disk bytes still match. */

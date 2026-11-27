@@ -42,7 +42,16 @@ COPY frontend/package.json ./frontend/package.json
 RUN bash scripts/install-frontend-node.sh /opt/frontend-node
 ENV PATH="/opt/frontend-node/bin:${PATH}"
 COPY . .
-RUN --mount=type=cache,target=/root/.gradle ./gradlew --no-daemon installDist
+# Gradle's native HTTP retry is intentionally limited to transient repository
+# failures; timeout bounds the one complete archival build invocation.
+RUN --mount=type=cache,target=/root/.gradle \
+    timeout --signal=TERM --kill-after=30s 45m \
+    ./gradlew --no-daemon \
+      -Dorg.gradle.internal.repository.max.tentatives=5 \
+      -Dorg.gradle.internal.repository.initial.backoff=2000 \
+      -Dorg.gradle.internal.http.connectionTimeout=30000 \
+      -Dorg.gradle.internal.http.socketTimeout=60000 \
+      installDist
 
 FROM toolchain AS runtime
 

@@ -172,3 +172,44 @@ test('shutdown and work cleanup flags stay truthful after capture failures', () 
   recordCleanupTruth(report, { cleanup: [{ status: 'fulfilled' }], workCleanup: 'removed' });
   assert.deepEqual([report.shutdownConfirmed, report.workCleanupConfirmed], [true, true]);
 });
+
+test('clipped chart capture shares the ledgered path with exact clip arguments, bytes and hash', async (t) => {
+  const directory = await scratch(); t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const chart = png(640, 384, 7);
+  const socket = fakeSocket(okReply(chart));
+  const ledger = [];
+  const capture = createCapture({ cdp: new CdpProtocol(socket), directory, ledger, targetIndex: () => 3 });
+  const clip = { x: 12, y: 40, width: 320, height: 192, scale: 1 };
+  const bytes = await capture.clipped({ sessionId: 'C' }, 'chart-0.png', clip);
+  assert.deepEqual(socket.sent.map(({ method, params, sessionId }) => [method, params, sessionId]), [
+    ['Page.bringToFront', {}, 'C'],
+    ['Page.captureScreenshot', { format: 'png', clip, captureBeyondViewport: false }, 'C'],
+  ]);
+  assert.ok(Buffer.isBuffer(bytes)); assert.deepEqual(bytes, chart);
+  const disk = await fs.readFile(join(directory, 'chart-0.png'));
+  assert.deepEqual(disk, chart);
+  assert.deepEqual({ ...ledger[0], startedAtMs: 0 }, { name: 'chart-0.png', phase: 'chart-clip:chart-0.png', targetIndex: 3,
+    startedAtMs: 0, outcome: 'written', bytes: chart.length, width: 640, height: 384,
+    sha256: createHash('sha256').update(disk).digest('hex') });
+  // Ordinary capture on the same instance keeps the 1280x900 contract, no clip, and returns the ledger entry.
+  const ordinary = createCapture({ cdp: new CdpProtocol(fakeSocket(okReply())), directory, ledger });
+  assert.equal(await ordinary({ sessionId: 'C' }, 'home.png', 'home'), ledger[1]);
+
+  // Duplicate: exclusive write refuses, original bytes untouched.
+  const again = createCapture({ cdp: new CdpProtocol(fakeSocket(okReply(png(10, 10)))), directory, ledger });
+  await assert.rejects(again.clipped({ sessionId: 'C' }, 'chart-0.png', clip), /Screenshot chart-0.png \(chart-clip:chart-0.png\) failed/);
+  assert.equal(ledger[2].outcome, 'duplicate'); assert.equal(ledger[2].method, 'write');
+  assert.deepEqual(await fs.readFile(join(directory, 'chart-0.png')), chart);
+
+  // Failure: non-PNG payload is ledgered as failed at validate and nothing is written.
+  const bad = createCapture({ cdp: new CdpProtocol(fakeSocket(okReply(Buffer.from('nope')))), directory, ledger });
+  await assert.rejects(bad.clipped({ sessionId: 'C' }, 'chart-1.png', clip), /chart-clip:chart-1.png/);
+  assert.equal(ledger[3].outcome, 'failed'); assert.equal(ledger[3].method, 'validate');
+  await assert.rejects(fs.access(join(directory, 'chart-1.png')));
+  // Unsafe name or missing clip fail before any ledger entry or CDP call.
+  const quiet = fakeSocket(okReply(chart));
+  const guarded = createCapture({ cdp: new CdpProtocol(quiet), directory, ledger });
+  await assert.rejects(guarded.clipped({ sessionId: 'C' }, '../x.png', clip), /Unsafe screenshot name/);
+  await assert.rejects(guarded.clipped({ sessionId: 'C' }, 'x.png', null), /Invalid screenshot clip/);
+  assert.equal(ledger.length, 4); assert.equal(quiet.sent.length, 0);
+});
