@@ -706,9 +706,9 @@ try {
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin, undefined,
-    // Chrome-only connection, explicit-filter and source-file-open timings are qualified by DevTools;
+    // Chrome-only connection, cross-tab preference, explicit-filter and source-file-open timings are qualified by DevTools;
     // this runner does not measure them, so their verdicts are omitted rather than claimed.
-    { connectionNotice: false, jobFilter: false, fileOpen: false });
+    { connectionNotice: false, jobFilter: false, fileOpen: false, crossTabPreferences: false });
   const records = [smoked.record, ...audited.records];
   const cspEvents = records.flatMap((record) => record.csp);
   const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);
