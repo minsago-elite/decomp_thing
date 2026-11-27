@@ -47,6 +47,7 @@ function parseUrl(value, label) {
 const report = { status: 'running', engine: values.engine, playwright: readJson(join(values.playwright, 'package.json'), 'Playwright package metadata').version,
   driverNode: process.versions.node, evidenceDirectory: root };
 const secrets = [];
+const exceptionContexts = [];
 const safe = (text) => secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), String(text)).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
 let work; let application; let browser; let output = ''; let errors = '';
 
@@ -99,7 +100,9 @@ async function stop(child) {
 /** One context per viewport; CSP violations, responses and workers are recorded per context. */
 async function context(options = {}) {
   const created = await browser.newContext({ acceptDownloads: true, ...options });
-  const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [] };
+  const exceptionContext = attachExceptionContext(created);
+  exceptionContexts.push(exceptionContext);
+  const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [], exceptionContext };
   await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => {
     try { record.csp.push(JSON.parse(payload)); }
     catch (cause) { throw new Error('CSP instrumentation returned invalid JSON', { cause }); }
@@ -368,7 +371,6 @@ async function context(options = {}) {
     page.on('pageerror', (error) => record.exceptions.push(String(error)));
     page.on('worker', (worker) => record.workers.push({ url: worker.url(), responses: [] }));
   });
-  record.exceptionContext = attachExceptionContext(created);
   return { context: created, record };
 }
 
@@ -468,7 +470,7 @@ async function probeApplicationShellCsp(origin) {
 /** Real server session: bootstrap link, cookie restore across reload, runtime identity and sign-out. */
 async function smoke(origin, manifest) {
   const { context: created, record } = await context();
-  record.exceptionContext.phase = 'smoke';
+  record.exceptionContext.auditPhase = 'smoke';
   const page = await created.newPage();
   const link = await waitFor(() => output.split(/\s+/).find((part) => part.startsWith(`${origin}/nested/#bootstrap=`)), 'local bootstrap handoff');
   secrets.push(parseUrl(link, 'bootstrap handoff').hash.slice('#bootstrap='.length));
@@ -493,7 +495,7 @@ async function smoke(origin, manifest) {
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.getByText(/You signed out of this browser/).waitFor();
   const storage = await page.evaluate(() => localStorage.length + sessionStorage.length);
-  record.exceptionContext.phase = 'smoke closing';
+  record.exceptionContext.auditPhase = 'smoke closing';
   await created.close();
   return { record, result: { authenticated: true, fragmentRemoved: true, restoredAfterReload: true, runtimeBuild: manifest.buildId, signedOut: true, storageEntries: storage } };
 }
@@ -515,7 +517,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
   const open = async (target, page, context, prepare = true) => {
-    records.at(-1).exceptionContext.phase = `${context}: ${page.name}`;
+    records.at(-1).exceptionContext.auditPhase = `${context}: ${page.name}`;
     try {
       interactions.push(...await openEngineAuditPage(target, { origin, page, fulfilled, context, prepare }));
     } catch (failure) {
@@ -669,7 +671,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       await open(target, source, 'worker/CSP qualification');
       highlightedTokens = await target.locator('.source-token').count();
     }
-    record.exceptionContext.phase = `${viewport.name} closing`;
+    record.exceptionContext.auditPhase = `${viewport.name} closing`;
     await created.close();
   }
   // Timing: initial-route metadata only; explicit-read population is recorded in interactions.
@@ -685,7 +687,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       const cycle = fixtures.pages.filter((page) => page.name !== 'upload');
       for (let index = 0; index < 50; index += 1) {
         const page = cycle[(index + 1) % cycle.length];
-        record.exceptionContext.phase = `route timing ${index}: ${page.name}`;
+        record.exceptionContext.auditPhase = `route timing ${index}: ${page.name}`;
         const timing = await target.evaluate(`new Promise((resolve, reject) => {
           const target = ${JSON.stringify(page.path)};
           const link = document.createElement('a'); link.href = target; link.textContent = 'audit'; document.querySelector('main').append(link);
@@ -702,7 +704,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         feedback.push(timing.focused); data.push(timing.populated);
       }
     }
-    record.exceptionContext.phase = `cold sample ${sample} closing`;
+    record.exceptionContext.auditPhase = `cold sample ${sample} closing`;
     await created.close();
   }
   const summary = (list) => { const sorted = [...list].sort((a, b) => a - b); const at = (f) => Number(sorted[Math.min(sorted.length - 1, Math.ceil(f * sorted.length) - 1)].toFixed(1));
@@ -750,7 +752,6 @@ try {
     violations: applicationCspViolations, playwrightScreenshotViolations: playwrightScreenshotEvents,
     exceptions: records.flatMap((record) => record.exceptions),
   };
-  report.pageExceptionContexts = summarizeExceptionContexts(records.map((record) => record.exceptionContext.snapshot()));
   const failures = [...report.auditVerdict.failures];
   if (report.contentSecurityPolicy.violations.length) failures.push(`CSP violations: ${JSON.stringify(report.contentSecurityPolicy.violations)}`);
   if (report.contentSecurityPolicy.missingPolicyDocuments.length) failures.push('A packaged document omitted CSP');
@@ -769,6 +770,8 @@ try {
     try { execFileSync(values.python, [installHelper, 'cleanup', '--work', work, '--owner-token', ownerToken]); report.workCleanupConfirmed = true; }
     catch (error) { report.workCleanupError = String(error); process.exitCode = 1; }
   }
+  // Report observations from every created context, including probes and interrupted journeys.
+  report.pageExceptionContexts = summarizeExceptionContexts(exceptionContexts.map((exceptionContext) => exceptionContext.snapshot()));
   await fs.writeFile(join(root, 'report.json'), safe(JSON.stringify(report, null, 2)) + '\n');
   console.log(`${values.engine}: ${report.status}. Report: ${join(root, 'report.json')}`);
 }
