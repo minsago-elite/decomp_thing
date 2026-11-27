@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { crc32, deflateSync } from 'node:zlib';
-import { ALLOWED_METHODS, REAL_ZOOM_DEADLINES, REAL_ZOOM_PROCESSES, createRealZoomSection, qualifyRealZoom } from './packaged-browser-real-zoom.mjs';
+import { ALLOWED_METHODS, LAYOUT_READY, REAL_ZOOM_DEADLINES, REAL_ZOOM_PROCESSES, createRealZoomSection, qualifyRealZoom } from './packaged-browser-real-zoom.mjs';
 import {
   GEOMETRY_PROBE_SCHEMA, MARKER, MAX_PROBE_PNG_BYTES, PROBE_CAPS, PROBE_PAGE, assessGeometryProbe, candidateClips, createGeometryProbe, createGeometryProbeSection,
   decideConvention, decodePng, matchMarker, probePngName, samplePoints,
@@ -140,6 +140,8 @@ function harness({ convention = 'document-dip', tweak = {}, hangCapture = false,
       const e = params.expression;
       if (e.includes('__probeWheel')) return { result: { value: measure() } };
       if (e === '[scrollX, scrollY]') return { result: { value: [0, scrollY] } };
+      // Ordinary-drive layout readiness (#619 calibration repair): the stand-in's measured, positive viewport.
+      if (e.startsWith(`({ ready: ${LAYOUT_READY}`)) { const m = measure(); return { result: { value: { ready: m.innerWidth > 0 && m.innerHeight > 0, innerWidth: m.innerWidth, innerHeight: m.innerHeight } } }; }
       if (e.includes('resolutionMatches')) return { result: { value: { ...measure(), visualViewport: { scale: 1, width: 1280, height: 657 }, innerHeight: 657, resolutionQuery: /matchMedia\("([^"]+)"\)/.exec(e)[1], resolutionMatches: true } } };
       return { result: { value: true } };
     };
@@ -274,7 +276,7 @@ test('late hook work: cleanup cuts a hung probe at the original deadline, reject
     const s = createGeometryProbeSection(); const probe = createGeometryProbe({ section: s, root });
     probe.attach(REAL_ZOOM_PROCESSES[1]);
     let release; const gate = new Promise((r) => { release = r; });
-    const cdp = { call: async (m) => { if (m === 'Target.createTarget') await gate; if (m === 'Runtime.evaluate') return { result: { value: { ready: 'complete', markerDocument: { left: 1 }, devicePixelRatio: 2, visualViewport: { scale: 1 } } } }; return { targetId: 't', sessionId: 's' }; } };
+    const cdp = { call: async (m) => { if (m === 'Target.createTarget') await gate; if (m === 'Runtime.evaluate') return { result: { value: { ready: 'complete', markerDocument: { left: 1 }, innerWidth: 640, innerHeight: 328, devicePixelRatio: 2, visualViewport: { scale: 1 } } } }; return { targetId: 't', sessionId: 's' }; } };
     const running = probe.run({ key: 'zoom200', factor: 2, cdp, delay, pid: null, remainingMs: () => 1e6 });
     await delay(20); probe.cleanupStarted('zoom200'); const frozen = JSON.stringify(s); release(); await running; await delay(100);
     assert.equal(s.processes[0].state, 'cut-by-cleanup'); assert.ok(s.processes[0].rejectedLateWrites >= 1);
@@ -309,7 +311,7 @@ async function directProbe({ neverReady = false } = {}) {
   const root = await fs.mkdtemp(join(repo, 'build/test-zoom-probe-lifetime-'));
   const section = createGeometryProbeSection(); const calls = []; let releaseCapture;
   const measure = { ready: neverReady ? 'loading' : 'complete', markerDocument: { left: 37, top: 411, width: 100, height: 100 },
-    devicePixelRatio: 2, innerWidth: 640, clientWidth: 632, scrollHeight: 3000, visualViewport: { scale: 1, width: 632.5, height: 328.5 }, scrollX: 0, scrollY: 296.5,
+    devicePixelRatio: 2, innerWidth: 640, innerHeight: 328, clientWidth: 632, scrollHeight: 3000, visualViewport: { scale: 1, width: 632.5, height: 328.5 }, scrollX: 0, scrollY: 296.5,
     wheel: [{ isTrusted: true, deltaX: 0, deltaY: 296.5, deltaMode: 0 }] };
   const cdp = { async call(method, params = {}) {
     calls.push(method);
@@ -563,4 +565,40 @@ test('N9: only one factor matching, or zoom200/zoom400 disagreeing, never conclu
     assert.match((await assessGeometryProbe(split.section, { directory: split.root, realZoom: split.realZoom })).join('\n'), /conventions differ/);
     assert.notDeepEqual(await assessGeometryProbe(one.section, { directory: one.root, realZoom: one.realZoom }), []);
   } finally { await rmRoot(one.root); await rmRoot(split.root); }
+});
+
+// #619 Chrome 149 repair: run2 retained a probe target measured 0x0 at readyState complete; it is waited for within
+// the probe's own readyMs and a permanently 0x0 probe target is a diagnostic failure, never a 0 gutter.
+test('probe layout readiness: delayed positive layout is measured; permanent 0x0 fails without recording a gutter', async () => {
+  for (const zeroPolls of [3, Infinity]) {
+    const root = await fs.mkdtemp(join(repo, 'build/test-zoom-probe-layout-'));
+    try {
+      const section = createGeometryProbeSection(); let polls = 0;
+      const cdp = { async call(method) {
+        if (method === 'Target.createTarget') return { targetId: 'p' };
+        if (method === 'Target.attachToTarget') return { sessionId: 's' };
+        if (method === 'Target.closeTarget') return { success: true };
+        if (method === 'Browser.getWindowForTarget') return { bounds: { width: 1280, height: 800 } };
+        if (method === 'Runtime.evaluate') {
+          const valid = ++polls > zeroPolls;
+          return { result: { value: { ready: 'complete', markerDocument: { left: 37, top: 411, width: 100, height: 100 }, devicePixelRatio: 1, innerWidth: valid ? 1280 : 0,
+            innerHeight: valid ? 657 : 0, clientWidth: valid ? 1265 : 0, clientHeight: valid ? 657 : 0, scrollHeight: 3000, visualViewport: { scale: 1, width: valid ? 1265 : 0, height: valid ? 657 : 0 }, scrollX: 0, scrollY: 0 } } };
+        }
+        return {};
+      } };
+      const probe = createGeometryProbe({ section, root, caps: { ...PROBE_CAPS, readyMs: 400 } });
+      probe.attach(REAL_ZOOM_PROCESSES[0]);
+      await probe.run({ key: 'calibration', factor: 1, cdp, delay, pid: null, remainingMs: () => 1e6 });
+      const e = section.processes[0];
+      if (zeroPolls === 3) {
+        assert.equal(e.state, 'completed', JSON.stringify(e.failures));
+        assert.equal(e.gutterCss, 15); assert.equal(e.measurements[0].innerWidth, 1280);
+      } else {
+        assert.equal(e.state, 'failed');
+        assert.match(e.failures.join(), /probe target never reported a positive layout viewport \(0x0\)/);
+        assert.equal(e.gutterCss ?? null, null, 'no gutter from an unusable target');
+        assert.ok(polls >= 3);
+      }
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  }
 });

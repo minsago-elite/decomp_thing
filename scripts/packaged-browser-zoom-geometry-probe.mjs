@@ -403,6 +403,33 @@ export function createGeometryProbe({ section, root, caps = PROBE_CAPS, now = ()
   };
 }
 
+// A target can exist before its first layout. Bound the outstanding CDP read as well as the polling interval.
+export async function pollZoomLayout(read, isReady, readyMs, delay) {
+  const started = performance.now();
+  const end = started + readyMs;
+  const expired = Symbol('layout deadline');
+  let timer;
+  const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(expired), readyMs); });
+  let first = null;
+  let last = null;
+  let polls = 0;
+  let ready = false;
+  try {
+    while (performance.now() < end) {
+      polls++;
+      const value = await Promise.race([read(), timeout]);
+      if (value === expired || performance.now() >= end) break;
+      if (polls === 1) first = value;
+      last = value;
+      if (isReady(value)) { ready = true; break; }
+      if (await Promise.race([delay(50), timeout]) === expired) break;
+    }
+    return { first, last, polls, ready, elapsedMs: Math.round(performance.now() - started) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function probeWork({ entry, put, factor, key, cdp, checkActive, delay, root, caps }) {
   const evaluate = async (sessionId, expression) => {
     const r = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId);
@@ -413,12 +440,17 @@ async function probeWork({ entry, put, factor, key, cdp, checkActive, delay, roo
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
   await cdp.call('Page.enable', {}, sessionId); await cdp.call('Runtime.enable', {}, sessionId);
   await cdp.call('Page.navigate', { url: PROBE_URL }, sessionId);
-  const readyEnd = Date.now() + caps.readyMs; let m = null;
-  while (Date.now() < readyEnd) {
-    try { m = await evaluate(sessionId, MEASURE); if (m?.ready === 'complete' && m.markerDocument) break; } catch (error) { if (!/context|navigat|Cannot find/i.test(error.message)) throw error; }
-    await delay(50);
-  }
+  const layout = await pollZoomLayout(async () => {
+    try { return await evaluate(sessionId, MEASURE); }
+    catch (error) {
+      if (!/context|navigat|Cannot find/i.test(error.message)) throw error;
+      return null;
+    }
+  }, value => value?.ready === 'complete' && value.markerDocument && value.innerWidth > 0 && value.innerHeight > 0,
+  caps.readyMs, delay);
+  const m = layout.last;
   if (m?.ready !== 'complete' || !m.markerDocument) throw new Error('probe page not ready');
+  if (!layout.ready) throw new Error(`probe target never reported a positive layout viewport (${m.innerWidth}x${m.innerHeight})`);
   const measure = async (label) => {
     const value = label === 'initial' ? m : await evaluate(sessionId, MEASURE);
     const { bounds } = await cdp.call('Browser.getWindowForTarget', { targetId });

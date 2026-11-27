@@ -366,8 +366,8 @@ async function stop(child) {
 }
 
 /** Scripted CDP that derives zoom from the seeded profile, as a stand-in for HostZoomMap. */
-function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null, product = PRODUCT, stopImpl = stop, shot = 'dip', gutterCal = GUTTER_CAL, openState = null, scrolling = null } = {}) {
-  const launches = []; const children = []; const clips = []; const viewportPngs = new Map();
+function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null, product = PRODUCT, stopImpl = stop, shot = 'dip', gutterCal = GUTTER_CAL, openState = null, scrolling = null, layout = null } = {}) {
+  const launches = []; const children = []; const clips = []; const viewportPngs = new Map(); const layoutPolls = new Map();
   const spawnChrome = (binary, argv, options) => {
     const key = REAL_ZOOM_PROCESSES[launches.length].key;
     const profile = argv.find((a) => a.startsWith('--user-data-dir=')).slice(16);
@@ -390,7 +390,7 @@ function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null
     const listeners = new Map(); const pending = new Set(); let closed = false;
     const close = () => { closed = true; for (const p of pending) p.reject(new Error('DevTools connection closed')); pending.clear(); };
     child.once('exit', close);
-    const reply = (method, params, sessionId) => {
+    const reply = async (method, params, sessionId) => {
       const g = geo();
       if (method === 'Browser.getVersion') return { product };
       if (method === 'Target.createTarget') return { targetId: `t-${launch.key}` };
@@ -419,7 +419,12 @@ function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null
       if (method !== 'Runtime.evaluate') return {};
       const expr = params.expression;
       let value = true;
-      if (expr.includes('__gutterCalibration')) value = gutterCal ? { __gutterCalibration: true, ready: 'complete', innerWidth: gutterCal.innerWidth, clientWidth: gutterCal.clientWidth,
+      if (expr.startsWith(`({ ready: ${RealZoom.LAYOUT_READY}`)) {
+        // Observed layout readiness: by default the measured geometry; `layout` scripts a delayed or permanently 0x0 target.
+        const l = layout ? await layout(launch.key, layoutPolls.set(launch.key, (layoutPolls.get(launch.key) ?? 0) + 1).get(launch.key)) : g;
+        value = { ready: l.innerWidth > 0 && l.innerHeight > 0, innerWidth: l.innerWidth, innerHeight: l.innerHeight };
+      }
+      else if (expr.includes('__gutterCalibration')) value = gutterCal ? { __gutterCalibration: true, ready: 'complete', innerWidth: gutterCal.innerWidth, clientWidth: gutterCal.clientWidth,
         clientHeight: gutterCal.clientHeight, scrollHeight: gutterCal.scrollHeight } : null;
       else if (expr.includes('resolutionMatches')) value = { ...g, resolutionQuery: /matchMedia\("([^"]+)"\)/.exec(expr)[1], bounds: undefined };
       else if (scrolls && expr.includes('const r = e.getBoundingClientRect();\n    return { x:') && /main-navigation-links|getElementById/.test(expr)) {
@@ -1375,4 +1380,77 @@ test('R3 rejects panels beyond the calibrated limit and refuses oversized PNGs b
     await RealZoom.writeZoomPng(path, Buffer.alloc(cap));
     assert.equal((await fs.stat(path)).size, cap);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// #619 Chrome 149 calibration repair: a fresh headless target reported 0x0 until its first resize (retained
+// build/1982-calibration-repair/repro logs: 19/25 launches, positive at Page.frameResized within ~1.9 s).
+test('layout readiness: a delayed valid 1x layout is waited for, then measured once and exactly', async () => {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  try {
+    const h = harness({ layout: (key, n) => (key === 'calibration' && n <= 4 ? { innerWidth: 0, innerHeight: 0 } : { innerWidth: 1280, innerHeight: CAL.innerHeight }) });
+    const section = createRealZoomSection();
+    await qualifyRealZoom({ ...h.args, section, root });
+    const c = proc(section, 'calibration');
+    assert.equal(c.failure, undefined);
+    assert.deepEqual(c.layoutWaits.map((w) => [w.label, w.ready, w.polls, w.initial, w.last]),
+      [['calibration', true, 5, { innerWidth: 0, innerHeight: 0 }, { innerWidth: 1280, innerHeight: CAL.innerHeight }]]);
+    assert.equal(c.probes.length, 1, 'single calibration probe, taken only after readiness');
+    assert.equal(c.probes[0].innerWidth, 1280, 'independent measurement, not the readiness poll');
+    assert.equal(c.methods.counts['Target.createTarget'], 1, 'no fresh target or retry');
+    assert.ok(proc(section, 'zoom200').failure === undefined && proc(section, 'zoom200').layoutWaits.every((w) => w.ready), 'zoom processes run on the valid calibration');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('layout readiness: a permanently 0x0 target fails at the original readyMs, without probe, retry or guessed size', async () => {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  try {
+    const h = harness({ layout: (key) => (key === 'calibration' ? { innerWidth: 0, innerHeight: 0 } : { innerWidth: 1280, innerHeight: CAL.innerHeight }) });
+    const section = createRealZoomSection();
+    const started = Date.now();
+    await qualifyRealZoom({ ...h.args, section, root, deadlines: { ...REAL_ZOOM_DEADLINES, readyMs: 600 } });
+    assert.ok(Date.now() - started < 20000);
+    const c = proc(section, 'calibration');
+    assert.match(c.failure, /calibration target never reported a positive layout viewport within 600 ms \(last 0x0\)/);
+    assert.deepEqual([c.layoutWaits[0].ready, c.layoutWaits[0].last], [false, { innerWidth: 0, innerHeight: 0 }]);
+    assert.ok(c.layoutWaits[0].polls >= 2 && c.layoutWaits[0].elapsedMs >= 600);
+    assert.deepEqual(c.probes, [], 'no calibration geometry is recorded from an unusable target');
+    assert.equal(c.methods.counts['Target.createTarget'], 1);
+    assert.equal(c.cleanup.directoryRemoved, true);
+    assert.equal(proc(section, 'zoom200').failure, 'skipped: no valid 1x calibration');
+    zoomFails(section, cleanZoom().main, /calibration/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('layout readiness: a positive but wrong 1x layout still fails the exact calibration checks', async () => {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  try {
+    const h = harness({ geometryFor: (f, key) => (key === 'calibration' ? { ...realGeometry(1), innerWidth: 1265, visualViewport: { ...realGeometry(1).visualViewport, width: 1265 } } : realGeometry(f)) });
+    const section = createRealZoomSection();
+    await qualifyRealZoom({ ...h.args, section, root });
+    assert.equal(proc(section, 'calibration').layoutWaits[0].ready, true);
+    assert.equal(proc(section, 'zoom200').failure, 'skipped: no valid 1x calibration');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('a layout reply arriving after readiness expires cannot start the calibration probe', async () => {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  const read = Promise.withResolvers();
+  try {
+    const h = harness({ layout: () => read.promise });
+    const section = createRealZoomSection();
+    await qualifyRealZoom({ ...h.args, section, root,
+      deadlines: { ...REAL_ZOOM_DEADLINES, readyMs: 60, calibrationMs: 3000 } });
+    const calibration = proc(section, 'calibration');
+    assert.match(calibration.failure, /never reported a positive layout viewport within 60 ms/);
+    assert.equal(calibration.layoutWaits[0].ready, false);
+    assert.equal(calibration.layoutWaits[0].polls, 1);
+    read.resolve({ innerWidth: 1280, innerHeight: CAL.innerHeight });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calibration.probes, []);
+    assert.equal(calibration.cleanup.directoryRemoved, true);
+    assert.equal(proc(section, 'zoom200').failure, 'skipped: no valid 1x calibration');
+  } finally {
+    read.resolve({ innerWidth: 1280, innerHeight: CAL.innerHeight });
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

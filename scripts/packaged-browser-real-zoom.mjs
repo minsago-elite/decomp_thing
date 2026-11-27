@@ -11,8 +11,8 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { crc32, deflateSync } from 'node:zlib';
-// The diagnostic probe file is unchanged and only imported for its bounded PNG decoder and full-region comparison.
-import { decodePng, regionEqual, MAX_PROBE_PNG_BYTES } from './packaged-browser-zoom-geometry-probe.mjs';
+// The ordinary drive and the diagnostic use the same bounded layout wait and PNG helpers.
+import { decodePng, pollZoomLayout, regionEqual, MAX_PROBE_PNG_BYTES } from './packaged-browser-zoom-geometry-probe.mjs';
 import {
   RESPONSIVE_REGIONS, RESPONSIVE_SCHEMA, RESPONSIVE_TOUCH, createResponsiveSection, qualifyResponsive, screenshotName, assessResponsiveObservation,
   digestFailures, fixtureFailures, runLedgerFailures, verifyResponsiveScreenshots, readResponsivePng, PREFERENCES, MAX_RESPONSIVE_PNG_BYTES,
@@ -359,11 +359,34 @@ async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spa
   }
 }
 
-async function makeZoomTarget(cdp) {
+/** Observed-only readiness: a fresh target reports a positive layout viewport before anything measures it. */
+export const LAYOUT_READY = '(innerWidth > 0 && innerHeight > 0)';
+const MAX_LAYOUT_WAITS = 16;
+
+/**
+ * A fresh headless target can report innerWidth/innerHeight 0 until its first view resize reaches the renderer
+ * (observed on pinned Chrome 149 under load: 0x0 at creation, 1280x657 after Page.frameResized).
+ * Waits for a positive layout within the existing readyMs budget; it never sets or infers a size, and the single
+ * calibration probe that follows is still checked exactly. A viewport that stays unusable fails here.
+ */
+async function makeZoomTarget(cdp, { record, delay, deadlines, label }) {
   const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
   await cdp.call('Page.enable', {}, sessionId);
   await cdp.call('Runtime.enable', {}, sessionId);
+  const layout = await pollZoomLayout(async () => {
+    const response = await cdp.call('Runtime.evaluate', {
+      expression: `({ ready: ${LAYOUT_READY}, innerWidth, innerHeight })`, returnByValue: true,
+    }, sessionId);
+    return response?.result?.value ?? null;
+  }, value => value?.ready === true, deadlines.readyMs, delay);
+  const size = value => value && ({ innerWidth: value.innerWidth, innerHeight: value.innerHeight });
+  record.layoutWaits ??= [];
+  if (record.layoutWaits.length < MAX_LAYOUT_WAITS) {
+    record.layoutWaits.push({ label: cap(label), ready: layout.ready, polls: layout.polls,
+      elapsedMs: layout.elapsedMs, initial: size(layout.first), last: size(layout.last) });
+  }
+  if (!layout.ready) throw new Error(`real-zoom: ${label} target never reported a positive layout viewport within ${deadlines.readyMs} ms (last ${cap(layout.last?.innerWidth)}x${cap(layout.last?.innerHeight)})`);
   return { targetId, sessionId };
 }
 
@@ -390,7 +413,7 @@ async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlin
     return entry;
   };
   if (!spec.seed) {
-    const target = await makeZoomTarget(cdp);
+    const target = await makeZoomTarget(cdp, { record, delay, deadlines, label: 'calibration' });
     await probe(target, 'calibration about:blank');
     // Authoritative 1x gutter, flag off: same owned target, pinned overflowing data: page, inside the calibration cap.
     await cdp.call('Page.navigate', { url: GUTTER_URL }, target.sessionId);
@@ -496,7 +519,7 @@ async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlin
     return { ...strip(first), ...(full ? { segments: segments.map(strip) } : {}), name, bytes: png.length, sha256: sha256(png), width: clip.width, height: clip.height,
       clip: { ...clip }, elementRect: first.elementRect, viewport: first.viewport };
   };
-  await qualifyResponsive({ cdp, makeTarget: async () => (current = await makeZoomTarget(cdp)), evaluate, ready, delay, root, origin, fixtures, section: responsive,
+  await qualifyResponsive({ cdp, makeTarget: async () => (current = await makeZoomTarget(cdp, { record, delay, deadlines, label: spec.key })), evaluate, ready, delay, root, origin, fixtures, section: responsive,
     clipFor, pageExpression: ZOOM_PAGE, captureShot,
     profiles: [profile], sizing: REAL_ZOOM_SIZING, restoreMetrics: false,
     // Touch emulation is labelled and allowed; size is observed, never set.
