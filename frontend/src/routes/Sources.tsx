@@ -117,6 +117,8 @@ function Directory({ selected, basePath, pin, search, historyEntry, onDeleted }:
       <button type="button" disabled={loading || cursor === undefined} onClick={first}>{copy.first}</button>
       <button type="button" disabled={loading || !data?.page.nextCursor} onClick={() => {
         if (data?.page.nextCursor) {
+          // A first automatic pin changes the routed pin, so this route remounts the view under the still-enabled control.
+          holdFocusThroughTransition(document.activeElement);
           moveFocus.current = true;
           location.route(sourceDirectoryPath(basePath, selected, selected.directoryId, data.page.nextCursor, effectivePin ?? undefined));
         }

@@ -370,3 +370,54 @@ it('does not hold focus for a blur that happens outside the operation transition
     expect(document.activeElement).toBe(document.body);
   } finally { auth.dispose(); }
 });
+
+// R16: Next directory page from an address its first read pinned in place routes to the pinned address, so the view
+// remounts under the still-enabled control. A genuine 410, held or not, must still land on the surviving notice.
+const paged: RevisionDirectory = { ...directory, page: { ...directory.page, nextCursor: 'page_2' } };
+for (const timing of ['held', 'unheld'] as const) {
+  it(`keeps Next directory page focus ownership from an automatically pinned address until a ${timing} 410 (R16)`, async () => {
+    chromeRemovalBlur();
+    const held = heldRead();
+    let answer: () => Promise<unknown> = () => Promise.resolve({ data: paged });
+    transport.get.mockImplementation((kind: string) => kind === 'revisionDirectory' ? answer() : Promise.reject(new Error(kind)));
+    const auth = await mount(directoryUrl);
+    try {
+      const next = await screen.findByRole('button', { name: sourceCopy.next });
+      await waitFor(() => expect(next.matches(':disabled')).toBe(false));
+      expect(location.search).toMatch(/metadataVersion=/);
+      next.focus();
+      answer = timing === 'held' ? () => held.promise : () => Promise.reject(gone());
+      fireEvent.keyDown(next, { key: 'Enter' }); fireEvent.click(next);
+      if (timing === 'held') {
+        await waitFor(() => expect(reads('revisionDirectory')).toBe(2));
+        await new Promise(done => setTimeout(done, 20));
+        expect(next.isConnected).toBe(false);
+        await act(async () => { held.reject(gone()); await Promise.resolve(); });
+      }
+      const notice = await waitFor(expectGone);
+      expect(transport.get.mock.calls.at(-1)![1]).toContain('page_2');
+      expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+    } finally { auth.dispose(); }
+  });
+}
+
+it('leaves focus the user moved after Next directory page remounts the pinned view alone (R16)', async () => {
+  chromeRemovalBlur();
+  const held = heldRead();
+  let answer: () => Promise<unknown> = () => Promise.resolve({ data: paged });
+  transport.get.mockImplementation((kind: string) => kind === 'revisionDirectory' ? answer() : Promise.reject(new Error(kind)));
+  const auth = await mount(directoryUrl);
+  try {
+    const next = await screen.findByRole('button', { name: sourceCopy.next });
+    await waitFor(() => expect(next.matches(':disabled')).toBe(false));
+    next.focus();
+    answer = () => held.promise;
+    fireEvent.click(next);
+    await waitFor(() => expect(reads('revisionDirectory')).toBe(2));
+    await new Promise(done => setTimeout(done, 20));
+    const surviving = screen.getByRole('button', { name: 'Sign out' }); surviving.focus();
+    await act(async () => { held.reject(gone()); await Promise.resolve(); });
+    await waitFor(expectGone);
+    expect(document.activeElement).toBe(surviving);
+  } finally { auth.dispose(); }
+});
