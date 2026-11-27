@@ -2,6 +2,10 @@ package decompengine
 
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentTaskProgress
+import decompengine.agent.AgentTerminalOutputEvent
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.jobs.FullRunJournalWriterHooks
@@ -53,6 +57,21 @@ internal class ReconstructionCliProgress private constructor(
     private val workspace: decompengine.project.ReconstructionOutputWorkspace?,
 ) : AgentWorkflowProgress by journal, AutoCloseable {
     private val closed = AtomicBoolean()
+
+    override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress =
+        observeTask(journal.beginTask(taskId, request))
+
+    override fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress =
+        observeTask(journal.beginTask(taskId, request, workflowRunId))
+
+    private fun observeTask(delegate: AgentTaskProgress) = object : AgentTaskProgress {
+        override fun event(event: AgentExecutionEvent) {
+            delegate.event(event)
+            if (event is AgentTerminalOutputEvent) observer.terminalOutput(event)
+        }
+
+        override fun complete(receipt: decompengine.agent.AgentExecutionReceipt) = delegate.complete(receipt)
+    }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
@@ -123,6 +142,8 @@ internal class CliProgressObserver(
     private val warningRequested = AtomicBoolean()
     private val reconstructionPhases = java.util.ArrayDeque<AgentWorkflowPhase>()
     private var omittedReconstructionPhases = 0L
+    private val reconstructionTerminalOutputs = java.util.ArrayDeque<AgentTerminalOutputEvent>()
+    private var omittedReconstructionTerminalOutputs = 0L
     private val cursor = if (workflow == CliProgressWorkflow.REPAIR) RepairCliProgressCursor(
         runCatching { readSnapshot(reportsDirectory) }.getOrNull(), workflow,
     ) else null
@@ -167,18 +188,43 @@ internal class CliProgressObserver(
         }
     }
 
+    fun terminalOutput(event: AgentTerminalOutputEvent) {
+        check(workflow == CliProgressWorkflow.RECONSTRUCTION)
+        synchronized(wakeUp) {
+            if (stopped.get() || warningRequested.get()) return
+            if (reconstructionTerminalOutputs.size == 32) {
+                reconstructionTerminalOutputs.removeFirst()
+                omittedReconstructionTerminalOutputs = Math.addExact(omittedReconstructionTerminalOutputs, 1L)
+            }
+            reconstructionTerminalOutputs.addLast(event)
+            wakeUp.notifyAll()
+        }
+    }
+
     private fun emitReconstructionPhases() {
-        val (omitted, phases) = synchronized(wakeUp) {
-            val batch = omittedReconstructionPhases to reconstructionPhases.toList()
+        val (phaseBatch, outputBatch) = synchronized(wakeUp) {
+            val phases = omittedReconstructionPhases to reconstructionPhases.toList()
+            val outputs = omittedReconstructionTerminalOutputs to reconstructionTerminalOutputs.toList()
             omittedReconstructionPhases = 0L
             reconstructionPhases.clear()
-            batch
+            omittedReconstructionTerminalOutputs = 0L
+            reconstructionTerminalOutputs.clear()
+            phases to outputs
         }
+        val (omitted, phases) = phaseBatch
+        val (omittedOutput, outputs) = outputBatch
         if (stopped.get() || warningRequested.get()) return
         if (omitted > 0) output.println("reconstruction progress omitted $omitted older phase update(s)")
         phases.forEach { phase ->
             if (!stopped.get() && !warningRequested.get())
                 output.println("reconstruction: ${phase.name.lowercase().replace('_', ' ')}")
+        }
+        if (omittedOutput > 0) output.println("reconstruction progress omitted $omitted older terminal output observation(s)")
+        outputs.forEach { event ->
+            if (!stopped.get() && !warningRequested.get()) output.println(
+                "reconstruction terminal output observed: ${event.retainedByteCount} bytes retained of " +
+                    "${event.producedByteCount} produced; truncated=${event.truncated}; terminal=${event.terminalIdSha256.take(12)}",
+            )
         }
     }
 
@@ -215,7 +261,8 @@ internal class CliProgressObserver(
             try {
                 synchronized(wakeUp) {
                     if (!drainRequested.get() && !stopped.get() &&
-                        (workflow != CliProgressWorkflow.RECONSTRUCTION || warningRequested.get() || reconstructionPhases.isEmpty())) {
+                        (workflow != CliProgressWorkflow.RECONSTRUCTION || warningRequested.get() ||
+                            (reconstructionPhases.isEmpty() && reconstructionTerminalOutputs.isEmpty()))) {
                         wakeUp.wait(250)
                     }
                 }
@@ -269,11 +316,23 @@ internal class RepairCliProgressCursor(
             val sequence = event.getValue("sequence").jsonPrimitive.long
             omitted = Math.addExact(omitted, sequence - expected)
             expected = sequence + 1
-            val kind = if (workflow == CliProgressWorkflow.REPAIR) "workflow_run_state" else "workflow_phase"
-            if (event["workflow"]?.jsonPrimitive?.content != workflow.wireName ||
-                event["kind"]?.jsonPrimitive?.content != kind) return@forEach
+            if (event["workflow"]?.jsonPrimitive?.content != workflow.wireName) return@forEach
             if (workflow == CliProgressWorkflow.RECONSTRUCTION &&
                 event["runId"]?.jsonPrimitive?.content != reconstructionRunId) return@forEach
+            if (event["kind"]?.jsonPrimitive?.content == "terminal_output") {
+                val terminal = event["terminalIdSha256"]?.jsonPrimitive?.content ?: return@forEach
+                val session = event["sessionIdSha256"]?.jsonPrimitive?.content ?: return@forEach
+                val retained = event["retainedOutputBytes"]?.jsonPrimitive?.content?.toULongOrNull() ?: return@forEach
+                val produced = event["producedOutputBytes"]?.jsonPrimitive?.content?.toULongOrNull() ?: return@forEach
+                val truncated = event["outputTruncated"]?.jsonPrimitive?.booleanOrNull ?: return@forEach
+                if (!terminal.matches(Regex("[0-9a-f]{64}")) || !session.matches(Regex("[0-9a-f]{64}")) ||
+                    produced < retained || truncated != (produced > retained)) return@forEach
+                val prefix = if (workflow == CliProgressWorkflow.REPAIR) "repair" else "reconstruction"
+                phases += "$prefix terminal output observed: $retained bytes retained of $produced produced; truncated=$truncated; terminal=${terminal.take(12)}"
+                return@forEach
+            }
+            val kind = if (workflow == CliProgressWorkflow.REPAIR) "workflow_run_state" else "workflow_phase"
+            if (event["kind"]?.jsonPrimitive?.content != kind) return@forEach
             val phase = event["phase"]?.jsonPrimitive?.content ?: return@forEach
             if (AgentWorkflowPhase.entries.none { it.name.lowercase() == phase }) return@forEach
             when (workflow) {
@@ -290,7 +349,16 @@ internal class RepairCliProgressCursor(
             CliProgressWorkflow.REPAIR -> "repair progress omitted $omitted event(s); inspect the retained journal and durable state"
             CliProgressWorkflow.RECONSTRUCTION -> "reconstruction progress omitted $omitted event(s); inspect the retained journal and workflow results"
         }
-        if (phases.size > 32) lines += "${workflow.wireName} progress omitted ${phases.size - 32} older phase update(s)"
+        if (phases.size > 32) {
+            val omittedCount = phases.size - 32
+            val omittedTerminalOutputs = phases.take(omittedCount).count { " terminal output observed:" in it }
+            val omittedKind = when (omittedTerminalOutputs) {
+                0 -> "older phase update(s)"
+                omittedCount -> "older terminal output observation(s)"
+                else -> "older progress update(s)"
+            }
+            lines += "${workflow.wireName} progress omitted $omittedCount $omittedKind"
+        }
         lines += phases.takeLast(32)
         next = end
         return lines

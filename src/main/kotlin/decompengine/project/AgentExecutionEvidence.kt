@@ -17,6 +17,7 @@ import decompengine.acp.AcpSandboxResourceLimits
 import decompengine.acp.AcpTerminalAuditRecord
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentContextUsageEvent
+import decompengine.agent.AgentTerminalOutputEvent
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
@@ -690,6 +691,10 @@ internal class BoundedAgentExecutionEventRecorder(
                     ArchivedContextUsageEvent(event.sequence, event.usedTokens, event.contextWindowTokens,
                         event.costAmount?.toString(), event.costCurrency?.let(ArchivedTextCommitment::capture))
                 }
+                is AgentTerminalOutputEvent -> {
+                    ArchivedTerminalOutputEvent(event.sequence, event.sessionIdSha256, event.terminalIdSha256,
+                        event.toolCallIdSha256, event.retainedByteCount, event.producedByteCount, event.truncated)
+                }
                 is AgentMessageEvent -> {
                     consume(1, event.messageId, event.textDelta)
                     ArchivedMessageEvent(
@@ -842,6 +847,29 @@ private data class ArchivedContextUsageEvent(
         output.append(",\"costAmount\":").append(costAmount?.jsonString() ?: "null")
         output.append(",\"costCurrency\":")
         if (costCurrency == null) output.append("null") else output.appendTextCommitment(costCurrency)
+        output.append('}')
+    }
+}
+
+private data class ArchivedTerminalOutputEvent(
+    override val sequence: Long,
+    val sessionIdSha256: String,
+    val terminalIdSha256: String,
+    val toolCallIdSha256: String?,
+    val retainedBytes: Int,
+    val producedBytes: Long,
+    val truncated: Boolean,
+) : ArchivedAgentEvent {
+    override val receiptTextUtf8: Boolean = true
+    override fun appendJson(output: StringBuilder) = appendReceiptJson(output)
+    override fun appendReceiptJson(output: StringBuilder) {
+        output.append("{\"sequence\":").append(sequence)
+        output.append(",\"type\":\"terminal_output\",\"sessionIdSha256\":\"").append(sessionIdSha256).append('"')
+        output.append(",\"terminalIdSha256\":\"").append(terminalIdSha256).append('"')
+        output.append(",\"toolCallIdSha256\":").append(toolCallIdSha256?.let { "\"$it\"" } ?: "null")
+        output.append(",\"retainedBytes\":").append(retainedBytes)
+        output.append(",\"producedBytes\":").append(producedBytes)
+        output.append(",\"truncated\":").append(truncated)
         output.append('}')
     }
 }

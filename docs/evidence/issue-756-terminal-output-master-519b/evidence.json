@@ -1,0 +1,49 @@
+{
+  "issue": 756,
+  "scope": "Metadata-only terminal output events persisted in active ACP progress, evidence archives, public schema, CLI, and web activity rows, including output observed before a failed attempt.",
+  "qualification": "Local exact-source focused Kotlin and frontend checks only; hosted CI and production qualification remain outstanding.",
+  "source": {
+    "baseCommit": "519b16afa06ab64d2b72ad92c46c1baffc24f294",
+    "implementationCommit": "2e002f0fb74637ee18cfc9f97350cb4b790ea5f0",
+    "tree": "65ec496a40db2372cfa5f57264e2679668bab7cd"
+  },
+  "checks": [
+    {
+      "command": "./gradlew test --tests 'decompengine.acp.AcpAgentHarnessTest.fake agent exercises official terminal create wait output release and tool correlation' --tests decompengine.acp.AcpTerminalBrokerTest --tests decompengine.jobs.AgentProgressJournalTest --tests decompengine.RepairCliProgressTest --tests decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest --tests decompengine.project.AgentExecutionEvidenceTest --tests decompengine.acp.AcpSandboxPolicyTest -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets",
+      "result": "passed",
+      "tests": 93,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "junit": [
+        { "path": "TEST-decompengine.acp.AcpAgentHarnessTest.xml", "tests": 1, "sha256": "2c5ff84f43ebc6105e9d385e419bd7e87c5439d0dd723bd7e7dfdcff2a173ef2" },
+        { "path": "TEST-decompengine.acp.AcpTerminalBrokerTest.xml", "tests": 6, "sha256": "7c85e4ec7c95d900a6371dab10ee3bc88117033b36fce6e6c8e1ede4d9606659" },
+        { "path": "TEST-decompengine.jobs.AgentProgressJournalTest.xml", "tests": 37, "sha256": "4694fbc0f48af5f081b3547a23faf34568ee3fd15ddf3c4f74252d1d9cfbecbd" },
+        { "path": "TEST-decompengine.RepairCliProgressTest.xml", "tests": 15, "sha256": "f1e8edc93723e98a1fa75197663810ec32ca9eaf85e778e5d3e51207a515dbff" },
+        { "path": "TEST-decompengine.project.ReconstructionAcpEvidenceArchiveVerifierTest.xml", "tests": 19, "sha256": "25051334a2a9c3dce575b55637dfee9dad88b840cda8319cc1f5ec0fa558ee51" },
+        { "path": "TEST-decompengine.project.AgentExecutionEvidenceTest.xml", "tests": 11, "sha256": "4cab8733ccd6faf3a1d04f800813b0fbcca5c4cbe964f32f82c49a76a27b7a8f" },
+        { "path": "TEST-decompengine.acp.AcpSandboxPolicyTest.xml", "tests": 4, "sha256": "1dc2fa703a82f5092aef681da190d6ccd1dec0166fe50a92d65e87dd50c6d051" }
+      ]
+    },
+    {
+      "command": "node node_modules/vitest/vitest.mjs run tests/activity.test.tsx --reporter=junit --outputFile=../docs/evidence/issue-756-terminal-output-master-519b/TEST-frontend-activity.xml",
+      "result": "passed",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "junit": { "path": "TEST-frontend-activity.xml", "sha256": "bc1ae84c136e681b11ea5eeb5b1a15649e8127192dd8281143a18163e28961dd" }
+    },
+    { "command": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json", "result": "passed" },
+    { "command": "node node_modules/eslint/bin/eslint.js src/jobs/ActivityRow.tsx tests/activity.test.tsx", "result": "passed" },
+    { "command": "node scripts/generate-web-api.mjs --check", "result": "passed" },
+    { "command": "node scripts/generate-web-api.test.mjs", "result": "passed", "tests": 1 },
+    { "command": "git diff --cached --check", "result": "passed" }
+  ],
+  "limitations": [
+    "The repository's Python launcher for contracts/web/v1/verify.py could not start because this environment has no python-exec wrapped executable.",
+    "Frontend checks used installed Node 26.12.1 dependencies; the repository-pinned Node 24/npm toolchain was not available.",
+    "No hosted exact-head CI, live-provider qualification, packaged browser run, or production deployment was performed.",
+    "This event-path slice does not close parent #69 or siblings #757/#760, and does not establish #236 production validation, #732 crash recovery, or #733 durable provenance acceptance."
+  ]
+}

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpSandboxPolicyTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-11-12T18:41:18.216Z" hostname="whatsername" time="0.047">
+  <properties/>
+  <testcase name="policy evidence digest binds all authority and canonicalizes unordered collections()" classname="decompengine.acp.AcpSandboxPolicyTest" time="0.042"/>
+  <testcase name="mount and environment authority rejects broad secret and nonportable inputs()" classname="decompengine.acp.AcpSandboxPolicyTest" time="0.001"/>
+  <testcase name="public sandbox evidence retains legacy JVM constructor arities()" classname="decompengine.acp.AcpSandboxPolicyTest" time="0.0"/>
+  <testcase name="ordinary writable staging fails closed and invalid ids create no directory()" classname="decompengine.acp.AcpSandboxPolicyTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

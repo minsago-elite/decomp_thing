@@ -293,6 +293,63 @@ class RepairCliProgressTest {
     }
 
     @Test
+    fun `progress cursor prints terminal output metadata without output contents`() {
+        val record = JsonObject(event(0, "ignored").toMutableMap().apply {
+            put("workflow", JsonPrimitive("repair"))
+            put("kind", JsonPrimitive("terminal_output"))
+            put("sessionIdSha256", JsonPrimitive("a".repeat(64)))
+            put("terminalIdSha256", JsonPrimitive("b".repeat(64)))
+            put("retainedOutputBytes", JsonPrimitive("4"))
+            put("producedOutputBytes", JsonPrimitive("9"))
+            put("outputTruncated", JsonPrimitive(true))
+            put("text", JsonPrimitive("PRIVATE_TERMINAL_OUTPUT"))
+        })
+        val lines = RepairCliProgressCursor(null).advance(snapshot(1, listOf(record)))
+        assertEquals(1, lines.size)
+        assertTrue(lines.single().contains("4 bytes retained of 9 produced"))
+        assertTrue(lines.single().contains("truncated=true"))
+        assertFalse(lines.single().contains("PRIVATE"))
+
+        val observations = (0L..32).map { sequence ->
+            JsonObject(event(sequence, "ignored").toMutableMap().apply {
+                put("workflow", JsonPrimitive("repair"))
+                put("kind", JsonPrimitive("terminal_output"))
+                put("sessionIdSha256", JsonPrimitive("a".repeat(64)))
+                put("terminalIdSha256", JsonPrimitive("b".repeat(64)))
+                put("retainedOutputBytes", JsonPrimitive("4"))
+                put("producedOutputBytes", JsonPrimitive("9"))
+                put("outputTruncated", JsonPrimitive(true))
+            })
+        }
+        val bounded = RepairCliProgressCursor(null).advance(snapshot(33, observations))
+        assertEquals(33, bounded.size)
+        assertEquals("repair progress omitted 1 older terminal output observation(s)", bounded.first())
+    }
+
+    @Test
+    fun `reconstruction CLI observes terminal output from the task progress stream`() {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/reconstruction-terminal-output").toAbsolutePath())
+        val root = createTempDirectory(parent, "progress-")
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            ReconstructionCliProgress.open(root, emptyList(), output).use { progress ->
+                val request = AgentExecutionRequest(
+                    "terminal output fixture",
+                    listOf(AgentWorkspaceRoot("project", root.toAbsolutePath().normalize())),
+                    accessPolicy = AgentAccessPolicy(emptyList()),
+                )
+                progress.beginTask("terminal-task", request, "workflow-run-1").event(
+                    AgentTerminalOutputEvent(0, "a".repeat(64), "b".repeat(64), null, 4, 9, true),
+                )
+            }
+        }
+        val rendered = bytes.toString(Charsets.UTF_8)
+        assertTrue(rendered.contains("4 bytes retained of 9 produced"), rendered)
+        assertTrue(rendered.contains("terminal=bbbbbbbbbbbb"), rendered)
+        assertFalse(rendered.contains("terminal payload"), rendered)
+    }
+
+    @Test
     fun `reconstruction journal production and close survive a blocked console`() {
         assertReconstructionConsoleBackpressure(unavailable = false)
     }
