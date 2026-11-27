@@ -35,7 +35,7 @@ afterEach(() => {
 });
 
 async function settle() { for (let i = 0; i < 4; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); }); }
-const probe = () => JSON.parse(JSON.stringify(helper.connectionDomProbe())) as { asideCount: number };
+const probe = () => JSON.parse(JSON.stringify(helper.connectionDomProbe())) as { noticeCount: number };
 async function runAxe() {
   const result = await (0, eval)(helper.axeExpression()) as object;
   return { ...result, rules: helper.AXE_RULES, sha256: axeSha256 };
@@ -56,7 +56,7 @@ async function signedOutHome() {
 
 it('real signed-out App satisfies the packaged DOM and axe contract offline and after reconnect, with no revalidation', async () => {
   const { gateway, fetch, store } = await signedOutHome();
-  expect(probe().asideCount).toBe(0);
+  expect(probe().noticeCount).toBe(0);
   const calls = gateway.bootstrap.mock.calls.length;
   const href = location.href;
   const link = document.querySelector<HTMLElement>('a[href="/upload"]') ?? document.querySelector<HTMLElement>('nav a')!;
@@ -81,12 +81,16 @@ it('real signed-out App satisfies the packaged DOM and axe contract offline and 
 it('negative control: the former aside[role=status] rebuilt from the real render fails the packaged DOM and axe gate', async () => {
   await signedOutHome();
   online = false; fireEvent(window, new Event('offline'));
-  const aside = document.querySelector('aside.connection-notice')!;
-  const inner = aside.querySelector('div[role="status"]')!;
-  inner.removeAttribute('role'); inner.removeAttribute('aria-label');
-  aside.setAttribute('role', 'status');
+  const section = document.querySelector('.connection-notice')!;
+  const aside = document.createElement('aside');
+  aside.className = section.className;
+  aside.setAttribute('role', 'status'); aside.setAttribute('aria-label', 'Connection status');
+  const inner = section.querySelector('div[role="status"]')!;
+  while (inner.firstChild) aside.appendChild(inner.firstChild);
+  section.replaceWith(aside);
   const dom = helper.assessConnectionDom(probe(), 'offline');
-  expect(dom.some(f => /native aside/.test(f))).toBe(true);
+  expect(dom.some(f => /native section/.test(f))).toBe(true);
+  expect(dom.some(f => /former aside/.test(f))).toBe(true);
   expect(dom.some(f => /status must be one labelled inner div/.test(f))).toBe(true);
   expect(helper.assessConnectionAxe(await runAxe()).some(f => /aria-allowed-role/.test(f))).toBe(true);
 });
