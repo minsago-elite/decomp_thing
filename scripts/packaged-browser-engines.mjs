@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertAudit, auditFixtures, clickJourneyLink, runGraphJourney, auditProfileEvidence, auditViewports, captureOutputSignatureChart, chartCaptureSets, engineSupplementalInteractionContexts, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
 import { createEngineDiagnostics, diagnosticOverflowFailure } from './packaged-browser-engine-diagnostics.mjs';
+import { armAttemptCommandSettle } from './packaged-browser-engine-keyboard.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures, waitForEngineExpression } from './packaged-browser-engine-adapter.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
@@ -652,6 +653,8 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       keyboard = { steps: [] };
       const overview = fixtures.pages.find((page) => page.name === 'attempt overview');
       await open(target, overview, 'keyboard commands');
+      const overviewJob = new RegExp(`^/nested/jobs/([0-9a-f]{32})/runs/${fixtures.runId}$`).exec(overview.path)?.[1];
+      assert.ok(overviewJob, `Attempt overview path ${overview.path} does not name the fixture attempt`);
       for (const [mode, command, key, done] of [['retry', 'Retry as a new attempt', ' ', `Open new attempt ${fixtures.retriedRunId}`],
         ['running', 'Request cancellation', 'Enter', `Cancellation of attempt ${fixtures.runId} was recorded`]]) {
         fixtures.controls.mode = mode;
@@ -660,8 +663,13 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         await target.keyboard.press('Enter');
         await target.getByText(/Available actions verified/).waitFor();
         keyboard.steps.push({ action: command, tabs: await tabTo(command) });
-        await target.keyboard.press(key === ' ' ? 'Space' : key);
-        await target.getByText(done).first().waitFor();
+        const settled = armAttemptCommandSettle(target, { origin, basePath: '/nested/', jobId: overviewJob, runId: fixtures.runId,
+          action: mode === 'running' ? 'cancel' : 'recover', readLabel: 'Read available actions' });
+        const reread = await settled(async () => {
+          await target.keyboard.press(key === ' ' ? 'Space' : key);
+          await target.getByText(done).first().waitFor();
+        });
+        keyboard.steps.push({ action: `${command} re-read`, ...reread });
         const sent = fulfilled.filter((entry) => entry.method === 'POST').slice(before);
         assert.equal(sent.length, 1, `${command} must send exactly one command`);
         assert.ok(sent[0].idempotencyKey && sent[0].ifMatch === `"${fixtures.runVersion}"` && sent[0].csrf, `${command} lost its identity-bound headers: ${JSON.stringify(sent[0])}`);
