@@ -478,6 +478,11 @@ def check_scorecard(data: dict) -> None:
     if card["modules"]["page"]["snapshotVersion"] != data["structureVersion"]:
         raise ValueError("scorecard pages must be bound to the structure version")
     check_offset_page(card["modules"]["page"], len(card["modules"]["items"]), card["modules"]["total"])
+    # The rows are the available plan's modules, counted by the scope; without an available plan there are none.
+    total = card["modules"]["total"]
+    if (card["scope"]["modules"] is not None) != (data["plan"]["state"] == "available") or total != card["scope"]["modules"] or \
+            (total is None and (card["modules"]["items"] or card["modules"]["page"]["nextCursor"] is not None)):
+        raise ValueError("scorecard module rows are counted exactly when the plan is available")
 
 
 BLOCKING_COMPARISON_CHECKS = frozenset(("input-binary", "reconstruction-profile", "confidence-schema",
@@ -529,6 +534,8 @@ def check_comparison_side(side: dict, values: dict) -> None:
             raise ValueError("a side's scorecard scope must name its own model record")
         if values.get("input-binary") != scope["inputSha256"]:
             raise ValueError("the input-binary check must state each recorded scope's input")
+        if (scope["modules"] is not None) != (side["plan"]["state"] == "available"):
+            raise ValueError("a side's scope counts modules exactly when its plan is available")
     if values.get("model-schema") != (None if model["schemaVersion"] is None else str(model["schemaVersion"])):
         raise ValueError("the model-schema check must state each side's model record schema")
     if values.get("confidence-schema") != (str(side["confidence"]["schemaVersion"]) if available else None):
@@ -576,10 +583,15 @@ def check_comparison(data: dict) -> None:
         if data["metrics"] or modules["total"] or page["nextCursor"] is not None:
             raise ValueError("an unavailable scorecard cannot be compared")
     else:
-        counts = [data[side]["scope"]["modules"] for side in ("current", "baseline")]
-        known = [count for count in counts if count is not None]
-        if modules["total"] < max(known, default=0) or (len(known) == 2 and modules["total"] > sum(known)):
+        # Both scopes are recorded here; a side whose plan is not available (an unset count) contributes no modules.
+        current, baseline = (data[side]["scope"]["modules"] or 0 for side in ("current", "baseline"))
+        total = modules["total"]
+        if total < max(current, baseline) or total > current + baseline:
             raise ValueError("comparison module total is outside the union bounds of the recorded plans")
+        # The union partitions into modules in both plans and those in only one; a page lists no more of a part than exists.
+        parts = {"both": current + baseline - total, "current-only": total - baseline, "baseline-only": total - current}
+        if any(sum(item["presence"] == presence for item in items) > size for presence, size in parts.items()):
+            raise ValueError("a comparison page lists more modules of a plan membership than the recorded plans hold")
     if len({item["id"] for item in data["metrics"]}) != len(data["metrics"]) or len({item["moduleId"] for item in items}) != len(items):
         raise ValueError("a comparison lists each measure and module once")
     for item in items:

@@ -10,6 +10,7 @@ import { createBrowserSession } from '../src/session/session';
 import { ApiClientError } from '../src/api/errors';
 import { structureCopy } from '../src/copy/structure';
 import { scorecardLocation, scorecardSearch } from '../src/structure/scorecardQuery';
+import { describesScorecard } from '../src/structure/Scorecard';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 import '../src/structure/contract';
@@ -46,17 +47,27 @@ const card: StructureScorecard = { ...recorded, binding: selected, sourceSha256:
     modules: paged('', recorded.structureVersion, moduleRows) } };
 // A second page follows the first 50 modules.
 const manyRows = [...moduleRows, ...Array.from({ length: 49 }, (_, index) => moduleScore(`module_${index + 3}`, moduleRows[0]!.metric))];
-// The server echoes the requested ordering and returns that ordering's page. A module outside the comparison stands
-// in for the score/desc first row, so a stale ordering would show the wrong module.
+/**
+ * The producer's order of the same modules, given in identity order: reversed for module/desc; for a score sort, measured
+ * scores ascending with ties in identity order, reversed for desc (so ties then fall in reverse identity order), and
+ * unmeasured rows last in identity order.
+ */
+function sortModules(rows: readonly ModuleScore[], sort: 'module' | 'score', order: 'asc' | 'desc'): readonly ModuleScore[] {
+  if (sort === 'module') return order === 'asc' ? rows : [...rows].reverse();
+  const score = (row: ModuleScore) => row.metric.state === 'measured' && row.metric.value !== null ? Number(row.metric.value) : null;
+  const measured = rows.filter(row => score(row) !== null).sort((a, b) => score(a)! - score(b)!);
+  return [...order === 'asc' ? measured : measured.reverse(), ...rows.filter(row => score(row) === null)];
+}
+// The server echoes the requested ordering and returns that ordering's page of the same modules. With the fixture's tied
+// scores, a descending ordering leads with a different module than identity order, so a stale ordering shows the wrong one.
 const ordered = (path: string, value: StructureScorecard = card, rows: readonly ModuleScore[] = moduleRows): StructureScorecard => {
   const values = new URLSearchParams(path.split('?')[1]);
   const query = { sort: (values.get('sort') ?? 'module') as 'module' | 'score', order: (values.get('order') ?? 'asc') as 'asc' | 'desc' };
   if (!value.scorecard) return { ...value, query };
-  const [first, ...rest] = rows;
-  const sorted = query.sort === 'module' && query.order === 'asc' || !first ? rows
-    : [{ ...first, moduleId: 'net', selector: 'net', metric: { ...first.metric, value: '0.9000' } }, ...rest];
-  return { ...value, query, scorecard: { ...value.scorecard, modules: paged(path, value.structureVersion, sorted) } };
+  return { ...value, query, scorecard: { ...value.scorecard, modules: paged(path, value.structureVersion, sortModules(rows, query.sort, query.order)) } };
 };
+/** The module named by the first row of the displayed scorecard's module table. */
+const leadingModule = () => within(within(screen.getByRole('table', { name: copy.modulesTitle })).getAllByRole('row')[1]!).getByRole('link').textContent;
 const run = { ...fixture<Run>('run-completed-unaccepted'), jobId: selected.jobId, runId: selected.runId, resultRevisionId: selected.revisionId, acceptance: 'rejected' } as Run;
 const revision = `/nested/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
 const api = `/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
@@ -75,9 +86,11 @@ async function session() {
 }
 
 function serve(compare: ScorecardComparison = comparison, rows: readonly ModuleScore[] = moduleRows) {
+  const currentCard = { ...card, scorecard: { ...card.scorecard!,
+    scope: { ...card.scorecard!.scope, modules: rows.length } } };
   transport.get.mockImplementation((kind, path) => {
     const result = path.includes('run_5') ? incompatible : compare;
-    return Promise.resolve({ data: kind === 'structureScorecard' ? ordered(path, card, rows) : kind === 'run' ? run : kind === 'runs' ? runs
+    return Promise.resolve({ data: kind === 'structureScorecard' ? ordered(path, currentCard, rows) : kind === 'run' ? run : kind === 'runs' ? runs
       : { ...result, structureVersion: card.structureVersion, current: { ...result.current, structureVersion: card.structureVersion },
         modules: result === compare ? paged(path, card.structureVersion, compare.modules.items) : result.modules } });
   });
@@ -449,16 +462,16 @@ it('restores both module sort controls on Back and Forward', async () => {
     fireEvent.change(screen.getByRole('combobox', { name: copy.order }), { target: { value: 'desc' } });
     fireEvent.click(screen.getByRole('button', { name: copy.applySort }));
     await waitFor(() => expect(location.search).toBe('?sort=score&order=desc'));
-    await waitFor(() => expect(within(screen.getByRole('table', { name: copy.modulesTitle })).queryByText('net')).not.toBeNull());
+    await waitFor(() => expect(leadingModule()).toBe('util'));
     history.back();
     await waitFor(() => expect(location.search).toBe(''));
-    await waitFor(() => expect(within(screen.getByRole('table', { name: copy.modulesTitle })).queryByText('core')).not.toBeNull());
+    await waitFor(() => expect(leadingModule()).toBe('core'));
     await waitFor(() => expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1]).toBe(`${api}/scorecard?limit=50`));
     expect({ sort: screen.getByRole<HTMLSelectElement>('combobox', { name: copy.sort }).value,
       order: screen.getByRole<HTMLSelectElement>('combobox', { name: copy.order }).value }).toEqual({ sort: 'module', order: 'asc' });
     history.forward();
     await waitFor(() => expect(location.search).toBe('?sort=score&order=desc'));
-    await waitFor(() => expect(within(screen.getByRole('table', { name: copy.modulesTitle })).queryByText('net')).not.toBeNull());
+    await waitFor(() => expect(leadingModule()).toBe('util'));
     expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1])
       .toBe(`${api}/scorecard?limit=50&sort=score&order=desc`);
     expect(screen.getByRole<HTMLSelectElement>('combobox', { name: copy.sort }).value).toBe('score');
@@ -504,7 +517,7 @@ it('moves focus to the module heading after a genuine sort move, and no later Re
     const apply = screen.getByRole('button', { name: copy.applySort });
     apply.focus();
     fireEvent.click(apply);
-    await waitFor(() => expect(within(screen.getByRole('table', { name: copy.modulesTitle })).queryByText('net')).not.toBeNull());
+    await waitFor(() => expect(leadingModule()).toBe('util'));
     await waitFor(() => expect(document.activeElement?.textContent).toBe(copy.modulesTitle));
     await heldRefreshKeepsFocus();
   } finally { auth.dispose(); }
@@ -584,7 +597,9 @@ it('abandons a sort focus request when Back interrupts its read, even when Forwa
     await screen.findByText(structureCopy.loading);
     const focusBeforeCompletion = document.activeElement;
     await act(() => Promise.resolve().then(held[1]));
-    await screen.findByRole('row', { name: /net/ });
+    // Tied scores ascending keep identity order, so the settled read is the module table without the loading state.
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    await waitFor(() => expect(screen.queryByText(structureCopy.loading)).toBeNull());
     await afterPaint();
     expect({ search: location.search, focusMoved: document.activeElement !== focusBeforeCompletion,
       headingFocused: focus.events.includes(copy.modulesTitle) })
@@ -764,7 +779,6 @@ it('gives focus to the later sort move, not the comparison page it interrupts', 
     apply.focus();
     fireEvent.click(apply);
     await waitFor(() => expect(location.search).toContain('sort=score'));
-    await screen.findByRole('row', { name: /net/ });
     // The sorted card remounts the comparison, which rereads the same requested page.
     await waitFor(() => expect(held).toHaveLength(2));
     await act(() => Promise.resolve().then(held[1]));
@@ -1049,12 +1063,16 @@ it.each<[string, (data: ScorecardComparison) => void]>([
 });
 
 it('checks the comparison against the scorecard page of each ordering', async () => {
-  // A comparison of three modules; the score/desc page replaces one with a module the comparison page omits.
+  // A comparison of three modules in both plans; the score/desc page lists them in another order.
   const extra = moduleScore('zeta', comparison.modules.items[0]!.current!);
+  const threeModules = structuredClone(card);
+  threeModules.scorecard!.scope.modules = 3;
   serveDecoded(data => {
     data.modules.items.push({ ...data.modules.items[0]!, moduleId: 'zeta', selector: 'zeta' });
     data.modules.total = 3;
-  }, card, [...moduleRows, extra]);
+    data.current.scope!.modules = 3;
+    data.baseline.scope!.modules = 3;
+  }, threeModules, [...moduleRows, extra]);
   const auth = await session();
   history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
   try {
@@ -1064,7 +1082,7 @@ it('checks the comparison against the scorecard page of each ordering', async ()
     fireEvent.change(screen.getByRole('combobox', { name: copy.order }), { target: { value: 'desc' } });
     fireEvent.click(screen.getByRole('button', { name: copy.applySort }));
     await waitFor(() => expect(location.search).toContain('sort=score'));
-    await screen.findByRole('link', { name: 'net' });
+    await waitFor(() => expect(leadingModule()).toBe('zeta'));
     await screen.findByText(copy.compatibility.compatible);
     // The comparison remounts with the scorecard's read, as before; checking it adds no read of its own.
     expect(transport.get.mock.calls.filter(([kind]) => kind === 'scorecardComparison')).toHaveLength(2);
@@ -1137,12 +1155,42 @@ it.each<[string, string, (data: ScorecardComparison, path: string) => void]>([
   }
 });
 
+/** The fixture's union of three modules: core in both plans, zeta in the current plan only and gone in the baseline only. */
+const unseenCurrentModule = (data: ScorecardComparison) => {
+  const [core] = data.modules.items;
+  data.modules.total = 3;
+  data.modules.items = [core!, { ...core!, moduleId: 'zeta', selector: 'zeta', presence: 'current-only', baseline: null,
+    delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } },
+  { ...core!, moduleId: 'gone', selector: 'gone', presence: 'baseline-only', current: null,
+    delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } }];
+};
+
+it('refuses a comparison measuring a current module that the complete current scorecard does not list', async () => {
+  // The memberships fit both plan counts, but the displayed scorecard lists all its modules, and zeta is not one of them.
+  serveDecoded(unseenCurrentModule);
+  expect(await comparisonOutcome()).toEqual({ refused: true, shown: false, modules: false });
+  // Beside a scorecard page that does not list every module, an unlisted current module cannot be checked.
+  const decoded = decodeResponse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8'), 'scorecardComparison').data;
+  const shown = structuredClone(decoded);
+  unseenCurrentModule(shown);
+  const pagedCard = structuredClone(card);
+  pagedCard.structureVersion = decoded.structureVersion;
+  pagedCard.scorecard!.modules = { ...pagedCard.scorecard!.modules, items: pagedCard.scorecard!.modules.items.slice(0, 1),
+    page: { ...pagedCard.scorecard!.modules.page, limit: 1, nextCursor: cursorAt(decoded.structureVersion, 1) } };
+  const completeCard = { ...pagedCard, scorecard: { ...pagedCard.scorecard!, modules: card.scorecard!.modules } };
+  expect(describesScorecard(decoded, completeCard)).toBe(true);
+  expect(describesScorecard(shown, completeCard)).toBe(false);
+  expect(describesScorecard(shown, pagedCard)).toBe(true);
+});
+
 it('admits the final comparison page at the requested offset', async () => {
+  // The current plan's two modules are both baseline modules too, so a 51st module is in the baseline plan only.
   const sample = comparison.modules.items[0]!;
   serveDecoded(data => {
     data.baseline.scope!.modules = 51;
     data.modules.total = 51;
-    data.modules.items = [{ ...sample, moduleId: 'module_50', selector: 'module_50' }];
+    data.modules.items = [{ ...sample, moduleId: 'module_50', selector: 'module_50', presence: 'baseline-only', current: null,
+      delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } }];
   });
   expect(await comparisonOutcome(`?baselineRunId=run_1&baselineRevisionId=revision_1&compareCursor=${cursorAt(card.structureVersion, 50)}`))
     .toEqual({ refused: false, shown: true, modules: true });

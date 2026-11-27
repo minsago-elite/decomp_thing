@@ -138,8 +138,10 @@ const measureOf = ({ state, reason, value, numerator, denominator }: Measure): M
 /**
  * A comparison's current side is the scorecard shown beside it: the same records and digests, scope and reconciliation,
  * every paired measure as recorded there, and the recorded score of each module that this scorecard page also lists.
+ * A scorecard page that lists every module it counts (no module when its plan is unavailable) also lists every module
+ * the comparison measures on the current side.
  */
-function describesScorecard(comparison: ScorecardComparison, scorecard: StructureScorecard): boolean {
+export function describesScorecard(comparison: ScorecardComparison, scorecard: StructureScorecard): boolean {
   const current = comparison.current, card = scorecard.scorecard;
   if (current.structureVersion !== scorecard.structureVersion || current.sourceSha256 !== scorecard.sourceSha256
     || current.manifestSha256 !== scorecard.manifestSha256 || !same(current.model, scorecard.model)
@@ -158,9 +160,10 @@ function describesScorecard(comparison: ScorecardComparison, scorecard: Structur
   })) return false;
   if (comparison.compatibility.state !== 'unavailable' && card.modules.total !== null && comparison.modules.total < card.modules.total) return false;
   const shown = new Map(card.modules.items.map(item => [item.moduleId, item.metric]));
+  const complete = card.modules.items.length === (card.modules.total ?? 0);
   return comparison.modules.items.every(item => {
     const recorded = shown.get(item.moduleId);
-    return recorded === undefined || (item.current !== null && same(item.current, measureOf(recorded)));
+    return recorded === undefined ? !complete || item.current === null : item.current !== null && same(item.current, measureOf(recorded));
   });
 }
 

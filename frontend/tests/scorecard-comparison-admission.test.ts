@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import '../src/structure/contract';
 import { decodeResponse } from '../src/api/decode';
 import type { ScorecardComparison } from '../src/api/generated';
@@ -148,13 +148,16 @@ it('admits exact differences at the producer\'s scale, zero, negative and unpair
   document.data.modules.items.push({ moduleId: 'gone', selector: null, presence: 'baseline-only', current: null,
     baseline: { state: 'unmeasured', reason: 'EMPTY_POPULATION', value: null, numerator: '0', denominator: '0' },
     delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } });
+  // The baseline plan holds both shared modules and the one it alone lists.
   document.data.modules.total = 3;
+  document.data.baseline.scope!.modules = 3;
   expect(decode(document).data.modules.items).toHaveLength(3);
   const incompatible = load('scorecard-comparison-incompatible');
   incompatible.data.modules.items.push({ moduleId: 'new', selector: null, presence: 'current-only',
     current: { state: 'measured', reason: null, value: '1.0000', numerator: '1', denominator: '1' }, baseline: null,
     delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } });
   incompatible.data.modules.total += 1;
+  incompatible.data.current.scope!.modules! += 1;
   expect(decode(incompatible).data.compatibility.state).toBe('incompatible');
 });
 
@@ -213,8 +216,108 @@ it('refuses a scorecard module page whose occupancy disagrees with its total and
   const short = scorecard(); short.data.scorecard.modules.page = { ...short.data.scorecard.modules.page, limit: 2, nextCursor: null };
   const beyond = scorecard(); beyond.data.scorecard.modules.page.nextCursor = beyond.data.scorecard.modules.page.nextCursor!.replace('_1_', '_2_');
   const unknown = scorecard(); unknown.data.scorecard.modules.total = null; unknown.data.scorecard.modules.items = [];
-  for (const document of [empty, short, beyond, unknown]) expect(() => admit(document)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
-  // An unrecorded plan has no total, so only the continuation is checked.
-  const unplanned = scorecard(); unplanned.data.scorecard.modules.total = null;
-  expect(admit(unplanned).kind).toBe('structureScorecard');
+  // An available plan counts its modules: withholding the total of a continued page is refused too.
+  const uncounted = scorecard(); uncounted.data.scorecard.modules.total = null;
+  for (const document of [empty, short, beyond, unknown, uncounted]) expect(() => admit(document)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+});
+
+type Presence = ScorecardComparison['modules']['items'][number]['presence'];
+const measured = { state: 'measured', reason: null, value: '1.0000', numerator: '2', denominator: '2' } as const;
+const notInBoth = { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } as const;
+const planStates = {
+  'not-recorded': { state: 'not-recorded', stateReason: 'PLAN_NOT_RECORDED', path: null, sha256: null, sizeBytes: null, schemaVersion: null },
+  invalid: { state: 'invalid', stateReason: 'PLAN_MALFORMED', path: 'reports/module_plan.json', sha256: 'e'.repeat(64), sizeBytes: '1', schemaVersion: null },
+} as const;
+
+/** A row the producer writes for a module in the given plans: equal measures on both sides differ by exactly zero. */
+const row = (moduleId: string, presence: Presence) => ({ moduleId, selector: moduleId, presence,
+  current: presence === 'baseline-only' ? null : { ...measured }, baseline: presence === 'current-only' ? null : { ...measured },
+  delta: presence === 'both' ? { state: 'computed', reason: null, value: '0', numerator: '0', denominator: '0' } as const : { ...notInBoth } });
+
+/**
+ * A comparison with the given plan module counts (null: that side's plan is not recorded) and union total, listing `rows`
+ * on its first page of `limit` rows.
+ */
+function membership(current: number | null, baseline: number | null, total: number, rows: readonly Presence[], limit = 50): Envelope {
+  const document = load(baseline === null ? 'scorecard-comparison-unrecorded-baseline-plan' : 'scorecard-comparison');
+  const data = document.data;
+  data.current.scope!.modules = current;
+  data.baseline.scope!.modules = baseline;
+  data.modules = { total, items: rows.map((presence, index) => row(`module_${String(index).padStart(4, '0')}`, presence)),
+    page: { limit, snapshotVersion: data.structureVersion, nextCursor: rows.length < total ? `${data.structureVersion}_${limit}_${'a'.repeat(32)}` : null } };
+  return document;
+}
+const repeat = (presence: Presence, count: number) => Array.from({ length: count }, () => presence);
+
+describe('the R9 plan-membership reproductions', () => {
+  it('refuses an available baseline plan whose scope withholds its count behind an empty terminal page', () => {
+    // The genuine empty-current reply against the 4,167-module baseline, with the page emptied and only the count unset.
+    const concealed = membership(0, 4167, 0, []);
+    concealed.data.baseline.scope!.modules = null;
+    expect(() => decode(concealed)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+    // The genuine reply lists every baseline module.
+    expect(decode(membership(0, 4167, 4167, repeat('baseline-only', 50))).data.modules.total).toBe(4167);
+  });
+
+  it('refuses a baseline-only module claimed in both plans beside an empty current plan, with its exact zero delta', () => {
+    const invented = membership(0, 4167, 4167, ['both', ...repeat('baseline-only', 49)]);
+    expect(() => decode(invented)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+  });
+
+  it.each(Object.entries(planStates))('admits a %s baseline plan without a count, contributing no module', (_, plan) => {
+    for (const [current, rows] of [[0, []], [2, ['current-only', 'current-only']]] as const) {
+      const document = membership(current, null, current, rows);
+      document.data.baseline.plan = { ...plan };
+      expect(decode(document).data.modules.total).toBe(current);
+    }
+  });
+
+  it.each(Object.entries(planStates))('refuses a %s baseline plan that still counts or shares modules', (_, plan) => {
+    const counted = membership(0, null, 0, []);
+    counted.data.baseline.plan = { ...plan };
+    counted.data.baseline.scope!.modules = 0;
+    const shared = membership(2, null, 2, ['both', 'current-only']);
+    shared.data.baseline.plan = { ...plan };
+    const beyond = membership(2, null, 3, repeat('current-only', 3));
+    beyond.data.baseline.plan = { ...plan };
+    for (const document of [counted, shared, beyond]) expect(() => decode(document)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+  });
+
+  it('refuses a current scope that withholds the count of its available plan, and keeps unavailable confidence uncounted', () => {
+    const uncounted = membership(2, 2, 2, ['both', 'both']);
+    uncounted.data.current.scope!.modules = null;
+    expect(() => decode(uncounted)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+    // A side without a confidence report has no scope at all, whatever its plan records.
+    const missing = unavailable('baseline');
+    expect(missing.data.baseline.plan.state).toBe('available');
+    expect(decode(missing).data.compatibility.state).toBe('unavailable');
+  });
+});
+
+// Plans of C and B modules whose union holds U: C+B-U in both plans, U-B in the current plan only, U-C in the baseline only.
+it.each<[number, number, number, Presence[]]>([
+  [2, 2, 2, ['both', 'both']],
+  [2, 2, 3, ['both', 'current-only', 'baseline-only']],
+  [2, 2, 4, ['current-only', 'current-only', 'baseline-only', 'baseline-only']],
+  [3, 1, 3, ['both', 'current-only', 'current-only']],
+  [1, 3, 3, ['both', 'baseline-only', 'baseline-only']],
+  [0, 0, 0, []],
+  [60, 60, 100, [...repeat('both', 20), ...repeat('current-only', 30)]],
+  [60, 60, 100, repeat('baseline-only', 40).concat(repeat('current-only', 10))],
+])('admits plans of %i and %i modules whose union of %i lists %j', (current, baseline, total, rows) => {
+  expect(decode(membership(current, baseline, total, rows)).data.modules.items).toHaveLength(rows.length);
+});
+
+it.each<[number, number, number, Presence[]]>([
+  [2, 2, 2, ['both', 'current-only']],
+  [2, 2, 3, ['both', 'both', 'baseline-only']],
+  [2, 2, 3, ['both', 'current-only', 'current-only']],
+  [2, 2, 3, ['baseline-only', 'baseline-only', 'current-only']],
+  [2, 2, 4, ['both', 'current-only', 'baseline-only', 'baseline-only']],
+  [3, 1, 3, ['current-only', 'current-only', 'baseline-only']],
+  [1, 3, 3, ['current-only', 'baseline-only', 'baseline-only']],
+  [60, 60, 100, [...repeat('both', 21), ...repeat('current-only', 29)]],
+  [60, 60, 100, repeat('current-only', 41).concat(repeat('both', 9))],
+])('refuses plans of %i and %i modules whose union of %i lists %j', (current, baseline, total, rows) => {
+  expect(() => decode(membership(current, baseline, total, rows))).toThrow(expect.objectContaining({ code: 'invalid_response' }));
 });

@@ -1333,6 +1333,30 @@
     {
       "file": "fixtures/invalid-scorecard-comparison-concealed-baseline-modules.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/scorecard-comparison-unrecorded-baseline-plan.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-available-plan-without-module-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-module-in-both-without-baseline-plan.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/structure-scorecard-unrecorded-plan.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-unrecorded-plan-with-module-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-available-plan-without-module-total.json",
+      "valid": false
     }
   ]
 }

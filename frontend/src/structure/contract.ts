@@ -126,6 +126,7 @@ type Delta = Comparison['metrics'][number]['delta'];
 /**
  * Each side's identity values are the ones its own records state: its scope names its model record, the model-schema
  * check states that record's schema, and the confidence checks state a value exactly when its scorecard is available.
+ * Its scope counts modules exactly when its plan is available.
  */
 function checkSide(side: Side, value: (id: string) => string | null | undefined): void {
   const available = side.confidence.state === 'available';
@@ -133,6 +134,7 @@ function checkSide(side: Side, value: (id: string) => string | null | undefined)
   if (side.scope) {
     requireValue(side.scope.modelSha256 === side.model.sha256 && side.scope.modelSchemaVersion === (side.model.schemaVersion ?? 1));
     requireValue(value('input-binary') === side.scope.inputSha256);
+    requireValue((side.scope.modules !== null) === (side.plan.state === 'available'));
   }
   requireValue(value('model-schema') === (side.model.schemaVersion === null ? null : String(side.model.schemaVersion)));
   requireValue(value('confidence-schema') === (available ? String(side.confidence.schemaVersion) : null));
@@ -192,6 +194,9 @@ function checkStructureDocument(document: ContractDocument): void {
         for (const metric of [...card.metrics, ...card.modules.items.map(item => item.metric)]) checkMeasure(metric, metric.unit);
         checkStructurePage(card.modules.page, document.data.structureVersion, card.modules.items.length);
         checkOffsetPage(card.modules.page, card.modules.items.length, card.modules.total);
+        // The rows are the available plan's modules, counted by the scope; without an available plan there are none.
+        requireValue((card.scope.modules !== null) === (document.data.plan.state === 'available') && card.modules.total === card.scope.modules);
+        if (card.modules.total === null) requireValue(card.modules.items.length === 0 && card.modules.page.nextCursor === null);
       }
       break;
     }
@@ -209,10 +214,14 @@ function checkStructureDocument(document: ContractDocument): void {
       if (compatibility.state === 'unavailable') {
         requireValue(metrics.length === 0 && modules.total === 0 && modules.page.nextCursor === null);
       } else {
-        // Rows are the union of the two plans' distinct module IDs.
-        const currentCount = current.scope?.modules, baselineCount = document.data.baseline.scope?.modules;
-        requireValue(modules.total >= Math.max(currentCount ?? 0, baselineCount ?? 0));
-        if (currentCount != null && baselineCount != null) requireValue(modules.total <= currentCount + baselineCount);
+        // Rows are the union of the two plans' distinct module IDs. Both scopes are recorded here, and a side whose plan
+        // is not available (an unset count, bound to that plan state above) contributes no modules.
+        const currentCount = current.scope?.modules ?? 0, baselineCount = document.data.baseline.scope?.modules ?? 0;
+        requireValue(modules.total >= Math.max(currentCount, baselineCount) && modules.total <= currentCount + baselineCount);
+        // The union partitions into modules in both plans and those in only one; a page lists no more of a part than exists.
+        const parts = { both: currentCount + baselineCount - modules.total, 'current-only': modules.total - baselineCount,
+          'baseline-only': modules.total - currentCount };
+        for (const [presence, size] of Object.entries(parts)) requireValue(modules.items.filter(item => item.presence === presence).length <= size);
       }
       requireValue(new Set(metrics.map(item => item.id)).size === metrics.length && new Set(modules.items.map(item => item.moduleId)).size === modules.items.length);
       for (const item of modules.items) {
