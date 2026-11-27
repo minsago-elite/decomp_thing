@@ -36,6 +36,7 @@ class WebProgramStructureTest {
         val acceptedModules: Set<String> = emptySet(),
         val unresolvedImplementations: List<String> = emptyList(),
         val modelInput: String = inputSha,
+        streamed: Boolean = false,
     ) {
         val sources = (listOf("Makefile", "include/decomp_types.h") + modules.flatMap { listOf("src/modules/$it.c", "include/modules/$it.h") })
             .associateWith { "// $it\n".toByteArray() }
@@ -66,12 +67,18 @@ class WebProgramStructureTest {
             "reports/runs/$runId/source-tree/reports/build_contract.json" to descriptor,
         )).mapValues { captured(it.value) }.toMutableMap()
         val reads: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
-        val evidence = WebSourceCatalogEvidence(listOf(profile), { captured(inputBytes).copy(identity = INPUT_IDENTITY) }) { _, path, maximum ->
+        val evidence = WebSourceCatalogEvidence(listOf(profile), { captured(inputBytes).copy(identity = INPUT_IDENTITY) }, readArtifact = { _, path, maximum ->
             reads += path
             val file = files[path] ?: error("Unexpected read $path")
             if (file.bytes.size > maximum) throw RepairBudgetExceededException("fixture exceeds $maximum")
             file
-        }
+        }, verifyInput = null, verifyArtifact = null, streamArtifact = if (!streamed) null else { _, path, maximum, sha, size, consume ->
+            reads += "stream:$path"
+            val file = files.getValue(path)
+            require(file.bytes.size.toLong() <= maximum && file.bytes.size.toLong() == size)
+            consume(java.io.ByteArrayInputStream(file.bytes))
+            if (WebExplorationArtifact.sha256(file.bytes) != sha) revisionSourceChanged()
+        })
         val cache = WebProgramStructureCache()
         fun pagesWithCache(cache: WebProgramStructureCache, timing: ((String, Long) -> Unit)? = null): WebProgramStructurePages {
             return WebProgramStructurePages { job, run, revision, project ->
@@ -237,6 +244,19 @@ class WebProgramStructureTest {
             val table = columnTable(WebStructureKind.FUNCTION, List(count) { null })
             assertContentEquals(IntArray(count) { it }, table.byAddress)
         }
+    }
+
+    @Test fun `entity detail uses committed stream adapter and preserves byte capture response`() {
+        val content = model(functions)
+        val array = Revision(content, null, emptyList())
+        val streaming = Revision(content, null, emptyList(), streamed = true)
+        streaming.pages.functions("owner", jobId, runId, revisionId, null)
+        streaming.reads.clear()
+        val expected = array.pages.entity(WebStructureKind.FUNCTION, jobId, runId, revisionId, functions.first().id, null)
+        val actual = streaming.pages.entity(WebStructureKind.FUNCTION, jobId, runId, revisionId, functions.first().id, null)
+        assertEquals(expected, actual)
+        assertTrue(streaming.reads.any { it.startsWith("stream:") && it.endsWith("program_model.json") })
+        assertFalse(streaming.reads.any { !it.startsWith("stream:") && it.endsWith("program_model.json") })
     }
 
     @Test fun `functions keep recorded identity exact addresses ownership and evidence references`() {

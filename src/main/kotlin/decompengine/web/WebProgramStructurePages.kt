@@ -216,7 +216,7 @@ internal class WebProgramStructurePages(
                 val table = index.table(kind)
                 val row = table.index[selector]?.takeIf { addressable(selector) } ?: throw WebAccessDenied(404,
                     "ENTITY_NOT_FOUND", "The requested ${kind.wire} is not recorded in this revision's program model.")
-                val fields = readWebStructureEntity(records.read(checkNotNull(index.model), WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES),
+                val fields = records.entity(checkNotNull(index.model), WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES,
                     table.offsets[row])
                 put("entity", fitDetail(JsonObject(entityItem(index, table, row) + detail(index, table, row, fields))))
             }.let(::JsonObject)

@@ -49,6 +49,7 @@ internal class WebSourceCatalogEvidence(
     private val verifyInput: ((String, StableRegularFile) -> Unit)?,
     private val verifyArtifact: ((String, String, Long, StableRegularFile) -> Unit)?,
     private val compareArtifact: ((String, String, Long, StableRegularFile) -> StableComparison)? = null,
+    private val streamArtifact: ((String, String, Long, String, Long, (java.io.InputStream) -> Unit) -> Unit)? = null,
 ) {
     constructor(profiles: List<ReconstructionProfile>, readInput: (String) -> StableRegularFile,
         readArtifact: (String, String, Long) -> StableRegularFile) :
@@ -221,11 +222,23 @@ internal class WebSourceCatalogEvidence(
             // Retention pins change the attempt version without changing the candidate; the projection depends
             // only on the keyed commitments, so it stays valid for the current reference.
             check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256 && index.inputSha256 == input.sha256)
-            val result = measured("project-page") { project(index, WebStructureRecordReader { record, maximum ->
-                val read = readArtifact(reference.jobId, "$root/${record.path}", maximum.toLong())
-                if (read.bytes.size > maximum) throw RepairBudgetExceededException("Structure record exceeds its byte bound.")
-                if (read.sha256 != record.sha256 || WebExplorationArtifact.sha256(read.bytes) != record.sha256) revisionSourceChanged()
-                read.bytes
+            val result = measured("project-page") { project(index, object : WebStructureRecordReader {
+                override fun read(record: WebStructureRecord, maximumBytes: Int): ByteArray {
+                    val read = readArtifact(reference.jobId, "$root/${record.path}", maximumBytes.toLong())
+                    if (read.bytes.size > maximumBytes) throw RepairBudgetExceededException("Structure record exceeds its byte bound.")
+                    if (read.sha256 != record.sha256 || WebExplorationArtifact.sha256(read.bytes) != record.sha256) revisionSourceChanged()
+                    return read.bytes
+                }
+                override fun entity(record: WebStructureRecord, maximumBytes: Int, offset: Long): WebStructureEntityFields {
+                    val stream = streamArtifact ?: return super.entity(record, maximumBytes, offset)
+                    require(offset in 0 until record.sizeBytes)
+                    var fields: WebStructureEntityFields? = null
+                    stream(reference.jobId, "$root/${record.path}", maximumBytes.toLong(), record.sha256, record.sizeBytes) { input ->
+                        input.skipNBytes(offset)
+                        fields = readWebStructureEntity(input)
+                    }
+                    return checkNotNull(fields)
+                }
             }) }
             measured("verify-descriptor") { verifyCapturedArtifact(reference.jobId, descriptorPath, descriptor) }
             measured("verify-manifest") { verifyCapturedArtifact(reference.jobId, manifestPath, captured) }

@@ -304,7 +304,7 @@ class WebJobService(
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     @Volatile private var uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact,
-        ::verifySourceCatalogInput, ::verifySourceCatalogArtifact, ::compareSourceCatalogArtifact)
+        ::verifySourceCatalogInput, ::verifySourceCatalogArtifact, ::compareSourceCatalogArtifact, ::streamSourceCatalogArtifact)
     private val programStructureCache = WebProgramStructureCache()
 
     /** Installs a deterministic retained-byte ceiling before tests admit any upload. */
@@ -827,6 +827,15 @@ class WebJobService(
         val segments = canonicalReportSegments(path)
         if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
         sourceCatalogVerification { store.verifyArtifact(jobId, path, maximumBytes, expected) }
+    }
+
+    @Synchronized
+    private fun streamSourceCatalogArtifact(jobId: String, path: String, maximumBytes: Long,
+        sha256: String, size: Long, consume: (java.io.InputStream) -> Unit) {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(path)
+        if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
+        sourceCatalogVerification { store.streamCommittedArtifact(jobId, path, maximumBytes, sha256, size, consume) }
     }
 
     @Synchronized

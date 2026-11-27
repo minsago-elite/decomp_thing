@@ -251,7 +251,11 @@ internal class WebProgramStructureIndex(
 internal class WebStructureRecord(val path: String, val sha256: String, val sizeBytes: Long)
 
 /** Reads one manifest-committed record of the selected revision again, refused unless it still has its recorded digest. */
-internal fun interface WebStructureRecordReader { fun read(record: WebStructureRecord, maximumBytes: Int): ByteArray }
+internal fun interface WebStructureRecordReader {
+    fun read(record: WebStructureRecord, maximumBytes: Int): ByteArray
+    fun entity(record: WebStructureRecord, maximumBytes: Int, offset: Long): WebStructureEntityFields =
+        readWebStructureEntity(read(record, maximumBytes), offset)
+}
 
 /** One parse outcome; [value] is present only when [outcome] is `available`. */
 internal class WebStructureParse<T>(val value: T?, val outcome: WebStructureOutcome)
@@ -947,10 +951,16 @@ internal class WebStructureEntityFields(
 
 internal fun readWebStructureEntity(bytes: ByteArray, offset: Long, maximumStrings: Int = 20): WebStructureEntityFields {
     require(offset in 0 until bytes.size)
+    return java.io.ByteArrayInputStream(bytes, offset.toInt(), bytes.size - offset.toInt()).use {
+        readWebStructureEntity(it, maximumStrings)
+    }
+}
+
+internal fun readWebStructureEntity(input: java.io.InputStream, maximumStrings: Int = 20): WebStructureEntityFields {
     val texts = LinkedHashMap<String, WebStructureText?>()
     val strings = ArrayList<WebStructureText>()
     var byteEvidence: String? = null
-    WebProgramStructureBuilder.JSON.createParser(bytes, offset.toInt(), bytes.size - offset.toInt()).use { parser ->
+    WebProgramStructureBuilder.JSON.createParser(input).disable(com.fasterxml.jackson.core.JsonParser.Feature.AUTO_CLOSE_SOURCE).use { parser ->
         require(parser.nextToken() == JsonToken.START_OBJECT)
         while (true) {
             val token = parser.nextToken()

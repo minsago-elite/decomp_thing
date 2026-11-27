@@ -7289,6 +7289,7 @@ internal fun hashStableRegularFile(
     cancellationCheck: () -> Unit,
     validateMetadata: (LinuxDescriptor) -> Unit = {},
     verifyChunk: (ByteArray, Int, Long) -> Unit = { _, _, _ -> },
+    consume: ((java.io.InputStream) -> Unit)? = null,
 ): StableFileDigest {
     cancellationCheck()
     // Snapshot paths use Linux filename semantics, independently of repair manifest grammar.
@@ -7327,17 +7328,38 @@ internal fun hashStableRegularFile(
         val buffer = ByteArray(64 * 1024)
         var size = 0L
         // This kernel-owned proc entry references our still-owned descriptor, not the workspace name.
-        Files.newInputStream(descriptorPath).use { input ->
-            while (true) {
-                cancellationCheck()
-                val count = input.read(buffer)
-                if (count < 0) break
-                size = Math.addExact(size, count.toLong())
-                readBytes(count, size)
-                verifyChunk(buffer, count, size - count)
-                digest.update(buffer, 0, count)
-                utf8.accept(buffer, count)
+        Files.newInputStream(descriptorPath).use { raw ->
+            val input = object : java.io.InputStream() {
+                private val single = ByteArray(1)
+                override fun read(): Int = if (read(single, 0, 1) < 0) -1 else single[0].toInt() and 255
+                override fun skip(amount: Long): Long {
+                    var remaining = amount.coerceAtLeast(0)
+                    while (remaining > 0) {
+                        val count = read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
+                        if (count < 0) break
+                        remaining -= count
+                    }
+                    return amount.coerceAtLeast(0) - remaining
+                }
+                override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                    cancellationCheck()
+                    val count = raw.read(bytes, offset, minOf(length, buffer.size))
+                    if (count > 0) {
+                        size = Math.addExact(size, count.toLong())
+                        readBytes(count, size)
+                        // Keep callbacks' existing zero-based chunk contract.
+                        if (offset != 0) System.arraycopy(bytes, offset, buffer, 0, count)
+                        val chunk = if (offset == 0) bytes else buffer
+                        verifyChunk(chunk, count, size - count)
+                        digest.update(chunk, 0, count)
+                        utf8.accept(chunk, count)
+                    }
+                    return count
+                }
             }
+            consume?.invoke(input)
+            // Parser read-ahead is already hashed; drain the unread tail before accepting any projection.
+            while (input.read(buffer) >= 0) { }
         }
         cancellationCheck()
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
@@ -7356,6 +7378,34 @@ internal fun hashStableRegularFile(
         authorized?.close()
         directories.asReversed().forEach { it.close() }
     }
+}
+
+/** Project a committed record through a bounded stream; publish only after the full digest and stability fences. */
+internal fun readCommittedStableRegularFile(root: Path, relative: String, maximumBytes: Long,
+    expectedSha256: String, expectedSize: Long, consume: (java.io.InputStream) -> Unit,
+    cancellationCheck: () -> Unit = { if (Thread.currentThread().isInterrupted) throw InterruptedException() },
+) {
+    require(maximumBytes in 1 until Int.MAX_VALUE.toLong() && expectedSize in 0..maximumBytes)
+    var identity: LinuxFileIdentity? = null
+    var changeTime: java.nio.file.attribute.FileTime? = null
+    val result = hashStableRegularFile(root, relative,
+        declaredSize = { size ->
+            if (size > maximumBytes) throw RepairBudgetExceededException("record exceeds read limit")
+            requireUnchanged(size == expectedSize) { "committed record size changed" }
+        },
+        readBytes = { _, total -> if (total > maximumBytes) throw RepairBudgetExceededException("record exceeds read limit") },
+        cancellationCheck = cancellationCheck,
+        validateMetadata = { descriptor ->
+            val current = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            val ctime = Files.getAttribute(Path.of("/proc/self/fd/${descriptor.fd}"), "unix:ctime")
+                as? java.nio.file.attribute.FileTime ?: throw StableFileUnavailableException("record change time unavailable")
+            if (identity == null) {
+                if (!current.isRegularFile || current.isSymbolicLink || current.linkCount != 1)
+                    throw StableFileUnavailableException("record target is unavailable")
+                identity = current; changeTime = ctime
+            } else requireUnchanged(identity == current && changeTime == ctime) { "record changed during projection" }
+        }, consume = consume)
+    requireUnchanged(result.size == expectedSize && result.sha256 == expectedSha256) { "committed record digest changed" }
 }
 
 internal enum class StableComparison { SAME, DIFFERENT }
