@@ -70,6 +70,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       failed: copy.jobMetadataCouldNotBeLoadedCheckTheLocalSession,
     }[metadataFailureKind(failure)], failure);
     if (canRetainMetadata(failure)) {
+      order.current.applied = ticket;
       setStored(previous => ({ ...previous, error: message, loading: false }));
     } else {
       clearObservation(ticket, message);

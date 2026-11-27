@@ -1462,7 +1462,7 @@ it.each([
 // #1778 round 10: a same-version confirmation issued after a held Refresh supersedes it.
 let heldAuth: Awaited<ReturnType<typeof session>> | undefined;
 afterEach(() => { heldAuth?.dispose(); heldAuth = undefined; });
-async function heldRefreshBeforeConfirmation(earlier: () => Promise<unknown>, later: Array<() => Promise<unknown>> = []) {
+async function startHeldRefresh(earlier: () => Promise<unknown>, confirmation: () => Promise<unknown>, later: Array<() => Promise<unknown>> = []) {
   let releaseHistory: (() => void) | undefined;
   let releaseEarlierRefresh: (() => void) | undefined;
   let jobs = 0;
@@ -1471,6 +1471,7 @@ async function heldRefreshBeforeConfirmation(earlier: () => Promise<unknown>, la
     if (kind === 'job') {
       jobs += 1;
       if (jobs === 2) return new Promise((resolve, reject) => { releaseEarlierRefresh = () => { void earlier().then(resolve, reject); }; });
+      if (jobs === 3) return confirmation();
       if (jobs > 3) return later[jobs - 4]!();
       return Promise.resolve(labelled('Alpha'));
     }
@@ -1486,13 +1487,18 @@ async function heldRefreshBeforeConfirmation(earlier: () => Promise<unknown>, la
   fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
   await waitFor(() => expect(releaseEarlierRefresh).toBeDefined());
   await act(() => { releaseHistory!(); });
+  return releaseEarlierRefresh!;
+}
+
+async function heldRefreshBeforeConfirmation(earlier: () => Promise<unknown>, later: Array<() => Promise<unknown>> = []) {
+  const release = await startHeldRefresh(earlier, () => Promise.resolve(labelled('Alpha')), later);
   const acceptedLink = await screen.findByRole('link', { name: 'Open the accepted attempt run_accepted' });
   expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job', 'job']);
   // The later confirmation settled the overview: Refresh is no longer pending on the held read.
   expect(screen.queryByText(jobCopy.refreshingJob)).toBeNull();
   expect(screen.getByRole('button', { name: jobCopy.refreshJob })).toHaveProperty('disabled', false);
   acceptedLink.focus();
-  await act(() => { releaseEarlierRefresh!(); });
+  await act(() => { release(); });
   await settleReads();
   return acceptedLink;
 }
@@ -1532,4 +1538,20 @@ it('still ends the overview on a deletion read after the superseding confirmatio
   fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
   await screen.findByText(jobCopy.thisJobWasDeleted);
   expect(screen.queryByRole('heading', { name: 'Alpha' })).toBeNull();
+});
+
+
+it('keeps a newer confirmation failure and retained job visible after an older Refresh settles', async () => {
+  const alpha = () => Promise.resolve(labelled('Alpha'));
+  const release = await startHeldRefresh(() => Promise.resolve(labelled('Beta')),
+    () => Promise.reject(new ApiClientError('http_error', { status: 503, serverCode: 'LISTING_BUSY' })), [alpha, alpha]);
+  await screen.findByText(jobCopy.previousJobMetadataMayBeOutdated);
+  await act(() => { release(); });
+  await settleReads();
+  expect(screen.getByRole('heading', { name: 'Alpha' })).toBeTruthy();
+  expect(screen.queryByRole('heading', { name: 'Beta' })).toBeNull();
+  expect(screen.getByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeTruthy();
+  expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job', 'job']);
+  fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+  await waitFor(() => expect(screen.queryByText(jobCopy.previousJobMetadataMayBeOutdated)).toBeNull());
 });
