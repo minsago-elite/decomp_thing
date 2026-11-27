@@ -351,3 +351,67 @@ it('distinguishes sanitized repository-read failure classes without enabling ini
   }
   expect(messages.size).toBe(failures.length);
 });
+
+function readbackFetcher(final: Record<string, unknown>, after: { repositories: unknown[]; operations: unknown[] }, polls = { count: 0 }) {
+  let repositoryReads = 0;
+  return mockedFetch((url, init) => {
+    const method = init.method ?? 'GET';
+    if (method === 'GET' && url.endsWith(`/jobs/${jobId}/repositories`)) {
+      repositoryReads++;
+      return apiResponse('gitRepositories', repositoryReads === 1 ? { jobId, repositories: [], operations: [] } : { jobId, ...after });
+    }
+    if (method === 'GET' && url.endsWith(`/jobs/${jobId}/runs/run_1`)) {
+      const data = fixture<{ data: Record<string, unknown> }>('run-completed-unaccepted').data;
+      return apiResponse('run', { ...data, jobId, runId: 'run_1', resultRevisionId: 'revision_1' });
+    }
+    if (method === 'POST' && url.endsWith(`/jobs/${jobId}/repositories`)) return apiResponse('operation', operation('queued').data, 202);
+    if (method === 'GET' && url.endsWith('/repositories/repository_1/operations/operation_1')) { polls.count++; return apiResponse('operation', final); }
+    if (method === 'GET' && url.endsWith('/repositories/repository_1')) return apiResponse('gitWorkspace', workspace.data);
+    if (method === 'GET' && url.endsWith('/repositories/repository_2')) return apiResponse('gitWorkspace', { ...workspace.data, repositoryId: 'repository_2', headRefName: 'refs/heads/other' });
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+}
+const otherRepository = { ...listed.data.repositories[0], repositoryId: 'repository_2', operationId: 'operation_2' };
+const otherCompleted = { ...operation('completed').data, operationId: 'operation_2', repositoryId: 'repository_2', endedAt: '2026-10-25T00:00:03Z' };
+
+for (const state of ['failed', 'cancelled', 'interrupted'] as const) {
+  it(`reports this click's ${state} outcome even when a concurrent operation and another repository are listed`, async () => {
+    const final = { ...operation(state).data, endedAt: '2026-10-25T00:00:02Z', message: 'The selected source snapshot is unavailable.' };
+    const fetcher = readbackFetcher(final, { repositories: [otherRepository], operations: [otherCompleted, final] });
+    realApi(fetcher);
+    const view = mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+    expect(await screen.findByText(`The last repository operation is ${state}: The selected source snapshot is unavailable.`)).toBeTruthy();
+    expect(screen.queryByText('Repository state was read from the server.')).toBeNull();
+    expect(screen.getByText('Branch other (no commits yet)')).toBeTruthy();
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    view.unmount();
+  });
+}
+
+it('does not confirm a completed click when the listed repository is another one', async () => {
+  const final = { ...operation('completed').data, endedAt: '2026-10-25T00:00:02Z' };
+  const fetcher = readbackFetcher(final, { repositories: [otherRepository], operations: [otherCompleted, final] });
+  realApi(fetcher);
+  const view = mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+  expect(await screen.findByText(/initialization could not be confirmed/)).toBeTruthy();
+  expect(screen.queryByText('Repository state was read from the server.')).toBeNull();
+  expect(screen.getByText('Branch other (no commits yet)')).toBeTruthy();
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  view.unmount();
+});
+
+it('keeps still-running guidance after poll exhaustion instead of the listing status', async () => {
+  const polls = { count: 0 };
+  const fetcher = readbackFetcher(operation('running').data, { repositories: [otherRepository], operations: [otherCompleted] }, polls);
+  realApi(fetcher);
+  const view = mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+  expect(await screen.findByText('Initialization is still running. Refresh to check its outcome.', {}, { timeout: 10000 })).toBeTruthy();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh repository' }).hasAttribute('disabled')).toBe(false));
+  expect(screen.getByText('Initialization is still running. Refresh to check its outcome.')).toBeTruthy();
+  expect(polls.count).toBe(300);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  view.unmount();
+}, 20000);

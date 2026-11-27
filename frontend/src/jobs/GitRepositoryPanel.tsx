@@ -68,6 +68,7 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setStatus(initialize ? copy.requestingInitialization : copy.readingRepository);
     try {
+      let outcome: Operation | null = null;
       if (initialize) {
         const runId = job.latestRunId; const revisionId = observed?.revisionId;
         const csrfToken = session.csrf();
@@ -81,16 +82,16 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
         }
         const expected = { jobId: job.jobId, action: 'git.init' as const,
           repositoryId: operation.repositoryId, operationId: operation.operationId };
-        let state = operation.state;
-        for (let poll = 0; !terminal.has(state); poll++) {
-          if (poll >= maximumPolls) { setStatus(copy.stillRunning); break; }
+        outcome = operation;
+        for (let poll = 0; !terminal.has(outcome.state); poll++) {
+          if (poll >= maximumPolls) break;
           setStatus(copy.initializationRunning);
           await sleep(pollIntervalMs, controller.signal);
           const next = (await client.get('operation',
             `${repositoriesPath}/${expected.repositoryId}/operations/${expected.operationId}`, { signal: controller.signal })).data;
           if (next.jobId !== expected.jobId || next.action !== expected.action || next.repositoryId !== expected.repositoryId
             || next.operationId !== expected.operationId) throw new ApiClientError('invalid_response');
-          state = next.state;
+          outcome = next;
         }
       }
       if (controller.signal.aborted) return;
@@ -98,7 +99,11 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
       if (controller.signal.aborted) return;
       setObserved(next);
       const latest = next.listing.operations[0];
-      setStatus(next.workspace ? copy.repositoryRead
+      // This click's outcome comes only from its identity-bound acknowledgement or poll, never the listing order.
+      setStatus(outcome && !terminal.has(outcome.state) ? copy.stillRunning
+        : outcome && outcome.state !== 'completed' ? textMessage(copy.lastOperation, { state: outcome.state, message: outcome.message ?? '' })
+        : outcome ? (next.workspace?.repositoryId === outcome.repositoryId ? copy.repositoryRead : copy.initializationUnconfirmed)
+        : next.workspace ? copy.repositoryRead
         : latest && latest.state !== 'completed' ? textMessage(copy.lastOperation, { state: latest.state, message: latest.message ?? '' })
         : copy.noRepository);
     } catch (failure: unknown) {
