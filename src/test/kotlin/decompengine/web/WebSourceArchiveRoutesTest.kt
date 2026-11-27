@@ -13,6 +13,12 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.zip.ZipInputStream
+import java.io.ByteArrayOutputStream
+import org.apache.commons.compress.archivers.zip.UnrecognizedExtraField
+import org.apache.commons.compress.archivers.zip.Zip64Mode
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
+import org.apache.commons.compress.archivers.zip.ZipShort
 import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
@@ -355,6 +361,46 @@ class WebSourceArchiveRoutesTest {
         // Restoring the verified bytes restores the label: it follows exact bytes and revision metadata.
         Files.write(fixture.archive, original)
         assertEquals("verified", state(fixture))
+    }
+
+    @Test fun `verification refuses a file one byte over the admission limit`() = withFixture { fixture ->
+        java.io.RandomAccessFile(fixture.archive.toFile(), "rw").use { it.setLength(64L * 1024 * 1024 + 1) }
+        val response = verify(fixture, "0".repeat(64))
+        assertEquals(413, response.statusCode())
+        assertEquals("ARCHIVE_TOO_LARGE", Json.parseToJsonElement(String(response.body())).jsonObject
+            .getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+    }
+
+    @Test fun `verification binds the full digest of a commented ZIP64 archive to the retained inventory`() = withFixture { fixture ->
+        val original = Files.readAllBytes(fixture.archive)
+        val buffer = ByteArrayOutputStream()
+        ZipArchiveOutputStream(buffer).use { output ->
+            output.setUseZip64(Zip64Mode.Always)
+            output.setComment("a".repeat(65535))
+            ZipInputStream(original.inputStream()).use { input ->
+                generateSequence { input.nextEntry }.forEach { entry ->
+                    val copy = ZipArchiveEntry(entry).apply {
+                        comment = "retained entry"
+                        lastModifiedTime = java.nio.file.attribute.FileTime.fromMillis(1_700_000_000_000)
+                        addExtraField(UnrecognizedExtraField().apply {
+                            headerId = ZipShort(0xa11f)
+                            localFileDataData = byteArrayOf(1, 2)
+                        })
+                    }
+                    output.putArchiveEntry(copy)
+                    input.copyTo(output)
+                    output.closeArchiveEntry()
+                }
+            }
+        }
+        val archive = buffer.toByteArray()
+        val digest = sha256(archive)
+        assertNotEquals(sha256(original), digest)
+        Files.write(fixture.archive, archive)
+        val operation = data(verify(fixture, digest), "operation", 202)
+        assertEquals("completed", finish(fixture, operation).getValue("state").jsonPrimitive.content)
+        assertEquals("verified", state(fixture))
+        assertEquals(digest, status(fixture).getValue("archive").jsonObject.getValue("sha256").jsonPrimitive.content)
     }
 
     @Test fun `an archive whose payload differs from the current tree is not labeled verified`() = withFixture(beforeStart = { tree ->

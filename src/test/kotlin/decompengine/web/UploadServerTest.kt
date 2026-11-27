@@ -2824,6 +2824,10 @@ class UploadServerTest {
                 assertContentEquals(archive.archivePath.readBytes(), downloaded.body)
                 assertEquals(archive.archiveSha256, digest(downloaded.body))
                 assertEquals("\"${archive.archiveSha256}\"", downloaded.etag)
+                val incomplete = downloaded.body.copyOf(downloaded.body.size - 1)
+                archive.archivePath.writeBytes(incomplete)
+                val current = "/jobs/$jobId/artifacts/reports/source-tree.zip?sha256=${digest(incomplete)}"
+                assertEquals(400, request(server, "GET", current).status)
             }
         }
     }
