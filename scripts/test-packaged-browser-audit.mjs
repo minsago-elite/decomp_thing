@@ -505,7 +505,7 @@ test('interaction records match each fixture action and are summarized without a
   assert.match(verdict(crossEngine).join('\n'), /unexpected action/);
 });
 
-test('the constrained profile is explicit, applies 4x CPU and 10 Mbit/s, and does not apply reference budgets', async () => {
+test('the constrained profile is explicit, matches the documented 4x CPU, 10/2 Mbit/s, 100 ms contract, and does not apply reference budgets', async () => {
   const calls = [];
   const cdp = { call: async (...args) => { calls.push(args); return {}; } };
   assert.deepEqual(await applyAuditProfile(cdp, 'target-session', 'reference'), auditProfileEvidence('reference'));
@@ -514,8 +514,8 @@ test('the constrained profile is explicit, applies 4x CPU and 10 Mbit/s, and doe
   assert.deepEqual(profile, auditProfileEvidence('constrained'));
   assert.deepEqual(calls, [
     ['Emulation.setCPUThrottlingRate', { rate: 4 }, 'target-session'],
-    ['Network.emulateNetworkConditions', { offline: false, latency: 0,
-      downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 }, 'target-session'],
+    ['Network.emulateNetworkConditions', { offline: false, latency: 100,
+      downloadThroughput: 1_250_000, uploadThroughput: 250_000 }, 'target-session'],
   ]);
   await assert.rejects(applyAuditProfile(cdp, 'target-session', 'unknown'), /Unknown packaged audit profile/);
 
@@ -533,6 +533,11 @@ test('the constrained profile is explicit, applies 4x CPU and 10 Mbit/s, and doe
     interactionPages, profile: 'constrained',
   });
   assert.deepEqual(verdictForConstrained.failures, []);
+  const symmetric = structuredClone(constrained);
+  Object.assign(symmetric.profile.network, { latency: 0, uploadThroughput: 1_250_000 });
+  assert.match(assertAudit(symmetric, manifest, responses, origin, undefined, { interactionPages, profile: 'constrained' })
+    .failures.join('\n'), /audit profile: report does not match requested constrained profile/,
+  'evidence from the superseded symmetric zero-latency profile must not qualify as constrained');
   assert.equal(verdictForConstrained.profile, 'constrained');
   assert.equal(verdictForConstrained.timingBudgetsEnforced, false);
 });
@@ -1073,8 +1078,8 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
   assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, chart: 10, navigations: 84, chartCaptureEvaluations: 4 });
   assert.deepEqual(calls.filter(([method]) => ['Emulation.setCPUThrottlingRate', 'Network.emulateNetworkConditions'].includes(method)), [
     ['Emulation.setCPUThrottlingRate', { rate: 4 }],
-    ['Network.emulateNetworkConditions', { offline: false, latency: 0,
-      downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 }],
+    ['Network.emulateNetworkConditions', { offline: false, latency: 100,
+      downloadThroughput: 1_250_000, uploadThroughput: 250_000 }],
   ], 'the active audit path applies the constrained profile before navigation');
 });
 
