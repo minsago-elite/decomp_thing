@@ -75,7 +75,8 @@ export default function GraphRoute({ selected, basePath, search, runtime = graph
       selected, version);
     const echoed = data.query;
     if (echoed.view !== query.view || echoed.focus !== query.focus || echoed.depth !== query.depth || echoed.nodeLimit !== query.nodeLimit
-      || echoed.edgeLimit !== query.edgeLimit || echoed.direction !== query.direction) throw new Error('Neighborhood answers another request.');
+      || echoed.edgeLimit !== query.edgeLimit || echoed.direction !== query.direction
+      || echoed.unresolved !== (query.view === 'calls' ? query.unresolved : null)) throw new Error('Neighborhood answers another request.');
     return data;
   });
   const data = read.state === 'ready' ? read.value : null;

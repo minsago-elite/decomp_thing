@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Run, Runs, ScorecardComparison, StructureScorecard } from '../src/api/generated';
@@ -12,6 +12,8 @@ import { structureCopy } from '../src/copy/structure';
 import { scorecardLocation, scorecardSearch } from '../src/structure/scorecardQuery';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
+import '../src/structure/contract';
+import { decodeResponse } from '../src/api/decode';
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 const fixture = <T,>(name: string) => (JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as { data: T }).data;
 const bootstrap = fixture<Bootstrap>('bootstrap');
@@ -19,6 +21,16 @@ const comparison = fixture<ScorecardComparison>('scorecard-comparison');
 const incompatible = fixture<ScorecardComparison>('scorecard-comparison-incompatible');
 const selected = comparison.binding;
 const card = { ...fixture<StructureScorecard>('structure-scorecard'), binding: selected };
+// The server echoes the requested ordering and returns that ordering's first page. A second module row stands in
+// for the score/desc first page, so a stale ordering would show the wrong module.
+const ordered = (path: string, value: StructureScorecard = card): StructureScorecard => {
+  const values = new URLSearchParams(path.split('?')[1]);
+  const query = { sort: (values.get('sort') ?? 'module') as 'module' | 'score', order: (values.get('order') ?? 'asc') as 'asc' | 'desc' };
+  if (!value.scorecard || (query.sort === 'module' && query.order === 'asc')) return { ...value, query };
+  const [first] = value.scorecard.modules.items;
+  return { ...value, query, scorecard: { ...value.scorecard, modules: { ...value.scorecard.modules,
+    items: first ? [{ ...first, moduleId: 'net', metric: { ...first.metric, value: '0.9000' } }] : [] } } };
+};
 const run = { ...fixture<Run>('run-completed-unaccepted'), jobId: selected.jobId, runId: selected.runId, resultRevisionId: selected.revisionId, acceptance: 'rejected' } as Run;
 const revision = `/nested/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
 const api = `/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
@@ -39,7 +51,7 @@ async function session() {
 function serve(compare: ScorecardComparison = comparison) {
   transport.get.mockImplementation((kind, path) => {
     const result = path.includes('run_5') ? incompatible : compare;
-    return Promise.resolve({ data: kind === 'structureScorecard' ? card : kind === 'run' ? run : kind === 'runs' ? runs
+    return Promise.resolve({ data: kind === 'structureScorecard' ? ordered(path) : kind === 'run' ? run : kind === 'runs' ? runs
       : { ...result, structureVersion: card.structureVersion, current: { ...result.current, structureVersion: card.structureVersion } } });
   });
 }
@@ -275,7 +287,7 @@ it('keeps inventory navigation after a changed pinned scorecard and refreshes to
   const auth = await session();
   transport.get.mockImplementation((kind, path) => kind === 'structureScorecard' && path.includes('structureVersion=')
     ? Promise.reject(new ApiClientError('http_error', { status: 409, serverCode: 'STRUCTURE_CHANGED' }))
-    : Promise.resolve({ data: kind === 'structureScorecard' ? card : kind === 'run' ? run : kind === 'runs' ? runs : comparison }));
+    : Promise.resolve({ data: kind === 'structureScorecard' ? ordered(path) : kind === 'run' ? run : kind === 'runs' ? runs : comparison }));
   history.replaceState(null, '', `${revision}/scorecard?sort=score&structureVersion=${'8'.repeat(64)}`);
   try {
     render(<App basePath="/nested" session={auth} />);
@@ -335,9 +347,9 @@ it.each([
   let cardReads = 0;
   let changed = expired;
   transport.get.mockImplementation((kind, path) => {
-    if (kind === 'structureScorecard') return Promise.resolve({ data: {
+    if (kind === 'structureScorecard') return Promise.resolve({ data: ordered(path, {
       ...card, structureVersion: ++cardReads === 1 ? card.structureVersion : latestVersion,
-    } });
+    }) });
     if (kind === 'scorecardComparison') {
       const values = new URLSearchParams(path.split('?')[1]);
       if (changed && values.has('cursor')) return Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }));
@@ -404,19 +416,214 @@ it('restores both module sort controls on Back and Forward', async () => {
     fireEvent.change(screen.getByRole('combobox', { name: copy.order }), { target: { value: 'desc' } });
     fireEvent.click(screen.getByRole('button', { name: copy.applySort }));
     await waitFor(() => expect(location.search).toBe('?sort=score&order=desc'));
-    await screen.findByRole('table', { name: copy.modulesTitle });
+    await waitFor(() => expect(within(screen.getByRole('table', { name: copy.modulesTitle })).queryByText('net')).not.toBeNull());
     history.back();
     await waitFor(() => expect(location.search).toBe(''));
-    await screen.findByRole('table', { name: copy.modulesTitle });
+    await waitFor(() => expect(within(screen.getByRole('table', { name: copy.modulesTitle })).queryByText('core')).not.toBeNull());
     await waitFor(() => expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1]).toBe(`${api}/scorecard?limit=50`));
     expect({ sort: screen.getByRole<HTMLSelectElement>('combobox', { name: copy.sort }).value,
       order: screen.getByRole<HTMLSelectElement>('combobox', { name: copy.order }).value }).toEqual({ sort: 'module', order: 'asc' });
     history.forward();
     await waitFor(() => expect(location.search).toBe('?sort=score&order=desc'));
-    await screen.findByRole('table', { name: copy.modulesTitle });
+    await waitFor(() => expect(within(screen.getByRole('table', { name: copy.modulesTitle })).queryByText('net')).not.toBeNull());
     expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1])
       .toBe(`${api}/scorecard?limit=50&sort=score&order=desc`);
     expect(screen.getByRole<HTMLSelectElement>('combobox', { name: copy.sort }).value).toBe('score');
     expect(screen.getByRole<HTMLSelectElement>('combobox', { name: copy.order }).value).toBe('desc');
+  } finally { auth.dispose(); }
+});
+
+/** Holds scorecard reads until released, answering every other read as `serve()` does. */
+function hold() {
+  const initial = transport.get.getMockImplementation()!;
+  let release!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  transport.get.mockImplementation(async (...args) => {
+    if (args[0] === 'structureScorecard') await wait;
+    return initial(...args);
+  });
+  return () => release();
+}
+
+async function heldRefreshKeepsFocus() {
+  const refresh = screen.getByRole<HTMLButtonElement>('button', { name: structureCopy.refresh });
+  const release = hold();
+  transport.get.mockClear();
+  refresh.focus();
+  fireEvent.click(refresh);
+  await screen.findByText(structureCopy.loading);
+  fireEvent.click(refresh);
+  release();
+  await screen.findByRole('table', { name: copy.measuresTitle });
+  await waitFor(() => expect(screen.queryByText(structureCopy.loading)).toBeNull());
+  expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(1);
+  expect(document.activeElement).toBe(refresh);
+}
+
+it('moves focus to the module heading after a genuine sort move, and no later Refresh moves it again', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.change(await screen.findByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    fireEvent.change(screen.getByRole('combobox', { name: copy.order }), { target: { value: 'desc' } });
+    const apply = screen.getByRole('button', { name: copy.applySort });
+    apply.focus();
+    fireEvent.click(apply);
+    await waitFor(() => expect(within(screen.getByRole('table', { name: copy.modulesTitle })).queryByText('net')).not.toBeNull());
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(copy.modulesTitle));
+    await heldRefreshKeepsFocus();
+  } finally { auth.dispose(); }
+});
+
+it('moves focus to the module heading after a page move', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const next = await screen.findByRole('button', { name: copy.next });
+    next.focus();
+    fireEvent.click(next);
+    await waitFor(() => expect(location.search).toContain('cursor='));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(copy.modulesTitle));
+  } finally { auth.dispose(); }
+});
+
+it.each([false, true])('records no focus move for an unchanged sort, so a later Refresh keeps focus (comparison %s)', async active => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard${active ? '?baselineRunId=run_1&baselineRevisionId=revision_1' : ''}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const apply = await screen.findByRole('button', { name: copy.applySort });
+    if (active) await screen.findByText(copy.compatibility.compatible);
+    const reads = transport.get.mock.calls.length;
+    apply.focus();
+    fireEvent.click(apply);
+    expect(transport.get.mock.calls).toHaveLength(reads);
+    expect(document.activeElement).toBe(apply);
+    await heldRefreshKeepsFocus();
+  } finally { auth.dispose(); }
+});
+
+it('abandons a sort focus request when Back interrupts its read', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.change(await screen.findByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    const release = hold();
+    const apply = screen.getByRole('button', { name: copy.applySort });
+    apply.focus();
+    fireEvent.click(apply);
+    await screen.findByText(structureCopy.loading);
+    history.back();
+    await waitFor(() => expect(location.search).toBe(''));
+    await waitFor(() => expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(3));
+    await act(() => Promise.resolve().then(release));
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    const focusAfterBack = document.activeElement;
+    const releaseForward = hold();
+    history.forward();
+    await waitFor(() => expect(location.search).toContain('sort=score'));
+    await screen.findByText(structureCopy.loading);
+    await act(() => Promise.resolve().then(releaseForward));
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    expect(document.activeElement).toBe(focusAfterBack);
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus where it was deliberately moved while a sort read is pending', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.change(await screen.findByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    const release = hold();
+    const apply = screen.getByRole('button', { name: copy.applySort });
+    apply.focus();
+    fireEvent.click(apply);
+    await screen.findByText(structureCopy.loading);
+    const elsewhere = screen.getByRole('link', { name: structureCopy.browseModules });
+    elsewhere.focus();
+    release();
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    await waitFor(() => expect(screen.queryByText(structureCopy.loading)).toBeNull());
+    expect(document.activeElement).toBe(elsewhere);
+  } finally { auth.dispose(); }
+});
+
+it.each(['jobId', 'runId', 'revisionId'] as const)('refuses a decoded comparison whose current side names another %s', async field => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8')) as { data: ScorecardComparison };
+  envelope.data.current.binding[field] = `${field === 'jobId' ? 'job' : field === 'runId' ? 'run' : 'revision'}_other`;
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation((kind, path) => Promise.resolve(kind === 'scorecardComparison' ? decodeResponse(text, 'scorecardComparison')
+    : { data: kind === 'structureScorecard' ? ordered(path, { ...card, structureVersion: comparison.structureVersion }) : kind === 'run' ? run : runs }));
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('alert');
+    expect(screen.queryByText(copy.compatibility.compatible)).toBeNull();
+    expect(screen.queryByRole('table', { name: copy.moduleComparisonTitle })).toBeNull();
+    expect(screen.getAllByRole('table', { name: copy.measuresTitle })).toHaveLength(1);
+  } finally { auth.dispose(); }
+});
+
+it('shows a decoded comparison whose current side names the selected revision', async () => {
+  const auth = await session();
+  const text = readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8');
+  transport.get.mockImplementation((kind, path) => Promise.resolve(kind === 'scorecardComparison' ? decodeResponse(text, 'scorecardComparison')
+    : { data: kind === 'structureScorecard' ? ordered(path, { ...card, structureVersion: comparison.structureVersion }) : kind === 'run' ? run : runs }));
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { search: '?sort=score&order=desc', echoed: { sort: 'module', order: 'asc' } },
+  { search: '?sort=score&order=desc', echoed: { sort: 'score', order: 'asc' } },
+  { search: '?sort=score&order=desc', echoed: { sort: 'module', order: 'desc' } },
+  { search: '', echoed: { sort: 'score', order: 'asc' } },
+  { search: '?order=desc', echoed: { sort: 'module', order: 'asc' } },
+])('refuses a decoded scorecard echoing $echoed.sort/$echoed.order for "$search"', async ({ search, echoed }) => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/structure-scorecard.json'), 'utf8')) as { data: StructureScorecard };
+  envelope.data.binding = selected;
+  envelope.data.query = echoed as StructureScorecard['query'];
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'structureScorecard' ? decodeResponse(text, 'structureScorecard')
+    : { data: kind === 'run' ? run : runs }));
+  history.replaceState(null, '', `${revision}/scorecard${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('table', { name: copy.modulesTitle })).toBeNull();
+    expect(screen.queryByRole('table', { name: copy.measuresTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { search: '', echoed: { sort: 'module', order: 'asc' } },
+  { search: '?sort=score&order=desc', echoed: { sort: 'score', order: 'desc' } },
+  { search: '?order=desc', echoed: { sort: 'module', order: 'desc' } },
+])('shows a decoded scorecard echoing the requested ordering for "$search"', async ({ search, echoed }) => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/structure-scorecard.json'), 'utf8')) as { data: StructureScorecard };
+  envelope.data.binding = selected;
+  envelope.data.query = echoed as StructureScorecard['query'];
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'structureScorecard' ? decodeResponse(text, 'structureScorecard')
+    : { data: kind === 'run' ? run : runs }));
+  history.replaceState(null, '', `${revision}/scorecard${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.modulesTitle });
   } finally { auth.dispose(); }
 });

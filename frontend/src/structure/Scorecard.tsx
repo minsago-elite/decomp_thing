@@ -132,8 +132,9 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
     if (query.compareCursor) values.set('cursor', query.compareCursor);
     values.set('structureVersion', version);
     const data = (await client.get('scorecardComparison', `${revisionReadRoute(selected)}/scorecard-comparison?${values}`, { signal })).data;
-    const binding = data.binding, base = data.baseline.binding;
+    const binding = data.binding, current = data.current.binding, base = data.baseline.binding;
     if (binding.jobId !== selected.jobId || binding.runId !== selected.runId || binding.revisionId !== selected.revisionId
+      || current.jobId !== selected.jobId || current.runId !== selected.runId || current.revisionId !== selected.revisionId
       || base.jobId !== selected.jobId || base.runId !== query.baseline.runId || base.revisionId !== query.baseline.revisionId) {
       throw new ApiClientError('invalid_response');
     }
@@ -238,16 +239,22 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
   const { client } = usePrivateTransport(basePath);
   const query = scorecardLocation(search);
   const results = useRef<HTMLHeadingElement>(null);
-  const moveFocus = useRef(false);
-  const key = [selected.jobId, selected.runId, selected.revisionId, query.sort, query.order, query.cursor ?? '', query.version ?? ''].join('/');
+  const readKey = (value: ScorecardQuery) => [selected.jobId, selected.runId, selected.revisionId, value.sort, value.order,
+    value.cursor ?? '', value.version ?? ''].join('/');
+  const key = readKey(query);
+  // A heading-focus request belongs to the one read a sort or page move starts, and to the control that asked for it.
+  // A move that leaves the read unchanged starts no read, so it records nothing for a later Refresh to consume.
+  const moveFocus = useRef<{ key: string; origin: string; from: Element | null } | null>(null);
   const [read, refresh] = useStructureRead<StructureScorecard>(key, async signal => {
     const values = new URLSearchParams({ limit: String(SCORECARD_PAGE_LIMIT) });
     if (query.sort !== 'module') values.set('sort', query.sort);
     if (query.order !== 'asc') values.set('order', query.order);
     if (query.cursor) values.set('cursor', query.cursor);
     if (query.version) values.set('structureVersion', query.version);
-    return bindStructure((await client.get('structureScorecard', `${revisionReadRoute(selected)}/scorecard?${values}`, { signal })).data,
+    const data = bindStructure((await client.get('structureScorecard', `${revisionReadRoute(selected)}/scorecard?${values}`, { signal })).data,
       selected, query.version);
+    if (data.query.sort !== query.sort || data.query.order !== query.order) throw new ApiClientError('invalid_response');
+    return data;
   });
   const attemptPath = `/jobs/${selected.jobId}/runs/${selected.runId}`;
   const [attempt, refreshAttempt] = useStructureRead<Acceptance>(attemptPath, async signal => {
@@ -256,9 +263,19 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
     return data.acceptance;
   });
   const acceptance = attempt.state === 'ready' ? attempt.value : null;
-  useEffect(() => { if (read.state !== 'loading' && moveFocus.current) { moveFocus.current = false; results.current?.focus(); } }, [read]);
+  useEffect(() => {
+    const pending = moveFocus.current;
+    // Renders before the location changes still show the originating read; wait for the requested one.
+    if (!pending || key === pending.origin) return;
+    if (key !== pending.key) { moveFocus.current = null; return; }
+    if (read.state === 'loading') return;
+    moveFocus.current = null;
+    // Focus moved deliberately elsewhere while the read was pending stays where the person put it.
+    const active = document.activeElement;
+    if ((active === pending.from || active === null || active === document.body || !active.isConnected)) results.current?.focus();
+  }, [read]);
   const route = (next: ScorecardQuery, focus = false) => {
-    moveFocus.current = focus;
+    moveFocus.current = focus && readKey(next) !== key ? { key: readKey(next), origin: key, from: document.activeElement } : null;
     location.route(structureListPath(basePath, selected, 'scorecard', scorecardSearch(next)));
   };
   const data = read.state === 'ready' ? read.value : null;
@@ -273,6 +290,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
   // Inventory links stay outside the read gate; refresh reads current first pages for the card and comparison.
   return <Frame selected={selected} data={data} read={read} pinned={query.version !== undefined} boundary={copy.boundary}
     onRefresh={() => {
+      moveFocus.current = null;
       refreshAttempt();
       if (!query.version && !query.cursor && !query.compareCursor) { refresh(); return; }
       const next = { ...query }; delete next.version; delete next.cursor; delete next.compareCursor; route(next);

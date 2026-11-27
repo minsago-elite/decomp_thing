@@ -13,6 +13,8 @@ import { ApiClientError } from '../src/api/errors';
 import { graphLocation, graphPath } from '../src/graph/query';
 import { layoutGraph } from '../src/graph/layout';
 import type { LayoutWorker } from '../src/graph/layoutOperation';
+import '../src/structure/contract';
+import { decodeResponse } from '../src/api/decode';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
@@ -218,5 +220,44 @@ it('applies new limits through the URL and draws module dependencies with plan l
     expect(() => graphLocation('?view=modules&focus=core&unresolved=omit')).toThrow();
     expect(() => graphLocation('?view=calls&focus=fn_1&depth=4')).toThrow();
     expect(() => graphLocation('?view=calls')).toThrow();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2&unresolved=omit', fixtureName: 'structure-neighborhood-calls', echoed: 'show' },
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2', fixtureName: 'structure-neighborhood-calls', echoed: 'omit' },
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2', fixtureName: 'structure-neighborhood-calls', echoed: null },
+  { search: 'view=modules&focus=core', fixtureName: 'structure-neighborhood-modules', echoed: 'show' },
+])('refuses a decoded neighborhood whose echoed unresolved policy answers another request ($search, echoed $echoed)', async ({ search, fixtureName, echoed }) => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${fixtureName}.json`), 'utf8')) as { data: StructureNeighborhood };
+  envelope.data.query.unresolved = echoed as StructureNeighborhood['query']['unresolved'];
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation(() => Promise.resolve(decodeResponse(text, 'structureNeighborhood')));
+  history.replaceState(null, '', `${revision}/graph?${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toBeTruthy();
+    expect(screen.queryByRole('table', { name: copy.edgesTitle })).toBeNull();
+    expect(screen.queryByRole('table', { name: copy.nodesTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2&unresolved=omit', fixtureName: 'structure-neighborhood-calls', echoed: 'omit' },
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2', fixtureName: 'structure-neighborhood-calls', echoed: 'show' },
+  { search: 'view=modules&focus=core', fixtureName: 'structure-neighborhood-modules', echoed: null },
+])('shows a decoded neighborhood whose echoed unresolved policy matches ($search)', async ({ search, fixtureName, echoed }) => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${fixtureName}.json`), 'utf8')) as { data: StructureNeighborhood };
+  envelope.data.query.unresolved = echoed as StructureNeighborhood['query']['unresolved'];
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation(() => Promise.resolve(decodeResponse(text, 'structureNeighborhood')));
+  history.replaceState(null, '', `${revision}/graph?${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.edgesTitle });
+    expect(transport.get.mock.calls[0]?.[1]).toContain(search.includes('modules') ? 'view=modules' : `unresolved=${echoed}`);
+    expect(transport.get.mock.calls[0]?.[1].includes('unresolved=')).toBe(!search.includes('modules'));
   } finally { auth.dispose(); }
 });
