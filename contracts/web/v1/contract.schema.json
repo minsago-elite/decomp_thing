@@ -738,6 +738,36 @@
               "type": "null"
             }
           ]
+        },
+        "localMeasurement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "sampledAt",
+            "fields"
+          ],
+          "properties": {
+            "source": {
+              "const": "workflow-execution-meter"
+            },
+            "sampledAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "fields": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "wallClockMs",
+                  "toolCalls"
+                ]
+              }
+            }
+          }
         }
       },
       "required": [

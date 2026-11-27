@@ -10,6 +10,7 @@ import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowRunObservation
 import decompengine.jobs.WorkflowExecutionLimits
+import decompengine.jobs.WorkflowLocalMeasurement
 import decompengine.jobs.WorkflowUsage
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
@@ -18,6 +19,8 @@ import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
+import java.time.Clock
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
@@ -32,6 +35,7 @@ internal class WorkflowExecutionMeter(
     val toolCallsMetered: Boolean,
     private val maximumEntries: Int = 250_000,
     private val nanoTime: () -> Long = System::nanoTime,
+    private val clock: Clock = Clock.systemUTC(),
 ) {
     private val toolCalls = AtomicLong()
     private val inputTokens = AtomicLong(-1)
@@ -118,6 +122,7 @@ internal class WorkflowExecutionMeter(
         cachedInputTokens = cachedInputTokens.get().takeIf { it >= 0 }?.toULong(),
         toolCalls = if (toolCallsMetered) toolCalls.get().toULong() else null,
         wallClockMs = wallClockMillis.coerceAtLeast(0).toULong(),
+        localMeasurement = WorkflowLocalMeasurement(Instant.now(clock), if (toolCallsMetered) listOf("wallClockMs", "toolCalls") else listOf("wallClockMs")),
     )
 
     private class WalkLimit : RuntimeException(null, null, false, false)

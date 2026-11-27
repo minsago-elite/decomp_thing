@@ -5,7 +5,7 @@ import { formatExactTimestamp } from '../copy/format';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
-import type { Run as RunData } from '../api/generated';
+import type { Run as RunData, Usage } from '../api/generated';
 import { withApiFailureReference } from '../api/client';
 import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
 import type { BrowserSession } from '../session/session';
@@ -104,11 +104,11 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       <p>{run.endedAt ? displayMessage(outcomeCopy.usageSource, { time: <time dateTime={run.endedAt} title={run.endedAt}>{formatExactTimestamp(run.endedAt)}</time> })
         : outcomeCopy.usageWhileActive}</p>
       {run.usage ? <dl class="job-facts">
-        <dt>{copy.inputTokens}</dt><dd>{run.usage.inputTokens ?? copy.notReported}</dd>
-        <dt>{copy.outputTokens}</dt><dd>{run.usage.outputTokens ?? copy.notReported}</dd>
-        <dt>{copy.cachedInputTokens}</dt><dd>{run.usage.cachedInputTokens ?? copy.notReported}</dd>
-        <dt>{copy.toolCalls}</dt><dd>{run.usage.toolCalls ?? copy.notReported}</dd>
-        <dt>{copy.wallClockUsage2}</dt><dd>{run.usage.wallClockMs === null ? copy.notReported : displayMessage(copy.wallClockUsage, { value: run.usage.wallClockMs })}</dd>
+        <dt>{copy.inputTokens}</dt><dd><span>{run.usage.inputTokens ?? copy.notReported}</span> {run.usage.inputTokens !== null && <UsageSource />}</dd>
+        <dt>{copy.outputTokens}</dt><dd><span>{run.usage.outputTokens ?? copy.notReported}</span> {run.usage.outputTokens !== null && <UsageSource />}</dd>
+        <dt>{copy.cachedInputTokens}</dt><dd><span>{run.usage.cachedInputTokens ?? copy.notReported}</span> {run.usage.cachedInputTokens !== null && <UsageSource />}</dd>
+        <dt>{copy.toolCalls}</dt><dd><span>{run.usage.toolCalls ?? copy.notReported}</span> <UsageSource local={run.usage.localMeasurement} field="toolCalls" /></dd>
+        <dt>{copy.wallClockUsage2}</dt><dd><span>{run.usage.wallClockMs === null ? copy.notReported : displayMessage(copy.wallClockUsage, { value: run.usage.wallClockMs })}</span> <UsageSource local={run.usage.localMeasurement} field="wallClockMs" /></dd>
       </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
       </>}
       {view !== 'evidence' && <>
@@ -169,4 +169,13 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
         : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}
     </> : <p role="alert">{copy.theRequestedJobOrAttemptIdentityIsInvalid}</p>}
   </section>;
+}
+
+/** Names the source of one usage counter. Local sample time is shown only for fields the meter explicitly designates. */
+function UsageSource({ local, field }: { local?: Usage['localMeasurement']; field?: 'wallClockMs' | 'toolCalls' }) {
+  const text = field === undefined ? outcomeCopy.providerMeasurementSource
+    : local?.source === 'workflow-execution-meter' && local.fields.includes(field)
+      ? displayMessage(outcomeCopy.localMeasurementSource, { time: <time dateTime={local.sampledAt} title={local.sampledAt}>{formatExactTimestamp(local.sampledAt)}</time> })
+      : outcomeCopy.noLocalMeasurementSource;
+  return <small class="usage-source" data-usage-source={field ?? 'provider'}>{text}</small>;
 }

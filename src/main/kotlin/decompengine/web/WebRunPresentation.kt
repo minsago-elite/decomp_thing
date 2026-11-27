@@ -1,5 +1,6 @@
 package decompengine.web
 
+import decompengine.jobs.localMeasurementJson
 import decompengine.jobs.WorkflowAttempt
 import kotlinx.serialization.json.*
 
@@ -26,6 +27,7 @@ internal fun webRun(run: WorkflowAttempt): JsonObject = buildJsonObject {
     put("usage", run.usage?.let { usage -> buildJsonObject {
         fun count(name: String, value: ULong?) { put(name, value?.let { JsonPrimitive(it.toString()) } ?: JsonNull) }
         count("inputTokens", usage.inputTokens); count("outputTokens", usage.outputTokens)
+        usage.localMeasurement?.let { put("localMeasurement", localMeasurementJson(it)) }
         count("cachedInputTokens", usage.cachedInputTokens); count("toolCalls", usage.toolCalls); count("wallClockMs", usage.wallClockMs)
     } } ?: JsonNull)
 }

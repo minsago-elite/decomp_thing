@@ -20,6 +20,9 @@ export const attemptOutcomeCopy = {
   stopDescription: '{label}. {detail} {recordedCode}',
   recordedCode: 'Recorded code {code}.',
   usageSource: 'Source: the attempt\'s terminal receipt, recorded at {time}. Provider measurement time: Not reported. Missing counters remain unknown.',
+  localMeasurementSource: 'Measured locally by the workflow execution meter, sampled at {time}.',
+  providerMeasurementSource: 'Reported by the provider; measurement time not reported.',
+  noLocalMeasurementSource: 'Local measurement time not recorded for this attempt.',
   usageWhileActive: 'Usage is recorded with the attempt\'s terminal receipt; none is available before the attempt ends.',
   limitsSource: 'Source: the configuration persisted when this attempt was created at {time}. Limits do not measure consumption or confer acceptance.',
 } as const;

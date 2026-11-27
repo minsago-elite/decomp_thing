@@ -115,3 +115,41 @@ it('reads a queue position only for a queued attempt', async () => {
     expect(screen.getByText('Usage is recorded with the attempt\'s terminal receipt; none is available before the attempt ends.')).toBeTruthy();
   } finally { auth.dispose(); }
 });
+
+it('attributes usage counters to local meter or provider without inventing sample times', async () => {
+  const auth = await session();
+  const ended = '2026-01-02T03:04:59Z'; const sampled = '2026-01-02T03:04:05Z';
+  const base = { inputTokens: '12', outputTokens: '3', cachedInputTokens: null, toolCalls: '4', wallClockMs: '900' } as const;
+  const show = async (usage: Run['usage']) => {
+    transport.get.mockReset(); transport.get.mockResolvedValue({ data: { ...failed, state: 'failed', terminalReason: 'FAILED', endedAt: ended, usage } satisfies Run });
+    history.replaceState(null, '', `/nested/jobs/${failed.jobId}/runs/${failed.runId}`);
+    const view = render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(stopOutcomeCopy.FAILED.label);
+    const source = (field: string) => view.container.querySelectorAll(`[data-usage-source="${field}"]`);
+    return { view, source };
+  };
+  try {
+    // Both local fields designated: sample time is distinct from terminal recorded time.
+    let { view, source } = await show({ ...base, localMeasurement: { source: 'workflow-execution-meter', sampledAt: sampled, fields: ['wallClockMs', 'toolCalls'] } });
+    for (const field of ['wallClockMs', 'toolCalls']) {
+      expect(source(field)[0]!.textContent).toMatch(/^Measured locally by the workflow execution meter, sampled at /);
+      expect(source(field)[0]!.querySelector('time')!.getAttribute('dateTime')).toBe(sampled);
+    }
+    expect(view.container.querySelector(`time[datetime="${ended}"]`)).toBeTruthy();
+    expect(source('provider').length).toBe(2);
+    for (const node of source('provider')) { expect(node.textContent).toBe('Reported by the provider; measurement time not reported.'); expect(node.querySelector('time')).toBeNull(); }
+    view.unmount();
+    // toolCalls not designated: only wall clock carries the local sample.
+    ({ view, source } = await show({ ...base, toolCalls: null, localMeasurement: { source: 'workflow-execution-meter', sampledAt: sampled, fields: ['wallClockMs'] } }));
+    expect(source('wallClockMs')[0]!.querySelector('time')!.getAttribute('dateTime')).toBe(sampled);
+    expect(source('toolCalls')[0]!.textContent).toBe('Local measurement time not recorded for this attempt.');
+    expect(source('toolCalls')[0]!.querySelector('time')).toBeNull();
+    view.unmount();
+    // Legacy usage without localMeasurement: no backfilled sample time anywhere.
+    ({ view, source } = await show({ ...base }));
+    expect(view.container.querySelectorAll(`time[datetime="${sampled}"]`).length).toBe(0);
+    for (const field of ['wallClockMs', 'toolCalls']) expect(source(field)[0]!.textContent).toBe('Local measurement time not recorded for this attempt.');
+    expect(screen.getByText(/Source: the attempt's terminal receipt, recorded at/)).toBeTruthy();
+    view.unmount();
+  } finally { auth.dispose(); }
+});
