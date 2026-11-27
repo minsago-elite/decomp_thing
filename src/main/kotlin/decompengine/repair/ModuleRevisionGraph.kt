@@ -7281,6 +7281,13 @@ internal data class StableRegularFile(
 
 internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity, val validUtf8: Boolean)
 
+/** Match streamed digest receipts over an already captured array without copying or decoding its contents. */
+internal fun digestOfStableRegularFile(file: StableRegularFile): StableFileDigest {
+    val utf8 = StrictUtf8ByteValidator()
+    utf8.accept(file.bytes, file.bytes.size)
+    return StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity, utf8.finish())
+}
+
 /** Stream a pinned regular file, then revalidate its metadata and every directory binding. */
 internal fun hashStableRegularFile(
     root: Path,

@@ -4,7 +4,6 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
 import decompengine.jobs.*
 import decompengine.project.*
-import decompengine.repair.StableFileDigest
 import decompengine.repair.StableRegularFile
 import java.math.BigInteger
 import java.security.MessageDigest
@@ -45,7 +44,7 @@ class WebRevisionSourcesTest {
     private fun captured(bytes: ByteArray, inode: Long): StableRegularFile = StableRegularFile(bytes,
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) },
         LinuxFileIdentity(LinuxFileKey(1, inode), 0x8180, 1000, 1000, 1, 1, true, false, false))
-    private fun digest(file: StableRegularFile) = StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity)
+    private fun digest(file: StableRegularFile) = decompengine.repair.digestOfStableRegularFile(file)
     private fun capture(inputs: List<Input> = small, selected: ReconstructionProfile = profile,
         document: JsonObject = descriptor(inputs)): WebRevisionSourceSnapshot {
         val manifest = manifest(inputs, selected)

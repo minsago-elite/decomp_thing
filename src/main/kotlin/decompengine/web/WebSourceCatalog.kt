@@ -226,7 +226,7 @@ internal class WebSourceCatalogEvidence(
     private fun artifactDigest(jobId: String, path: String, maximum: Long): StableFileDigest =
         readArtifactDigest?.invoke(jobId, path, maximum) ?: digestOf(readArtifact(jobId, path, maximum))
 
-    private fun digestOf(file: StableRegularFile) = StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity)
+    private fun digestOf(file: StableRegularFile) = decompengine.repair.digestOfStableRegularFile(file)
 
     private fun sourceCatalogChanged(): Nothing = throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED",
         "Source catalog changed during capture. Refresh its first page.")

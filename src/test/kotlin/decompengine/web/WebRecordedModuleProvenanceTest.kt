@@ -10,7 +10,6 @@ import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.SourceTreeManifest
 import decompengine.repair.RepairBudgetExceededException
-import decompengine.repair.StableFileDigest
 import decompengine.repair.StableRegularFile
 import kotlinx.serialization.json.*
 import kotlin.test.*
@@ -189,7 +188,7 @@ class WebRecordedModuleProvenanceTest {
         )
         val reads = mutableMapOf<String, Int>()
         val digests = mutableMapOf<String, Int>()
-        fun digest(file: StableRegularFile) = StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity)
+        fun digest(file: StableRegularFile) = decompengine.repair.digestOfStableRegularFile(file)
         val source = WebSourceCatalogEvidence(listOf(profile), { selectedJob ->
             assertEquals(job, selectedJob); reads["input"] = (reads["input"] ?: 0) + 1
             stable(inputBytes, 5)

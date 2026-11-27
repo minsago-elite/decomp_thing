@@ -3,7 +3,6 @@ package decompengine.web
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
 import decompengine.project.*
-import decompengine.repair.StableFileDigest
 import decompengine.repair.StableRegularFile
 import java.security.MessageDigest
 import kotlinx.serialization.json.*
@@ -30,9 +29,26 @@ class WebSourceCatalogTest {
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) },
         LinuxFileIdentity(LinuxFileKey(1, inode), 0x8180, 1000, 1000, 1, 1, true, false, false))
 
-    private fun digest(file: StableRegularFile) = StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity)
+    private fun digest(file: StableRegularFile) = decompengine.repair.digestOfStableRegularFile(file)
 
     private fun cursor(page: JsonObject): String? = page.getValue("page").jsonObject.getValue("nextCursor").jsonPrimitive.contentOrNull
+
+    @Test fun `materialized digest receipts preserve commitments identity and strict UTF8 validity`() {
+        val valid = listOf(byteArrayOf(), "ASCII".toByteArray(), "é한😀".toByteArray())
+        val invalid = listOf(byteArrayOf(0xc3.toByte()), byteArrayOf(0xe2.toByte(), 0x82.toByte()),
+            byteArrayOf(0xf0.toByte(), 0x9f.toByte(), 0x98.toByte()), byteArrayOf(0x80.toByte()),
+            byteArrayOf(0xc0.toByte(), 0xaf.toByte()), byteArrayOf(0xed.toByte(), 0xa0.toByte(), 0x80.toByte()))
+        for ((expected, samples) in listOf(true to valid, false to invalid)) for (bytes in samples) {
+            val file = captured(bytes, 17)
+            val before = bytes.copyOf()
+            val receipt = digest(file)
+            assertEquals(expected, receipt.validUtf8)
+            assertEquals(MessageDigest.getInstance("SHA-256").digest(before).joinToString("") { "%02x".format(it) }, receipt.sha256)
+            assertEquals(before.size.toLong(), receipt.size)
+            assertSame(file.identity, receipt.identity)
+            assertContentEquals(before, file.bytes)
+        }
+    }
 
     @Test fun `25000 manifest files are captured without reading source bodies and paged exactly once`() {
         val files = (0 until 25_000).map { file(it) }
