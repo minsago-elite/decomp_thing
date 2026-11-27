@@ -81,7 +81,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
    * and a current failure is shown by the overview: a deletion ends it, a transient failure keeps the earlier
    * observation with a warning, and any other failure clears it. A `confirm` read only checks that the shown
    * observation is still current, so a successful one is returned without being applied: applying it would start
-   * another lookup that confirms again.
+   * another lookup that confirms again. When it is the newest read and matches the shown version, it still supersedes earlier reads.
    */
   const readJob = async (signal: AbortSignal, mode: 'observe' | 'confirm' = 'observe'): Promise<JobData | null> => {
     const ticket = issue();
@@ -100,8 +100,10 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     }
     if (mode === 'observe') apply(ticket, data);
     else if (ticket === order.current.issued && data.version === order.current.current?.version) {
-      // The retained overview is current again. Preserve its observation so the lookup can settle.
-      setStored(previous => previous.error ? { ...previous, error: '' } : previous);
+      // The retained overview is current again. This newest read supersedes every earlier one, such as a held Refresh,
+      // so those are dropped when they settle. Its observation is kept, not reapplied, so the lookup can settle.
+      order.current.applied = ticket;
+      setStored(previous => previous.error || previous.loading ? { ...previous, error: '', loading: false } : previous);
     }
     return data;
   };
