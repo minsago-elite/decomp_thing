@@ -34,17 +34,28 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
   const [restoreFocus, setRestoreFocus] = useState(false);
   const notice = useRef<HTMLParagraphElement>(null);
   const deletionForm = useRef<HTMLDivElement>(null);
-  // A tombstone read can land before this page's own DELETE acknowledgement; keep observing that one request.
+  const departing = useRef<Element | null>(null);
+  // This authenticated view's own DELETE may still be unacknowledged when the page mounts, including before
+  // its first job read settles or after a tombstone read lands first: observe that one request from mount (#512).
   useLayoutEffect(() => {
-    if (!deleted || operation) return;
+    if (operation) return;
     const inFlight = pendingDeletion({ session, generation, basePath, jobId });
     if (!inFlight) return;
     let current = true;
-    inFlight.then(result => { if (current && result.jobId === jobId) setOperation(result); }, () => undefined);
+    inFlight.then(result => {
+      if (!current || result.jobId !== jobId) return;
+      setOperation(result); departing.current = document.activeElement; setDeleted(true);
+    }, () => undefined);
     return () => { current = false; };
-  }, [deleted, operation, session, generation, basePath, jobId]);
-  // The focused Delete control departed with the form: land on the surviving notice instead of the document.
-  useLayoutEffect(() => { if (deleted && restoreFocus) { notice.current?.focus(); setRestoreFocus(false); } }, [deleted, restoreFocus]);
+    // Re-subscribe on a tombstone, so an acknowledgement settling after it still arrives.
+  }, [session, generation, basePath, jobId, deleted, operation]);
+  // When the transition removed the focused control, land on the surviving notice; leave surviving focus alone.
+  useLayoutEffect(() => {
+    if (!deleted) return;
+    const from = departing.current; departing.current = null;
+    if (restoreFocus || (from && from !== document.body && !from.isConnected)) notice.current?.focus();
+    if (restoreFocus) setRestoreFocus(false);
+  }, [deleted, restoreFocus]);
   // Another tab deleted or reorganized a job: read this one again so a deletion shows here too.
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
@@ -61,7 +72,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
         setStored({ binding, data: receive(response.data), error: '', loading: false });
       }
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted && isDeletedJob(failure)) { setDeleted(true); setStored({ binding, data: null, error: '', loading: false }); return; }
+      if (!controller.signal.aborted && isDeletedJob(failure)) { departing.current = document.activeElement; setDeleted(true); setStored({ binding, data: null, error: '', loading: false }); return; }
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
         error: withApiFailureReference({
@@ -75,7 +86,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
   }, [binding, client, jobId, refresh]);
   if (deleted) return <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{copy.thisJobWasDeleted}</p>
     {operation && <p>{operation.message}</p>}
-    {operation?.state === 'running' && <p>{jobDeletionCopy.stillRunning}</p>}
+    <p>{cleanupNotice(operation)}</p>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
   return <>
     {loading && <p role="status">{job ? copy.refreshingJob : copy.loadingJob}</p>}
@@ -108,9 +119,17 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
         onChanged={next => setStored({ binding, data: receive(next), error: '', loading: false })} />
       <div ref={deletionForm}><JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
-        onDeleted={result => { if (result) setOperation(result); setRestoreFocus(focusFollowsForm(deletionForm.current)); setDeleted(true); }} /></div>
+        onDeleted={result => { if (result) setOperation(result); departing.current = document.activeElement; setRestoreFocus(focusFollowsForm(deletionForm.current)); setDeleted(true); }} /></div>
     </>}
   </>;
+}
+
+/** File cleanup is reported only from the accepted operation this view observed; never inferred from a tombstone. */
+function cleanupNotice(operation: Operation | null) {
+  if (!operation) return jobDeletionCopy.cleanupUnknown;
+  if (['queued', 'running', 'cancelling'].includes(operation.state)) return jobDeletionCopy.stillRunning;
+  if (operation.state === 'completed' && !operation.recoveryRequired) return jobDeletionCopy.cleanupFinished;
+  return displayMessage(jobDeletionCopy.cleanupIncomplete, { state: operation.state });
 }
 
 export default function Job({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession | null }) {

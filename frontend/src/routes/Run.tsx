@@ -3,7 +3,7 @@ import { sourceCopy } from '../copy/sources';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from '../copy/format';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import type { Run as RunData } from '../api/generated';
 import { withApiFailureReference } from '../api/client';
@@ -27,8 +27,10 @@ import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/atte
 import { QueuePosition } from '../jobs/QueuePosition';
 import { jobCopy } from '../copy/job';
 
-function Details({ jobId, runId, basePath, session, view, navigation }: {
+function Details({ jobId, runId, basePath, session, view, navigation, onDeleted }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
+  /** A confirmed RESOURCE_GONE tombstone from the attempt read or any panel ends the whole routed attempt (#512). */
+  onDeleted: () => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
@@ -37,8 +39,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
   const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const run = observation?.value;
   const [refresh, setRefresh] = useState(0);
-  // A confirmed deletion tombstone from any panel ends this routed attempt, including its stale controls (#512).
-  const [gone, setGone] = useState<typeof binding | null>(null);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
     const controller = new AbortController();
@@ -50,9 +51,10 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       }
       setStored({ binding, data: receive(response.data), error: '', loading: false });
     }).catch((failure: unknown) => {
+      if (!controller.signal.aborted && isDeletedJob(failure)) { deletedHandler.current(); return; }
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
-        error: withApiFailureReference(isDeletedJob(failure) ? copy.thisJobWasDeleted : {
+        error: withApiFailureReference({
           session: copy.reconnectToReadThisAttempt, denied: copy.attemptAccessDenied,
           missing: copy.thisAttemptIsUnavailableForThisJob, unsupported: copy.incompatibleAttemptResponse,
           unverified: copy.attemptMetadataCouldNotBeVerified,
@@ -61,8 +63,6 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
     });
     return () => { controller.abort(); };
   }, [binding, client, jobId, runId, refresh]);
-  if (gone === binding) return <div class="notice" role="alert"><p>{copy.thisJobWasDeleted}</p>
-    <a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></div>;
   return <>
     {loading && <p role="status">{run ? copy.refreshingAttempt : copy.loadingAttempt}</p>}
     {error && <p role="alert">{error}</p>}
@@ -125,7 +125,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
           <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.activity}>
-          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={() => setGone(binding)} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
         </PanelBoundary>
       </>}
       {view !== 'activity' && <>
@@ -160,8 +160,26 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
   }, [route.url, route.route]);
   const navigation = suppliedNavigation ?? routedNavigation;
   const valid = /^[0-9a-f]{32}$/.test(jobId) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId);
+  // A tombstone belongs to one authenticated view of one attempt; every view of that attempt then shows only recovery (#512).
+  const viewKey = state?.status === 'authenticated' ? `${state.generation}/${jobId}/${runId}` : null;
+  const [gone, setGone] = useState<string | null>(null);
+  const departing = useRef<Element | null>(null);
+  const notice = useRef<HTMLParagraphElement>(null);
+  const deleted = viewKey !== null && gone === viewKey;
+  // When the transition removed the focused control, land on the surviving notice; leave surviving focus alone.
+  useLayoutEffect(() => {
+    if (!deleted) return;
+    const from = departing.current; departing.current = null;
+    if (from && from !== document.body && !from.isConnected) notice.current?.focus();
+  }, [deleted]);
+  const title = <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>;
+  if (deleted) return <section aria-labelledby="attempt-title">{title}
+    <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{copy.thisJobWasDeleted}</p>
+      <a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></div>
+  </section>;
+  const markDeleted = () => { if (viewKey !== null && gone !== viewKey) { departing.current = document.activeElement; setGone(viewKey); } };
   return <section aria-labelledby="attempt-title">
-    <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>
+    {title}
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>{copy.returnToJobOverview}</a>
       <p><a href={`${jobPath(basePath, jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
@@ -170,7 +188,7 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
         <a href={runViewPath(basePath, jobId, runId, 'activity')} aria-current={view === 'activity' ? 'page' : undefined}>{copy.activityView}</a>
         <a href={runViewPath(basePath, jobId, runId, 'evidence')} aria-current={view === 'evidence' ? 'page' : undefined}>{copy.evidenceView}</a>
       </nav>
-      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} {...(navigation === undefined ? {} : { navigation })} />
+      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} onDeleted={markDeleted} {...(navigation === undefined ? {} : { navigation })} />
         : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}
     </> : <p role="alert">{copy.theRequestedJobOrAttemptIdentityIsInvalid}</p>}
   </section>;

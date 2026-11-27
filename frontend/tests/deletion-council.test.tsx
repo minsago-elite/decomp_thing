@@ -8,7 +8,7 @@ import { ApiClientError } from '../src/api/client';
 import type { Bootstrap, Job, JobDeletionPreview, Operation, Run, Snapshot } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { runCopy } from '../src/copy/attempt';
-import { jobCopy } from '../src/copy/job';
+import { jobCopy, jobDeletionCopy } from '../src/copy/job';
 import { JobDeletion } from '../src/jobs/JobLifecycle';
 import { activityWindowSearch } from '../src/jobs/activityNavigation';
 import { createBrowserSession } from '../src/session/session';
@@ -151,7 +151,7 @@ it('keeps the original acknowledgement when a job refresh returns the tombstone 
   try {
     await arm();
     tombstone(); fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
-    await screen.findByText('This job was deleted.', { exact: false });
+    await screen.findByText(jobCopy.thisJobWasDeleted);
     expect(screen.queryByText(operation().message!)).toBeNull();
     await del.settle({ ok: operation() });
     expect(screen.getByText(operation().message!)).toBeTruthy();
@@ -222,5 +222,171 @@ it('never hands a pending DELETE, its acknowledgement or focus to a newer authen
     expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
     expect(document.activeElement).toBe(review);
     expect(transport.put).toHaveBeenCalledOnce();
+  } finally { auth.dispose(); }
+});
+
+// R2 Sol repros (#1978): mount-time acknowledgement, route-read tombstone, stale links, focus and cleanup copy.
+it('delivers an acknowledgement when the same job route is already remounted but its first job read is outstanding', async () => {
+  const del = deferred<Operation>(); const { auth, view } = await jobRoute(del);
+  try {
+    await arm();
+    view.unmount();
+    const read = deferred<Job>();
+    transport.get.mockImplementation((kind: string) => kind === 'job' ? read.promise : Promise.reject(unavailable()));
+    const start = transport.get.mock.calls.length;
+    render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(transport.get.mock.calls.slice(start).some(([kind]) => kind === 'job')).toBe(true));
+    await del.settle({ ok: operation() });
+    await read.settle({ err: gone('RESOURCE_GONE') });
+    await screen.findAllByText(jobCopy.thisJobWasDeleted);
+    expect(screen.getByText(operation().message!)).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it('does not claim the files were removed when the accepted operation says cleanup is still running', async () => {
+  const del = deferred<Operation>(); const { auth } = await jobRoute(del);
+  try {
+    await arm();
+    await del.settle({ ok: operation() });
+    const notice = screen.getByRole('alert');
+    expect(notice.textContent).toContain('File cleanup is still running');
+    expect(notice.textContent).not.toContain('Its files were removed');
+  } finally { auth.dispose(); }
+});
+
+it('ends the attempt when the route read itself confirms RESOURCE_GONE', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind: string) => Promise.reject(kind === 'run' ? gone('RESOURCE_GONE') : unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}/evidence`);
+  render(<App basePath="/nested" session={auth} />);
+  try {
+    await screen.findByText(runCopy.thisJobWasDeleted);
+    expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Return to jobs' })).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it('hands keyboard focus from a removed Activity filter to the deletion notice', async () => {
+  const events = deferred<unknown>();
+  const auth = await session();
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: run })
+    : kind === 'snapshot' ? Promise.resolve({ data: snapshot })
+    : kind === 'events' ? events.promise : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}/activity`);
+  render(<App basePath="/nested" session={auth} />);
+  try {
+    fireEvent.click(await screen.findByRole('button', { name: 'Follow activity' }));
+    await waitFor(() => expect(transport.get.mock.calls.some(([kind]) => kind === 'events')).toBe(true));
+    const filter = screen.getByRole('combobox', { name: 'Observation category' });
+    filter.focus();
+    expect(document.activeElement).toBe(filter);
+    await events.settle({ err: gone('RESOURCE_GONE') });
+    await screen.findByText(runCopy.thisJobWasDeleted);
+    expect(filter.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement?.closest('[role="alert"]')).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it('ends the links for the deleted job and attempt after the Activity tombstone', async () => {
+  const auth = await routedActivity(gone('RESOURCE_GONE'));
+  try {
+    fireEvent.click(await screen.findByRole('button', { name: 'Follow activity' }));
+    await screen.findByText(runCopy.thisJobWasDeleted);
+    const stale = [...document.querySelectorAll('main a')]
+      .map(node => node.getAttribute('href'))
+      .filter(href => href?.startsWith(`/nested/jobs/${run.jobId}`));
+    expect(stale).toEqual([]);
+  } finally { auth.dispose(); }
+});
+
+it('hands focus to the notice when a job tombstone removes a focused control other than Delete', async () => {
+  const del = deferred<Operation>(); const { auth, tombstone } = await jobRoute(del);
+  try {
+    await arm();
+    const link = screen.getByRole('link', { name: jobCopy.browseAttemptHistory });
+    link.focus();
+    expect(document.activeElement).toBe(link);
+    tombstone(); fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    await screen.findAllByText(jobCopy.thisJobWasDeleted);
+    await del.settle({ ok: operation() });
+    expect(link.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement?.closest('[role="alert"]')).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+// Discriminating controls for the R2 fixes.
+it('reports finished cleanup only for a completed operation, and unknown cleanup for a tombstone alone', async () => {
+  const del = deferred<Operation>(); const { auth } = await jobRoute(del);
+  try {
+    await arm();
+    await del.settle({ ok: { ...operation(), state: 'completed', endedAt: '2026-10-25T00:01:00Z' } });
+    expect(screen.getByRole('alert').textContent).toContain(jobDeletionCopy.cleanupFinished);
+    expect(screen.getByRole('alert').textContent).not.toContain(jobDeletionCopy.stillRunning);
+  } finally { auth.dispose(); }
+  cleanup();
+  const other = await jobRoute(deferred<Operation>());
+  try {
+    other.tombstone(); fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    await screen.findByText(jobCopy.thisJobWasDeleted);
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain(jobDeletionCopy.cleanupUnknown);
+    expect(text).not.toContain(jobDeletionCopy.cleanupFinished);
+    expect(text).not.toMatch(/files were removed/);
+  } finally { other.auth.dispose(); }
+
+});
+
+it('keeps an ordinary 410 from the attempt read as an attempt error, not a deletion', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind: string) => Promise.reject(kind === 'run' ? gone('EVENT_GAP') : unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}`);
+  render(<App basePath="/nested" session={auth} />);
+  try {
+    await screen.findByRole('button', { name: runCopy.refreshAttempt });
+    await waitFor(() => expect(screen.getAllByRole('alert').length).toBeGreaterThan(0));
+    expect(screen.queryByText(runCopy.thisJobWasDeleted)).toBeNull();
+    expect(screen.getByRole('link', { name: runCopy.returnToJobOverview })).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it('leaves surviving focus outside the attempt alone when Activity confirms the tombstone', async () => {
+  const events = deferred<unknown>();
+  const auth = await session();
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: run })
+    : kind === 'snapshot' ? Promise.resolve({ data: snapshot })
+    : kind === 'events' ? events.promise : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}/activity`);
+  render(<App basePath="/nested" session={auth} />);
+  try {
+    fireEvent.click(await screen.findByRole('button', { name: 'Follow activity' }));
+    await waitFor(() => expect(transport.get.mock.calls.some(([kind]) => kind === 'events')).toBe(true));
+    const surviving = screen.getByRole('button', { name: 'Sign out' });
+    surviving.focus();
+    await events.settle({ err: gone('RESOURCE_GONE') });
+    await screen.findByText(runCopy.thisJobWasDeleted);
+    expect(document.activeElement).toBe(surviving);
+  } finally { auth.dispose(); }
+});
+
+it('shows only recovery on another attempt view reached after the tombstone, with no mutation replay', async () => {
+  const auth = await routedActivity(gone('RESOURCE_GONE'));
+  try {
+    fireEvent.click(await screen.findByRole('button', { name: 'Follow activity' }));
+    await screen.findByText(runCopy.thisJobWasDeleted);
+    transport.get.mockImplementation((kind: string) => Promise.reject(kind === 'run' ? gone('RESOURCE_GONE') : unavailable()));
+    for (const view of ['', '/evidence']) {
+      await act(async () => {
+        history.pushState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}${view}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+        await Promise.resolve();
+      });
+      await screen.findByText(runCopy.thisJobWasDeleted);
+      expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
+      expect([...document.querySelectorAll('main a')].map(node => node.getAttribute('href'))
+        .filter(href => href?.startsWith(`/nested/jobs/${run.jobId}`))).toEqual([]);
+    }
+    expect(transport.put).not.toHaveBeenCalled();
   } finally { auth.dispose(); }
 });
