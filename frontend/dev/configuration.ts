@@ -165,6 +165,7 @@ export function developmentConfiguration(settings: DevelopmentSettings): { plugi
         `<meta name="decomp-base-path" content="${settings.basePath}" />`);
       return { html: replaced, tags: fixtures ? [{ tag: 'aside', attrs: { id: 'decomp-development-notice', role: 'note' },
         children: [{ tag: 'strong', children: 'SIMULATED DEVELOPMENT DATA. ' },
+          { tag: 'span', children: 'Read-only fixture server: upload and sign-out are unavailable. ' },
           { tag: 'a', attrs: { href: cataloguePath }, children: 'Open fixture catalogue' }], injectTo: 'body-prepend' }] : [] };
     },
   };

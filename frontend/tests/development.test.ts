@@ -98,8 +98,10 @@ describe('shared-schema deterministic fixtures', () => {
     expect(() => jobPath('/nested/', 'fixture_job_running')).toThrow();
     expect(fixture.routes['/nested/api/v1/jobs']?.data.items.map((item) => item.jobId)).toEqual(ids);
     expect(fixture.routes['/nested/api/v1/jobs']?.data.items[0]?.sizeBytes).toBe('9007199254740993');
-    const bootstrap = fixture.routes['/nested/api/v1/bootstrap'] as unknown as { data: { sessionExpiresAt: string } };
+    const bootstrap = fixture.routes['/nested/api/v1/bootstrap'] as unknown as { data: { sessionExpiresAt: string; limits: { maxUploadBytes: string } } };
     expect(Date.parse(bootstrap.data.sessionExpiresAt)).toBeGreaterThan(Date.now());
+    // GET/HEAD-only server: the production zero-limit signal keeps upload submission disabled.
+    expect(bootstrap.data.limits.maxUploadBytes).toBe('0');
     expect(fixture.routes['/nested/api/v1/recovery']).toMatchObject({ kind: 'recovery',
       data: { displayOnly: true, inventoryComplete: true, retainedUploadStages: 0, retainedMetadataFiles: 0 } });
     await mkdir(fileURLToPath(new URL('../../build/', import.meta.url)), { recursive: true });
@@ -159,6 +161,10 @@ describe('shared-schema deterministic fixtures', () => {
     const rejected = await fetch(`${frontend.api}/jobs`, { method: 'POST', headers: { Origin: frontend.origin } });
     expect(rejected.status).toBe(405);
     expect(rejected.headers.get('allow')).toBe('GET, HEAD');
+    // Sign out (DELETE /session) is refused like every other mutation; no fake success is served.
+    const signOut = await fetch(`${frontend.api}/session`, { method: 'DELETE', headers: { Origin: frontend.origin } });
+    expect(signOut.status).toBe(405);
+    expect(shell).toContain('Read-only fixture server: upload and sign-out are unavailable.');
     const unknown = await fetch(`${frontend.api}/not-present`);
     expect(unknown.status).toBe(404);
     expect(unknown.headers.get('content-type')).toContain('application/json');

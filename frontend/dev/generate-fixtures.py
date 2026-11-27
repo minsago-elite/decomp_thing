@@ -52,6 +52,9 @@ def generate(base_path: str, schema_path: Path) -> dict:
     bootstrap["data"]["serverInstanceId"] = "SIMULATED_DEVELOPMENT_INSTANCE"
     # Fixed far-future expiry keeps output deterministic while the shell treats the simulated session as live.
     bootstrap["data"]["sessionExpiresAt"] = "2099-12-31T23:59:59Z"
+    # The fixture server is GET/HEAD-only. A zero upload limit is the production "no upload support" signal,
+    # so the real Upload view keeps submission disabled with its own explanation instead of inviting a 405.
+    bootstrap["data"]["limits"]["maxUploadBytes"] = "0"
     record(api + "/bootstrap", bootstrap)
     for name, state, description in [
         ("running", "running", "Simulated active attempt; no native process is running."),
