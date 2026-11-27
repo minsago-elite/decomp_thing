@@ -171,6 +171,92 @@ export function expectedSearch(files, { q, match = 'text', caseSensitive = true,
   return { results, searchable, unsearchable };
 }
 
+const SEARCH_CAPTURE_LIMIT = 4;
+const decodeBody = (response) => response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body;
+
+/**
+ * Response-stage capture of the source-search route for one submitted search on one target (#1977). The page
+ * consumes the search page and Chrome may evict the body afterwards, so it is read while paused at response stage.
+ * Every paused response is continued unchanged exactly once; the handler never fulfils, fails, retries or
+ * refetches. Only an exact same-origin Fetch/XHR GET of the route with a 200 response is eligible. Events that
+ * arrive after release begins are still continued but never captured.
+ */
+export function searchCapture(cdp, sessionId, browserOrigin, searchPath) {
+  const origin = new URL(browserOrigin).origin;
+  const captures = new Map();
+  const inflight = new Set();
+  let state = 'capturing', overflow = false, late = 0;
+  cdp.on('Fetch.requestPaused', (event) => {
+    if (state === 'released') return;
+    const capturing = state === 'capturing';
+    const handled = (async () => {
+      let value = null;
+      try {
+        if (!capturing) { late++; return; }
+        let url = null;
+        try { url = new URL(event.request.url); } catch { url = null; }
+        if (url === null || url.origin !== origin || url.pathname !== searchPath) return;
+        const networkId = event.networkId;
+        if (typeof networkId !== 'string' || captures.has(networkId)) {
+          if (typeof networkId === 'string') captures.get(networkId).duplicate = true;
+          else overflow = true;
+          return;
+        }
+        if (captures.size >= SEARCH_CAPTURE_LIMIT) { overflow = true; return; }
+        value = { url, eligible: event.request.method === 'GET' && ['Fetch', 'XHR'].includes(event.resourceType)
+          && event.responseStatusCode === 200 && event.responseErrorReason === undefined,
+        body: null, text: null, continued: false, duplicate: false };
+        captures.set(networkId, value);
+        if (!value.eligible) return;
+        try { value.body = cdp.call('Fetch.getResponseBody', { requestId: event.requestId }, sessionId); }
+        catch (error) { value.body = Promise.reject(error); }
+        value.body.catch(() => {});
+        value.text = decodeBody(await value.body);
+      } catch { /* The bound read keeps its original error in value.body. */ }
+      finally {
+        try { await cdp.call('Fetch.continueResponse', { requestId: event.requestId }, sessionId); if (value) value.continued = true; }
+        catch { /* A failed continuation leaves the capture ineligible. */ }
+      }
+    })();
+    inflight.add(handled);
+  }, sessionId);
+  return {
+    /** Stops capturing, continues every paused response and stops interception, including after a failure. */
+    async release() {
+      if (state === 'released') return;
+      state = 'closing';
+      try {
+        await Promise.allSettled(inflight);
+        await cdp.call('Fetch.disable', {}, sessionId);
+      } finally {
+        await Promise.allSettled(inflight);
+        state = 'released';
+      }
+    },
+    /**
+     * Returns the decoded envelope of the one selected search response. The capture must be the only one in the
+     * window, bound to the selecting response's network id, and its URL must carry exactly the expected query.
+     */
+    async bodyFor(networkId, expectedQuery) {
+      assert.equal(state, 'released', 'Search capture must be released before it is read');
+      assert.ok(!overflow, 'Source search capture overflowed');
+      assert.equal(late, 0, 'A search response paused after capture closed');
+      const bound = captures.get(networkId);
+      assert.ok(bound, 'Missing response-stage capture of the selected source search response');
+      assert.equal(captures.size, 1, 'Ambiguous source search captures: the submission produced more than one response');
+      assert.ok(bound.eligible && !bound.duplicate, 'Selected source search capture is not one exact Fetch/XHR GET 200 response');
+      await bound.body;
+      assert.ok(bound.continued && typeof bound.text === 'string', 'Selected source search response was not continued unchanged');
+      const actual = [...bound.url.searchParams].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+      const expected = Object.entries(expectedQuery).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => [k, String(v)])
+        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+      assert.deepEqual(actual, expected, 'Captured search request query differs from the submitted search');
+      const envelope = JSON.parse(bound.text);
+      return envelope.data ?? envelope;
+    },
+  };
+}
+
 /** Focus a control by its accessible text, then activate it with the real keyboard. */
 async function activate(cdp, ready, tab, selector, text) {
   await ready(tab, `(() => {
@@ -309,10 +395,21 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   cdp.on('Network.requestWillBeSent', (event) => {
     if (event.request.url.split('?')[0].endsWith(searchRoute)) searchUrls.set(event.requestId, new URL(event.request.url));
   }, tab.sessionId);
-  const searchBody = async (response) => {
-    const { body, base64Encoded } = await cdp.call('Network.getResponseBody', { requestId: response.requestId }, tab.sessionId);
-    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, 'base64').toString('utf8') : body);
-    return envelope.data ?? envelope;
+  // #1977: Chrome can evict a consumed search body before Network.getResponseBody, so each submission's one
+  // original response is read at Fetch response stage. Interception spans only that submission.
+  const submitCaptured = async (submit) => {
+    const capture = searchCapture(cdp, tab.sessionId, browserOrigin, searchRoute);
+    let submitted = false;
+    try {
+      await cdp.call('Fetch.enable', { patterns: ['Fetch', 'XHR'].map((resourceType) =>
+        ({ urlPattern: `${new URL(browserOrigin).origin}${searchRoute}*`, resourceType, requestStage: 'Response' })) }, tab.sessionId);
+      await submit();
+      submitted = true;
+    } finally {
+      // Release never replaces an earlier failure.
+      await capture.release().catch((error) => { if (submitted) throw error; });
+    }
+    return capture;
   };
   const shownSearch = () => evaluate(tab, `({ state: ${searchState}.dataset.searchState, complete: ${searchState}.classList.contains('source-search-status-complete'),
     text: document.querySelector('#source-search-results')?.closest('section')?.innerText ?? ${searchState}.innerText, status: ${searchState}.innerText,
@@ -332,15 +429,18 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
     await focus('form[role="search"] input[name="q"]');
     await cdp.call('Input.insertText', { text: q }, tab.sessionId);
     const before = tab.responses.length;
-    await press(cdp, tab);
-    await ready(tab, `!!${searchState} && document.activeElement?.id === 'source-search-results'`, `${label} results`);
+    const capture = await submitCaptured(async () => {
+      await press(cdp, tab);
+      await ready(tab, `!!${searchState} && document.activeElement?.id === 'source-search-results'`, `${label} results`);
+    });
     const query = new URLSearchParams(await evaluate(tab, 'location.search'));
     assert.deepEqual([query.get('q'), query.get('match') ?? 'text', query.get('case') ?? 'sensitive', query.get('path')],
       [q, match, caseSensitive ? 'sensitive' : 'insensitive', path], `${label} canonical document query`);
     const responses = tab.responses.slice(before).filter((response) => response.url.endsWith(searchRoute));
     assert.equal(responses.length, 1, `${label} must read exactly one retained search page`);
     assert.equal(responses[0].status, 200);
-    const api = await searchBody(responses[0]);
+    const api = await capture.bodyFor(responses[0].requestId, { q, match: match === 'text' ? null : match,
+      case: caseSensitive ? null : 'insensitive', path, limit: 50 });
     const truth = expectedSearch(fixture.trees.run_source_b, { q, match, caseSensitive, path });
     assert.deepEqual([api.binding.runId, api.binding.revisionId, api.sourceSha256], ['run_source_b', 'revision_source_b', fixture.candidates.run_source_b.sourceSha256]);
     assert.deepEqual([api.query.text, api.query.match, api.query.caseSensitive, api.query.path], [q, match, caseSensitive, path]);
@@ -415,15 +515,18 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   assert.ok(result.shown.text.includes('It reached the result limit for this page.') && result.shown.text.includes('more matches may exist'), result.shown.text);
   assert.deepEqual(result.shown.buttons, { 'Start search over': true, 'Continue search': false });
   const beforeContinue = tab.responses.length;
-  await activate(cdp, ready, tab, 'nav[aria-label="Search results"] button', 'Continue search');
-  await ready(tab, `new URLSearchParams(location.search).get('cursor') === ${JSON.stringify(first.page.nextCursor)} && ${searchState}?.dataset.searchState === 'complete'`, 'continued page');
+  const continueCapture = await submitCaptured(async () => {
+    await activate(cdp, ready, tab, 'nav[aria-label="Search results"] button', 'Continue search');
+    await ready(tab, `new URLSearchParams(location.search).get('cursor') === ${JSON.stringify(first.page.nextCursor)} && ${searchState}?.dataset.searchState === 'complete'`, 'continued page');
+  });
   const continued = tab.responses.slice(beforeContinue).filter((response) => response.url.endsWith(searchRoute));
   assert.equal(continued.length, 1, 'Continue search must read exactly one further page');
   assert.equal(continued[0].status, 200);
   const continuedUrl = searchUrls.get(continued[0].requestId);
   assert.deepEqual([continuedUrl.searchParams.get('cursor'), continuedUrl.searchParams.get('q'), continuedUrl.searchParams.get('path')],
     [first.page.nextCursor, PAGE_MARKER, 'core.c'], 'The continuation request carries the first page cursor and the same query');
-  const second = await searchBody(continued[0]);
+  const second = await continueCapture.bodyFor(continued[0].requestId, { ...Object.fromEntries(searchUrls.get(result.requestId).searchParams),
+    cursor: first.page.nextCursor });
   assert.deepEqual([second.binding.revisionId, second.sourceSha256, second.metadataVersion, second.query.text, second.query.path],
     ['revision_source_b', first.sourceSha256, first.metadataVersion, PAGE_MARKER, 'core.c']);
   assert.deepEqual([second.status, second.stopReason, second.page.nextCursor, second.items.length], ['complete', null, null, 1]);
