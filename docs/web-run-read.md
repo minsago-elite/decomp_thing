@@ -119,6 +119,92 @@ mock transport tests and from live workflow execution. Evidence/source/artifact
 navigation, active history changes and broader fixture families remain outstanding.
 
 
+## Earlier-attempt and accepted-work navigation
+
+Each attempt-history row now links that exact attempt's **Activity** and **Evidence and
+report snapshots** views, and its result revision's source browser when a result revision
+is recorded (a row without one says so). Link names include the attempt and revision
+identities, so rows stay distinguishable to assistive technology. These are the existing
+read-only routes; no request is made until a link is followed.
+
+The job overview has a **Current and accepted work** section that keeps the two apart:
+
+- **Latest attempt** links the latest recorded attempt's activity and evidence. Its
+  progress and reports belong to that attempt only.
+- **Accepted reconstruction** reads at most two newest-first history pages (100 attempts)
+  to find the attempt whose own recorded acceptance is exactly the job's
+  `acceptedRevisionId`. A candidate with the same revision identity but no recorded
+  acceptance, or an attempt accepted for another revision, is never substituted.
+- The lookup is bound to the job observation it answers by durable version, not by attempt
+  ID. Every history page must carry the contract's required `page.snapshotVersion`; a
+  page without one, or two pages of one walk with different snapshots, is refused as an
+  invalid response and no attempt is shown. For a job that was never labelled or archived
+  (including records without organization fields), the job `version` is the exact history
+  snapshot version, so history binds only when `page.snapshotVersion` equals it. A label or
+  archive masks that version, so for an organized job whose version differs from the
+  snapshot the section makes at most one further read of the job after history, and binds
+  only when that read returns the same job and the version first observed; any new
+  acceptance, even by the same latest attempt for the same revision, changes it. Attempts
+  listed before the observed `latestRunId` are also skipped, and older accepted attempts
+  behind a running or failed latest attempt are still found. Otherwise, including when the
+  observed latest attempt is not listed within the bound or the job was observed with no
+  attempt but history lists some, the section says history changed after the job was
+  read, shows no attempt, and offers retry and attempt history.
+- Retry from that state reads the job once before any history read, and the overview
+  takes what it returns as a new observation. If the read fails, the failure is shown with
+  no history read. One click therefore makes one job read, then at most two history pages
+  and, for an organized job, one bracketing job read. Nothing repeats without another
+  click or another applied job read.
+- Each applied job read is a new observation, numbered in the order the page issued it,
+  even when it reports a version seen before (a label set and then reverted restores the
+  earlier version). A found or not-found answer is bound to its version's history, so a
+  later observation of the same version reuses it and history is not read again, whether
+  the read came from Refresh, a peer tab, an organization change or Retry; incidental
+  renders never read. An unbound or failed state binds nothing: a later observation, even
+  of the same version, gets one lookup of its own, at once or as soon as a lookup already
+  reading settles, and the earlier state's Retry is withdrawn meanwhile. So **Refresh job**
+  does read both again, as the unbound statement says. A Retry is owned by the state it was
+  activated from: once any lookup starts after it, its late failure, stale result or
+  response naming another job changes nothing shown and starts no read, so it cannot
+  remove settled accepted links or move focus.
+- The job page orders every job read it applies (Refresh, a peer-tab change, an
+  organization change, and accepted-work Retry) by when it was issued: a response is
+  applied only if nothing issued later has been applied, so a slow earlier Refresh never
+  rewinds a newer Retry or organization result, whichever arrives first. The organization
+  form's reread after a save is numbered when it is issued, through the same ordered read,
+  so a newer Refresh or Retry is not rewound by it either. A superseded read only ends its
+  own loading state, and a failure of a read superseded by a newer applied one settles on
+  that newer observation instead of reporting a failure. The order resets with the page on session change
+  or unmount. If the Retry job read fails, the next Retry repeats that job read before
+  any history read.
+- The server reports a one-based `page.pageNumber` derived from the validated offset and
+  page limit. The lookup requires page 1 and then page 2, and checks that each attempt
+  ID appears once across the pages read. A page with a next cursor must be full. A continuation must contain at
+  least one row and its next cursor must differ from the cursor used to request it.
+  A failed check shows the lookup alert and offers Retry.
+- When the lookup finds the accepted attempt, it links that attempt, its evidence and report
+  snapshots, and the accepted revision's sources. If another page exists after the first
+  two, the overview reports absence from the newest 100 only when it examined 100
+  distinct attempts from the observed latest attempt onward. If it skipped newer rows,
+  it reports reaching the two-page limit. When the history ends, it reports how many
+  attempts it examined. Each absence message links to attempt history. With no accepted
+  revision, the page makes no history read.
+- Focus moves only when the person causes it. Retry moves focus to the status and then
+  to the outcome, unless focus has moved elsewhere in the meantime; moving it out of the
+  section withdraws that for good, even when the control it went to (such as **Refresh
+  job**, disabled while it reads) later drops focus to the page. If a background
+  refresh removes the focused accepted link, focus goes to the status that replaces it,
+  including when the accepted revision changes or is cleared, but only when focus would
+  otherwise drop to the page.
+
+Browser history restores the saved history page after opening an earlier attempt or one
+of its named views, and Forward returns to that view. This is covered by
+`frontend/tests/attempt-navigation.test.tsx` and by the packaged `history` journey in
+`scripts/packaged-browser-history.mjs`. The general artifact catalog (progress journal,
+manifest, build contract, source archive) is not linked yet; it depends on the catalog
+route proposed in #1698. Per-attempt artifacts reachable today are the exploration and
+validation reports in the evidence view and source-file downloads.
+
 ## Recorded harness identity
 
 The attempt metadata includes its persisted `harnessCapabilityId` beside the
