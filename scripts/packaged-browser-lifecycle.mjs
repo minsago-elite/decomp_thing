@@ -73,6 +73,11 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   // 3. Deliberate deletion: reviewed preview, typed confirmation gate, one DELETE.
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
+  // bringToFront flips visibilityState before Preact re-renders the availability-gated control;
+  // a click on the still-disabled button is a no-op, so act only once the physical control is enabled.
+  const reviewControl = `[...document.querySelectorAll('button')].find(button => button.textContent === 'Review what would be deleted')`;
+  await ready(tab, `document.visibilityState === 'visible' && ${reviewControl}?.disabled === false`, 'enabled deletion review control');
+  const previewsBefore = tab.requests.filter(request => request.url.includes('/deletion-preview')).length;
   await evaluate(tab, click('Review what would be deleted'));
   await ready(tab, `${deletion}?.innerText.includes('Job to delete') && ${deletion}.innerText.includes('Retained after deletion: a deletion record') && ${deletion}.querySelector('input[name="confirm"]') !== null`, 'deletion preview');
   // The reviewed preview, scoped to the deletion section, names exactly this fixture and its 64-byte input.
@@ -93,6 +98,7 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   const deletesBefore = tab.requests.filter(request => request.method === 'DELETE').length;
   await evaluate(tab, click('Delete permanently'));
   await ready(tab, deletedNotice, 'deleted notice in deleting tab');
+  assert.equal(tab.requests.filter(request => request.url.includes('/deletion-preview')).length - previewsBefore, 1, 'Deletion was not gated by exactly one reviewed preview');
   const deleteRequests = tab.requests.filter(request => request.method === 'DELETE').slice(deletesBefore);
   assert.equal(deleteRequests.length, 1);
   assert.equal(new URL(deleteRequests[0].url).pathname, '/nested/api/v1/jobs/' + job.id);
