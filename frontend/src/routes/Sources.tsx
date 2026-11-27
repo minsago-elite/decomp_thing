@@ -211,7 +211,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry, onDelete
       <p>{previewNotice[policy.preview]}</p>
       {policy.preview === 'available' && ((previewOpened !== null && previewOpened.sourceSha256 === data.sourceSha256 && previewOpened.metadataVersion === data.metadataVersion) || search !== ''
         ? <PanelBoundary name={panelBoundaryCopy.names.sourcePreview}><SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
-            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} onDeleted={onDeleted} {...(effectivePin ? { snapshotPin: effectivePin } : {})} /></PanelBoundary>
+            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} historyEntry={historyEntry} onDeleted={onDeleted} {...(effectivePin ? { snapshotPin: effectivePin } : {})} /></PanelBoundary>
         : <button type="button" onClick={() => setPreviewOpened({ sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion })}>{copy.openPreview}</button>)}
       {policy.download && <PanelBoundary name={panelBoundaryCopy.names.digestCheck}><SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} /></PanelBoundary>}
       {policy.download
@@ -295,7 +295,7 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>
       {session && state?.status === 'authenticated'
         ? resource === 'search'
-          ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} onDeleted={markDeleted} />
+          ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}`} selected={selected} basePath={basePath} search={rawSearch} historyEntry={historyEntry} onDeleted={markDeleted} />
           : resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
               selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} onDeleted={markDeleted} />

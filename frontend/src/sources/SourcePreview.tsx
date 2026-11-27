@@ -6,7 +6,7 @@ import { sourceCopy as copy } from '../copy/sources';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
-import type { FileSelection, SourceReadState } from './navigation';
+import type { FileSelection, SourceHistoryEntry, SourceReadState } from './navigation';
 import { bindSourceChunk, sourceChunkMaximum, sourceChunkRoute, sourcePosition, sourcePositionPath, sourceWindow } from './viewer';
 import { sourceHighlightLanguage } from './highlight';
 import { beginSourceHighlight } from './highlightOperation';
@@ -19,8 +19,9 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 
 /** One deliberately opened range. Highlighting separately requires an explicit local action. */
-export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search, snapshotPin, onDeleted }: {
-  selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string; snapshotPin?: SourceSnapshotPin; onDeleted?: (failure: unknown) => void;
+export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search, snapshotPin, historyEntry, onDeleted }: {
+  selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string; snapshotPin?: SourceSnapshotPin;
+  historyEntry?: SourceHistoryEntry; onDeleted?: (failure: unknown) => void;
 }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
@@ -51,7 +52,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
   useEffect(() => () => { stopCopy.current?.(); stopCopy.current = null; }, [copyKey]);
   useEffect(() => beginSourceRead(key, async signal => receive(bindSourceChunk(
     (await client.get('sourceChunk', sourceChunkRoute(selected, metadata, position, maximum), { signal })).data,
-    selected, metadata, position, maximum)), setRead, onDeleted), [client, key]);
+    selected, metadata, position, maximum)), setRead, onDeleted), [client, key, historyEntry]);
   const current = currentSourceRead(read, key);
   const observation = current.state === 'ready' ? current.value : null;
   const chunk = observation?.value;

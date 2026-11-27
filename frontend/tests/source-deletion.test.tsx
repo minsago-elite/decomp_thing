@@ -173,6 +173,44 @@ it('ends a search view on RESOURCE_GONE and leaves deliberately moved focus alon
   } finally { auth.dispose(); }
 });
 
+for (const kind of ['sourceSearch', 'sourceChunk'] as const) {
+  it(`uses the current fragment's ${kind} read to confirm deletion`, async () => {
+    const original = heldRead();
+    const next = heldRead();
+    const signals: AbortSignal[] = [];
+    transport.get.mockImplementation((requested: string, _path: string, options: { signal: AbortSignal }) => {
+      if (requested === 'revisionFile') return Promise.resolve({ data: file });
+      if (requested !== kind) return Promise.reject(new Error(requested));
+      signals.push(options.signal);
+      return signals.length === 1 ? original.promise : next.promise;
+    });
+    const auth = await mount(kind === 'sourceSearch' ? searchUrl : fileUrl);
+    try {
+      if (kind === 'sourceChunk') fireEvent.click(await screen.findByRole('button', { name: sourceCopy.openPreview }));
+      await waitFor(() => expect(signals).toHaveLength(1));
+      retain(jobId);
+      const saved = sessionStorage.getItem(slot);
+      await act(async () => {
+        history.pushState(null, '', location.pathname + location.search + '#source-title');
+        dispatchEvent(new HashChangeEvent('hashchange'));
+        await Promise.resolve();
+      });
+      expect(signals).toHaveLength(2);
+      expect(signals[0]?.aborted).toBe(true);
+      expect(signals[1]?.aborted).toBe(false);
+      await act(async () => { original.reject(gone()); await Promise.resolve(); });
+      expect(sessionStorage.getItem(slot)).toBe(saved);
+      expect(screen.queryByText(sourceCopy.jobDeleted, { exact: false })).toBeNull();
+      await act(async () => { next.reject(gone()); await Promise.resolve(); });
+      await screen.findByText(sourceCopy.jobDeleted, { exact: false });
+      expectGone();
+      expect(sessionStorage.getItem(slot)).toBeNull();
+      expect(signals).toHaveLength(2);
+      expect(reads('revisionFile')).toBe(kind === 'sourceChunk' ? 1 : 0);
+    } finally { auth.dispose(); }
+  });
+}
+
 for (const [label, failure] of [['EVENT_GAP 410', gone('EVENT_GAP')], ['unverified 410', new ApiClientError('invalid_headers', { status: 410 })],
   ['403', new ApiClientError('http_error', { status: 403, serverCode: 'FORBIDDEN' })], ['503', new ApiClientError('http_error', { status: 503 })]] as const) {
   it(`keeps the directory view and its attempt link for ${label}`, async () => {
