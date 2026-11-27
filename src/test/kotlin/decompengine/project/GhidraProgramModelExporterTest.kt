@@ -9,6 +9,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 import java.util.concurrent.TimeUnit
+import kotlinx.serialization.json.jsonObject
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.deleteExisting
@@ -35,7 +36,7 @@ class GhidraProgramModelExporterTest {
         assertEquals("0ee91d684d310357363cbf8516b2dc65b5f56c4b38c62d4c9e09304eb3ecafaf", sha256(retained))
         assertTrue("public class ExportProgramModel extends GhidraScript" in retained.toString(Charsets.UTF_8))
         assertTrue("public class ExportProgramModelOwned extends GhidraScript" in owned.toString(Charsets.UTF_8))
-        assertTrue("EXPORTER_VERSION = 18" in owned.toString(Charsets.UTF_8))
+        assertTrue("EXPORTER_VERSION = 19" in owned.toString(Charsets.UTF_8))
         assertTrue("owned-model-candidate-v1" in owned.toString(Charsets.UTF_8))
         assertTrue("arguments.length != 6 && arguments.length != 7" in owned.toString(Charsets.UTF_8))
         assertTrue("int protocolIndex = arguments.length == 6 ? 4 : 5" in owned.toString(Charsets.UTF_8))
@@ -253,27 +254,52 @@ class GhidraProgramModelExporterTest {
     @Test
     fun `opt in real Ghidra reuses accepted function records deterministically`() {
         if (System.getenv("RUN_REAL_GHIDRA") != "true") return
-        val temp = createTempDirectory("program-model-real-")
+        val temp = Files.createTempDirectory(Path.of("").toAbsolutePath().normalize().resolve("build"), "program-model-real-")
         val source = temp.resolve("program.c")
         val binary = temp.resolve("program")
         source.writeText(
             "#include <stdio.h>\nstatic int twice(int x) { return x * 2; }\n" +
-                "int main(void) { puts(\"resumable-export\"); return twice(0); }\n",
+                "static int *identity(int *pointer) { return pointer; }\n" +
+                "static void reset(int *pointer) { *pointer = 0; }\n" +
+                "static void *opaque_pointer(void *pointer) { return pointer; }\n" +
+                "int main(void) { int value = twice(0); reset(&value); puts(\"resumable-export\"); " +
+                "return opaque_pointer(identity(&value)) == &value ? value : 1; }\n",
         )
         val compiler = ProcessBuilder("gcc", "-g", "-O0", source.pathString, "-o", binary.pathString)
+            .apply { environment()["TMPDIR"] = temp.resolve("compiler-tmp").createDirectories().pathString }
             .redirectErrorStream(true)
             .start()
         val compilerOutput = compiler.inputStream.bufferedReader().readText()
         check(compiler.waitFor() == 0) { compilerOutput }
         source.deleteExisting()
         val work = temp.resolve("analysis")
-        val analyzer = GhidraHeadlessProgramModelAnalyzer()
+        val jvmHome = work.resolve("home").createDirectories()
+        val jvmTemp = work.resolve("tmp").createDirectories()
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(commandFactory = { invocation ->
+            val command = BundledGhidra.locate().analysisCommand(invocation.copy(
+                // Ghidra rejects the hidden .t3 component in the repository's absolute checkout path.
+                project = Path.of("/proc/self/cwd/ghidra_project"),
+            ))
+            listOf(command.first(), "-Duser.home=$jvmHome", "-Djava.io.tmpdir=$jvmTemp",
+                "-Djna.tmpdir=$jvmTemp", "-XX:-UsePerfData", "-XX:ActiveProcessorCount=4") + command.drop(1)
+        })
 
         val first = analyzer.analyze(binary, work)
         assertEquals(4, first.schemaVersion)
         assertTrue(first.globals.all { it.byteEvidence?.schemaVersion == 2 })
+        val firstByName = first.functions.associateBy { it.name }
+        assertEquals("int twice(int x)", firstByName.getValue("twice").prototype)
+        assertEquals(RecoveryStatus.RECOVERED, firstByName.getValue("twice").status)
+        assertEquals("int* identity(int* pointer)", firstByName.getValue("identity").prototype)
+        assertEquals(RecoveryStatus.RECOVERED, firstByName.getValue("identity").status)
+        assertEquals("void reset(int* pointer)", firstByName.getValue("reset").prototype)
+        assertEquals(RecoveryStatus.RECOVERED, firstByName.getValue("reset").status)
+        assertEquals("void* opaque_pointer(void* pointer)", firstByName.getValue("opaque_pointer").prototype)
+        assertEquals(RecoveryStatus.RECOVERED, firstByName.getValue("opaque_pointer").status)
+        assertEquals("int main(void)", firstByName.getValue("main").prototype)
         val modelPath = work.resolve("reports/program_model.json")
         val firstModel = modelPath.readBytes()
+        assertTrue(firstModel.toString(Charsets.UTF_8).contains("\"recoveryAssessment\": \"unassessed\""))
         assertEquals(first, decompengine.oracle.structural.CanonicalProgramModelStreaming.readCanonical(firstModel).model)
         val records = modelPath.resolveSibling("program_model.json.export/functions").listDirectoryEntries("*.json").sorted()
         assertTrue(records.isNotEmpty())
@@ -299,7 +325,7 @@ class GhidraProgramModelExporterTest {
     @Test
     fun `opt in real Ghidra reuses authenticated planning batches deterministically`() {
         if (System.getenv("RUN_REAL_GHIDRA") != "true") return
-        val temp = createTempDirectory("program-model-planning-real-")
+        val temp = Files.createTempDirectory(Path.of("").toAbsolutePath().normalize().resolve("build"), "program-model-planning-real-")
         val source = temp.resolve("program.c")
         val binary = temp.resolve("program")
         source.writeText(
@@ -307,13 +333,22 @@ class GhidraProgramModelExporterTest {
                 "int main(void) { return twice(21); }\n",
         )
         val compiler = ProcessBuilder("gcc", "-g", "-O0", source.pathString, "-o", binary.pathString)
+            .apply { environment()["TMPDIR"] = temp.resolve("compiler-tmp").createDirectories().pathString }
             .redirectErrorStream(true)
             .start()
         val compilerOutput = compiler.inputStream.bufferedReader().readText()
         check(compiler.waitFor() == 0) { compilerOutput }
         source.deleteExisting()
         val work = temp.resolve("analysis")
-        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+        val jvmHome = work.resolve("home").createDirectories()
+        val jvmTemp = work.resolve("tmp").createDirectories()
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(commandFactory = { invocation ->
+            val command = BundledGhidra.locate().analysisCommand(invocation.copy(
+                project = Path.of("/proc/self/cwd/ghidra_project"),
+            ))
+            listOf(command.first(), "-Duser.home=$jvmHome", "-Djava.io.tmpdir=$jvmTemp",
+                "-Djna.tmpdir=$jvmTemp", "-XX:-UsePerfData", "-XX:ActiveProcessorCount=4") + command.drop(1)
+        },
             recoveryMode = GhidraProgramModelRecoveryMode.PLANNING,
         )
 
@@ -336,9 +371,9 @@ class GhidraProgramModelExporterTest {
         assertTrue(progress.contains("\"reused\":${first.functions.size}"), progress)
         val statePath = modelPath.resolveSibling("program_model.json.export/state.json")
         val priorState = statePath.readText()
-        assertTrue("\"exporterVersion\":18" in priorState)
-        for (historicalVersion in listOf(17, 16, 13, 12, 11)) {
-            val historicalState = priorState.replace("\"exporterVersion\":18", "\"exporterVersion\":$historicalVersion")
+        assertTrue("\"exporterVersion\":19" in priorState)
+        for (historicalVersion in listOf(18, 17, 16, 13, 12, 11)) {
+            val historicalState = priorState.replace("\"exporterVersion\":19", "\"exporterVersion\":$historicalVersion")
             statePath.writeText(historicalState)
             assertFailsWith<IllegalArgumentException> { analyzer.analyze(binary, work) }
             assertEquals(historicalState, statePath.readText())
@@ -372,6 +407,10 @@ class GhidraProgramModelExporterTest {
                     if (index % 8 == 0) append("if (value & ${index}UL) value += fixture_bias; else value ^= fixture_global.value;\n")
                 }
                 append("return value;\n}\n")
+                append("__attribute__((noinline)) int aggregate_parameter_probe(FixtureRecord *record) { return record->kind; }\n")
+                append("__attribute__((noinline)) int aggregate_value_parameter_probe(FixtureRecord record) { return record.kind; }\n")
+                append("__attribute__((noinline)) FixtureRecord aggregate_return_probe(int value) { FixtureRecord record = {value, value + 1, \"return\"}; return record; }\n")
+                append("__attribute__((noinline)) int custom_storage_probe(int value) { return value + 5; }\n")
                 append("int main(int argc, char **argv) { return (int)(fixture_large(fixture_switch(&fixture_global, argc)) + argv[0][0]); }\n")
             })
             val compilerLog = temp.resolve("compiler.log")
@@ -396,23 +435,19 @@ class GhidraProgramModelExporterTest {
             }
             val candidate = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModelOwned.java"))
                 .use { it.readBytes().toString(Charsets.UTF_8) }
-            val renderOnce = "DecompiledFunction rendered = result.decompileCompleted() ? result.getDecompiledFunction() : null;\n" +
-                "            if (rendered != null) {\n                source = rendered.getC();"
-            val renderTwice = "if (result.decompileCompleted() && result.getDecompiledFunction() != null) {\n" +
-                "                source = result.getDecompiledFunction().getC();"
-            assertEquals(1, Regex(Regex.escape("decompiler.toggleSyntaxTree(false);")).findAll(candidate).count())
-            assertEquals(1, Regex(Regex.escape(renderOnce)).findAll(candidate).count())
-            // An explicit baseline qualifies prior committed source before a version bump.
-            // Both variants must retain the same exporter version so only source identity differs.
-            val baseline = System.getProperty("decompengine.ghidra.exporterBaseline")?.let { Path.of(it).readText() }
-                ?: candidate.replace("                decompiler.toggleSyntaxTree(false);\n", "")
-                    .replace(renderOnce, renderTwice)
-            assertFalse("decompiler.toggleSyntaxTree(false);" in baseline, "baseline must export the syntax tree")
-            assertFalse(renderOnce in baseline, "baseline must retain the original rendering path")
-            assertEquals(1, Regex(Regex.escape(renderTwice)).findAll(baseline).count(), "baseline renders twice")
+            assertEquals(1, Regex(Regex.escape("decompiler.toggleSyntaxTree(true)")).findAll(candidate).count())
+            assertEquals(1, Regex(Regex.escape("decompiler.toggleCCode(true)")).findAll(candidate).count())
+            // Compare against the actual pre-change exporter, not a candidate-derived listing-only
+            // variant that would still exercise the new typed-prototype refusal path.
+            val baselineProcess = ProcessBuilder("git", "show",
+                "519b16afa06ab64d2b72ad92c46c1baffc24f294:src/main/resources/ghidra_scripts/ExportProgramModelOwned.java")
+                .redirectErrorStream(true).start()
+            val baseline = baselineProcess.inputStream.bufferedReader().readText()
+            check(baselineProcess.waitFor() == 0) { "Could not load the pinned pre-typed exporter: $baseline" }
+            assertTrue("decompiler.toggleSyntaxTree(false);" in baseline, "pre-change baseline must disable typed HighFunction output")
             val version = Regex("EXPORTER_VERSION = ([0-9]+);")
-            assertEquals(checkNotNull(version.find(candidate)).groupValues[1],
-                checkNotNull(version.find(baseline)).groupValues[1], "explicit baseline requires the same exporter version")
+            assertEquals("19", checkNotNull(version.find(candidate)).groupValues[1])
+            assertEquals("18", checkNotNull(version.find(baseline)).groupValues[1], "baseline is the pinned pre-change exporter")
             val entry = "    protected void run() throws Exception {\n"
             val fixtureSetup = """
                         for (Function fixtureFunction : currentProgram.getFunctionManager().getFunctions(true)) {
@@ -426,13 +461,39 @@ class GhidraProgramModelExporterTest {
                                     }
                                 }
                             }
+                            if (fixtureFunction.getName().equals("custom_storage_probe")) {
+                                ghidra.program.model.listing.Parameter customParameter =
+                                    new ghidra.program.model.listing.ParameterImpl("value",
+                                        ghidra.program.model.data.IntegerDataType.dataType,
+                                        currentProgram.getRegister("esi"), currentProgram,
+                                        ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                                fixtureFunction.updateFunction(ghidra.program.model.listing.Function.DEFAULT_CALLING_CONVENTION_STRING,
+                                    new ghidra.program.model.listing.ReturnParameterImpl(
+                                        ghidra.program.model.data.IntegerDataType.dataType, currentProgram),
+                                    java.util.List.of(customParameter),
+                                    ghidra.program.model.listing.Function.FunctionUpdateType.CUSTOM_STORAGE,
+                                    true, ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                                if (!fixtureFunction.hasCustomVariableStorage()) {
+                                    throw new IllegalStateException("Could not seed custom variable storage");
+                                }
+                            }
                         }
             """.trimIndent().prependIndent("        ") + "\n"
             println("Native fixture setup (identical in both staged exporters):\n$fixtureSetup")
             println("Native fixture binary SHA256=${sha256(binary.readBytes())}")
+            fun seedKnownMetadataFailure(exporter: String): String {
+                val methodStart = exporter.indexOf("private FunctionMetadata collectFunctionMetadata(")
+                assertTrue(methodStart >= 0, "metadata collector anchor must exist")
+                val anchor = "        String failure = null;"
+                val failureOffset = exporter.indexOf(anchor, methodStart)
+                assertTrue(failureOffset >= 0, "metadata failure accumulator anchor must exist")
+                val seeded = anchor + "\n        if (\"custom_storage_probe\".equals(function.getName())) {\n" +
+                    "            failure = appendFailure(failure, \"fixture-seeded metadata failure\");\n        }"
+                return exporter.replaceRange(failureOffset, failureOffset + anchor.length, seeded)
+            }
             fun export(label: String, exporter: String): Pair<RecoveredProgramModel, Path> {
                 assertEquals(1, Regex(Regex.escape(entry)).findAll(exporter).count())
-                val staged = exporter.replace(entry, entry + fixtureSetup)
+                val staged = seedKnownMetadataFailure(exporter).replace(entry, entry + fixtureSetup)
                 val stagedHash = sha256(staged.toByteArray())
                 val work = temp.resolve(label)
                 val jvmHome = work.resolve("home").createDirectories()
@@ -470,8 +531,14 @@ class GhidraProgramModelExporterTest {
             }
             val (before, beforePath) = export("baseline", baseline)
             val (after, afterPath) = export("candidate", candidate)
-            assertEquals(before, after, "all parsed function, global and type facts")
-            assertTrue(beforePath.readBytes().contentEquals(afterPath.readBytes()), "canonical model bytes")
+            assertEquals(before.functions.map { it.decompiledC }, after.functions.map { it.decompiledC }, "typed extraction must not change decompiled C")
+            assertEquals(before.functions.map { it.copy(prototype = "", status = RecoveryStatus.RECOVERED) },
+                after.functions.map { it.copy(prototype = "", status = RecoveryStatus.RECOVERED) },
+                "only prototype and extraction status may change")
+            assertEquals(before.globals, after.globals, "global facts remain unchanged")
+            assertEquals(before.types, after.types, "type facts remain unchanged")
+            assertEquals(after, decompengine.oracle.structural.CanonicalProgramModelStreaming.readCanonical(afterPath.readBytes()).model,
+                "typed declarations survive canonical model decoding")
             fun sidecars(modelPath: Path): Map<String, ByteArray> {
                 val root = modelPath.resolveSibling("program_model.json.export")
                 return Files.walk(root).use { files ->
@@ -481,25 +548,85 @@ class GhidraProgramModelExporterTest {
             }
             val beforeSidecars = sidecars(beforePath)
             val afterSidecars = sidecars(afterPath)
-            assertEquals(beforeSidecars.keys, afterSidecars.keys, "all function/global/type/failure record paths")
-            beforeSidecars.forEach { (name, bytes) -> assertTrue(bytes.contentEquals(afterSidecars.getValue(name)), name) }
+            val nonFunctionSidecars = beforeSidecars.keys.filter { !it.startsWith("functions/") && !it.startsWith("failures/") }.toSet()
+            assertEquals(nonFunctionSidecars, afterSidecars.keys.filter {
+                !it.startsWith("functions/") && !it.startsWith("failures/")
+            }.toSet(), "global/type evidence record paths")
+            beforeSidecars.filterKeys { it in nonFunctionSidecars }.forEach { (name, bytes) ->
+                assertTrue(bytes.contentEquals(afterSidecars.getValue(name)), name)
+            }
             val beforeState = beforePath.resolveSibling("program_model.json.export/state.json").readText()
             val afterState = afterPath.resolveSibling("program_model.json.export/state.json").readText()
             val sourceIdentity = Regex("\"exporterSha256\":\"[0-9a-f]{64}\"")
-            assertEquals(beforeState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""),
-                afterState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""), "all other checkpoint state facts")
-            assertEquals(beforePath.resolveSibling("program_model.json.progress.json").readText(),
-                afterPath.resolveSibling("program_model.json.progress.json").readText(), "final progress/status counts")
+            fun comparableState(state: String) = state.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\"")
+                .replace("\"exporterVersion\":18", "\"exporterVersion\":VERSION")
+                .replace("\"exporterVersion\":19", "\"exporterVersion\":VERSION")
+            assertEquals(comparableState(beforeState), comparableState(afterState), "all other checkpoint state facts")
+            val progressKeys = listOf("phase", "completed", "total", "reused")
+            val beforeProgress = beforePath.resolveSibling("program_model.json.progress.json").readText()
+            val afterProgress = afterPath.resolveSibling("program_model.json.progress.json").readText()
+            progressKeys.forEach { key ->
+                val field = Regex("\\\"$key\\\":(?:\\\"([^\\\"]*)\\\"|([0-9]+))")
+                assertEquals(field.find(beforeProgress)?.value, field.find(afterProgress)?.value, "progress field $key")
+            }
             val named = after.functions.associateBy { it.name }
-            for (name in listOf("fixture_switch", "fixture_large", "main")) {
-                assertEquals(RecoveryStatus.RECOVERED, named.getValue(name).status, name)
+            for (name in listOf("fixture_switch", "fixture_large", "aggregate_parameter_probe", "aggregate_value_parameter_probe",
+                "aggregate_return_probe", "custom_storage_probe", "main")) {
                 assertTrue(!named.getValue(name).decompiledC.isNullOrBlank(), name)
             }
+            assertEquals(RecoveryStatus.PARTIAL, named.getValue("fixture_switch").status,
+                "unsupported aggregate parameter must remain partial rather than claim typed recovery")
+            assertEquals(RecoveryStatus.PARTIAL, named.getValue("fixture_large").status,
+                "unsupported typedef result must remain partial rather than claim typed recovery")
+            assertEquals(RecoveryStatus.PARTIAL, named.getValue("custom_storage_probe").status,
+                "custom storage under the default convention must not be claimed as an ordinary C ABI")
+            assertEquals(RecoveryStatus.PARTIAL, named.getValue("aggregate_parameter_probe").status,
+                "a scalar return must not mask the independent aggregate-parameter refusal")
+            assertEquals(RecoveryStatus.PARTIAL, named.getValue("aggregate_value_parameter_probe").status,
+                "by-value aggregate parameters cannot be flattened into ordinary scalar or pointer ABI")
+            assertEquals(RecoveryStatus.PARTIAL, named.getValue("aggregate_return_probe").status,
+                "aggregate return storage cannot be represented by the bounded prototype renderer")
+            assertEquals(RecoveryStatus.RECOVERED, named.getValue("main").status)
+            assertEquals("int main(int argc, char** argv)", named.getValue("main").prototype)
             val switchC = checkNotNull(named.getValue("fixture_switch").decompiledC)
             assertTrue("switch" in switchC && "case " in switchC, switchC)
             assertTrue("C-only fixture plate comment" in switchC, switchC)
             assertTrue("C-only fixture instruction comment" in switchC, switchC)
             assertTrue(checkNotNull(named.getValue("fixture_large").decompiledC).length > 5_000)
+            val failureSidecars = afterSidecars.filterKeys { it.startsWith("failures/") }
+            assertTrue(failureSidecars.isNotEmpty(), "failure sidecars must be retained")
+            fun failureFacts(sidecars: Map<String, ByteArray>): Map<String, String> = sidecars
+                .filterKeys { it.startsWith("failures/") }
+                .values.mapNotNull { bytes ->
+                    val record = kotlinx.serialization.json.Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
+                    val id = record["functionId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                    val message = record["message"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                    if (id == null || message == null) null else id to message
+                }.toMap()
+            val previousFailures = failureFacts(beforeSidecars)
+            val retainedFailures = failureFacts(afterSidecars)
+            assertTrue(previousFailures.isNotEmpty(), "pinned pre-change exporter must include metadata/native failure evidence")
+            previousFailures.forEach { (id, message) ->
+                assertTrue(id == named.getValue("custom_storage_probe").id && message == "fixture-seeded metadata failure",
+                    "the prior diagnostic is an independently seeded metadata failure")
+                assertTrue(retainedFailures[id]?.contains(message) == true,
+                    "pre-existing failure ID $id and diagnostic must survive typed refusal")
+            }
+            val customStorageId = named.getValue("custom_storage_probe").id
+            assertTrue(failureSidecars.values.any {
+                val failure = it.toString(Charsets.UTF_8)
+                "\"functionId\":\"$customStorageId\"" in failure && "custom variable storage is unsupported" in failure
+            }, "the custom-storage refusal must be retained with the available C extraction")
+            val aggregateParameterId = named.getValue("aggregate_parameter_probe").id
+            assertTrue(failureSidecars.values.any {
+                val failure = it.toString(Charsets.UTF_8)
+                "\"functionId\":\"$aggregateParameterId\"" in failure && "unsupported parameter type" in failure
+            }, "the scalar-return aggregate-parameter refusal must be retained independently")
+            val aggregateReturnId = named.getValue("aggregate_return_probe").id
+            assertTrue(failureSidecars.values.any {
+                val failure = it.toString(Charsets.UTF_8)
+                "\"functionId\":\"$aggregateReturnId\"" in failure && "return" in failure
+            }, "aggregate return storage or type refusal must be retained")
             assertTrue(after.globals.any { it.name == "fixture_global" }, after.globals.toString())
             assertTrue(after.globals.any { it.name == "fixture_bias" }, after.globals.toString())
             assertTrue(after.types.any { "struct" in it.declaration && "FixtureRecord" in it.declaration }, after.types.toString())
@@ -517,7 +644,7 @@ class GhidraProgramModelExporterTest {
         val repository = Path.of("").toAbsolutePath().normalize().toRealPath()
         val candidate = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModelOwned.java"))
             .use { it.readBytes().toString(Charsets.UTF_8) }
-        assertTrue("EXPORTER_VERSION = 18;" in candidate)
+        assertTrue("EXPORTER_VERSION = 19;" in candidate)
         // The baseline is the candidate with only the three pure-rendering call sites restored to their original
         // Formatter/regex implementations, so it keeps every other exporter behavior (byte evidence, workers, phases).
         val renderingEdits = listOf(
@@ -538,7 +665,8 @@ class GhidraProgramModelExporterTest {
         }
         assertTrue(baseline != candidate && "String.format(\"fn_%016x\"" in baseline)
         for (exporter in listOf(baseline, candidate)) {
-            assertEquals(1, Regex(Regex.escape("decompiler.toggleSyntaxTree(false);")).findAll(exporter).count())
+            assertEquals(1, Regex(Regex.escape("decompiler.toggleSyntaxTree(true)")).findAll(exporter).count())
+            assertEquals(1, Regex(Regex.escape("decompiler.toggleCCode(true)")).findAll(exporter).count())
             for (setting in listOf("DECOMPILE_TIMEOUT_SECONDS = 60", "DECOMPILE_RETRY_TIMEOUT_SECONDS = 180",
                 "MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000", "decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS)")) {
                 assertTrue(setting in exporter, "both variants must retain $setting")
@@ -637,8 +765,8 @@ class GhidraProgramModelExporterTest {
         beforeSidecars.forEach { (name, bytes) -> assertTrue(bytes.contentEquals(afterSidecars.getValue(name)), "native sidecar $name") }
         val beforeState = beforePath.resolveSibling("program_model.json.export/state.json").readText()
         val afterState = afterPath.resolveSibling("program_model.json.export/state.json").readText()
-        assertTrue("\"exporterVersion\":18" in beforeState)
-        assertTrue("\"exporterVersion\":18" in afterState)
+        assertTrue("\"exporterVersion\":19" in beforeState)
+        assertTrue("\"exporterVersion\":19" in afterState)
         assertTrue("\"decompilationWorkers\":4" in beforeState && "\"decompilationWorkers\":4" in afterState)
         val sourceIdentity = Regex("\"exporterSha256\":\"[0-9a-f]{64}\"")
         assertEquals(beforeState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""),
