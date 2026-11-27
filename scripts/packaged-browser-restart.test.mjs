@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import vm from 'node:vm';
-import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, publishReport, scrubTokens, summarizeRequests, MAX_REPORT_PARTS, REPORT_PART_BYTES } from './packaged-browser-restart.mjs';
+import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, publishReport, scrubTokens, summarizeRequests, MAX_REPORT_BYTES, MAX_REPORT_PARTS, REPORT_PART_BYTES } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
 
@@ -38,6 +38,82 @@ test('bounds reports by replacing request lists with counts', () => {
   assert.throws(() => boundReport({ blob: 'x'.repeat(5000), requests: {} }, 1000));
   assert.throws(() => boundReport({ blob: 'é'.repeat(600), requests: {} }, 1000),
     'UTF-8 encoded report bytes must be bounded, not JavaScript code units');
+});
+
+function generatedAuditReport() {
+  const documentRequests = Array.from({ length: 8 }, (_, index) => ({ sequence: index, source: 'responseReceived',
+    route: `/nested/page/${index}`, failure: null, responseHeaders: { 'content-security-policy': `default-src 'none'; report-${index}-${'x'.repeat(180)}` } }));
+  return { mode: 'audit', contentSecurityPolicy: { inspectedTargets: [{ documentRequests,
+    documentPolicies: structuredClone(documentRequests) }], inspectedTargetCount: 1, documentRequestCount: 8, documentResponseCount: 8 } };
+}
+
+test('oversized retained audit report encodes only exact duplicated CSP policy arrays', () => {
+  const report = generatedAuditReport();
+  report.contentSecurityPolicy.inspectedTargets[0].documentRequests[0].requestHeaders = {
+    Authorization: 'Bearer artifact-secret-token', 'X-Unusual': 'raw  value',
+  };
+  report.contentSecurityPolicy.inspectedTargets[0].documentPolicies[0] =
+    structuredClone(report.contentSecurityPolicy.inspectedTargets[0].documentRequests[0]);
+  const normal = structuredClone(report);
+  assert.equal(boundReport(normal, MAX_REPORT_BYTES), normal, 'a report under the normal bound must remain untouched');
+
+  const scrubbed = scrubTokens(report, ['artifact-secret-token']);
+  const target = scrubbed.contentSecurityPolicy.inspectedTargets[0];
+  const requestsBefore = structuredClone(target.documentRequests);
+  const countsBefore = { ...scrubbed.contentSecurityPolicy };
+  const rawBytes = Buffer.byteLength(JSON.stringify(scrubbed), 'utf8');
+  const marker = { __cspDocumentPoliciesEncoding: 'csp-document-policies-from-document-requests/v1', count: requestsBefore.length };
+  const compactBytes = rawBytes - Buffer.byteLength(JSON.stringify(target.documentPolicies), 'utf8') + Buffer.byteLength(JSON.stringify(marker), 'utf8');
+  assert.ok(compactBytes < rawBytes, 'the versioned marker must save bytes');
+  const limit = Math.floor((rawBytes + compactBytes) / 2);
+  assert.ok(rawBytes > limit && compactBytes <= limit, 'generated report must straddle the selected bound');
+  const result = boundReport(scrubbed, limit);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), 'utf8') <= limit);
+  const resultTarget = result.contentSecurityPolicy.inspectedTargets[0];
+  assert.deepEqual(resultTarget.documentRequests, requestsBefore, 'all request records, headers, and failures must be retained');
+  assert.deepEqual(resultTarget.documentRequests[0].requestHeaders,
+    { Authorization: 'Bearer [redacted]', 'X-Unusual': 'raw  value' });
+  assert.deepEqual(resultTarget.documentPolicies, marker);
+  for (const key of ['inspectedTargetCount', 'documentRequestCount', 'documentResponseCount']) {
+    assert.equal(result.contentSecurityPolicy[key], countsBefore[key]);
+  }
+  // v1 rule: reconstruct documentPolicies as requests with source !== null, in request order.
+  const parsed = JSON.parse(JSON.stringify(result));
+  const reconstructed = parsed.contentSecurityPolicy.inspectedTargets[0].documentRequests.filter(request => request.source !== null);
+  assert.deepEqual(reconstructed, scrubbed.contentSecurityPolicy.inspectedTargets[0].documentRequests.filter(request => request.source !== null));
+  assert.equal(JSON.stringify(result).includes('artifact-secret-token'), false, 'scrubbing must precede bounding');
+});
+
+test('leaves irregular policy arrays and reserved-marker collisions intact', () => {
+  const report = generatedAuditReport();
+  const targets = report.contentSecurityPolicy.inspectedTargets;
+  targets.push({ documentRequests: structuredClone(targets[0].documentRequests), documentPolicies: [] });
+  targets.push({ documentRequests: structuredClone(targets[0].documentRequests), documentPolicies: structuredClone(targets[0].documentPolicies),
+    __cspDocumentPoliciesEncoding: 'existing-data' });
+  const rawBytes = Buffer.byteLength(JSON.stringify(report), 'utf8');
+  const expected = structuredClone(targets[0].documentPolicies);
+  const marker = { __cspDocumentPoliciesEncoding: 'csp-document-policies-from-document-requests/v1', count: targets[0].documentPolicies.length };
+  const compactBytes = rawBytes - Buffer.byteLength(JSON.stringify(expected), 'utf8') + Buffer.byteLength(JSON.stringify(marker), 'utf8');
+  const result = boundReport(report, Math.floor((rawBytes + compactBytes) / 2));
+  assert.deepEqual(result.contentSecurityPolicy.inspectedTargets[1].documentPolicies, []);
+  assert.deepEqual(result.contentSecurityPolicy.inspectedTargets[2].documentPolicies, targets[2].documentPolicies);
+  assert.equal(result.contentSecurityPolicy.inspectedTargets[2].__cspDocumentPoliciesEncoding, 'existing-data');
+});
+
+test('does not apply CSP policy encoding to oversized non-audit reports', () => {
+  const policies = [{ source: 'responseReceived', contentSecurityPolicy: 'default-src none' }];
+  const report = { mode: 'public', requests: { captured: Array.from({ length: 1000 }, () => ({ detail: 'x'.repeat(100) })) },
+    contentSecurityPolicy: { inspectedTargets: [{ documentRequests: structuredClone(policies), documentPolicies: structuredClone(policies) }] } };
+  const maxBytes = Buffer.byteLength(JSON.stringify(report), 'utf8') - 1;
+  assert.ok(Buffer.byteLength(JSON.stringify(report), 'utf8') > maxBytes);
+  const result = boundReport(report, maxBytes);
+  assert.deepEqual(result.requests.captured, { count: 1000, truncated: true });
+  assert.deepEqual(result.contentSecurityPolicy.inspectedTargets[0].documentPolicies, policies);
+});
+
+test('still rejects an oversized report after duplicate CSP policy encoding', () => {
+  const report = { ...generatedAuditReport(), blob: 'x'.repeat(5000) };
+  assert.throws(() => boundReport(report, 1000), /exceeds its byte bound/);
 });
 
 test('only pin PUTs to the selected attempt are accepted mutations', () => {
