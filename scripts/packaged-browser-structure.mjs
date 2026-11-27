@@ -190,7 +190,8 @@ function moduleBodyObserver() {
     if (entries.has(requestId) || !create) return entries.get(requestId) ?? null;
     if (entries.size >= MAX_TRACKED) { incomplete = true; return null; }
     const value = { responseAt: null, status: null, servedFromCache: false, fromDiskCache: false, fromServiceWorker: false,
-      finishedAt: null, encodedDataLength: null, failed: false, canceled: false, failedAt: null };
+      finishedAt: null, encodedDataLength: null, failed: false, canceled: false, failedAt: null,
+      calledAt: null, settledAt: null, finishedBeforeCall: null, failedBeforeCall: null, responseBeforeCall: null, outcome: 'not-called' };
     entries.set(requestId, value);
     return value;
   };
@@ -245,18 +246,22 @@ function moduleBodyObserver() {
     select(requestId, path) {
       const value = entry(requestId, false);
       if (!value || !routeResponses.has(path)) incomplete = true;
-      selected = { value, sameRouteResponses: routeResponses.get(path) ?? 0,
-        calledAt: null, settledAt: null, finishedBeforeCall: null, failedBeforeCall: null, outcome: 'not-called' };
+      selected = { value, sameRouteResponses: routeResponses.get(path) ?? 0 };
     },
-    /** Observes the one existing body call; the same promise outcome and error object propagate. */
-    bodyCall(call) {
-      if (selected) {
-        selected.calledAt = performance.now();
-        selected.finishedBeforeCall = selected.value ? selected.value.finishedAt !== null : null;
-        selected.failedBeforeCall = selected.value ? selected.value.failed === true : null;
-        selected.outcome = 'pending';
+    /**
+     * Observes a response-stage body read of one paused network request (#1879). Ordering flags are sampled from
+     * events actually received when the read starts; the same promise outcome and error object propagate.
+     */
+    bodyCall(networkId, call) {
+      const target = entry(networkId, true);
+      if (target) {
+        target.calledAt = performance.now();
+        target.responseBeforeCall = target.responseAt !== null;
+        target.finishedBeforeCall = target.finishedAt !== null;
+        target.failedBeforeCall = target.failed === true;
+        target.outcome = 'pending';
       }
-      const record = (outcome) => { if (selected) { selected.outcome = outcome; selected.settledAt = performance.now(); } };
+      const record = (outcome) => { if (target) { target.outcome = outcome; target.settledAt = performance.now(); } };
       let pending;
       try { pending = call(); } catch (error) { record('rejected'); throw error; }
       return pending.then((value) => { record('resolved'); return value; }, (error) => { record('rejected'); throw error; });
@@ -264,9 +269,11 @@ function moduleBodyObserver() {
     snapshot() {
       const value = selected?.value ?? null;
       const totalMs = elapsed(started);
-      const responseToBodyCallMs = value?.responseAt != null && selected?.calledAt != null ? elapsed(value.responseAt, selected.calledAt) : null;
-      const bodyCallMs = selected?.calledAt != null ? elapsed(selected.calledAt, selected.settledAt ?? performance.now()) : null;
-      const failedBeforeBodyCall = selected && value ? selected.failedBeforeCall : null;
+      const called = value?.calledAt != null;
+      // Null when the response-stage read began before the response receipt: there is no forward gap to report.
+      const responseToBodyCallMs = called && value.responseBeforeCall ? receiptGap(value.responseAt, value.calledAt) : null;
+      const bodyCallMs = called ? elapsed(value.calledAt, value.settledAt ?? performance.now()) : null;
+      const failedBeforeBodyCall = called ? value.failedBeforeCall : null;
       const responseToFailedMs = failedBeforeBodyCall === null ? null : receiptGap(value.responseAt, value.failedAt);
       const detail = selected && Object.freeze({
         observationAvailable: value !== null,
@@ -277,13 +284,15 @@ function moduleBodyObserver() {
         fromDiskCache: value?.fromDiskCache ?? false,
         fromServiceWorker: value?.fromServiceWorker ?? false,
         loadingFinished: value?.finishedAt != null,
-        finishedBeforeBodyCall: selected.finishedBeforeCall,
+        bodyReadStage: called ? 'fetch-response' : 'not-read',
+        responseBeforeBodyCall: called ? value.responseBeforeCall : null,
+        finishedBeforeBodyCall: called ? value.finishedBeforeCall : null,
         failedBeforeBodyCall,
         loadingFailed: value?.failed ?? false,
         loadingCanceled: value?.canceled ?? false,
         encodedDataLength: value?.encodedDataLength ?? null,
         responseToBodyCallMs, bodyCallMs, responseToFailedMs,
-        bodyOutcome: BODY_OUTCOMES.includes(selected.outcome) ? selected.outcome : 'not-called',
+        bodyOutcome: called && BODY_OUTCOMES.includes(value.outcome) ? value.outcome : 'not-called',
       });
       return Object.freeze({ stage, totalMs, ...counts, trackedRequests: entries.size, trackedRoutes: routeResponses.size, trackedIncomplete: incomplete, selected: detail });
     },
@@ -301,6 +310,78 @@ export async function qualifyStructure(context) {
     }
     throw error;
   }
+}
+
+const MODULE_CAPTURE_LIMIT = 8;
+const decodeBody = (response) => response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body;
+
+/**
+ * Response-stage capture of one module-detail route on one target (#1879). Every paused response is continued
+ * unchanged exactly once; the handler never fulfils, fails, retries or refetches. A capture is eligible only for an
+ * exact same-origin GET of the route made by Fetch/XHR with a 200 response.
+ */
+function moduleCapture(cdp, sessionId, browserOrigin, modulePath, observer) {
+  const origin = new URL(browserOrigin).origin;
+  const captures = new Map();
+  const inflight = new Set();
+  let active = true, overflow = false;
+  cdp.on('Fetch.requestPaused', (event) => {
+    const handled = (async () => {
+      let value = null;
+      try {
+        if (!active) return;
+        let url = null;
+        try { url = new URL(event.request.url); } catch { url = null; }
+        if (url === null || url.origin !== origin || url.pathname !== modulePath) return;
+        const networkId = event.networkId;
+        if (typeof networkId !== 'string' || captures.has(networkId)) {
+          if (typeof networkId === 'string') captures.get(networkId).duplicate = true;
+          else overflow = true;
+          return;
+        }
+        if (captures.size >= MODULE_CAPTURE_LIMIT) { overflow = true; return; }
+        value = { eligible: event.request.method === 'GET' && ['Fetch', 'XHR'].includes(event.resourceType)
+          && event.responseStatusCode === 200 && event.responseErrorReason === undefined,
+        body: null, text: null, continued: false, duplicate: false };
+        captures.set(networkId, value);
+        if (!value.eligible) return;
+        try { value.body = observer.bodyCall(networkId, () => cdp.call('Fetch.getResponseBody', { requestId: event.requestId }, sessionId)); }
+        catch (error) { value.body = Promise.reject(error); }
+        value.text = decodeBody(await value.body);
+      } catch { /* The bound read keeps its original error in value.body. */ }
+      finally {
+        try { await cdp.call('Fetch.continueResponse', { requestId: event.requestId }, sessionId); if (value) value.continued = true; }
+        catch { /* A failed continuation leaves the capture ineligible. */ }
+      }
+    })();
+    inflight.add(handled);
+  }, sessionId);
+  return {
+    /** Waits for every paused response to be continued and stops interception, including after a failure. */
+    async release() {
+      active = false;
+      await Promise.allSettled(inflight);
+      await cdp.call('Fetch.disable', {}, sessionId);
+    },
+    /**
+     * Returns the originating request's body. Another response for the route is explained only when it is a
+     * byte-identical refetch or was canceled before any response stage; anything else is ambiguous.
+     */
+    async bodyFor(requestId) {
+      const bound = captures.get(requestId);
+      assert.ok(!overflow, 'Module detail capture overflowed');
+      assert.ok(bound, 'Missing response-stage capture of the originating module detail request');
+      assert.ok(bound.eligible && !bound.duplicate, 'Originating module detail capture is not one exact Fetch/XHR GET 200 response');
+      await bound.body;
+      assert.ok(bound.continued && typeof bound.text === 'string', 'Originating module detail response was not continued unchanged');
+      for (const [id, other] of captures) {
+        if (id === requestId) continue;
+        assert.ok(other.eligible && !other.duplicate && other.continued && other.text === bound.text,
+          'Ambiguous module detail responses: another capture differs from the originating response');
+      }
+      return bound.text;
+    },
+  };
 }
 
 async function qualify({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }, observer) {
@@ -373,21 +454,33 @@ async function qualify({ fixture, makeTarget, cdp, evaluate, ready, browserOrigi
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99998').click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99998'`, 'caller cross-link within the pinned structure version');
   const module = fixture.moduleId(Math.floor(99998 / 24));
-  await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === ${JSON.stringify(module)}).click()`);
-  await ready(tab, `document.querySelector('main h2')?.textContent === ${JSON.stringify(module)} && document.querySelector('table caption')?.textContent === 'Functions'`, 'owning module detail');
+  const modulePath = `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`;
+  // #1879: the page cancels the module request after consuming it and Chrome then evicts the body, so the body is
+  // read at Fetch response stage before delivery. Interception covers only this untimed module navigation.
+  const capture = moduleCapture(cdp, tab.sessionId, browserOrigin, modulePath, observer);
+  await cdp.call('Fetch.enable', { patterns: ['Fetch', 'XHR'].map((resourceType) =>
+    ({ urlPattern: `${new URL(browserOrigin).origin}${modulePath}*`, resourceType, requestStage: 'Response' })) }, tab.sessionId);
+  let navigated = false;
+  try {
+    await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === ${JSON.stringify(module)}).click()`);
+    await ready(tab, `document.querySelector('main h2')?.textContent === ${JSON.stringify(module)} && document.querySelector('table caption')?.textContent === 'Functions'`, 'owning module detail');
+    navigated = true;
+  } finally {
+    // Release never replaces an earlier failure.
+    await capture.release().catch((error) => { if (navigated) throw error; });
+  }
   const owned = Math.min(24, OWNED - Math.floor(99998 / 24) * 24);
   assert.equal(await evaluate(tab, `document.querySelectorAll('table tbody tr').length`), owned);
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
   observer.stage('lookup');
-  const modulePath = `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`;
   const requestId = moduleResponses.get(modulePath);
   assert.ok(requestId, 'Missing originating module detail response');
   observer.select(requestId, modulePath);
   observer.stage('body-call');
-  // Rendering has completed, so the response body consumed by the UI is available without another API read.
-  const response = await observer.bodyCall(() => cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
+  // The originating request's body was captured before the page consumed it; no other read is made.
+  const text = await capture.bodyFor(requestId);
   observer.stage('body-decode');
-  const snapshot = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body).data;
+  const snapshot = JSON.parse(text).data;
   assert.equal(snapshot.module.moduleId, module);
   observer.stage('source-link');
   assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
