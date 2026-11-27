@@ -105,7 +105,9 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       if (changedSelection) pendingScroll.current = 'end';
       else if (scroll) pendingScroll.current = scroll();
       bufferRef.current = merged.buffer; setBuffer(merged.buffer);
-      setNotice(merged.replaced ? copy.replaced : merged.released > 0 ? textMessage(copy.released, { count: merged.released }) : '');
+      // Only a different digest is a different recording; a jump also discards the window.
+      const recordingChanged = previousSource !== undefined && previousSource !== data.sourceSha256;
+      setNotice(recordingChanged ? copy.replaced : merged.released > 0 ? textMessage(copy.released, { count: merged.released }) : '');
       setStatus({ state: 'ready' });
       return data;
     } catch (failure: unknown) {
@@ -197,10 +199,17 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     </>}
     {status.state === 'oversized' && <p role="status">{displayMessage(copy.oversized, { limit: status.limit })}</p>}
     {error && <p role="alert">{error}</p>}
+    {status.state === 'error' && <div class="job-actions">
+      <button type="button" onClick={() => {
+        // One deliberate read per activation; a failure leaves this action in place, never replays.
+        setError(''); setStatus({ state: 'loading' });
+        void read({ tail: 'true', limit: '200' }, 'end', () => 'end');
+      }}>{copy.retry}</button>
+    </div>}
     {buffer && meta && <>
       <p>{displayMessage(copy.attempt, { run: <code>{meta.runId}</code>, state: meta.attempt.state, started: <Time value={meta.attempt.startedAt} />, ended: <Time value={meta.attempt.endedAt} /> })}</p>
       <p>{displayMessage(copy.provenance, { sha: <code>{meta.sourceSha256}</code>, bytes: meta.totalBytes, lines: meta.totalLines, redacted: meta.redactedLines, read: <Time value={meta.readAt} /> })}</p>
-      <p>{displayMessage(copy.retained, { first: buffer.firstLine.toString(), last: lastLine(buffer).toString(), total: buffer.totalLines.toString(), capacity: LOG_BUFFER_LINES })}</p>
+      {buffer.totalLines === 0n ? <p>{copy.empty}</p> : <p>{displayMessage(copy.retained, { first: buffer.firstLine.toString(), last: lastLine(buffer).toString(), total: buffer.totalLines.toString(), capacity: LOG_BUFFER_LINES })}</p>}
       {buffer.firstLine > 1n && <p>{copy.earlierHidden}</p>}
       {lastLine(buffer) < buffer.totalLines && <p>{copy.laterHidden}</p>}
       {meta.range.byteLimited && <p>{copy.byteLimited}</p>}

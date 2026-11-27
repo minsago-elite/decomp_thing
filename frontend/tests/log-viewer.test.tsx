@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { decodeContract } from '../src/api/decode';
+import { ApiClientError } from '../src/api/errors';
 import type { LogLine } from '../src/api/generated';
 import { LogViewer, LOG_ROW_PX, LOG_VIEWPORT_PX } from '../src/jobs/LogViewer';
 import { LOG_BUFFER_LINES, mergeLogRange, visibleWindow, type AvailableLog } from '../src/jobs/logBuffer';
@@ -376,5 +377,69 @@ describe('log viewer', () => {
     mount();
     expect(await screen.findByText('The build log exceeds the reading limit (8388608 bytes or 1,000,000 lines) and cannot be shown.')).toBeTruthy();
     expect(rows()).toHaveLength(0);
+  });
+
+  it('returns from a distant same-recording range without announcing a change, but still announces a real replacement', async () => {
+    const search = { query: 'line', scope: 'whole-log' as const, matchCount: '1', matches: ['1'], matchesTruncated: false };
+    transport.get.mockResolvedValueOnce({ data: range(1000, 1, 1000) }).mockResolvedValueOnce({ data: range(1000, 1, 1000, { search }) })
+      .mockResolvedValueOnce({ data: range(1, 1, 1000) }).mockResolvedValueOnce({ data: range(1000, 1, 1000) })
+      .mockResolvedValueOnce({ data: range(5, 1, 5, { sourceSha256: 'b'.repeat(64) }) });
+    mount();
+    await screen.findByText('line 1000');
+    fireEvent.input(screen.getByRole('textbox', { name: 'Search the whole log' }), { target: { value: 'line' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search the whole log' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Go to line 1' }));
+    await screen.findByText('line 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Go to the newest lines' }));
+    await screen.findByText('line 1000');
+    expect(screen.queryByText(/The recorded log changed/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Go to the newest lines' }));
+    expect(await screen.findByText('The recorded log changed. Loaded lines were replaced with the new recording.')).toBeTruthy();
+    expect(screen.getByText('line 5')).toBeTruthy();
+  });
+
+  it('announces a replacement discovered by a jump, reloads its tail and drops the stale search', async () => {
+    const search = { query: 'line', scope: 'whole-log' as const, matchCount: '1', matches: ['1'], matchesTruncated: false };
+    const other = { sourceSha256: 'b'.repeat(64) };
+    transport.get.mockResolvedValueOnce({ data: range(1000, 1, 1000) }).mockResolvedValueOnce({ data: range(1000, 1, 1000, { search }) })
+      .mockResolvedValueOnce({ data: range(1, 1, 7, other) }).mockResolvedValueOnce({ data: range(7, 1, 7, other) });
+    mount();
+    await screen.findByText('line 1000');
+    fireEvent.input(screen.getByRole('textbox', { name: 'Search the whole log' }), { target: { value: 'line' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search the whole log' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Go to line 1' }));
+    expect(await screen.findByText('The recorded log changed. Loaded lines were replaced with the new recording.')).toBeTruthy();
+    expect(transport.get).toHaveBeenCalledTimes(4);
+    expect(transport.get.mock.calls[3]![1]).toBe(`/jobs/${fixture.jobId}/runs/${fixture.runId}/logs/build?tail=true&limit=200`);
+    expect(screen.getByText('line 7')).toBeTruthy();
+    expect(screen.queryByText('line 1000')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Go to line 1' })).toBeNull();
+    expect(screen.queryByText(/Whole-log literal search/)).toBeNull();
+  });
+
+  it('states an empty recording instead of an inverted line range', async () => {
+    transport.get.mockResolvedValueOnce({ data: { ...range(1, 0, 0), totalBytes: '0' } });
+    mount();
+    expect(await screen.findByText('The recorded log has no lines.')).toBeTruthy();
+    expect(screen.queryByText(/Showing lines/)).toBeNull();
+  });
+
+  it('offers one deliberate retry after an initial failure and never replays it automatically', async () => {
+    vi.useFakeTimers();
+    transport.get.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503 })).mockResolvedValueOnce({ data: fixture });
+    mount();
+    await flush();
+    expect(screen.getByRole('alert').textContent).toContain('could not be read');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(transport.get).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Try reading the log again' }));
+    await flush();
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    expect(transport.get.mock.calls[1]![1]).toBe(`/jobs/${fixture.jobId}/runs/${fixture.runId}/logs/build?tail=true&limit=200`);
+    expect(screen.getByText(/Showing lines 41–43 of 120/)).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Try reading the log again' })).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(transport.get).toHaveBeenCalledTimes(2);
   });
 });

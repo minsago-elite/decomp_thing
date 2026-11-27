@@ -43,6 +43,7 @@ export const archiveCopy = {
   },
   boundary: 'Verification checks that the ZIP extracts safely, that its payload equals this revision’s source tree with no repository metadata, and that the recorded build contract matches the retained executable. It does not compile or run anything and does not establish behavioral fidelity. Verification results last until the server restarts.',
   verify: 'Verify archive integrity',
+  submitting: 'Verification operation: requesting…',
   operation: 'Verification operation: {state}.',
   operationStates: { queued: 'queued', running: 'running', cancelling: 'cancelling', completed: 'completed', failed: 'failed', cancelled: 'cancelled', interrupted: 'interrupted', 'recovery-required': 'recovery required' },
   downloadVerified: 'Download the verified source archive (ZIP)',

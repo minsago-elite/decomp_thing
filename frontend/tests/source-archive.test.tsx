@@ -108,3 +108,97 @@ it('verifies the displayed digest through one explicit idempotent operation and 
   await waitFor(() => { expect(document.activeElement?.getAttribute('data-archive-state')).toBe('verified'); });
   expect(screen.getByRole('link', { name: copy.downloadVerified })).toBeTruthy();
 });
+
+function held() {
+  let settle!: { resolve: (value: unknown) => void; reject: (reason: unknown) => void };
+  const promise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  return { promise, ...settle };
+}
+async function openVerify() {
+  fireEvent.click(screen.getByRole('button', { name: copy.inspect }));
+  return screen.findByRole('button', { name: copy.verify });
+}
+
+it('owns one held verification: same-frame activations send one request with visible pending feedback until completion', async () => {
+  transport.get.mockImplementation(kind => Promise.resolve({ data: kind === 'operation' ? operation('completed') : fixture('source-archive-verified') }));
+  const post = held();
+  transport.post.mockReturnValue(post.promise);
+  mount();
+  const verify = await openVerify();
+  verify.focus();
+  verify.click(); verify.click();
+  fireEvent.keyDown(verify, { key: 'Enter' }); verify.click();
+  expect(transport.post).toHaveBeenCalledOnce();
+  await waitFor(() => { expect(verify.getAttribute('aria-disabled')).toBe('true'); });
+  expect(screen.getByText(copy.submitting).getAttribute('role')).toBe('status');
+  expect(verify.getAttribute('aria-describedby')).toBe('source-archive-operation');
+  expect(document.activeElement).toBe(verify);
+  expect(transport.post.mock.calls[0]![4].signal).toBeInstanceOf(AbortSignal);
+  expect((transport.post.mock.calls[0]![4].signal as AbortSignal).aborted).toBe(false);
+  post.resolve({ data: operation('completed') });
+  await waitFor(() => { expect(document.getElementById('source-archive-operation')?.textContent).toBe('Verification operation: completed.'); });
+  await waitFor(() => { expect(screen.getByRole('button', { name: copy.verify }).hasAttribute('aria-disabled')).toBe(false); });
+  expect(transport.post).toHaveBeenCalledOnce();
+});
+
+it('shows progress of the polled operation and keeps the action owned until it is terminal', async () => {
+  transport.get.mockImplementation(kind => Promise.resolve({ data: kind === 'operation' ? operation('completed') : fixture('source-archive-verified') }));
+  transport.post.mockResolvedValue({ data: operation('running') });
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  mount();
+  const verify = await openVerify();
+  fireEvent.click(verify);
+  await waitFor(() => { expect(document.getElementById('source-archive-operation')?.textContent).toBe('Verification operation: running.'); });
+  expect(verify.getAttribute('aria-disabled')).toBe('true');
+  fireEvent.click(verify);
+  expect(transport.post).toHaveBeenCalledOnce();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+  await waitFor(() => { expect(document.getElementById('source-archive-operation')?.textContent).toBe('Verification operation: completed.'); });
+});
+
+it('releases the action after a failed request so a retry sends a fresh idempotent request', async () => {
+  transport.get.mockResolvedValue({ data: fixture('source-archive-verified') });
+  const post = held();
+  transport.post.mockReturnValueOnce(post.promise).mockReturnValueOnce(new Promise(() => {}));
+  mount();
+  const verify = await openVerify();
+  fireEvent.click(verify);
+  await screen.findByText(copy.submitting);
+  post.reject(new ApiClientError('http_error', { status: 503 }));
+  await screen.findByRole('alert');
+  expect(verify.hasAttribute('aria-disabled')).toBe(false);
+  expect(screen.queryByText(copy.submitting)).toBeNull();
+  fireEvent.click(verify);
+  expect(transport.post).toHaveBeenCalledTimes(2);
+  expect(transport.post.mock.calls[1]![4].idempotencyKey).not.toEqual(transport.post.mock.calls[0]![4].idempotencyKey);
+  await waitFor(() => { expect(screen.queryByRole('alert')).toBeNull(); });
+  expect(screen.getByText(copy.submitting)).toBeTruthy();
+});
+
+it('abandons a held verification and its feedback when the selected revision or session changes', async () => {
+  transport.get.mockResolvedValue({ data: fixture('source-archive-verified') });
+  const post = held();
+  transport.post.mockReturnValue(post.promise);
+  const view = mount();
+  fireEvent.click(await openVerify());
+  await screen.findByText(copy.submitting);
+  const signal = transport.post.mock.calls[0]![4].signal as AbortSignal;
+  view.rerender(<LocationProvider scope="/"><SourceArchive selected={{ ...selected, revisionId: 'revision_2' }} basePath="/" session={session} /></LocationProvider>);
+  await waitFor(() => { expect(signal.aborted).toBe(true); });
+  expect(screen.queryByText(copy.submitting)).toBeNull();
+  post.resolve({ data: operation('completed') });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(screen.queryByText(/Verification operation:/u)).toBeNull();
+
+  const second = held();
+  transport.post.mockReturnValue(second.promise);
+  view.rerender(<LocationProvider scope="/"><SourceArchive selected={selected} basePath="/" session={session} /></LocationProvider>);
+  fireEvent.click(screen.getByRole('button', { name: copy.refresh }));
+  fireEvent.click(await screen.findByRole('button', { name: copy.verify }));
+  await screen.findByText(copy.submitting);
+  const sessionSignal = transport.post.mock.calls[1]![4].signal as AbortSignal;
+  view.rerender(<LocationProvider scope="/"><SourceArchive selected={selected} basePath="/" session={{ csrf: () => 'csrf_token_2' }} /></LocationProvider>);
+  await waitFor(() => { expect(sessionSignal.aborted).toBe(true); });
+  expect(screen.queryByText(copy.submitting)).toBeNull();
+  expect(screen.getByRole('button', { name: copy.verify }).hasAttribute('aria-disabled')).toBe(false);
+});
