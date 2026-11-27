@@ -104,6 +104,22 @@ def inventory(layer):
     return rows, other
 
 
+def suffix_after_initial_etc_header_sha256(layer):
+    """Measure raw suffix only; never authorize or rewrite a layer/image.
+
+    Called after the existing bounded layer/config and inventory checks. Later
+    PAX members do not affect which first 512 raw bytes this measurement omits.
+    """
+    try:
+        member = tarfile.TarInfo.frombuf(layer[:512], "utf-8", "strict")
+    except (tarfile.HeaderError, ValueError, UnicodeError):
+        return None
+    if (member.type != tarfile.DIRTYPE or member.name != "etc"
+            or member.size != 0 or member.linkname):
+        return None
+    return sha(memoryview(layer)[512:])
+
+
 def diagnose(source):
     blobs = selected_blobs(source)
 
@@ -135,7 +151,8 @@ def diagnose(source):
     return {"schemaVersion": 1, "configBlobSha256": sha(blobs[config_name]),
             "historyCanonicalSha256": canonical_hash(config["history"]),
             "rootfsDiffIds": diff_ids, "uncompressedDiffId": diff_id,
-            "uncompressedBytes": len(layer), "entries": rows, "unlistedEntries": other}
+            "uncompressedBytes": len(layer), "entries": rows, "unlistedEntries": other,
+            "suffixAfterInitialEtcHeaderSha256": suffix_after_initial_etc_header_sha256(layer)}
 
 
 if __name__ == "__main__":

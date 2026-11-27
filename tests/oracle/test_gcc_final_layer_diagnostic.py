@@ -62,6 +62,58 @@ class FinalLayerTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 capture.diagnose(io.BytesIO(data))
 
+    def test_initial_etc_raw_suffix_measurement(self):
+        rest = tar([("usr/include/mpc.h", b"PRIVATE")])
+        entry = tarfile.TarInfo("etc")
+        entry.type = tarfile.DIRTYPE
+        layer = entry.tobuf(format=tarfile.USTAR_FORMAT) + rest
+        report = capture.diagnose(io.BytesIO(export(layer)))
+        field = "suffixAfterInitialEtcHeaderSha256"
+        self.assertEqual(hashlib.sha256(rest).hexdigest(), report[field])
+        self.assertEqual("sha256:" + hashlib.sha256(layer).hexdigest(),
+                         report["uncompressedDiffId"])
+        self.assertIsNone(capture.diagnose(io.BytesIO(export(rest)))[field])
+        changed_payload = layer.replace(b"PRIVATE", b"CHANGED")
+        changed_trailer = layer + b"TRAILER" + bytes(505)
+        for changed in (changed_payload, changed_trailer):
+            measured = capture.diagnose(io.BytesIO(export(changed)))[field]
+            self.assertEqual(hashlib.sha256(memoryview(changed)[512:]).hexdigest(), measured)
+            self.assertNotEqual(report[field], measured)
+
+    def test_initial_extension_withholds_suffix_measurement(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            entry = tarfile.TarInfo("etc")
+            entry.type = tarfile.DIRTYPE
+            entry.pax_headers = {"mtime": "1.5"}
+            archive.addfile(entry)
+        self.assertIsNone(capture.diagnose(io.BytesIO(export(buf.getvalue())))[
+            "suffixAfterInitialEtcHeaderSha256"])
+
+    def test_bad_initial_header_withholds_suffix_measurement(self):
+        entry = tarfile.TarInfo("etc")
+        entry.type = tarfile.DIRTYPE
+        header = bytearray(entry.tobuf(format=tarfile.USTAR_FORMAT))
+        header[0] ^= 1
+        self.assertIsNone(capture.suffix_after_initial_etc_header_sha256(bytes(header)))
+        self.assertIsNone(capture.suffix_after_initial_etc_header_sha256(b"short"))
+        entry.size = 512
+        self.assertIsNone(capture.suffix_after_initial_etc_header_sha256(entry.tobuf()))
+
+    def test_later_pax_keeps_exact_suffix_measurement(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            entry = tarfile.TarInfo("etc")
+            entry.type = tarfile.DIRTYPE
+            archive.addfile(entry)
+            file = tarfile.TarInfo("usr/include/mpc.h")
+            file.pax_headers = {"mtime": "1.5"}
+            archive.addfile(file)
+        layer = buf.getvalue()
+        self.assertEqual(hashlib.sha256(memoryview(layer)[512:]).hexdigest(),
+                         capture.diagnose(io.BytesIO(export(layer)))[
+                             "suffixAfterInitialEtcHeaderSha256"])
+
     def test_stream_cache_expansion_and_member_bounds(self):
         layer = tar([("usr/include/mpc.h", bytes(20480))])
         data = export(layer, compressed=True)
