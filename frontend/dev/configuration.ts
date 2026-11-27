@@ -12,12 +12,12 @@ export type DevelopmentSettings = {
   backendOrigin: string | null;
 };
 
-type FixtureDocument = { kind: string; data?: { items?: unknown[]; nextCursor?: unknown } };
+type FixtureDocument = { kind: string; data?: { items?: unknown[]; nextCursor?: unknown; page?: { limit?: unknown } } };
 type FixtureSet = {
   label: string;
   schemaSha256: string;
   routes: Record<string, FixtureDocument>;
-  scenarios: { name: string; description: string; jobPath: string; runPath: string; reportPath: string }[];
+  scenarios: { name: string; description: string; jobId: string; jobPath: string; runPath: string; reportPath: string }[];
   errors: Record<string, unknown>;
   download: { path: string; body: string; sha256: string };
 };
@@ -90,7 +90,9 @@ function serveFixture(request: IncomingMessage, response: ServerResponse, url: U
     return;
   }
   const document = fixtures.routes[url.pathname];
-  if (url.search && !(document?.kind === 'events' && url.search === '?transport=poll')) {
+  // The generated job listing is one complete page recorded at the default limit, so only that exact query matches it.
+  const defaultListing = document?.kind === 'jobs' && url.search === `?limit=${String(document.data?.page?.limit)}`;
+  if (url.search && !defaultListing && !(document?.kind === 'events' && url.search === '?transport=poll')) {
     json(response, 400, fixtures.errors.VALIDATION_FAILED, head);
   } else if (url.pathname === fixtures.download.path) {
     response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8',

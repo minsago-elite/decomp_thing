@@ -25,6 +25,11 @@ def source(name: str) -> dict:
     return json.loads((CONTRACT / "fixtures" / f"{name}.json").read_text())
 
 
+def fixture_job_id(name: str) -> str:
+    """Canonical 32-hex job ID; deterministic per scenario and accepted by production URL helpers."""
+    return hashlib.sha256(f"SIMULATED_DEVELOPMENT_DATA/job/{name}".encode()).hexdigest()[:32]
+
+
 def generate(base_path: str, schema_path: Path) -> dict:
     if not re.fullmatch(r"/(?:[A-Za-z0-9_-]+/)*", base_path):
         raise ValueError("Development base path must be normalized ASCII path segments")
@@ -45,6 +50,8 @@ def generate(base_path: str, schema_path: Path) -> dict:
     bootstrap["data"]["applicationBuildId"] = "SIMULATED_DEVELOPMENT_DATA"
     bootstrap["data"]["uiBuildId"] = "SIMULATED_DEVELOPMENT_DATA"
     bootstrap["data"]["serverInstanceId"] = "SIMULATED_DEVELOPMENT_INSTANCE"
+    # Fixed far-future expiry keeps output deterministic while the shell treats the simulated session as live.
+    bootstrap["data"]["sessionExpiresAt"] = "2099-12-31T23:59:59Z"
     record(api + "/bootstrap", bootstrap)
     for name, state, description in [
         ("running", "running", "Simulated active attempt; no native process is running."),
@@ -54,7 +61,7 @@ def generate(base_path: str, schema_path: Path) -> dict:
         ("partial", "running", "Simulated partially populated report; usage and revision are unavailable."),
     ]:
         job = source("job-lossless")
-        job_id, run_id = f"fixture_job_{name}", f"fixture_run_{name}"
+        job_id, run_id = fixture_job_id(name), f"fixture_run_{name}"
         job["data"].update(jobId=job_id, displayFilename=f"SIMULATED-{name}.elf", status=state,
                            latestRunId=run_id, acceptedRevisionId=None)
         run = source("run-queued")
@@ -100,9 +107,12 @@ def generate(base_path: str, schema_path: Path) -> dict:
         report["data"]["sourceArtifact"] = None
         report_path = run_path + "/reports/" + report["data"]["reportId"]
         record(report_path, report)
-        scenarios.append({"name": name, "description": description, "jobPath": job_path,
+        scenarios.append({"name": name, "description": description, "jobId": job_id, "jobPath": job_path,
                           "runPath": run_path, "reportPath": report_path})
 
+    ids = [job["jobId"] for job in jobs]
+    if len(set(ids)) != len(ids) or not all(re.fullmatch(r"[0-9a-f]{32}", i) for i in ids):
+        raise ValueError("Fixture job IDs must be distinct canonical 32-hex identifiers")
     page = source("jobs-page")
     page["data"]["items"] = jobs
     record(api + "/jobs", page)
@@ -112,8 +122,9 @@ def generate(base_path: str, schema_path: Path) -> dict:
     artifact["data"].update(artifactId="fixture_attachment", displayName="SIMULATED-evidence.txt",
                               mediaType="text/plain", sizeBytes=str(len(download.encode())),
                               sha256=hashlib.sha256(download.encode()).hexdigest())
-    artifact["data"]["binding"].update(jobId="fixture_job_partial", runId="fixture_run_partial", revisionId=None)
-    artifact_path = api + "/jobs/fixture_job_partial/artifacts/fixture_attachment"
+    attachment_job = fixture_job_id("partial")
+    artifact["data"]["binding"].update(jobId=attachment_job, runId="fixture_run_partial", revisionId=None)
+    artifact_path = api + "/jobs/" + attachment_job + "/artifacts/fixture_attachment"
     artifact["data"]["contentHref"] = artifact_path + "/content"
     record(artifact_path, artifact)
     errors = {}
