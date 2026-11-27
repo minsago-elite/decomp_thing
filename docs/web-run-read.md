@@ -177,8 +177,9 @@ The job overview has a **Current and accepted work** section that keeps the two 
   that newer observation instead of reporting a failure. The order resets with the page on session change
   or unmount. If the Retry job read fails, the next Retry repeats that job read before
   any history read.
-- Before using a page, the lookup checks that each attempt ID appears once across the
-  pages read. A page with a next cursor must be full. A continuation must contain at
+- The server reports a one-based `page.pageNumber` derived from the validated offset and
+  page limit. The lookup requires page 1 and then page 2, and checks that each attempt
+  ID appears once across the pages read. A page with a next cursor must be full. A continuation must contain at
   least one row and its next cursor must differ from the cursor used to request it.
   A failed check shows the lookup alert and offers Retry.
 - When the lookup finds the accepted attempt, it links that attempt, its evidence and report

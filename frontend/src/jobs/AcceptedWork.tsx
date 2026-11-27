@@ -178,6 +178,8 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory
         const readPage = () => client.get('runs', `/jobs/${jobId}/runs?${query}`, { signal: controller.signal });
         const { data } = await (readHistory === undefined ? readPage() : readHistory(controller.signal, readPage));
         if (controller.signal.aborted) return;
+        // The server derives pageNumber from the offset it actually read, including on a final page.
+        if (data.page.pageNumber !== page + 1) throw new ApiClientError('invalid_response');
         if (data.page.limit !== pageLimit || data.jobId !== jobId || data.items.some(run => run.jobId !== jobId)) throw new ApiClientError('invalid_response');
         // The contract requires each page's snapshot; without it no history can be bound, so none is shown.
         if (typeof data.page.snapshotVersion !== 'string' || data.page.snapshotVersion === '') throw new ApiClientError('invalid_response');
