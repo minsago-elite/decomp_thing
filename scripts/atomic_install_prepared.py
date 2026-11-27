@@ -1535,13 +1535,27 @@ def main():
         frontend_compare(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))
         return
     if sys.argv[1] == "bindings":
-        budget = BindingBudget(float(sys.argv[5]))
-        value = {"jdkBinding": jdk_binding(pathlib.Path(sys.argv[2]), budget),
-                 "gradleBinding": gradle_binding(pathlib.Path(sys.argv[3]), budget)}
-        validate_binding_receipts(value["jdkBinding"], value["gradleBinding"], budget.deadline)
-        budget.check()
-        write_json(pathlib.Path(sys.argv[4]), value, immutable=True)
-        budget.check()
+        stage = "budget"
+        try:
+            budget = BindingBudget(float(sys.argv[5]))
+            stage = "jdk"
+            jdk = jdk_binding(pathlib.Path(sys.argv[2]), budget)
+            stage = "gradle"
+            gradle = gradle_binding(pathlib.Path(sys.argv[3]), budget)
+            value = {"jdkBinding": jdk, "gradleBinding": gradle}
+            stage = "validate"
+            validate_binding_receipts(jdk, gradle, budget.deadline)
+            budget.check()
+            stage = "write"
+            write_json(pathlib.Path(sys.argv[4]), value, immutable=True)
+            budget.check()
+        except Exception as failure:
+            # The message can contain paths or tool output. Emit only a bounded,
+            # stable classification; bare raise preserves the original failure.
+            cause = type(failure).__name__[:96]
+            sys.stdout.write(f"atomic binding failure stage={stage} cause={cause}\n")
+            sys.stdout.flush()
+            raise
         return
     require(sys.argv[1] == "guard", "unknown prepared operation")
     run = safe_path(pathlib.Path(sys.argv[2]))

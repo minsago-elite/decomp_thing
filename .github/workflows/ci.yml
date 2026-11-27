@@ -952,6 +952,9 @@ jobs:
         with:
           submodules: recursive
       - uses: docker/setup-buildx-action@v4
+      - name: Verify bounded Gradle plugin resolution for archival builds
+        timeout-minutes: 12
+        run: JAVA_HOME="$JAVA_HOME_21_X64" python3 -B scripts/test-archival-gradle-resolution.py
       - run: scripts/validate-archival-docker.sh
       - uses: actions/upload-artifact@v7
         if: always()

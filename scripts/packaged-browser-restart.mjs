@@ -4,7 +4,9 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 const RUN = 'run_fixture_3';
-const MAX_REPORT_BYTES = 512 * 1024;
+export const MAX_REPORT_BYTES = 512 * 1024;
+const DOCUMENT_POLICIES_ENCODING = 'csp-document-policies-from-document-requests/v1';
+const DOCUMENT_POLICIES_MARKER = '__cspDocumentPoliciesEncoding';
 
 /** Replace-by-rename publication, so a reader never observes a partial progress journal. */
 export async function publishAtomically(path, text) {
@@ -51,6 +53,24 @@ export function scrubTokens(value, tokens) {
 export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
   if (Buffer.byteLength(JSON.stringify(report), 'utf8') <= maxBytes) return report;
   const bounded = structuredClone(report);
+  // Each target records the same response-policy entries twice. On oversized reports only,
+  // encode the duplicate as a versioned reconstruction marker; request records themselves
+  // (including headers, failures, and odd shapes) remain untouched.
+  const inspectedTargets = bounded.mode === 'audit' && Array.isArray(bounded.contentSecurityPolicy?.inspectedTargets)
+    ? bounded.contentSecurityPolicy.inspectedTargets : [];
+  for (const target of inspectedTargets) {
+    if (!target || typeof target !== 'object' || Array.isArray(target) ||
+        Object.hasOwn(target, DOCUMENT_POLICIES_MARKER) ||
+        !Array.isArray(target.documentRequests) || !Array.isArray(target.documentPolicies) ||
+        !target.documentRequests.every(request => request && typeof request === 'object' && !Array.isArray(request) && !Object.hasOwn(request, DOCUMENT_POLICIES_MARKER))) continue;
+    const policies = target.documentRequests.filter(request => request.source !== null);
+    if (JSON.stringify(target.documentPolicies) === JSON.stringify(policies)) {
+      const marker = { [DOCUMENT_POLICIES_MARKER]: DOCUMENT_POLICIES_ENCODING, count: policies.length };
+      if (Buffer.byteLength(JSON.stringify(target.documentPolicies), 'utf8') > Buffer.byteLength(JSON.stringify(marker), 'utf8')) {
+        target.documentPolicies = marker;
+      }
+    }
+  }
   if (bounded.requests) bounded.requests = Object.fromEntries(Object.entries(bounded.requests)
     .map(([name, list]) => [name, Array.isArray(list) ? { count: list.length, truncated: true } : list]));
   const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
