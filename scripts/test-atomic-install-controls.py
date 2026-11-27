@@ -83,6 +83,56 @@ def acp_publication_controls():
     passed.append('ACP-actual-publication-engine-inert-adversarial-controls')
 
 
+def binding_diagnostic_gradle_control():
+    """Exercise fallback and successful binding generation through real Gradle."""
+    java_home = driver.qualified_java_home()
+    helper = ROOT / 'scripts/atomic_install_prepared.py'
+    control_jdk = WORK / 'controlled-jdk'
+    (control_jdk / 'bin').mkdir(parents=True)
+    (control_jdk / 'release').write_text((java_home / 'release').read_text())
+    (control_jdk / 'bin/java').write_bytes((java_home / 'bin/java').read_bytes())
+    (control_jdk / 'bin/java').chmod(0o755)
+    env = {'JAVA_HOME': str(java_home), 'PATH': str(java_home / 'bin') + os.pathsep + '/usr/bin:/bin',
+           'TMPDIR': str(WORK / 'tmp'), 'GRADLE_USER_HOME': str(ROOT / 'build/.gradle-user-home')}
+    (WORK / 'tmp').mkdir(exist_ok=True)
+
+    def run_control(name, script, gradle_root, path):
+        project = WORK / name
+        project.mkdir()
+        (project / 'settings.gradle').write_text(f"rootProject.name = '{name}'\n")
+        (project / 'build.gradle').write_text("tasks.register('control')\n")
+        block = driver.binding_exec_groovy(script, driver.groovy_path(control_jdk),
+            gradle_root, driver.groovy_path(path))
+        init = WORK / f'{name}.init.gradle'
+        init.write_text("allprojects { p -> if (p == p.rootProject) {\n    def remainingBindingSeconds = 120.0d\n" + block + "} }\n")
+        driver.prepared.write_json(init.with_suffix('.json'), {'control': name})
+        command = [ROOT / 'gradlew', '--offline', '--no-daemon', '-g', env['GRADLE_USER_HOME'],
+            '-Dorg.gradle.jvmargs=' + shlex.join(driver.jvm_options()), '-p', project, '-I', init, 'control']
+        return driver.run(command, env=env, timeout=180, log=WORK / f'{name}.log', allow_failure=True)
+
+    current_gradle = 'gradle.gradleHomeDir.absolutePath'
+    refused = WORK / 'refused-bindings.json'
+    code, output = run_control('binding-refusal-gradle', helper, driver.groovy_path(WORK / 'missing-gradle'), refused)
+    assert code != 0 and 'non-zero exit value 1' in output, output[-2048:]
+    assert output.count('atomic binding failure stage=gradle cause=FileNotFoundError') == 1, output[-2048:]
+    assert not refused.exists()
+
+    failed_path = WORK / 'unreachable-bindings.json'
+    code, output = run_control('binding-fallback-gradle', WORK / 'missing-helper.py', current_gradle, failed_path)
+    assert code != 0 and 'non-zero exit value 2' in output, output[-2048:]
+    assert output.count('atomic binding failure stage=unknown cause=diagnostic-unavailable') == 1, output[-2048:]
+    assert not failed_path.exists()
+
+    success_path = WORK / 'successful-bindings.json'
+    code, output = run_control('binding-success-gradle', helper, current_gradle, success_path)
+    assert code == 0, output[-2048:]
+    bindings = json.loads(success_path.read_text())
+    assert set(bindings) == {'jdkBinding', 'gradleBinding'}
+    assert bindings['jdkBinding']['root'] == str(control_jdk)
+    assert pathlib.Path(bindings['gradleBinding']['root']).is_dir()
+    passed.append('real-Gradle-binding-fallback-and-success-with-pinned-local-inputs')
+
+
 ACP_PUBLICATION_CONTROLS = r'''import java.nio.file.*
 import java.nio.file.attribute.*
 import java.nio.channels.*
@@ -1177,7 +1227,12 @@ try:
     assert driver.groovy_path(WORK / "root-build/frontend") in init_text
     assert 'outputs.upToDateWhen { false }' in init_text
     assert '"dist", "bundle-report.json", "bundle-composition.json"' in init_text
+    assert 'bindingOutput.standardOutput.asText.get()' in init_text
+    assert 'throw bindingFailure' in init_text
+    assert 'atomic binding failure stage=' in init_text
     passed.append("one-install-root-and-fresh-frontend-output-wiring")
+    if '--binding-diagnostic-gradle' in sys.argv or '--gradle-writers' in sys.argv:
+        binding_diagnostic_gradle_control()
     with unittest.mock.patch.object(driver, "qualified_java_home", return_value=jdk):
         original_home = os.environ.get("HOME")
         assert driver.safe_env().get("HOME") == original_home
