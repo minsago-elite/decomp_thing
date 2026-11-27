@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
-import type { Bootstrap, RevisionDirectory, RevisionFile } from '../src/api/generated';
+import type { Bootstrap, RevisionDirectory, RevisionFile, SourceChunk, SourceSearch } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { sourceCopy } from '../src/copy/sources';
 import { createBrowserSession } from '../src/session/session';
@@ -419,5 +419,44 @@ it('leaves focus the user moved after Next directory page remounts the pinned vi
     await act(async () => { held.reject(gone()); await Promise.resolve(); });
     await waitFor(expectGone);
     expect(document.activeElement).toBe(surviving);
+  } finally { auth.dispose(); }
+});
+
+it.each(['continue', 'restart', 'line'] as const)('recovers focus after deletion during %s navigation', async action => {
+  chromeRemovalBlur();
+  const tombstone = heldRead();
+  const partial = fixture<SourceSearch>('source-search-incomplete-empty');
+  const chunk = { ...fixture<SourceChunk>('source-chunk-complete-BOM-CRLF'), binding,
+    fileId: file.item.fileId, sourceSha256: file.sourceSha256, metadataVersion: file.metadataVersion };
+  const metadata = { ...file, item: { ...file.item, sha256: chunk.sha256, sizeBytes: chunk.sizeBytes } };
+  const kind = action === 'line' ? 'sourceChunk' : 'sourceSearch';
+  let count = 0;
+  transport.get.mockImplementation((requested: string) => {
+    if (requested === 'revisionFile') return Promise.resolve({ data: metadata });
+    if (requested !== kind) return Promise.reject(new Error(requested));
+    if (++count > 1) return tombstone.promise;
+    return Promise.resolve({ data: action === 'line' ? chunk : partial });
+  });
+  const search = `${revision}/source-search?q=absent`;
+  const url = action === 'restart' ? `${search}&cursor=${partial.page.nextCursor}` : search;
+  const auth = await mount(action === 'line' ? fileUrl : url);
+  try {
+    if (action === 'line') fireEvent.click(await screen.findByRole('button', { name: sourceCopy.openPreview }));
+    const control = action === 'line'
+      ? await screen.findByRole('link', { name: /Open revision line 2 at byte/u })
+      : await screen.findByRole('button', { name: action === 'restart' ? sourceCopy.searchRestart : sourceCopy.searchContinue });
+    // The reader is interacting with an already displayed page, after its initial focus effects have settled.
+    await new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+    if (action === 'line') await waitFor(() => expect(document.activeElement?.id).toBe('source-preview-title'));
+    retain(jobId);
+    control.focus();
+    fireEvent.click(control);
+    await waitFor(() => expect(count).toBe(2));
+    expect(control.isConnected).toBe(false);
+    await act(async () => { tombstone.reject(gone()); await Promise.resolve(); });
+    const notice = await waitFor(expectGone);
+    expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+    expect(sessionStorage.getItem(slot)).toBeNull();
+    expect(reads(kind)).toBe(2);
   } finally { auth.dispose(); }
 });

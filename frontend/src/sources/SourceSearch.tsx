@@ -5,6 +5,7 @@ import { ApiClientError } from '../api/errors';
 import { sourceDirectoryPath } from '../app/paths';
 import type { SourceSelection } from '../app/paths';
 import { sourceCopy as copy } from '../copy/sources';
+import { holdFocusThroughTransition } from '../shared/departingFocus';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
@@ -87,7 +88,8 @@ export function SourceSearch({ selected, basePath, search, historyEntry, onDelet
     if (current && current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
   }, [current?.state, key]);
 
-  function go(next: SourceSearchRequest) {
+  function go(next: SourceSearchRequest, pagingButton?: HTMLButtonElement) {
+    if (pagingButton) holdFocusThroughTransition(pagingButton);
     moveFocus.current = true;
     location.route(sourceSearchPath(basePath, selected, directory, next));
   }
@@ -149,9 +151,9 @@ export function SourceSearch({ selected, basePath, search, historyEntry, onDelet
         </ol>
       </>}
       <nav aria-label={copy.searchResults}>
-        <button type="button" disabled={request.cursor === null} onClick={() => go({ ...request, cursor: null })}>{copy.searchRestart}</button>
-        <button type="button" disabled={data.page.nextCursor === null} onClick={() => {
-          if (data.page.nextCursor !== null) go({ ...request, cursor: data.page.nextCursor });
+        <button type="button" disabled={request.cursor === null} onClick={event => go({ ...request, cursor: null }, event.currentTarget)}>{copy.searchRestart}</button>
+        <button type="button" disabled={data.page.nextCursor === null} onClick={event => {
+          if (data.page.nextCursor !== null) go({ ...request, cursor: data.page.nextCursor }, event.currentTarget);
         }}>{copy.searchContinue}</button>
       </nav>
     </>}
