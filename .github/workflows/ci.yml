@@ -320,6 +320,7 @@ jobs:
       - uses: ./.github/actions/setup-gradle-compiler-cache
         id: gradle-cache
         with:
+          matrix: ${{ toJSON(matrix) }}
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
