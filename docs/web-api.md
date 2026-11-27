@@ -1639,8 +1639,8 @@ compilation or behavioral fidelity.
 
 The other states are `not-verified`, `running`, `failed` (with `failureCode`), `missing`,
 `too-large` and `stale`. `stale` means a different archive file now replaces a verified one; its
-`previousVerifiedSha256` is reported, and the label is never transferred. The old digest-bound link
-then refuses the new bytes with `409 ARCHIVE_CHANGED`. If only the revision metadata changes while the archive bytes stay the same, the state returns to `not-verified` until the archive is checked again.
+`previousVerifiedSha256` is reported, and the label is never transferred. Using the old digest-bound download link returns
+`409 ARTIFACT_CHANGED` and withholds the replacement bytes. If only the revision metadata changes while the archive bytes stay the same, the state returns to `not-verified` until the archive is checked again.
 
 `POST R/revisions/V/archive-verifications` takes `{"archiveSha256": "<displayed digest>"}` under the
 JSON mutation boundary (session, Origin, `X-CSRF-Token`) with a 16–128 character `Idempotency-Key`.
