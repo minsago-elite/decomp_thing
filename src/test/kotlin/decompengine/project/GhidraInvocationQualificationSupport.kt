@@ -218,7 +218,10 @@ internal object InvocationQualification {
         private val input: String, val runId: String, private val followupSink: (JsonObject) -> Unit = {},
         private val sink: (JsonObject) -> Unit) {
         init { requireProof(runId.matches(Regex("run-[A-Za-z0-9-]{1,80}"))) }
-        private val seen = linkedSetOf<Identity>()
+        // Each admitted identity retains only its latest completed live command sample.
+        private data class LiveSample(val poll: Long, val workerTokens: Int, val inputMatch: Boolean)
+        private val seen = linkedMapOf<Identity, LiveSample?>()
+        private var prior: LiveSample? = null
         private val matches = linkedSetOf<Identity>()
         private val unresolved = linkedSetOf<Identity>()
         val fault = AtomicReference<ObserverFault?>()
@@ -255,7 +258,7 @@ internal object InvocationQualification {
             }
         }
         private fun reset(child: Long?) {
-            pid = child; before = null; after = null; liveBefore = null; liveAfter = null
+            pid = child; prior = null; before = null; after = null; liveBefore = null; liveAfter = null
             acquired = false; byteCount = null; nonempty = null; finalNul = null; utf8 = null
             argumentCount = null; workerTokens = null; inputMatch = null; unboundSighting = child != null
         }
@@ -283,6 +286,15 @@ internal object InvocationQualification {
                 put("aliveAfter", liveAfter?.let(::JsonPrimitive) ?: JsonNull)
                 put("followupStat", "not_attempted"); put("followupState", JsonNull)
                 put("followupIdentitySame", JsonNull); put("followupLive", "not_attempted"); put("followupAlive", JsonNull)
+                put("priorLiveSample", when {
+                    before == null -> "unknown"
+                    prior == null -> "never_seen"
+                    else -> "observed"
+                })
+                put("priorLivePoll", prior?.poll?.let(::JsonPrimitive) ?: JsonNull)
+                put("priorCmdlineAcquired", prior?.let { JsonPrimitive(true) } ?: JsonNull)
+                put("priorWorkerTokenCount", prior?.workerTokens?.let(::JsonPrimitive) ?: JsonNull)
+                put("priorInputMatch", prior?.inputMatch?.let(::JsonPrimitive) ?: JsonNull)
                 put("cmdlineAcquired", acquired); put("byteCount", byteCount?.let(::JsonPrimitive) ?: JsonNull)
                 put("nonempty", nonempty?.let(::JsonPrimitive) ?: JsonNull)
                 put("finalNul", finalNul?.let(::JsonPrimitive) ?: JsonNull)
@@ -329,15 +341,16 @@ internal object InvocationQualification {
                 reset(child)
                 before = step(SampleOperation.STAT_BEFORE) { procStat(child, source.stat(child)) }
                 val first = before!!
+                prior = seen[first.identity]
                 step(SampleOperation.INVENTORY, SampleOutcome.OVERFLOW) {
-                    if (first.identity !in seen) { requireProof(seen.size < CHILD_LIMIT); seen += first.identity }
+                    if (first.identity !in seen) { requireProof(seen.size < CHILD_LIMIT); seen[first.identity] = null }
                     unresolved += first.identity; unboundSighting = false
                 }
                 step(SampleOperation.COHERENCE, SampleOutcome.INVALIDATED) { requireProof(first.ppid == parentPid) }
                 first
             }
             candidates.forEach { first ->
-                reset(first.identity.pid); before = first; unboundSighting = false
+                reset(first.identity.pid); before = first; prior = seen[first.identity]; unboundSighting = false
                 val child = first.identity.pid
                 liveBefore = step(SampleOperation.LIVE_BEFORE) { source.alive(child) }
                 coherent(first, first, liveBefore!!)
@@ -357,7 +370,8 @@ internal object InvocationQualification {
                 liveAfter = step(SampleOperation.LIVE_AFTER_COMMAND) { source.alive(child) }
                 coherent(first, after!!, liveAfter!!)
                 val indexes = command.indices.filter { command[it] == workerClass }
-                workerTokens = indexes.size; inputMatch = input in command
+                val hasInput = input in command
+                workerTokens = indexes.size; inputMatch = hasInput
                 if (indexes.isNotEmpty() && inputMatch == true) {
                     step(SampleOperation.SELECT, SampleOutcome.PREDICATE) { requireProof(indexes.size == 1) }
                     step(SampleOperation.INVENTORY, SampleOutcome.AMBIGUOUS) {
@@ -395,6 +409,7 @@ internal object InvocationQualification {
                         coherent(first, after!!, liveAfter!!)
                     }
                 }
+                seen[first.identity] = LiveSample(poll, indexes.size, hasInput)
                 // A non-worker vector cannot prove that this identity never execs a worker.
             }
         }

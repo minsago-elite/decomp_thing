@@ -72,6 +72,48 @@ class GhidraInvocationQualificationControlsTest {
         // A child entirely between enumeration samples cannot be attested by this source.
     }
 
+    @Test fun `terminal refusal retains only the latest earlier live command facts for the exact identity`() {
+        for (scenario in listOf("first", "nonmatching", "matching", "reused", "unreadable")) {
+            val source = ScriptProc()
+            val records = mutableListOf<JsonObject>()
+            val sample = sampler(source, records)
+            if (scenario != "first") {
+                sample.poll()
+                if (scenario == "nonmatching") {
+                    source.command = "CANARY\u0000INPUT\u0000".toByteArray()
+                    sample.poll()
+                }
+                source.childrenValue = emptyList()
+                sample.poll()
+                source.childrenValue = listOf(101)
+            }
+            source.statValue = { pid, _ ->
+                if (scenario == "unreadable") throw java.io.IOException("CANARY")
+                ScriptProc.statBytes(pid, start = if (scenario == "reused") 8 else 7, state = "Z")
+            }
+            val reads = source.calls.count { it == "cmdline" }
+            val original = assertFails { sample.poll() }
+            assertSame(original, assertFails { sample.poll() })
+            assertEquals(reads, source.calls.count { it == "cmdline" })
+            val record = Json.parseToJsonElement(records.single().toString()).jsonObject
+            val known = scenario == "nonmatching" || scenario == "matching"
+            assertEquals(JsonPrimitive(when {
+                known -> "observed"
+                scenario == "unreadable" -> "unknown"
+                else -> "never_seen"
+            }), record["priorLiveSample"])
+            assertEquals(if (known) JsonPrimitive(if (scenario == "matching") 1 else 2) else JsonNull, record["priorLivePoll"])
+            assertEquals(if (known) JsonPrimitive(true) else JsonNull, record["priorCmdlineAcquired"])
+            assertEquals(if (known) JsonPrimitive(if (scenario == "matching") 1 else 0) else JsonNull, record["priorWorkerTokenCount"])
+            assertEquals(if (known) JsonPrimitive(true) else JsonNull, record["priorInputMatch"])
+            assertEquals(JsonPrimitive(false), record["cmdlineAcquired"])
+            assertEquals(JsonNull, record["workerTokenCount"])
+            assertEquals(JsonPrimitive(if (scenario == "unreadable") "stat_before" else "coherence"), record["operation"])
+            assertFalse("CANARY" in record.toString())
+            assertTrue(record.toString().toByteArray().size + 1 <= q.FAILURE_RECORD_LIMIT)
+        }
+    }
+
     @Test fun `sampler framing facts preserve unknown false bounds and original error`() {
         data class Frame(val bytes: ByteArray, val stage: String, val nonempty: Boolean, val nul: Boolean?, val utf8: Boolean?, val count: Int?)
         val frames = listOf(
