@@ -128,6 +128,21 @@ test('does not publish when non-diagnostic evidence cannot fit the byte bound', 
   }
 });
 
+test('keeps small diagnostic fields when a large error competes with near-limit evidence', () => {
+  const report = {
+    status: 'failed', evidence: 'x'.repeat(523_000), error: 'é'.repeat(300_000),
+    applicationError: 'a', browserError: 'b', viteError: 'v', workCleanupError: 'w', cleanupErrors: ['c', 'd', 'e'],
+  };
+  const bounded = boundReport(report);
+  assert.ok(Buffer.byteLength(JSON.stringify(bounded), 'utf8') <= MAX_REPORT_BYTES);
+  assert.deepEqual({ applicationError: bounded.applicationError, browserError: bounded.browserError,
+    viteError: bounded.viteError, workCleanupError: bounded.workCleanupError, cleanupErrors: bounded.cleanupErrors },
+  { applicationError: 'a', browserError: 'b', viteError: 'v', workCleanupError: 'w', cleanupErrors: ['c', 'd', 'e'] });
+  assert.ok(bounded.error.includes('é'));
+  assert.ok(bounded.diagnosticTruncation.error.omittedBytes > 0);
+  assert.deepEqual(Object.keys(bounded.diagnosticTruncation), ['error']);
+});
+
 test('publishes a scrubbed, byte-bounded failure with large UTF-8 diagnostics and intact verdicts', async () => {
   const token = 'secret-access-token-123';
   const bootstrap = '#bootstrap=bootSecret_123';

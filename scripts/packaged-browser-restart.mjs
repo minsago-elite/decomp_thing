@@ -78,51 +78,115 @@ export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
     .sort((left, right) => right[1] - left[1]).slice(0, 5);
   if (boundedBytes > maxBytes) {
     const diagnostics = [];
+    const addDiagnostic = (name, value, set) => {
+      if (typeof value !== 'string' || !value) return;
+      const serializedBytes = Buffer.byteLength(JSON.stringify(value), 'utf8') - 2;
+      // Short diagnostics are more useful intact; the excerpt metadata itself would cost more.
+      if (serializedBytes <= 4096) return;
+      const byteOffsets = [0];
+      const codeUnitOffsets = [0];
+      let codeUnits = 0;
+      let codePoints = 0;
+      let originalBytes = 0;
+      for (const character of value) {
+        const point = character.codePointAt(0);
+        const bytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+        codeUnits += character.length;
+        originalBytes += bytes;
+        codePoints++;
+        if (codePoints % 256 === 0) {
+          byteOffsets.push(originalBytes);
+          codeUnitOffsets.push(codeUnits);
+        }
+      }
+      if (byteOffsets.at(-1) !== originalBytes) {
+        byteOffsets.push(originalBytes);
+        codeUnitOffsets.push(codeUnits);
+      }
+      diagnostics.push({ name, value, set, byteOffsets, codeUnitOffsets, originalBytes,
+        serializedBytes, sha256: createHash('sha256').update(value, 'utf8').digest('hex') });
+    };
     for (const name of ['error', 'applicationError', 'browserError', 'viteError', 'workCleanupError']) {
-      if (typeof bounded[name] === 'string' && bounded[name].length) diagnostics.push({ name, value: bounded[name] });
+      addDiagnostic(name, bounded[name], value => { bounded[name] = value; });
     }
     if (Array.isArray(bounded.cleanupErrors)) bounded.cleanupErrors.forEach((value, index) => {
-      if (typeof value === 'string' && value.length) diagnostics.push({ name: `cleanupErrors[${index}]`, value });
+      addDiagnostic(`cleanupErrors[${index}]`, value, next => { bounded.cleanupErrors[index] = next; });
     });
     if (diagnostics.length) {
-      const buildCandidate = fraction => {
-        const candidate = structuredClone(bounded);
-        const truncation = {};
-        for (const { name, value } of diagnostics) {
-          const characters = Array.from(value);
-          const keep = Math.floor(characters.length * fraction);
-          if (keep >= characters.length) continue;
-          const prefixCount = Math.ceil(keep / 2);
-          const suffixCount = keep - prefixCount;
-          const prefix = characters.slice(0, prefixCount).join('');
-          const suffix = suffixCount ? characters.slice(-suffixCount).join('') : '';
-          const originalBytes = Buffer.byteLength(value, 'utf8');
-          const retainedBytes = Buffer.byteLength(prefix + suffix, 'utf8');
-          const sha256 = createHash('sha256').update(value, 'utf8').digest('hex');
-          const marker = `\n...[diagnostic excerpt; omitted ${originalBytes - retainedBytes} of ${originalBytes} UTF-8 bytes; sha256=${sha256}]...\n`;
-          const excerpt = `${prefix}${marker}${suffix}`;
-          if (name.startsWith('cleanupErrors[')) candidate.cleanupErrors[Number(name.match(/\[(\d+)\]/)[1])] = excerpt;
-          else candidate[name] = excerpt;
-          truncation[name] = { originalBytes, retainedBytes, omittedBytes: originalBytes - retainedBytes, sha256 };
-        }
-        candidate.diagnosticTruncation = truncation;
-        return candidate;
+      const excerpt = (diagnostic, budget) => {
+        const { value, byteOffsets, codeUnitOffsets, originalBytes, sha256 } = diagnostic;
+        const checkpointBefore = target => {
+          let low = 0;
+          let high = byteOffsets.length;
+          while (low < high) {
+            const middle = (low + high) >>> 1;
+            if (byteOffsets[middle] <= target) low = middle + 1;
+            else high = middle;
+          }
+          return Math.max(0, low - 1);
+        };
+        const advance = (unitOffset, byteOffset, target, before) => {
+          let units = unitOffset;
+          let bytes = byteOffset;
+          while (units < value.length) {
+            const point = value.codePointAt(units);
+            const pointBytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+            if (before ? bytes + pointBytes > target : bytes >= target) break;
+            units += point > 0xffff ? 2 : 1;
+            bytes += pointBytes;
+          }
+          return { units, bytes };
+        };
+        const leftTarget = Math.floor(budget / 2);
+        const leftCheckpoint = checkpointBefore(leftTarget);
+        const left = advance(codeUnitOffsets[leftCheckpoint], byteOffsets[leftCheckpoint], leftTarget, true);
+        const remaining = Math.max(0, budget - left.bytes);
+        const rightTarget = originalBytes - remaining;
+        const rightCheckpoint = checkpointBefore(rightTarget);
+        const right = advance(codeUnitOffsets[rightCheckpoint], byteOffsets[rightCheckpoint], rightTarget, false);
+        const suffixStart = Math.max(left.units, right.units);
+        const prefix = value.slice(0, left.units);
+        const suffix = value.slice(suffixStart);
+        const retained = prefix + suffix;
+        const retainedBytes = Buffer.byteLength(retained, 'utf8');
+        const marker = `\n...[diagnostic excerpt; omitted ${originalBytes - retainedBytes} of ${originalBytes} UTF-8 bytes; sha256=${sha256}]...\n`;
+        return { text: prefix + marker + suffix,
+          metadata: { originalBytes, retainedBytes, omittedBytes: originalBytes - retainedBytes, sha256 } };
       };
-      let low = 0;
-      let high = 1;
-      let best = buildCandidate(0);
-      if (Buffer.byteLength(JSON.stringify(best), 'utf8') <= maxBytes) {
-        for (let iteration = 0; iteration < 48; iteration++) {
-          const middle = (low + high) / 2;
-          const candidate = buildCandidate(middle);
-          if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= maxBytes) {
-            best = candidate;
-            low = middle;
-          } else high = middle;
+      const truncation = {};
+      let diagnosticBytes = 0;
+      for (const diagnostic of diagnostics) {
+        const zero = excerpt(diagnostic, 0);
+        diagnostic.set(zero.text);
+        truncation[diagnostic.name] = zero.metadata;
+        diagnosticBytes += diagnostic.serializedBytes;
+      }
+      bounded.diagnosticTruncation = truncation;
+      const zeroBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
+      if (zeroBytes <= maxBytes) {
+        const available = maxBytes - zeroBytes;
+        const setBudgets = factor => {
+          for (const diagnostic of diagnostics) {
+            const budget = Math.floor(available * 0.8 * diagnostic.serializedBytes / diagnosticBytes * factor);
+            const result = excerpt(diagnostic, budget);
+            diagnostic.set(result.text);
+            truncation[diagnostic.name] = result.metadata;
+          }
+        };
+        setBudgets(1);
+        let currentBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
+        for (let attempt = 0; currentBytes > maxBytes && attempt < 8; attempt++) {
+          const used = currentBytes - zeroBytes;
+          const room = maxBytes - zeroBytes;
+          setBudgets(used > 0 ? Math.max(0, Math.min(0.8, (room / used) * 0.8)) : 0);
+          currentBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
         }
-        const bestBytes = Buffer.byteLength(JSON.stringify(best), 'utf8');
-        assert.ok(bestBytes <= maxBytes, `Report exceeds its byte bound after diagnostic compaction (${bestBytes}/${maxBytes} bytes)`);
-        return best;
+        if (currentBytes > maxBytes) {
+          setBudgets(0);
+          currentBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
+        }
+        assert.ok(currentBytes <= maxBytes, `Report exceeds its byte bound after diagnostic compaction (${currentBytes}/${maxBytes} bytes)`);
+        return bounded;
       }
     }
   }
