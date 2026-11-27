@@ -230,6 +230,7 @@ def prepared_fixture(repo, run, record, output_fault=None):
     stage = put("oracle/gcc/kotlin-boot-runtime/llm_bin_patch.jar", original.read_bytes())
     installed = run / "root-build/install/llm_bin_patch/lib/llm_bin_patch.jar"
     installed.write_bytes(original.read_bytes())
+    put("oracle/gcc/kotlin-boot-runtime/dependency.jar", (installed.parent / "dependency.jar").read_bytes())
     mapping_roots = {"stageKotlinBootRuntime": str(stage.parent)}
     for task, name in prep.REFERENCES.items():
         source = put("generated/" + name, (installed.parent / name).read_bytes())
@@ -335,6 +336,8 @@ def fixture(base):
     install_lib.mkdir(parents=True)
     installed_app = install_lib / "llm_bin_patch.jar"
     installed_app.write_bytes(b"fixture installed app jar")
+    dependency = install_lib / "dependency.jar"
+    dependency.write_bytes(b"inert classpath dependency")
     sources = {}
     for name in sorted({*verifier.OWNED, *driver.prepared.BUILD_CONTROLS, "src/main/c/fixture.c", driver.prepared.ACP_SOURCE, driver.prepared.ACP_PUBLICATION, "src/main/c/decomp_analysis_io_helper.c", "src/main/c/decomp_llvm_behavior_helper.c", "frontend/fixture.ts", "contracts/web/v1/contract.schema.json", "oracle/kotlin-schema-inventory-v1.json", "oracle/review.schema.json", "oracle/llvm/22.1.6/native-runtime-measurement-v2.Dockerfile"}):
         path = repo / name
@@ -359,7 +362,7 @@ def fixture(base):
         root.mkdir(parents=True)
         old_digest = hashlib.sha256(f"app-{generation}-{index}".encode()).hexdigest()
         ready = {"descriptorDigest": old_digest, "mainOrigin": str(installed_app),
-                 "mainLoader": "jdk.internal.loader.ClassLoaders$AppClassLoader@1", "classpath": str(installed_app),
+                 "mainLoader": "jdk.internal.loader.ClassLoaders$AppClassLoader@1", "classpath": os.pathsep.join(map(str, (dependency, installed_app))),
                  "archiveMarker": generation, "modelAbsentBeforeReady": "true", "resourceOpenedBeforeReady": "true",
                  "authority": authority, "releaseTimeoutSeconds": "1500"}
         loaded = {**ready, "lateResourceMarker": generation, "schemaVersion": "4", "inputSha256": "a" * 64,
@@ -380,6 +383,7 @@ def fixture(base):
 
     probe_rows = [probe(0, "A"), probe(1, "A"), probe(2, "A"), probe(3, "B"),
                   probe(4, "B"), probe(5, "A"), probe(6, "A", "gcc"), probe(7, "A", "llvm")]
+    probe_rows[1].update(readyAtUnixNs=300, releasedAtUnixNs=395)
     probe_rows[2]["loaded"]["installedPathDigestAfterRelease"] = "b" * 64
     probe_rows[3]["ready"]["descriptorDigest"] = "b" * 64
     probe_rows[3]["loaded"]["descriptorDigest"] = "b" * 64
@@ -425,13 +429,24 @@ def fixture(base):
                          "install-A-4.log", "install-B-5.log", "install-B-6.log", "install-A-7.log",
                          "install-A-8.log", "gcc-held-install.log", "install-A-10.log", "llvm-held-install.log",
                          "distribution-contracts.log"][index]
-        log.write_text("atomic-probe injected before first rename\ncompleted renames=0\n" if index == 3 else "BUILD SUCCESSFUL\n")
+        if index == 3:
+            log.write_text(f"> Task :installDist FAILED\nExecution failed for task ':installDist'.\n"
+                           f"> installDist atomic publication failed during rename {installed_app}; "
+                           "completed renames=0, prunes=0, rename attempts=0, prune attempts=0; "
+                           "protected targets unchanged (unprotected Sync files may have changed)\n")
+        else:
+            log.write_text("BUILD SUCCESSFUL\n")
         status = "failed" if index == 3 else "passed"
         events = run_dir / f"command-{index:02d}-events.json"
         task = {"path": ":atomicInstallProbeAgentJar" if index == 0 else ":installDist", "enabled": True,
                 "executed": True, "skipped": False, "noSource": False, "upToDate": False, "failure": index == 3,
                 "atUnixNs": index * 100 + 80}
-        write_json(events, {"commandId": index, "runRoot": str(run_dir), "tasks": [task], "events": []})
+        receipt = {"commandId": index, "runRoot": str(run_dir), "tasks": [task], "events": []}
+        if index == 3:
+            receipt.update(actionsStarted=True, actionsStartedAtUnixNs=310, publisherCompleted=False,
+                           events=[{"phase": "staged", "path": str(installed_app), "atUnixNs": 340},
+                                   {"phase": "before-rename", "path": str(installed_app), "atUnixNs": 375}])
+        write_json(events, receipt)
         commands.append({"args": command_args, "phase": PHASES[index], "status": status,
                          "commandId": index, "init": str(init), "initSha256": sha(init),
                          "initConfig": json.loads(init.with_suffix(".json").read_text()),
@@ -506,6 +521,77 @@ class QualificationVerifierControls(unittest.TestCase):
             repo, _ = fixture(pathlib.Path(temp))
             result = verifier.select_and_verify(repo, "0123456789abcdef")
             self.assertEqual("passed", result["status"])
+
+    def test_failed_update_evidence(self):
+        with tempfile.TemporaryDirectory(dir=CONTROL_TMP) as temp:
+            repo, run = fixture(pathlib.Path(temp))
+            record = json.loads((run / "qualification.json").read_bytes())
+            command = record["commands"][3]
+            path = pathlib.Path(command["taskReceipt"])
+            log = pathlib.Path(command["log"])
+            receipt = json.loads(path.read_bytes())
+            wrapper = log.read_text()
+            target = record["probes"][1]["ready"]["mainOrigin"]
+            other = str(pathlib.Path(target).with_name("dependency.jar"))
+            rename = receipt["events"][-1]
+            task = receipt["tasks"][-1]
+            for name, fields in (
+                ("no actions", {"actionsStarted": False}),
+                ("publisher completed", {"publisherCompleted": True}),
+                ("missing completion state", {}),
+                ("no task", {"tasks": []}),
+                ("different failed task", {"tasks": [{**task, "path": ":jar"}]}),
+                ("duplicate task", {"tasks": [task, task]}),
+                ("skipped", {"tasks": [{**task, "skipped": True}]}),
+                ("completion timestamp", {"publisherCompletedAtUnixNs": 377}),
+                ("unexecuted", {"tasks": [{**task, "executed": False}]}),
+                ("task succeeded", {"tasks": [{**task, "failure": False}]}),
+                ("no rename", {"events": []}),
+                ("other target", {"events": [{**rename, "path": other}]}),
+                ("duplicate rename", {"events": [rename, rename]}),
+                ("later event", {"events": [rename, {**rename, "phase": "published"}]}),
+                ("out of order", {"events": [{**rename, "atUnixNs": 390}]}),
+            ):
+                with self.subTest(name=name):
+                    changed = {**receipt, **fields}
+                    if name == "missing completion state":
+                        del changed["publisherCompleted"]
+                    write_json(path, changed)
+                    command["taskReceiptSha256"] = sha(path)
+                    with self.assertRaises(verifier.QualificationError):
+                        verifier.validate_commands(record, run, repo)
+            write_json(path, receipt)
+            command["taskReceiptSha256"] = sha(path)
+            for old, new in ((target, other), ("rename attempts=0", "rename attempts=1"),
+                             ("prune attempts=0", "prune attempts=1"), ("renames=0", "renames=1"),
+                             ("prunes=0", "prunes=1"), ("rename attempts=0, ", "")):
+                with self.subTest(old=old):
+                    log.write_text(wrapper.replace(old, new))
+                    command["logSha256"] = sha(log)
+                    with self.assertRaises(verifier.QualificationError):
+                        verifier.validate_commands(record, run, repo)
+            log.write_text(wrapper + wrapper.replace("rename attempts=0", "rename attempts=1"))
+            command["logSha256"] = sha(log)
+            with self.assertRaises(verifier.QualificationError):
+                verifier.validate_commands(record, run, repo)
+            # Even agreement between the receipt and log cannot identify the live JAR.
+            write_json(path, {**receipt, "events": [{**rename, "path": other}]})
+            command["taskReceiptSha256"] = sha(path)
+            log.write_text(wrapper.replace(target, other))
+            command["logSha256"] = sha(log)
+            with self.assertRaises(verifier.QualificationError):
+                verifier.validate_commands(record, run, repo)
+
+            # A different classpath member is still not the prepared application.
+            probe = record["probes"][1]
+            probe["ready"]["mainOrigin"] = other
+            probe["loaded"].update(mainOrigin=other, modelOrigin=other, transformOrigin=other)
+            record["failedBeforeRename"] = probe["loaded"]
+            write_json(pathlib.Path(probe["root"]) / "READY", probe["ready"])
+            write_json(pathlib.Path(probe["root"]) / "READY.loaded", probe["loaded"])
+            write_json(run / "qualification.json", record)
+            with self.assertRaisesRegex(verifier.QualificationError, "prepared application JAR"):
+                verifier.select_and_verify(repo, "0123456789abcdef")
 
     def test_retained_child_helper_relation_beyond_resealed_membership(self):
         spec = importlib.util.spec_from_file_location('child_artifact_controls', ROOT / 'scripts/atomic_install_artifacts.py')
