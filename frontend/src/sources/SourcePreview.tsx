@@ -14,7 +14,7 @@ import type { HighlightResult } from './highlightOperation';
 import { sourceHighlightRuntime } from './highlightRuntime';
 import { browserCapabilities } from '../shared/browserCapabilities';
 
-import { holdFocusThroughTransition } from '../shared/departingFocus';
+import { sameTabNavigationLink } from '../shared/departingFocus';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
@@ -96,11 +96,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
         {view.rows.map((row, index) => <div class="source-row" key={`${row.offset}/${index}`}>
           {row.line === null ? <span class="source-position"><code>{row.offset}</code></span>
             : <a class="source-position" href={sourcePositionPath(basePath, selected, { offset: row.offset, line: row.line }, snapshotPin)}
-              onClick={event => {
-                if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-                holdFocusThroughTransition(event.currentTarget);
-                moveFocus.current = true;
-              }}
+              onClick={event => { if (sameTabNavigationLink(event)) moveFocus.current = true; }}
               aria-label={textMessage(copy.lineLink, { line: row.line, offset: row.offset })}>{row.line}{row.continued && <span> {copy.continued}</span>}</a>}
           <pre dir="ltr">{highlighted?.mode === 'formatted'
             ? highlighted.rows[index]!.map((token, tokenIndex) => <span key={tokenIndex} class={`source-token source-token-${token.kind}`}>{token.text}</span>)

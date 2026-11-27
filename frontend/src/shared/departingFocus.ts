@@ -6,6 +6,14 @@ import type { RefObject } from 'preact';
 // keep it as the departing control; the claim lapses before any later user action can be mistaken for it.
 let transitionHolder: Element | null = null;
 
+/** The internal link whose ordinary activation will navigate this tab. */
+export function sameTabNavigationLink(event: MouseEvent): HTMLAnchorElement | null {
+  if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return null;
+  const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null;
+  if (!link || link.origin !== window.location.origin || link.hasAttribute('download') || (link.target && link.target !== '_self')) return null;
+  return link;
+}
+
 /** Keeps `control` as the departing control while its own operation's synchronous view transition replaces it. */
 export function holdFocusThroughTransition(control: Element | null) {
   if (!(control instanceof Element)) return;

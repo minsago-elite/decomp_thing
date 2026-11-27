@@ -24,7 +24,7 @@ import { onLibraryChange } from '../jobs/libraryChannel';
 import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
 import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
-import { focusSurvivingNotice, holdFocusThroughTransition, useDepartingFocus } from '../shared/departingFocus';
+import { focusSurvivingNotice, holdFocusThroughTransition, sameTabNavigationLink, useDepartingFocus } from '../shared/departingFocus';
 
 /** Reports a confirmed tombstone from one of this view's own reads to the route (#512); other failures stay in place. */
 type OnDeleted = (failure: unknown) => void;
@@ -292,7 +292,11 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
     setGone(current => current?.entry === historyEntry && current.generation === generation
       ? current : { entry: historyEntry, generation, message });
   };
-  return <section class="source-navigation" aria-labelledby="source-title" ref={routeRoot}>
+  return <section class="source-navigation" aria-labelledby="source-title" ref={routeRoot} onClick={event => {
+    // A source link can disappear as soon as its destination starts reading.
+    const link = sameTabNavigationLink(event);
+    if (link === document.activeElement) holdFocusThroughTransition(link);
+  }}>
     {title}
     {valid ? <>
       <p><a href={runPath(basePath, jobId, runId)}>{copy.returnAttempt}</a></p>

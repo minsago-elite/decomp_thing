@@ -460,3 +460,30 @@ it.each(['continue', 'restart', 'line'] as const)('recovers focus after deletion
     expect(reads(kind)).toBe(2);
   } finally { auth.dispose(); }
 });
+
+it.each(['notice', 'move', 'blur'] as const)('respects the reader’s focus when widening a deleted search (%s)', async choice => {
+  chromeRemovalBlur();
+  const directoryId = `dir_1_1_${'d'.repeat(64)}`;
+  const scoped = fixture<SourceSearch>('source-search-complete');
+  scoped.query.directoryId = directoryId;
+  const held = heldRead();
+  transport.get.mockResolvedValueOnce({ data: scoped }).mockReturnValueOnce(held.promise);
+  const auth = await mount(`${searchUrl}&directory=${directoryId}`);
+  try {
+    await screen.findByRole('list', { name: sourceCopy.searchResults });
+    const widen = screen.getByRole('link', { name: sourceCopy.searchAll });
+    widen.focus();
+    fireEvent.click(widen);
+    await waitFor(() => expect(reads('sourceSearch')).toBe(2));
+    expect(new URLSearchParams(location.search).has('directory')).toBe(false);
+    expect(widen.isConnected).toBe(false);
+    const signOut = screen.getByRole('button', { name: 'Sign out' });
+    if (choice !== 'notice') signOut.focus();
+    if (choice === 'blur') signOut.blur();
+    await act(async () => { held.reject(gone()); await Promise.resolve(); });
+    const notice = await waitFor(expectGone);
+    if (choice === 'notice') expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+    else expect(document.activeElement).toBe(choice === 'blur' ? document.body : signOut);
+    expect(reads('sourceSearch')).toBe(2);
+  } finally { auth.dispose(); }
+});
