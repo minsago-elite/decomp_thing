@@ -343,7 +343,8 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
       chartName: document.getElementById(chart?.getAttribute('aria-labelledby') ?? '')?.textContent.trim() ?? null,
       descriptionNames: describedBy,
       descriptionsResolve: describedBy.length === accessibleIds.length && accessibleIds.every(id => describedBy.includes(id) && document.getElementById(id)?.textContent.trim()),
-      bindingText: binding?.innerText ?? '',
+      binding: Object.fromEntries([...(binding?.querySelectorAll('dt') ?? [])].map(term =>
+        [term.textContent.trim(), term.nextElementSibling?.textContent.trim()])),
       tableCaption: table?.querySelector('caption')?.innerText.trim() ?? null,
       rows,
       text: section?.innerText ?? '',
@@ -351,8 +352,13 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   })()`);
   assert.equal(chartEvidence.chartName, 'Observed output signature counts');
   assert.equal(chartEvidence.descriptionsResolve, true);
-  assert.ok(chartEvidence.bindingText.includes(fixture.jobId) && chartEvidence.bindingText.includes('run_fixture_3')
-    && chartEvidence.bindingText.includes('revision_fixture_3'));
+  const reportDigest = createHash('sha256').update(fixture.exploration).digest('hex').slice(0, 32);
+  assert.deepEqual(chartEvidence.binding, {
+    'Report identity': `exploration_${reportDigest}`,
+    'Report job': fixture.jobId,
+    'Report attempt': 'run_fixture_3',
+    'Recorded report revision': 'Not recorded',
+  });
   assert.equal(chartEvidence.tableCaption, 'Output signature counts reported by the producer');
   assert.deepEqual(chartEvidence.rows, [
     ['Expanded distinct exit/output signatures', '1', 'The producer’s expanded observation sample'],
