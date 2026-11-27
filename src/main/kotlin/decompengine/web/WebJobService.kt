@@ -287,6 +287,7 @@ class WebJobService(
         require(workers in 1..2 && queueCapacity in 1..32) { "invalid workflow worker or queue bound" }
         workers + queueCapacity
     }
+    private val recoveryInspections = java.util.concurrent.Semaphore(maximumInFlight)
     private val ownedExecutor = if (executor == null) {
         require(workers in 1..2 && queueCapacity in 1..32)
         ThreadPoolExecutor(workers, workers, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(queueCapacity), { task ->
@@ -1304,8 +1305,7 @@ class WebJobService(
     }
 
     /** Read-only eligibility for one attempt. It reserves nothing; every command re-checks under the same lock. */
-    @Synchronized
-    internal fun attemptControls(jobId: String, runId: String): WebAttemptControls {
+    internal fun attemptControls(jobId: String, runId: String): WebAttemptControls = withRecoveryInspection { observed ->
         val attempt = getAttempt(jobId, runId)
         val view = inspectStoredJob(checkNotNull(attempts), jobId) as? WorkflowJobInspection.Available
             ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
@@ -1319,12 +1319,13 @@ class WebJobService(
             else -> null
         }
         fun recovery(mode: WorkflowRecoveryMode): RecoveryDecision = blocked?.let { RecoveryDecision.Refused(it) }
-            ?: recoveryDecision(jobId, view, attempt, mode)
+            ?: recoveryDecision(jobId, view, attempt, mode, observed)
         val retry = recovery(WorkflowRecoveryMode.RETRY)
         val resume = recovery(WorkflowRecoveryMode.RESUME)
-        return WebAttemptControls(attempt, cancel, (retry as? RecoveryDecision.Refused)?.code,
+        if (resume is PendingInspection) return@withRecoveryInspection resume
+        RecoveryStep.Done(WebAttemptControls(attempt, cancel, (retry as? RecoveryDecision.Refused)?.code,
             (resume as? RecoveryDecision.Refused)?.code, (resume as? RecoveryDecision.Admissible)?.recovery?.restores,
-            view.snapshot.attempts.lastOrNull { it.previousRunId == runId }?.runId)
+            view.snapshot.attempts.lastOrNull { it.previousRunId == runId }?.runId))
     }
 
     private sealed interface RecoveryDecision {
@@ -1333,13 +1334,48 @@ class WebJobService(
         data class Refused(val code: String) : RecoveryDecision
     }
 
+    private sealed interface RecoveryStep<out T> {
+        data class Done<T>(val value: T) : RecoveryStep<T>
+    }
+
+    private data class PendingInspection(
+        val owner: WorkflowAttemptStore, val jobVersion: String, val registration: Registration,
+        val policy: DurableWebWorkflowCheckpointPolicy, val request: DurableWebWorkflowCheckpointRequest,
+    ) : RecoveryDecision, RecoveryStep<Nothing>
+
+    private data class ObservedInspection(val pending: PendingInspection, val checkpoint: DurableWebWorkflowCheckpoint?,
+        val refused: String? = null)
+
+    /** Both passes run the same locked decision. Replay, version, ownership and capacity are checked again after I/O. */
+    private fun <T> withRecoveryInspection(operation: (ObservedInspection?) -> RecoveryStep<T>): T {
+        val pending = when (val first = synchronized(this) { operation(null) }) {
+            is RecoveryStep.Done -> return first.value
+            is PendingInspection -> first
+        }
+        val observed = if (!recoveryInspections.tryAcquire()) ObservedInspection(pending, null, "CAPACITY_UNAVAILABLE")
+        else try {
+            ObservedInspection(pending, pending.policy.inspect(pending.request))
+        } catch (failure: InterruptedException) {
+            Thread.currentThread().interrupt()
+            ObservedInspection(pending, null, "CHECKPOINT_UNVERIFIED")
+        } catch (_: Exception) {
+            ObservedInspection(pending, null, "CHECKPOINT_UNVERIFIED")
+        } finally {
+            recoveryInspections.release()
+        }
+        return when (val second = synchronized(this) { operation(observed) }) {
+            is RecoveryStep.Done -> second.value
+            is PendingInspection -> error("recovery inspection must finish after revalidation")
+        }
+    }
+
     /**
      * Shared by the eligibility read and the command. Durable reasons precede transient capacity, so a
      * refusal names the most specific cause. Resume requires the registered trusted checkpoint policy and
      * the exact recorded harness identity; it never infers continuation from a fresh session or caller input.
      */
     private fun recoveryDecision(jobId: String, view: WorkflowJobInspection.Available, predecessor: WorkflowAttempt,
-        mode: WorkflowRecoveryMode): RecoveryDecision {
+        mode: WorkflowRecoveryMode, observed: ObservedInspection?): RecoveryDecision {
         val snapshot = view.snapshot
         fun refuse(code: String) = RecoveryDecision.Refused(code)
         if (closed || stopping) return refuse("SERVICE_STOPPED")
@@ -1374,8 +1410,11 @@ class WebJobService(
             val policy = registration.adapter.checkpoints ?: return refuse("RESUME_UNSUPPORTED")
             if (predecessor.harnessCapabilityId != registration.harnessCapabilityId) return refuse("HARNESS_CHANGED")
             val directory = try { store.runReportsDirectory(jobId, predecessor.runId) } catch (_: Exception) { return refuse("CHECKPOINT_MISSING") }
-            val checkpoint = try { policy.inspect(DurableWebWorkflowCheckpointRequest(store.get(jobId), predecessor, directory)) }
-                catch (_: Exception) { return refuse("CHECKPOINT_UNVERIFIED") }
+            val pending = PendingInspection(checkNotNull(attempts), snapshot.version, registration, policy,
+                DurableWebWorkflowCheckpointRequest(store.get(jobId), predecessor, directory))
+            if (observed == null) return pending
+            if (observed.pending != pending) return refuse("CHECKPOINT_UNVERIFIED")
+            val checkpoint = observed.checkpoint ?: return refuse(observed.refused ?: "CHECKPOINT_UNVERIFIED")
             when (checkpoint) {
                 is DurableWebWorkflowCheckpoint.Refused -> return refuse(checkpoint.reason.code)
                 is DurableWebWorkflowCheckpoint.Verified -> RecoveryDecision.Admissible(registration,
@@ -1393,10 +1432,9 @@ class WebJobService(
      * capacity check and is read-only. A new command binds the predecessor's exact version and recorded input;
      * retry always publishes a new linked attempt, and resume records the verified checkpoint it continues.
      */
-    @Synchronized
     internal fun requestDurableRecovery(jobId: String, runId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
         expectedInputRevisionId: String?, requestKey: String,
-        prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED): DurableWebWorkflowStartResult {
+        prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED): DurableWebWorkflowStartResult = withRecoveryInspection { observed ->
         requireInitializedRead()
         requirePublicationAvailable()
         val id = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
@@ -1410,7 +1448,7 @@ class WebJobService(
         catch (failure: WorkflowStoreException) {
             throw WebJobServiceException(failure.code, "The recorded recovery is unavailable. Refresh its state before retrying.", failure)
         }
-        if (replay != null) return DurableWebWorkflowStartResult(replay.attempt, replayed = true)
+        if (replay != null) return@withRecoveryInspection RecoveryStep.Done(DurableWebWorkflowStartResult(replay.attempt, replayed = true))
         if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
             ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
@@ -1420,7 +1458,8 @@ class WebJobService(
         if (predecessor.inputRevisionId != expectedInputRevisionId) {
             throw WebJobServiceException("INPUT_REVISION_CONFLICT", "The attempt's recorded input differs from the expected input revision.")
         }
-        val decision = when (val selected = recoveryDecision(jobId, view, predecessor, mode)) {
+        val decision = when (val selected = recoveryDecision(jobId, view, predecessor, mode, observed)) {
+            is PendingInspection -> return@withRecoveryInspection selected
             is RecoveryDecision.Refused -> throw WebJobServiceException(selected.code, "This attempt cannot be recovered in the requested mode.")
             is RecoveryDecision.Admissible -> selected
         }
@@ -1436,9 +1475,9 @@ class WebJobService(
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedRunVersion)
         }
-        if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
-        return dispatchAdmitted(DurableTask(job, admitted.attempt, decision.registration.adapter,
-            decision.inputSourceTree, predecessor))
+        if (admitted.replayed) return@withRecoveryInspection RecoveryStep.Done(DurableWebWorkflowStartResult(admitted.attempt, replayed = true))
+        RecoveryStep.Done(dispatchAdmitted(DurableTask(job, admitted.attempt, decision.registration.adapter,
+            decision.inputSourceTree, predecessor)))
     }
 
     /** Shared by starts and recovery commands: a declared prerequisite must hold in the supplied snapshot. */
