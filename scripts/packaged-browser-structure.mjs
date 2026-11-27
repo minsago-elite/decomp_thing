@@ -1835,7 +1835,12 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   await ready(tab, `[...document.querySelectorAll('table caption')].some(caption => caption.textContent === 'Measures') && document.body.innerText.includes('Showing 1–50 of ${fixture.modules} modules.')`, 'recorded scorecard');
   const scorecardMs = performance.now() - started;
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Not measured: the score is uncalibrated, so no probability is recorded')`));
-  assert.ok(await evaluate(tab, `[...document.querySelectorAll('tr')].some(row => row.textContent.startsWith('Structural recovery score (heuristic)Measured'))`),
+  const projectScoreCells = await evaluate(tab, `(() => {
+    const table = [...document.querySelectorAll('table')].find(item => item.caption?.textContent === 'Measures');
+    const row = [...(table?.tBodies[0]?.rows ?? [])].find(item => item.cells[0]?.textContent === 'Structural recovery score (heuristic)');
+    return row ? [...row.cells].map(cell => cell.textContent) : [];
+  })()`);
+  assert.deepEqual(projectScoreCells.slice(1, 6), ['Ratio', 'Measured', '0.9668', '96789.4 of 100110', '0.9668'],
     'The seeded project score must reproduce from its recorded labels');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('The module sums plus excluded entities, less shared memberships, equal the project numerator and denominator.')`));
   assert.ok(await evaluate(tab, `document.querySelector('svg[role="img"][aria-label^="Bar chart"]') !== null`));

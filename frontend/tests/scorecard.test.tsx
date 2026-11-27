@@ -1010,6 +1010,14 @@ it.each<[string, (data: ScorecardComparison) => void]>([
     metric.delta = { ...metric.delta, value: '0.2500', numerator: '1.0' };
   }],
   ['names another current model record', data => { data.current.model.sizeBytes = '1'; }],
+  ['claims a matching interpretation that differs from the displayed scorecard', data => {
+    const check = data.compatibility.checks.find(item => item.id === 'score-interpretation')!;
+    check.current = check.baseline = 'structural-recovery/v2/uncalibrated';
+  }],
+  ['claims a matching formula that differs from the displayed scorecard', data => {
+    const check = data.compatibility.checks.find(item => item.id === 'score-formula')!;
+    check.current = check.baseline = 'other-formula';
+  }],
   ['names another current plan digest', data => { data.current.plan.sha256 = 'f'.repeat(64); }],
   ['names another current manifest', data => { data.current.manifestSha256 = 'f'.repeat(64); }],
   ['states another current reconciliation', data => { data.current.reconciliation!.reconciles = false; }],
@@ -1114,7 +1122,7 @@ it.each<[string, string, (data: ScorecardComparison, path: string) => void]>([
   serveDecoded(change);
   const outcome = await comparisonOutcome(`?baselineRunId=run_1&baselineRevisionId=revision_1${cursor}`);
   expect(outcome).toEqual({ refused: true, shown: false, modules: false });
-  // Refresh returns to the current first page, which recovers the rows.
+  // Opening the first-page URL again loads its rows.
   if (cursor) {
     cleanup();
     serveDecoded(() => undefined);
@@ -1122,7 +1130,7 @@ it.each<[string, string, (data: ScorecardComparison, path: string) => void]>([
   }
 });
 
-it('admits the final comparison page at the requested offset and the empty first page of an empty total', async () => {
+it('admits the final comparison page at the requested offset', async () => {
   const sample = comparison.modules.items[0]!;
   serveDecoded(data => {
     data.modules.total = 51;
@@ -1130,7 +1138,13 @@ it('admits the final comparison page at the requested offset and the empty first
   });
   expect(await comparisonOutcome(`?baselineRunId=run_1&baselineRevisionId=revision_1&compareCursor=${cursorAt(card.structureVersion, 50)}`))
     .toEqual({ refused: false, shown: true, modules: true });
-  expect(screen.queryByText(/51–51 of 51|51-51 of 51/)).toBeDefined();
+  expect(screen.getByText('Showing 51–51 of 51 modules in either plan.')).toBeTruthy();
+});
+
+it('admits an empty first page when both plans have zero modules', async () => {
+  serveDecoded(data => { data.modules.items = []; data.modules.total = 0; }, card, []);
+  expect(await comparisonOutcome()).toEqual({ refused: false, shown: true, modules: false });
+  expect(screen.queryByText(/modules in either plan/)).toBeNull();
 });
 
 it.each<[string, (value: StructureScorecard) => void]>([

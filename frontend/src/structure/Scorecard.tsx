@@ -146,6 +146,10 @@ function describesScorecard(comparison: ScorecardComparison, scorecard: Structur
     || !same(current.plan, scorecard.plan) || !same(current.confidence, scorecard.confidence)) return false;
   if (card === null) return current.scope === null && comparison.metrics.length === 0;
   if (!same(current.scope, card.scope) || !same(current.reconciliation, card.reconciliation)) return false;
+  const { kind, schemaVersion, calibrationStatus } = card.interpretation;
+  const checks = comparison.compatibility.checks;
+  if (checks.find(check => check.id === 'score-interpretation')?.current !== `${kind}/v${schemaVersion}/${calibrationStatus}`
+    || checks.find(check => check.id === 'score-formula')?.current !== card.formula.id) return false;
   // The producer pairs every current measure unless a side is unavailable, and then pairs none.
   if (comparison.compatibility.state === 'unavailable') { if (comparison.metrics.length !== 0) return false; }
   else if (comparison.metrics.length !== card.metrics.length || !comparison.metrics.every((metric, position) => {
@@ -218,8 +222,7 @@ function Comparison({ selected, basePath, query, scorecard, focus, onRoute }: {
   // Keep that exact submitted identity until an equivalent candidate arrives; never substitute a newer result.
   const unlistedBaseline = query.baseline && !candidates.some(run => run.runId === query.baseline!.runId
     && run.resultRevisionId === query.baseline!.revisionId) ? query.baseline : null;
-  // The reply is checked against the scorecard displayed with it, so a sort, page or Refresh of that scorecard
-  // rechecks the same reply without reading it again.
+  // This admission check uses the comparison and scorecard returned by their respective reads.
   const reply = read.state === 'ready' ? read.value : null;
   const contradicts = reply !== null && !describesScorecard(reply, scorecard);
   const data = contradicts ? null : reply;
