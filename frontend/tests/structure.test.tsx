@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, RevisionFile } from '../src/api/generated';
@@ -71,6 +71,29 @@ it('keeps inventory filters, sorting and cursors in the URL and reads one bounde
     fireEvent.click(screen.getByRole('button', { name: copy.first }));
     await waitFor(() => expect(location.search).toBe('?sort=name&search=help&evidence=unresolved'));
     await screen.findByText('Showing 1–3 of 5 matching functions (5 recorded).');
+  } finally { auth.dispose(); }
+});
+
+it.each(['wait', 'move'] as const)('respects the reader’s choice to %s during a function filter read', async choice => {
+  const auth = await session();
+  let finish!: (value: { data: FunctionInventory }) => void;
+  const pending = new Promise<{ data: FunctionInventory }>(resolve => { finish = resolve; });
+  transport.get.mockResolvedValueOnce({ data: inventory }).mockReturnValueOnce(pending);
+  history.replaceState(null, '', `${revision}/functions`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const field = await screen.findByRole('searchbox');
+    field.focus();
+    fireEvent.input(field, { target: { value: 'main' } });
+    fireEvent.submit(field.closest('form')!);
+    await screen.findByText(copy.loading);
+    const modules = screen.getByRole('link', { name: copy.browseModules });
+    if (choice === 'move') modules.focus();
+    await act(async () => { finish({ data: inventory }); await pending; });
+    const results = await screen.findByRole('heading', { name: copy.results });
+    // The results handoff runs in a Preact after-paint effect.
+    await new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+    await waitFor(() => expect(document.activeElement).toBe(choice === 'move' ? modules : results));
   } finally { auth.dispose(); }
 });
 

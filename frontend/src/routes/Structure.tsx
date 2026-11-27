@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
 import { useLocation } from 'preact-iso/router';
 import { structureCopy as copy } from '../copy/structure';
 import { ApiClientError } from '../api/errors';
+import { useHeadingHandoff } from '../shared/useHeadingHandoff';
 import { message } from '../shared/messages';
 import type { EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, StructureEntity, StructureReference,
   StructureReferences, StructureText, StructureUnrecordedEntity } from '../api/generated';
@@ -144,12 +145,12 @@ function Functions({ selected, basePath, search }: { selected: SourceSelection; 
   const query = functionLocation(search);
   const [draft, setDraft] = useState<FunctionQuery>(() => withField(query, 'cursor', ''));
   const results = useRef<HTMLHeadingElement>(null);
-  const moveFocus = useRef(false);
+  const moveFocus = useHeadingHandoff(results, false);
   const key = [selected.jobId, selected.runId, selected.revisionId, search].join('/');
   const [read, refresh] = useStructureRead<FunctionInventory>(key, async signal =>
     bindStructure((await client.get('functionInventory', functionReadRoute(selected, query), { signal })).data, selected));
   useEffect(() => { setDraft(withField(query, 'cursor', '')); }, [search]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (read.state !== 'loading' && moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
   }, [read]);
   const data = read.state === 'ready' ? read.value : null;

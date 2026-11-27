@@ -5,6 +5,7 @@ import { ApiClientError } from '../api/errors';
 import { apiPath, sourceDirectoryPath, sourceFilePath } from '../app/paths';
 import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 import { sourceCopy as copy } from '../copy/sources';
+import { useHeadingHandoff } from '../shared/useHeadingHandoff';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { formatExactBytes } from '../jobs/metadataFormat';
@@ -43,29 +44,6 @@ function ComparisonRefresh({ readKey, loading, heading, onRefresh }: {
       // Refreshing a continuation routes synchronously to its unpinned first page.
       request.url = window.location.href;
     }}>{copy.diffRefresh}</button>;
-}
-
-/**
- * A pending heading handoff after an entry or a chosen page. The reader's own focus choice while the read is
- * outstanding (moving to another control, or blurring one that stays on the page) withdraws the handoff;
- * a control removed by the transition does not.
- */
-function useHeadingHandoff(heading: { current: HTMLHeadingElement | null }, initial: boolean) {
-  const armed = useRef(initial);
-  useEffect(() => {
-    const moved = (event: FocusEvent) => { if (armed.current && event.target !== heading.current) armed.current = false; };
-    const left = (event: FocusEvent) => {
-      const target = event.target;
-      if (!armed.current || event.relatedTarget !== null || !(target instanceof Node)) return;
-      queueMicrotask(() => {
-        if (target.isConnected && (document.activeElement === null || document.activeElement === document.body)) armed.current = false;
-      });
-    };
-    document.addEventListener('focusin', moved, true);
-    document.addEventListener('focusout', left, true);
-    return () => { document.removeEventListener('focusin', moved, true); document.removeEventListener('focusout', left, true); };
-  }, [heading]);
-  return armed;
 }
 
 function Revisions({ selected, base, data }: { selected: SourceSelection; base: SourceDiffBase; data: Identity | null }) {

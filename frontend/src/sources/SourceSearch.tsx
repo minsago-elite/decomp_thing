@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import type { SourceSearch as SourceSearchPage } from '../api/generated';
 import { ApiClientError } from '../api/errors';
 import { sourceDirectoryPath } from '../app/paths';
 import type { SourceSelection } from '../app/paths';
 import { sourceCopy as copy } from '../copy/sources';
+import { useHeadingHandoff } from '../shared/useHeadingHandoff';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
@@ -21,6 +22,7 @@ function SearchStatus({ data, continued }: { data: SourceSearchPage; continued: 
   const complete = data.status === 'complete';
   const unread = data.coverageGaps.unsearchableText + data.coverageGaps.unavailableFiles;
   const searched = data.scope.searchableFiles - unread;
+  const remaining = data.progress.remainingFiles;
   const reason = data.stopReason ? copy.searchStopped[data.stopReason] : '';
   return <div class={`source-search-status ${complete && missing === 0 ? 'source-search-status-complete' : 'source-search-status-incomplete'}`}
     role="status" data-search-state={complete ? (data.items.length ? 'complete' : continued ? 'no-further-matches' : 'no-matches') : (data.items.length ? 'partial' : 'partial-empty')}>
@@ -28,18 +30,18 @@ function SearchStatus({ data, continued }: { data: SourceSearchPage; continued: 
       ? <p><strong>{data.scope.searchableFiles === 0 ? copy.searchNothingSearchable
         : data.items.length ? message(copy.searchCompleteMatches, { count: data.items.length })
           : continued ? copy.searchNoFurtherMatches
-          : unread ? message(copy.searchNoMatchesSearched, { count: searched })
+          : unread ? message(searched === 1 ? copy.searchNoMatchesSearchedOne : copy.searchNoMatchesSearched, { count: searched })
             : message(copy.searchNoMatches, { count: data.scope.searchableFiles })}</strong> {data.scope.searchableFiles > 0 && (unread
-          ? message(copy.searchCompleteUnread, { count: unread, total: data.scope.searchableFiles })
+          ? message(data.scope.searchableFiles === 1 ? copy.searchOnlyFileUnread : copy.searchCompleteUnread, { count: unread, total: data.scope.searchableFiles })
           : message(copy.searchComplete, { count: data.scope.searchableFiles }))}</p>
-      : <p><strong>{data.items.length
-        ? message(copy.searchIncomplete, { reason, count: data.progress.remainingFiles })
-        : message(continued ? copy.searchIncompleteNoFurther : copy.searchIncompleteEmpty, { reason, count: data.progress.remainingFiles })}</strong></p>}
+      : <p><strong>{message(data.items.length ? copy.searchIncomplete : continued ? copy.searchIncompleteNoFurther : copy.searchIncompleteEmpty,
+        { reason })} {message(remaining === 1 ? copy.searchRemainingOne : copy.searchRemaining, { count: remaining })}</strong></p>}
     {missing > 0 && <>
-      <p><strong>{message(copy.searchSkipped, { count: missing })}</strong></p>
+      <p><strong>{message(missing === 1 ? copy.searchSkippedOne : copy.searchSkipped, { count: missing })}</strong></p>
       <ul>{skipped.map(entry => <li key={entry.reason}>{message(copy.searchSkippedReasons[entry.reason], { count: entry.count })}</li>)}</ul>
     </>}
-    <p>{message(copy.searchProgress, { files: data.progress.scannedFiles, bytes: data.progress.scannedBytes })}</p>
+    <p>{message(copy.searchProgress, { files: message(data.progress.scannedFiles === 1 ? copy.searchFileRead : copy.searchFilesRead, { count: data.progress.scannedFiles }),
+      bytes: message(data.progress.scannedBytes === '1' ? copy.searchByteRead : copy.searchBytesRead, { count: data.progress.scannedBytes }) })}</p>
   </div>;
 }
 
@@ -48,7 +50,7 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
-  const moveFocus = useRef(false);
+  const moveFocus = useHeadingHandoff(heading, false);
   let selection: ReturnType<typeof sourceSearchSelection> | null;
   try { selection = sourceSearchSelection(search); } catch { selection = null; }
   const request = selection?.request ?? null;
@@ -81,7 +83,7 @@ export function SourceSearch({ selected, basePath, search }: { selected: SourceS
   }, [client, key]);
   const current = request && !tooLong ? currentSourceRead(read, key) : null;
   const data = current?.state === 'ready' ? current.value : null;
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (current && current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
   }, [current?.state, key]);
 
