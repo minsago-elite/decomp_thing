@@ -233,6 +233,15 @@ internal class AcpCapturedRepairFilesystem(
                         "captured repair may only replace an existing source file")
                 }
                 val encoded = encodeCapturedUtf8(content, limits.maximumWriteBytes)
+                if (!request.accessPolicy.allowsMutation(
+                        policyPath,
+                        AgentOperation.WRITE_FILE,
+                        encoded.size.toLong(),
+                        validUtf8 = true,
+                    )) {
+                    rejectCaptured(AcpFilesystemAuditReason.POLICY_DENIED,
+                        "filesystem write is outside the workflow mutation authority")
+                }
                 try {
                     // BoundedRepairOutput checks every dynamic repair quota before retaining bytes.
                     output.replace(policyPath.relativePath, encoded)

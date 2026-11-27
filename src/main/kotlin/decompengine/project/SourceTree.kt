@@ -142,10 +142,10 @@ class BoundedLlmModuleReconstructor(
 
     override fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity(contextBudget(profile))
 
-    // v4 binds dependency-minimal inline context and removes readable workspace context.
+    // v5 additionally binds the declared-role mutation authority into the execution receipt.
     private fun cacheIdentity(contextCharacters: Int): String =
         "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
-            "factory-${harnessProvenanceSha256 ?: "unbound"}:v4"
+            "factory-${harnessProvenanceSha256 ?: "unbound"}:v5"
 
     private fun contextBudget(profile: ReconstructionProfile): Int =
         minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
@@ -246,6 +246,18 @@ class BoundedLlmModuleReconstructor(
                         targetPath,
                         targetOperations,
                     )),
+                    mutationAuthority = DeclaredRoleMutationPolicy.forDeclaredPaths(
+                        profile = request.profile,
+                        rootId = root.id,
+                        ownerId = "module-reconstruction:${request.profile.id}:${request.module.id}",
+                        operationsByPath = mapOf(target to targetOperations),
+                        requiredOwnershipRoles = setOf(
+                            ProjectFileRole.MODULE_IMPLEMENTATION,
+                            ProjectFileRole.ENTRYPOINT_IMPLEMENTATION,
+                        ),
+                        maximumBytes = request.profile.budgets.archiveMaximumFileBytes,
+                        policyId = "declared-role-reconstruction-v1",
+                    ),
                 ),
                 sessionContinuation = sessionContinuation(request),
             )
