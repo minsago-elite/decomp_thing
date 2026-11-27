@@ -4,7 +4,7 @@ import { promises as ownerFs } from 'node:fs';
 import { dirname as ownerDirname, join as ownerJoin, relative as ownerRelative, isAbsolute as ownerIsAbsolute } from 'node:path';
 import vm from 'node:vm';
 import { allocateSourceTreeBrowserTemp, requireSourceTreeBrowserTemp, removeSourceTreeBrowserTemp, SOURCE_TREE_BROWSER_TEMP_OWNER } from './packaged-browser-temp-owner.mjs';
-import { qualifySourceTreeColdPage, maximumFirstSearchPageMs, nearestRankPercentile, sourceSearchResponsePause, sourceSearchCancellation, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
+import { submitSourceSearch, qualifySourceTreeColdPage, maximumFirstSearchPageMs, nearestRankPercentile, sourceSearchResponsePause, sourceSearchCancellation, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
 
 const searchUrl = 'http://127.0.0.1:4567/nested/api/v1/jobs/job/runs/run/revisions/revision/source-search?q=Inert&limit=50';
 const searchUrlKey = new URL(searchUrl).pathname + new URL(searchUrl).search;
@@ -12,6 +12,35 @@ const searchPause = { requestId: 'fetch-1', networkId: 'network-1', responseStat
   request: { url: searchUrl, method: 'GET' }, responseHeaders: [{ name: 'Content-Length', value: '998' }] };
 const abortedSearch = { requestId: 'network-1', route: 'search', method: 'GET', urlKey: searchUrlKey,
   status: null, responseBytes: null, endedAt: 5, failure: 'net::ERR_ABORTED' };
+
+test('cancellation submits the new search after the form renders its input state', async () => {
+  const submitted = [];
+  const button = {};
+  function render(text) {
+    // SourceSearch.submit closes over this render's text. Submitting the same
+    // query refreshes it, so a stale click still starts a real search.
+    button.click = () => submitted.push(text);
+  }
+  render('NEVER_PRESENT_1056');
+  const input = {
+    value: 'NEVER_PRESENT_1056',
+    dispatchEvent(event) {
+      assert.equal(event.type, 'input');
+      const text = this.value;
+      queueMicrotask(() => render(text));
+    },
+  };
+  const elements = new Map([
+    ['input[name="q"]', input],
+    ['form[role="search"] button[type="submit"]', button],
+  ]);
+  const evaluate = (_target, expression) => vm.runInNewContext(expression, {
+    document: { querySelector: selector => elements.get(selector) },
+    Event, requestAnimationFrame: callback => setImmediate(callback),
+  });
+  await submitSourceSearch(null, evaluate, 'Inert');
+  assert.deepEqual(submitted, ['Inert']);
+});
 
 test('cancelled navigation only qualifies the exact dispatched successful bounded Fetch response', () => {
   const pause = sourceSearchResponsePause(searchPause, searchUrl);

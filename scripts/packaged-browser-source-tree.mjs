@@ -465,10 +465,14 @@ export async function qualifySourceTreeColdPage({ fixture, target, cdp, evaluate
   };
 }
 
-async function collectSearchPage({ target, cdp, evaluate, ready, requests, query, label }) {
-  const started = performance.now();
+export async function submitSourceSearch(target, evaluate, query) {
   await evaluate(target, `new Promise(resolve => { const input = document.querySelector('input[name="q"]'); input.value = ${JSON.stringify(query)}; input.dispatchEvent(new Event('input', { bubbles: true })); requestAnimationFrame(() => requestAnimationFrame(resolve)); })`);
   await evaluate(target, `document.querySelector('form[role="search"] button[type="submit"]').click()`);
+}
+
+async function collectSearchPage({ target, cdp, evaluate, ready, requests, query, label }) {
+  const started = performance.now();
+  await submitSourceSearch(target, evaluate, query);
   await ready(target, `new URLSearchParams(location.search).get('q') === ${JSON.stringify(query)} && document.querySelector('.source-search-status') !== null`, label);
   const durationMs = Math.round((performance.now() - started) * 100) / 100;
   const result = await evaluate(target, `(() => { const status = document.querySelector('.source-search-status'); const items = [...document.querySelectorAll('.source-search-results li')]; const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === 'Continue search'); return { state: status?.dataset.searchState ?? null, text: status?.innerText ?? '', items: items.length, names: items.map(item => item.querySelector('a')?.textContent.trim() ?? ''), firstHref: items[0]?.querySelector('a')?.getAttribute('href') ?? null, canContinue: !!button && !button.disabled, pageText: document.querySelector('nav[aria-label="Search results"]')?.innerText ?? '' }; })()`);
@@ -690,7 +694,8 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
     await cdp.call('Page.navigate', { url: `${sourceBase}/source-search` }, target.sessionId);
     await ready(target, `location.pathname === ${JSON.stringify(new URL(`${sourceBase}/source-search`).pathname)} && document.querySelector('form[role="search"] input[name="q"]') !== null`, 'return to fresh source search form');
 
-    const missing = await collectSearchPage({ target, cdp, evaluate, ready, requests, query: 'NEVER_PRESENT_1056', label: 'missing-term bounded search' });
+    const missingQuery = 'NEVER_PRESENT_1056';
+    const missing = await collectSearchPage({ target, cdp, evaluate, ready, requests, query: missingQuery, label: 'missing-term bounded search' });
     const missingFirstPageMs = missing.durationMs;
     await captureRenderedEofEvidence({ target, evaluate, requests });
     assert.ok(missing.state === 'no-matches' || (missing.state === 'partial-empty' && missing.text.toLowerCase().includes('time limit')),
@@ -705,17 +710,29 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
     // Navigate through the application's own router; the unmounted search view must
     // abort its outstanding response read without rendering stale results.
     const cancelledSearchUrl = `${browserOrigin}/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/source-search?q=Inert&limit=50`;
-    let pausedRequest;
+    const previousSearch = new URL(cancelledSearchUrl);
+    previousSearch.searchParams.set('q', missingQuery);
+    const expected = new URL(cancelledSearchUrl);
+    const requestStart = requests.length;
+    let previousResponsePaused = false;
+    let otherResponsePaused = false;
     let resolvePaused;
     const paused = new Promise(resolve => { resolvePaused = resolve; });
     cdp.on('Fetch.requestPaused', event => {
-      if (event.request.url !== cancelledSearchUrl) return;
-      pausedRequest = event;
-      resolvePaused(event);
+      if (event.request.url === cancelledSearchUrl) resolvePaused(event);
+      else if (event.request.url === previousSearch.href) previousResponsePaused = true;
+      else otherResponsePaused = true;
     }, target.sessionId);
     await cdp.call('Fetch.enable', { patterns: [{ urlPattern: '*source-search*', requestStage: 'Response' }] }, target.sessionId);
-    await evaluate(target, `(() => { const input = document.querySelector('input[name="q"]'); input.value = 'Inert'; input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('form[role="search"] button[type="submit"]').click(); })()`);
-    await Promise.race([paused, new Promise((_, reject) => setTimeout(() => reject(new Error('Source-search request did not reach the cancellation gate')), 10_000))]);
+    await submitSourceSearch(target, evaluate, 'Inert');
+    let timer;
+    const pausedRequest = await Promise.race([paused, new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const expectedGetObserved = requests.slice(requestStart).some(entry => entry.route === 'search'
+          && entry.method === 'GET' && entry.urlKey === expected.pathname + expected.search);
+        reject(new Error(`Source-search request did not reach the cancellation gate (expectedGetObserved=${expectedGetObserved}, previousResponsePaused=${previousResponsePaused}, otherResponsePaused=${otherResponsePaused})`));
+      }, 10_000);
+    })]).finally(() => clearTimeout(timer));
     const pausedResponse = sourceSearchResponsePause(pausedRequest, cancelledSearchUrl);
     assert.equal(await evaluate(target, `(() => { const link = document.querySelector('.app-nav a[href="/nested/runtime"]'); if (!link) return false; link.click(); return true; })()`), true,
       'The Runtime route must be reachable through the application navigation');
