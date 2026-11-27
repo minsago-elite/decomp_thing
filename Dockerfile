@@ -12,6 +12,7 @@ RUN timeout --signal=KILL 10m sh -ec ' \
         build-essential \
         ca-certificates \
         clang \
+        llvm \
         curl \
         ninja-build \
         python3 \

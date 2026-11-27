@@ -11,6 +11,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  c-vulnerability-repairs:
+    name: Ten C vulnerability reference repairs
+    uses: ./.github/workflows/c-vul-qualification.yml
+    permissions:
+      contents: read
+
   frontend:
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
@@ -379,6 +385,8 @@ jobs:
             bubblewrap \
             binutils \
             build-essential \
+            clang \
+            llvm \
             dbus-user-session \
             e2fsprogs \
             bzip2 \
