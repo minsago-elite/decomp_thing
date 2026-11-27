@@ -30,50 +30,78 @@ function failureMessage(failure: unknown) {
 /**
  * The latest attempt is current work; the accepted revision is the job's published reconstruction.
  * They are shown side by side so newer progress or reports never stand in for accepted evidence.
+ *
+ * `observed` numbers each job observation the parent applies, in order. A version can recur (a label set and then
+ * reverted restores it), so the number, not the version, says whether an answer or an in-flight read is still current.
  */
-export function AcceptedWork({ job, basePath, readJob }: { job: Job; basePath: string; readJob?: (signal: AbortSignal) => Promise<Job | null> }) {
+export function AcceptedWork({ job, observed = 0, basePath, readJob }: {
+  job: Job; observed?: number; basePath: string; readJob?: (signal: AbortSignal) => Promise<Job | null>;
+}) {
   const { client } = usePrivateTransport(basePath);
   const { jobId, acceptedRevisionId, latestRunId, version } = job;
   // The server versions a never-organized job by its exact attempt-history snapshot; a label or archive masks it.
   const organized = (job.label ?? null) !== null || job.archived === true;
   // Each settled lookup names the observation it answers; a superseded one never renders as actionable.
   const key = `${jobId}\n${acceptedRevisionId ?? ''}\n${latestRunId ?? ''}\n${version}`;
-  const [settled, setSettled] = useState<{ key: string; lookup: Lookup }>({ key, lookup: acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' } });
-  const lookup: Lookup = settled.key === key ? settled.lookup : acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' };
+  /**
+   * `observed` is the observation the shown state was started for. `retrying` marks the wait for a Retry job read,
+   * which no history read answers yet.
+   */
+  type Settled = { key: string; observed: number; lookup: Lookup; retrying?: true };
+  const [settled, setSettled] = useState<Settled>({ key, observed, lookup: acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' } });
+  // An unbound or failed state of an earlier observation is about to be read again, so it is no longer actionable.
+  const answers = settled.key === key && (settled.observed >= observed || (settled.lookup.status !== 'unbound' && settled.lookup.status !== 'failed'));
+  const lookup: Lookup = answers ? settled.lookup : acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' };
   const currentKey = useRef(key);
   currentKey.current = key;
-  const setLookup = (next: Lookup) => {
-    if (currentKey.current === key) setSettled({ key, lookup: next });
+  const currentObserved = useRef(observed);
+  currentObserved.current = observed;
+  const setOwnLookup = (next: Lookup, startedFor: number, retrying?: true) => {
+    if (currentKey.current === key) setSettled({ key, observed: startedFor, lookup: next, ...(retrying ? { retrying } : {}) });
   };
   const [retry, setRetry] = useState(0);
+  /**
+   * The operation that owns the shown state: every history lookup and every Retry takes a new number when it starts,
+   * so an earlier Retry that settles late, even for a version that has recurred, never changes what a later one shows.
+   */
+  const owner = useRef(0);
   // A Retry job read outlives an observation change so the parent can still order it; only unmount cancels it.
   const refreshing = useRef<AbortController | null>(null);
   useEffect(() => () => { refreshing.current?.abort(); }, []);
   /**
-   * Retry from an unbound history first reads the job once, then makes one history lookup for the observation it
-   * returns: a changed job is handed up and its new version starts that lookup; an unchanged one retries in place.
-   * A failed read settles as a failure, with no history read, and the next Retry repeats this job read. The parent
-   * orders the read against every other job read, so a later observation always wins.
+   * Retry from an unbound history reads the job once. Its outcome is an observation like any other the parent applies
+   * (the parent orders it against every other job read, so a later observation always wins), and that observation
+   * gets one history lookup by the rule below, whether or not its version changed. A failed read settles as a
+   * failure, with no history read, and the next Retry repeats this job read, unless a lookup started meanwhile.
    */
   const retryUnbound = () => {
     if (readJob === undefined) { setRetry(value => value + 1); return; }
     refreshing.current?.abort();
     const controller = new AbortController();
     refreshing.current = controller;
-    setLookup({ status: 'loading' });
+    const operation = ++owner.current;
+    setOwnLookup({ status: 'loading' }, observed, true);
     void readJob(controller.signal).then(current => {
-      if (controller.signal.aborted) return;
       if (current === null) throw new ApiClientError('invalid_response');
-      // A changed observation re-keys this lookup through the parent; an unchanged one retries in place.
-      if (current.version === version && currentKey.current === key) setRetry(value => value + 1);
     }).catch((failure: unknown) => {
-      if (controller.signal.aborted) return;
-      setLookup({ status: 'failed', message: failureMessage(failure), recovery: true });
+      if (controller.signal.aborted || owner.current !== operation) return;
+      setOwnLookup({ status: 'failed', message: failureMessage(failure), recovery: true }, observed);
     });
   };
+  /**
+   * A found or not-found answer is bound to its version's history, so it also answers any later observation of that
+   * version and is not read again. An unbound or failed state binds nothing, so a later observation, even of the same
+   * version, gets one history lookup of its own: when it is applied, or once a lookup already reading settles.
+   */
+  useEffect(() => {
+    if (settled.key !== key || settled.observed >= observed) return;
+    const status = settled.lookup.status;
+    if (status === 'unbound' || status === 'failed' || settled.retrying) setRetry(value => value + 1);
+  }, [settled, key, observed]);
   // Set only when the person activated Retry, so focus follows their action and never jumps on refresh.
   const focusIntent = useRef<'none' | 'requested' | 'reading'>('none');
   const outcome = useRef<HTMLParagraphElement | null>(null);
+  const region = useRef<HTMLElement | null>(null);
   const retryButton = useRef<HTMLButtonElement | null>(null);
   // The control inside this section that last held focus, cleared once focus leaves for somewhere else.
   const focused = useRef<HTMLElement | null>(null);
@@ -90,7 +118,12 @@ export function AcceptedWork({ job, basePath, readJob }: { job: Job; basePath: s
   useEffect(() => {
     if (focusIntent.current === 'none') return;
     if (lookup.status === 'loading') {
-      if (focusIntent.current === 'requested') { outcome.current?.focus(); focusIntent.current = 'reading'; }
+      if (focusIntent.current !== 'requested') return;
+      // Focus already placed outside the section, before this first move ran, keeps its place.
+      const active = document.activeElement;
+      if (active !== null && active !== document.body && !region.current?.contains(active)) { focusIntent.current = 'none'; return; }
+      outcome.current?.focus();
+      focusIntent.current = 'reading';
       return;
     }
     // The failure that Retry was activated from is not the retried read's outcome.
@@ -100,8 +133,11 @@ export function AcceptedWork({ job, basePath, readJob }: { job: Job; basePath: s
     const active = document.activeElement;
     if (active !== null && active !== document.body) return;
     (lookup.status === 'failed' || lookup.status === 'unbound' ? retryButton.current : outcome.current)?.focus();
-  }, [settled, key]);
+  }, [settled, key, observed]);
   useEffect(() => {
+    owner.current += 1;
+    const startedFor = currentObserved.current;
+    const setLookup = (next: Lookup) => setOwnLookup(next, startedFor);
     if (acceptedRevisionId === null) { setLookup({ status: 'none' }); return; }
     const controller = new AbortController();
     setLookup({ status: 'loading' });
@@ -157,11 +193,16 @@ export function AcceptedWork({ job, basePath, readJob }: { job: Job; basePath: s
     });
     return () => { controller.abort(); };
   }, [client, jobId, acceptedRevisionId, latestRunId, version, organized, retry]);
-  return <section aria-labelledby="accepted-work-title"
+  return <section aria-labelledby="accepted-work-title" ref={region}
     onFocusIn={event => { focused.current = event.target instanceof HTMLElement ? event.target : null; }}
     onFocusOut={event => {
       const target = event.target;
-      if (event.relatedTarget instanceof Node) { focused.current = null; return; }
+      if (event.relatedTarget instanceof Node) {
+        focused.current = null;
+        // Moving focus out of the section withdraws a pending Retry's focus, even if that control later drops it.
+        if (!event.currentTarget.contains(event.relatedTarget)) focusIntent.current = 'none';
+        return;
+      }
       // Focus dropped to nothing: a person who blurred a still-present control has moved on; a removal has not.
       queueMicrotask(() => { if (target instanceof HTMLElement && target.isConnected && focused.current === target) focused.current = null; });
     }}>

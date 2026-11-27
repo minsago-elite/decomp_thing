@@ -24,9 +24,10 @@ import { panelBoundaryCopy } from '../copy/shell';
 function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
-  const [stored, setStored] = useState<{ binding: typeof binding; data: Received<JobData> | null; error: string; loading: boolean }>(
-    { binding, data: null, error: '', loading: true });
-  const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  // `observed` is the issue number of the applied observation, so a recurring version still reads as a new one.
+  const [stored, setStored] = useState<{ binding: typeof binding; data: Received<JobData> | null; observed: number; error: string; loading: boolean }>(
+    { binding, data: null, observed: 0, error: '', loading: true });
+  const { data: observation, observed, error, loading } = stored.binding === binding ? stored : { data: null, observed: 0, error: '', loading: true };
   const job = observation?.value;
   const [refresh, setRefresh] = useState(0);
   /**
@@ -39,7 +40,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
   const apply = (ticket: number, next: JobData) => {
     order.current.applied = ticket;
     order.current.current = next;
-    setStored({ binding, data: receive(next), error: '', loading: false });
+    setStored({ binding, data: receive(next), observed: ticket, error: '', loading: false });
   };
   /**
    * An ordered read for accepted-work Retry and the post-save organization reread, numbered when issued. It resolves
@@ -66,9 +67,9 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
     const controller = new AbortController();
-    setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
+    setStored(previous => ({ ...previous, binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
     if (!/^[0-9a-f]{32}$/.test(jobId)) {
-      setStored({ binding, data: null, error: copy.thisJobIdentityIsInvalid, loading: false }); return;
+      setStored(previous => ({ ...previous, binding, data: null, error: copy.thisJobIdentityIsInvalid, loading: false })); return;
     }
     const ticket = issue();
     void client.get('job', `/jobs/${jobId}`, { signal: controller.signal }).then(response => {
@@ -77,14 +78,14 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
           setStored(previous => ({ ...previous, loading: false })); return;
         }
         if (response.data.jobId !== jobId) {
-          setStored({ binding, data: null, error: copy.theServerReturnedADifferentJobIdentity, loading: false }); return;
+          setStored(previous => ({ ...previous, binding, data: null, error: copy.theServerReturnedADifferentJobIdentity, loading: false })); return;
         }
         apply(ticket, response.data);
       }
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted && ticket < order.current.applied) { setStored(previous => ({ ...previous, loading: false })); return; }
-      if (!controller.signal.aborted && isDeletedJob(failure)) { setDeleted(true); setStored({ binding, data: null, error: '', loading: false }); return; }
-      if (!controller.signal.aborted) setStored(previous => ({ binding,
+      if (!controller.signal.aborted && isDeletedJob(failure)) { setDeleted(true); setStored(previous => ({ ...previous, binding, data: null, error: '', loading: false })); return; }
+      if (!controller.signal.aborted) setStored(previous => ({ ...previous, binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
         error: withApiFailureReference({
           session: copy.reconnectToReadThisJob, denied: copy.jobAccessDenied,
@@ -113,7 +114,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
       {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>{copy.openLatestRecordedAttempt}</a>}
       {/* Kept mounted across acceptances so focus on a replaced accepted link can follow to its replacement. */}
-      <AcceptedWork key={job.jobId} job={job} basePath={basePath} readJob={readJob} />
+      <AcceptedWork key={job.jobId} job={job} observed={observed} basePath={basePath} readJob={readJob} />
       <h3>{copy.binaryMetadata}</h3>
       <dl class="job-facts">
         <dt>{copy.format}</dt><dd>{job.binary.format}</dd><dt>{copy.machine}</dt><dd>{job.binary.machine}</dd>

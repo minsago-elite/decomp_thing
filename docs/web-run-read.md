@@ -150,12 +150,23 @@ The job overview has a **Current and accepted work** section that keeps the two 
   observed latest attempt is not listed within the bound or the job was observed with no
   attempt but history lists some, the section says history changed after the job was
   read, shows no attempt, and offers retry and attempt history.
-- Retry from that state reads the job once before any history read. If the job changed,
-  the overview takes the new observation and makes one lookup for it; if unchanged, the
-  lookup runs once more against the same observation and may again show no attempt; if
-  the read fails, the failure is shown with no history read. One click therefore makes one
-  job read, then at most two history pages and, for an organized job, one bracketing job
-  read. Nothing repeats without another click.
+- Retry from that state reads the job once before any history read, and the overview
+  takes what it returns as a new observation. If the read fails, the failure is shown with
+  no history read. One click therefore makes one job read, then at most two history pages
+  and, for an organized job, one bracketing job read. Nothing repeats without another
+  click or another applied job read.
+- Each applied job read is a new observation, numbered in the order the page issued it,
+  even when it reports a version seen before (a label set and then reverted restores the
+  earlier version). A found or not-found answer is bound to its version's history, so a
+  later observation of the same version reuses it and history is not read again, whether
+  the read came from Refresh, a peer tab, an organization change or Retry; incidental
+  renders never read. An unbound or failed state binds nothing: a later observation, even
+  of the same version, gets one lookup of its own, at once or as soon as a lookup already
+  reading settles, and the earlier state's Retry is withdrawn meanwhile. So **Refresh job**
+  does read both again, as the unbound statement says. A Retry is owned by the state it was
+  activated from: once any lookup starts after it, its late failure, stale result or
+  response naming another job changes nothing shown and starts no read, so it cannot
+  remove settled accepted links or move focus.
 - The job page orders every job read it applies (Refresh, a peer-tab change, an
   organization change, and accepted-work Retry) by when it was issued: a response is
   applied only if nothing issued later has been applied, so a slow earlier Refresh never
@@ -174,7 +185,9 @@ The job overview has a **Current and accepted work** section that keeps the two 
   alert with an explicit retry and shows no attempt. With no accepted revision, no
   history read is made.
 - Focus moves only when the person causes it. Retry moves focus to the status and then
-  to the outcome, unless focus has moved elsewhere in the meantime. If a background
+  to the outcome, unless focus has moved elsewhere in the meantime; moving it out of the
+  section withdraws that for good, even when the control it went to (such as **Refresh
+  job**, disabled while it reads) later drops focus to the page. If a background
   refresh removes the focused accepted link, focus goes to the status that replaces it,
   including when the accepted revision changes or is cleared, but only when focus would
   otherwise drop to the page.
