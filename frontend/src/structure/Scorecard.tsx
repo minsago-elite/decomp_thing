@@ -264,7 +264,12 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
   const data = read.state === 'ready' ? read.value : null;
   const card = data?.scorecard ?? null;
   const offset = query.cursor ? Number(query.cursor.split('_')[1]) : 0;
-  const [sort, setSort] = useState(query.sort); const [order, setOrder] = useState(query.order);
+  const [sort, setSort] = useState(query.sort);
+  const [order, setOrder] = useState(query.order);
+  useEffect(() => {
+    setSort(query.sort);
+    setOrder(query.order);
+  }, [query.sort, query.order]);
   // Inventory links stay outside the read gate; refresh reads current first pages for the card and comparison.
   return <Frame selected={selected} data={data} read={read} pinned={query.version !== undefined} boundary={copy.boundary}
     onRefresh={() => {

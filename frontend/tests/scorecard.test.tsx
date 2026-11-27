@@ -392,3 +392,31 @@ it('keeps scorecard state in a strict URL', () => {
     expect(() => scorecardLocation(search)).toThrow();
   }
 });
+
+it('restores both module sort controls on Back and Forward', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const sort = await screen.findByRole('combobox', { name: copy.sort });
+    fireEvent.change(sort, { target: { value: 'score' } });
+    fireEvent.change(screen.getByRole('combobox', { name: copy.order }), { target: { value: 'desc' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.applySort }));
+    await waitFor(() => expect(location.search).toBe('?sort=score&order=desc'));
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    history.back();
+    await waitFor(() => expect(location.search).toBe(''));
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    await waitFor(() => expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1]).toBe(`${api}/scorecard?limit=50`));
+    expect({ sort: screen.getByRole<HTMLSelectElement>('combobox', { name: copy.sort }).value,
+      order: screen.getByRole<HTMLSelectElement>('combobox', { name: copy.order }).value }).toEqual({ sort: 'module', order: 'asc' });
+    history.forward();
+    await waitFor(() => expect(location.search).toBe('?sort=score&order=desc'));
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1])
+      .toBe(`${api}/scorecard?limit=50&sort=score&order=desc`);
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: copy.sort }).value).toBe('score');
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: copy.order }).value).toBe('desc');
+  } finally { auth.dispose(); }
+});
