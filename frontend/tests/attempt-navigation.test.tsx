@@ -190,6 +190,37 @@ it('locates the accepted attempt on the second bounded page and names each link 
   } finally { auth.dispose(); }
 });
 
+it.each([
+  { pageNumber: 1, limit: 105, count: 105 },
+  { pageNumber: 2, limit: 55, count: 55 },
+  { pageNumber: 1, limit: 10, count: 10 },
+])('withholds accepted work when history page $pageNumber echoes limit $limit', async ({ pageNumber, limit, count }) => {
+  const auth = await session();
+  const first = Array.from({ length: 50 }, (_, index) => run(index === 0 ? 'run_latest' : `run_${index}`));
+  const start = pageNumber === 1 ? 0 : first.length;
+  const rows = Array.from({ length: count }, (_, index) =>
+    run(start + index === 0 ? 'run_latest' : `run_${start + index}`));
+  rows[count - 1] = run('run_accepted', { acceptance: 'accepted', resultRevisionId: 'revision_accepted' });
+  const mismatched = page(rows);
+  mismatched.data.page.limit = limit;
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'job') return Promise.resolve(acceptedJob());
+    return Promise.resolve(pageNumber === 1 || path.includes('cursor=cursor_2') ? mismatched : page(first, 'cursor_2'));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('heading', { name: acceptedWorkCopy.title });
+    await section().findByRole('button', { name: acceptedWorkCopy.retry });
+    for (const label of [acceptedWorkCopy.acceptedAttempt, acceptedWorkCopy.acceptedEvidence, acceptedWorkCopy.acceptedSources]) {
+      expect(section().queryByRole('link', { name: new RegExp(`^${label}`) })).toBeNull();
+    }
+    const paths = transport.get.mock.calls.filter(([kind]) => kind === 'runs').map(([, path]) => path);
+    const firstPath = `/jobs/${jobId}/runs?limit=50`;
+    expect(paths).toEqual(pageNumber === 1 ? [firstPath] : [firstPath, firstPath + '&cursor=cursor_2']);
+  } finally { auth.dispose(); }
+});
+
 it('distinguishes exhausted history from the lookup cap and links history from the fallback', async () => {
   const auth = await session();
   transport.get.mockImplementation((kind) => Promise.resolve(kind === 'job' ? acceptedJob() : page([run('run_latest')])));

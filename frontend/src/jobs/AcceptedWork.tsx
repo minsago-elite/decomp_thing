@@ -177,7 +177,7 @@ export function AcceptedWork({ job, observed = 0, basePath, readJob, readHistory
         const readPage = () => client.get('runs', `/jobs/${jobId}/runs?${query}`, { signal: controller.signal });
         const { data } = await (readHistory === undefined ? readPage() : readHistory(controller.signal, readPage));
         if (controller.signal.aborted) return;
-        if (data.jobId !== jobId || data.items.some(run => run.jobId !== jobId)) throw new ApiClientError('invalid_response');
+        if (data.page.limit !== pageLimit || data.jobId !== jobId || data.items.some(run => run.jobId !== jobId)) throw new ApiClientError('invalid_response');
         // The contract requires each page's snapshot; without it no history can be bound, so none is shown.
         if (typeof data.page.snapshotVersion !== 'string' || data.page.snapshotVersion === '') throw new ApiClientError('invalid_response');
         // Pages of one walk share a snapshot; the server expires a cursor rather than mixing two.
