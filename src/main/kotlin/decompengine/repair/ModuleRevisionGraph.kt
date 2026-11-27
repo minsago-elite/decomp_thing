@@ -7421,6 +7421,32 @@ internal fun readStableJobMetadataFile(
     )
 }
 
+internal fun readBudgetedStableRegularFile(
+    root: Path,
+    relative: String,
+    maximumBytes: Long,
+    cancellationCheck: () -> Unit,
+    admitSize: (Long) -> Unit,
+    chargeBytes: (Int) -> Unit,
+): StableRegularFile = readStableRegularFileInternal(
+    root, relative, maximumBytes, null, null, cancellationCheck, false,
+) { descriptorPath, size ->
+    admitSize(size.toLong())
+    cancellationCheck()
+    val bytes = ByteArray(size)
+    Files.newInputStream(descriptorPath).use { input ->
+        var offset = 0
+        while (offset < size) {
+            cancellationCheck()
+            val count = input.read(bytes, offset, minOf(size - offset, 16 * 1024))
+            requireUnchanged(count > 0) { "stable file-read target shrank: $relative" }
+            offset += count
+            chargeBytes(count)
+        }
+    }
+    bytes
+}
+
 private fun readStableRegularFileInternal(
     root: Path,
     relative: String,
@@ -7429,9 +7455,11 @@ private fun readStableRegularFileInternal(
     afterRead: (() -> Unit)?,
     cancellationCheck: () -> Unit,
     allowFinalDirectoryLinkCountChange: Boolean,
+    admittedRead: ((Path, Int) -> ByteArray)? = null,
 ): StableRegularFile {
     cancellationCheck()
-    require(maximumBytes in 1 until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
+    val minimumLimit = if (admittedRead == null) 1L else 0L
+    require(maximumBytes in minimumLimit until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
     val normalized = normalizedRelative(relative)
     val base = root.toAbsolutePath().normalize()
     RepairDescriptorReadSupport.requireSupported(base)
@@ -7466,7 +7494,7 @@ private fun readStableRegularFileInternal(
                 "stable file-read target $relative has ${before.size()} bytes; limit=$maximumBytes",
             )
         }
-        val bytes = try {
+        val bytes = admittedRead?.invoke(descriptorPath, before.size().toInt()) ?: try {
             LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt(), cancellationCheck)
         } catch (_: LinuxResourceLimitException) {
             throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
