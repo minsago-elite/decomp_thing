@@ -15,10 +15,11 @@ diagnostics. `RepairValidationStrategy` similarly keeps build commands and rebui
 outside the repair loop. GCC is one useful C benchmark, not an architectural dependency.
 
 The generated-C repair configuration fingerprint is SHA-256 over these UTF-8 bytes:
-`generated-c-repair-index-v3\n`, the canonical SHA-256 of
-the selected reconstruction descriptor, and a final newline. The prefix versions
-repair-policy interpretation independently of the descriptor's layout, roles, build configuration
-and budgets. Repair resource budgets retain their separate graph/recovery binding.
+`generated-c-repair-index-v6\n`, the canonical SHA-256 of the selected reconstruction descriptor,
+a newline, the canonical repair resource-budget JSON, and a final newline. The prefix versions
+repair-policy interpretation independently of the descriptor's layout, roles, and build
+configuration. The resolved plan/model semantic facts are committed separately through the layout
+and index digests, so changing report contents cannot hide behind an unchanged descriptor identity.
 
 This intentionally changes both the historical ID-only fingerprint and the v2 policy fingerprint.
 Existing graphs carrying either prior identity are rejected before pending recovery writes;
@@ -79,6 +80,59 @@ through a streaming byte-capped digest. Budget-aware profiles must apply the sam
 configuration fingerprinting. A candidate that
 changes dependency evidence is restored and rejected; dependency migrations require a separately
 reviewed graph migration.
+
+The v6 layout commitment includes a deterministic semantic evidence index. Each origin identifies a
+captured document role, its exact content digest, schema version, and field locator; it never stores
+the host path. Program-model functions, globals, and types remain recovered evidence. Their prototypes,
+bodies, initializers, and declarations are referenced by document fields, not reclassified as facts
+about the current C source. Calls, global references, and module ownership retain separate relation
+kinds. Module ownership is derived from the admitted module plan and the existing graph layout, and
+graph admission checks that semantic entity IDs exactly match that ownership inventory. A recovered
+type declaration is not called a definition when no separate definition evidence exists.
+The index records the build-definition path separately from generated target identities. For the
+generated-C Make profile it maps `all` and `build/reconstructed` to the plan-owned module sources
+and generated entrypoint; for Ninja it maps `build/reconstructed`. Membership comes from the
+profile's renderer contract and admitted source/ownership inventory, never from parsing Make/Ninja
+text or treating the produced artifact as a target. Target-to-target dependency edges remain
+explicitly unknown. Unlisted C files are not treated as target members. Editable build-definition
+bytes are bound by the working/source-revision digest, not duplicated as static semantic-index
+origins; this allows an authorized build-file candidate to retain the same static index identity
+while changing revisions. When paired plan/model evidence is unavailable, target membership remains
+explicitly uncertain. The generated entrypoint participates when the admitted model has no
+`main` function and the renderer therefore emits it, even if the expected path is missing from the
+current source snapshot; that expected path remains in target membership and is separately reported
+as `EVIDENCE_NOT_CAPTURED` for `build-target-source-availability`. Plan-owned module source paths
+must still be present as declared discovered inputs. This distinguishes renderer-expected target
+membership from physical presence in the indexed working tree. Module-plan and program-model document roots remain
+committed even when a valid document contains no module/entity records, so empty evidence cannot be
+confused with absent evidence during target projection.
+The focused built-in contract checkpoint is retained in
+`docs/evidence/issue-798-revision-evidence-index-2026-11-13.json`; it is local fixture evidence,
+not production-provider or workflow-release qualification.
+
+Context selection uses the existing ownership, dependency, readable-path, writable-path, and budget
+decisions. Its v2 evidence snapshot binds the selected evidence to the profile and reconstruction
+descriptor, structural index and source basis, working revision, graph head/status, fully accepted
+head when one exists, and retained regression corpus. Deferred context and unavailable source
+locations, definitions, target membership/dependency edges, recovery assessment, or authenticated diagnostic attribution
+are represented as subject-specific uncertainty, and omitted projected entities, relations,
+declarations, definitions, build evidence, and uncertainties are counted by comparing the complete
+projection with the retained one. A caller-supplied diagnostic hint is hashed as a hint; the snapshot
+records its subject source revision, selected modules, matched in-tree paths, and
+attribution basis without retaining the text or treating it as a compiler receipt. For provisional
+work, the hint subject is the provisional working revision; profile-derived ownership separately
+retains the accepted index-basis revision that authenticated that ownership. Retained behavior
+cases identify their input and corpus, but do not claim that the case ran or passed. When
+profile-bound failure ownership uses a build contract, its exact document hash and field locator are
+included with the accepted index-basis revision. This projection is descriptive and grants no
+read/write or acceptance authority.
+
+The profile re-reads the admitted plan/model pair before index publication and requires the semantic
+commitment to match. A later evidence change cannot reuse an old recovery binding. Context snapshots
+are likewise rechecked against current plan/model and profile-bound build-contract evidence, as well
+as the graph and corpus, before and after staging capture. The canonical JSON
+projection is subject to both the configured index/request budgets and the strict JSON layer's
+64 MiB hard byte ceiling; exceeding either fails closed without truncation.
 
 Immediately before `headId` is persisted, acceptance rebuilds the complete index from the current
 profile, source tree, generic resolved evidence, and profile-specific diagnostic evidence and requires

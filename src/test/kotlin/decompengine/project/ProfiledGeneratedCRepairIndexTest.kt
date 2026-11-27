@@ -5,13 +5,21 @@ import decompengine.repair.open
 import decompengine.repair.ModuleRepairIndex
 import decompengine.repair.ModuleRevisionGraph
 import decompengine.repair.RepairBudgetExceededException
+import decompengine.repair.RepairIndexLayout
+import decompengine.repair.RepairIndexProfile
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.RepairEvidenceEntityKind
+import decompengine.repair.RepairEvidenceRelationKind
+import decompengine.repair.RepairEvidenceUncertaintyReason
+import java.security.MessageDigest
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readText
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
+import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -40,6 +48,324 @@ class ProfiledGeneratedCRepairIndexTest {
                 if (it.id in setOf("shared-interface", "module-interface")) it.roles - ProjectFileRole.EDITABLE else it.roles, it.contentKind)
         }), base.budgets, base.adapterConfiguration,
     )
+
+    @Test
+    fun `plan or model evidence changing during index capture is refused`() {
+        val descriptor = profile(GeneratedCMakeReconstructionProfile.descriptor)
+        val delegate = GeneratedCRepairIndexProfile.forProfile(descriptor)
+        val project = createTempDirectory("repair-evidence-capture-race-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "f".repeat(64),
+            functions = listOf(RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)")),
+        ), project, profile = descriptor)
+        val modelPath = project.resolve("reports/inputs/model.json")
+        val profileWithMutation = object : RepairIndexProfile by delegate {
+            override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
+                val admitted = delegate.resolve(projectRoot, budget)
+                modelPath.writeBytes(modelPath.readBytes() + byteArrayOf(' '.code.toByte()))
+                return admitted
+            }
+
+            override fun verifyEvidenceUnchanged(projectRoot: Path, budget: RepairResourceBudget, layout: RepairIndexLayout) {
+                delegate.verifyEvidenceUnchanged(projectRoot, budget, layout)
+            }
+        }
+
+        val refusal = assertFailsWith<IllegalArgumentException> {
+            ModuleRepairIndex.load(project, profileWithMutation)
+        }
+
+        assertTrue(refusal.message.orEmpty().contains("plan/model evidence changed"))
+    }
+
+    @Test
+    fun `generated semantic evidence preserves origins relationships and uncertainty without source claims`() {
+        val project = createTempDirectory("repair-semantic-evidence-projection-")
+        val model = RecoveredProgramModel(
+            schemaVersion = 4,
+            inputSha256 = "e".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    "fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
+                    decompiledC = "int alpha_run(void) { return beta_read() + global_state; }",
+                    calls = setOf("fn_beta"), referencedGlobals = setOf("global_state"),
+                ),
+                RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)", decompiledC = "int beta_read(void) { return 1; }"),
+            ),
+            globals = listOf(RecoveredGlobal("global_state", "state", 0x3000UL, "int", initializer = "1")),
+            types = listOf(RecoveredType("type_state", "struct state;", 0x3000UL)),
+        )
+        SourceTreeGenerator.generate(model, project)
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val context = index.select("compile", "src/modules/alpha.c:1: compiler diagnostic")
+        val facts = context.evidenceFacts
+        val modelDigest = MessageDigest.getInstance("SHA-256")
+            .digest(project.resolve("reports/program_model.json").readBytes())
+            .joinToString("") { "%02x".format(it) }
+        val planDigest = MessageDigest.getInstance("SHA-256")
+            .digest(project.resolve("reports/module_plan.json").readBytes())
+            .joinToString("") { "%02x".format(it) }
+
+        assertTrue(facts.entities.any { it.id == "module:alpha" && it.kind == RepairEvidenceEntityKind.MODULE })
+        assertTrue(facts.entities.any { it.id == "fn_alpha" && it.kind == RepairEvidenceEntityKind.FUNCTION })
+        assertTrue(facts.entities.any { it.id == "global_state" && it.kind == RepairEvidenceEntityKind.GLOBAL })
+        assertTrue(facts.entities.any { it.id == "type_state" && it.kind == RepairEvidenceEntityKind.TYPE })
+        assertTrue(facts.relations.any {
+            it.kind == RepairEvidenceRelationKind.CALLS && it.sourceEntityId == "fn_alpha" && it.targetEntityId == "fn_beta"
+        })
+        assertTrue(facts.relations.any {
+            it.kind == RepairEvidenceRelationKind.REFERENCES_GLOBAL && it.sourceEntityId == "fn_alpha" && it.targetEntityId == "global_state"
+        })
+        assertTrue(facts.relations.any {
+            it.kind == RepairEvidenceRelationKind.MODULE_OWNS && it.sourceEntityId == "module:alpha" && it.targetEntityId == "fn_alpha"
+        })
+        assertTrue(facts.declarations.any { it.entityId == "fn_alpha" && it.form == "recovered-prototype" })
+        assertTrue(facts.declarations.any { it.entityId == "global_state" && it.form == "global-type" })
+        assertTrue(facts.declarations.any { it.entityId == "type_state" && it.form == "type-declaration" })
+        assertTrue(facts.definitions.any { it.entityId == "fn_alpha" && it.form == "recovered-body" })
+        assertTrue(facts.definitions.any { it.entityId == "global_state" && it.form == "recovered-initializer" })
+        assertFalse(facts.definitions.any { it.entityId == "type_state" })
+        assertTrue(facts.uncertainties.any {
+            it.subject == "type_state" && it.category == "definition" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+        assertTrue(facts.origins.any { it.documentRole == "program-model" && it.contentSha256 == modelDigest })
+        assertTrue(facts.origins.any { it.documentRole == "module-plan" && it.contentSha256 == planDigest })
+        assertTrue(facts.uncertainties.any {
+            it.subject == "fn_alpha" && it.reason == RepairEvidenceUncertaintyReason.SOURCE_LOCATION_UNAVAILABLE
+        })
+        assertTrue(facts.uncertainties.any {
+            it.subject == "fn_alpha" && it.reason == RepairEvidenceUncertaintyReason.RECOVERY_UNASSESSED
+        })
+        assertTrue(facts.uncertainties.any {
+            it.subject == "Makefile" && it.category == "build-target-dependencies" &&
+                it.reason == RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED
+        })
+        val build = facts.buildEvidence.single { it.buildDefinitionPath == "Makefile" }
+        assertEquals(listOf("all", "build/reconstructed"), build.explicitTargets)
+        assertEquals(
+            mapOf(
+                "all" to listOf("src/main.c", "src/modules/alpha.c", "src/modules/beta.c"),
+                "build/reconstructed" to listOf("src/main.c", "src/modules/alpha.c", "src/modules/beta.c"),
+            ),
+            build.sourcePathsByTarget,
+        )
+        assertTrue(build.buildDefinitionPath !in build.explicitTargets)
+        val completeProject = createTempDirectory("repair-semantic-evidence-complete-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "c".repeat(64),
+            functions = listOf(RecoveredFunction("fn_only", "only", 0x1000UL, "int only(void)")),
+        ), completeProject)
+        val completeIndex = ModuleRepairIndex.load(completeProject, GeneratedCRepairIndexProfile)
+        val completeSelection = completeIndex.select(
+            "compile", completeIndex.sourcePaths.joinToString("\n") { "$it: error: selected" },
+        )
+        assertEquals(
+            mapOf("entities" to 0, "relations" to 0, "declarations" to 0, "definitions" to 0,
+                "buildEvidence" to 0, "uncertainties" to 0),
+            completeIndex.omittedEvidenceRecordCounts(completeSelection),
+        )
+    }
+
+    @Test
+    fun `module fact and program entity may share the same textual ID`() {
+        val project = createTempDirectory("repair-module-entity-id-collision-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "f".repeat(64),
+            functions = listOf(RecoveredFunction(
+                "module:alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
+                decompiledC = "int alpha_run(void) { return 1; }",
+            )),
+        ), project)
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/alpha.c: compiler diagnostic")
+        val facts = selection.evidenceFacts
+
+        assertTrue(facts.entities.any { it.id == "module:alpha" && it.kind == RepairEvidenceEntityKind.MODULE })
+        assertTrue(facts.entities.any { it.id == "module:alpha" && it.kind == RepairEvidenceEntityKind.FUNCTION })
+        assertTrue(facts.relations.any {
+            it.kind == RepairEvidenceRelationKind.MODULE_OWNS &&
+                it.sourceEntityId == "module:alpha" && it.targetEntityId == "module:alpha"
+        })
+        assertEquals(2, facts.entities.count { it.id == "module:alpha" })
+    }
+
+    @Test
+    fun `target membership stays uncertain without paired plan and model evidence`() {
+        val project = createTempDirectory("repair-target-membership-without-plan-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "d".repeat(64),
+            functions = listOf(RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)")),
+        ), project)
+        Files.delete(project.resolve("reports/module_plan.json"))
+        Files.delete(project.resolve("reports/program_model.json"))
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("behavior")
+        val build = selection.evidenceFacts.buildEvidence.single()
+
+        assertEquals(listOf("all", "build/reconstructed"), build.explicitTargets)
+        assertTrue(build.sourcePathsByTarget.isEmpty())
+        assertTrue(selection.evidenceFacts.uncertainties.any {
+            it.category == "build-target-membership" &&
+                it.reason == RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED
+        })
+    }
+
+    @Test
+    fun `unlisted entrypoint path is not assigned to generated targets when model has main`() {
+        val project = createTempDirectory("repair-target-no-generated-entrypoint-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "e".repeat(64),
+            functions = listOf(RecoveredFunction(
+                "fn_main", "main", 0x1000UL, "int main(void)",
+                decompiledC = "int main(void) { return 0; }",
+            )),
+        ), project)
+        val unlistedEntrypoint = project.resolve("src/main.c")
+        unlistedEntrypoint.writeText("int main(void) { return 1; }\n")
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/main.c: compiler diagnostic")
+        val targetSources = selection.evidenceFacts.buildEvidence.single().sourcePathsByTarget.values.flatten().toSet()
+
+        assertTrue("src/modules/main.c" in targetSources)
+        assertFalse("src/main.c" in targetSources)
+    }
+
+    @Test
+    fun `missing renderer target sources remain expected with availability uncertainty`() {
+        val project = createTempDirectory("repair-target-missing-generated-entrypoint-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "9".repeat(64),
+            functions = listOf(RecoveredFunction(
+                "fn_entry", "entry", 0x1000UL, "int entry(void)",
+                decompiledC = "int entry(void) { return 0; }",
+            )),
+        ), project)
+        val entrypoint = project.resolve("src/main.c")
+        assertTrue(Files.deleteIfExists(entrypoint))
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/entry.c:1: compiler diagnostic")
+        val build = selection.evidenceFacts.buildEvidence.single()
+        val targetSources = build.sourcePathsByTarget.values.flatten().toSet()
+
+        assertTrue("src/main.c" !in index.sourcePaths)
+        assertTrue("src/main.c" in targetSources)
+        assertTrue("src/modules/entry.c" in targetSources)
+        assertTrue(selection.evidenceFacts.uncertainties.any {
+            it.subject == "src/main.c" && it.category == "build-target-source-availability" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+    }
+
+    @Test
+    fun `empty admitted program model retains document identity and generated target membership`() {
+        val project = createTempDirectory("repair-target-empty-program-model-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "8".repeat(64),
+            functions = emptyList(),
+        ), project)
+        val entrypoint = project.resolve("src/main.c")
+        assertTrue(Files.deleteIfExists(entrypoint))
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/core.c: compiler diagnostic")
+        val facts = selection.evidenceFacts
+        val build = facts.buildEvidence.single()
+
+        assertTrue(facts.origins.any { it.documentRole == "module-plan" && it.locator == "/" })
+        assertTrue(facts.origins.any { it.documentRole == "program-model" && it.locator == "/" })
+        assertTrue(build.sourcePathsByTarget.values.flatten().contains("src/main.c"))
+        assertTrue(build.sourcePathsByTarget.values.flatten().contains("src/modules/core.c"))
+        assertTrue(facts.uncertainties.any {
+            it.subject == "src/main.c" && it.category == "build-target-source-availability" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+    }
+
+    @Test
+    fun `blank recovered bodies and initializers remain unavailable definitions`() {
+        val project = createTempDirectory("repair-semantic-blank-definitions-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "b".repeat(64),
+            functions = listOf(RecoveredFunction(
+                "fn_blank", "blank", 0x1000UL, "int blank(void)", decompiledC = "  \n",
+            )),
+            globals = listOf(RecoveredGlobal("global_blank", "blank_global", 0x2000UL, "int", initializer = "")),
+        ), project)
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select("compile", "src/modules/blank.c:1: diagnostic")
+
+        assertFalse(selection.evidenceFacts.definitions.any { it.entityId == "fn_blank" })
+        assertFalse(selection.evidenceFacts.definitions.any { it.entityId == "global_blank" })
+        assertTrue(selection.evidenceFacts.uncertainties.any {
+            it.subject == "fn_blank" && it.category == "definition" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+        assertTrue(selection.evidenceFacts.uncertainties.any {
+            it.subject == "global_blank" && it.category == "definition" &&
+                it.reason == RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED
+        })
+    }
+
+    @Test
+    fun `generated model entity IDs retain the full admitted identifier length`() {
+        val project = createTempDirectory("repair-semantic-long-entity-id-")
+        val entityId = "function_" + "e".repeat(4_087)
+        SourceTreeGenerator.generate(RecoveredProgramModel(
+            inputSha256 = "c".repeat(64),
+            functions = listOf(RecoveredFunction(entityId, "long_id_function", 0x1000UL, "int long_id_function(void)")),
+        ), project)
+
+        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        val selection = index.select(
+            "compile", index.sourcePaths.joinToString("\n") { "$it:1: diagnostic" },
+        )
+
+        assertTrue(selection.evidenceFacts.entities.any {
+            it.id == entityId && it.kind == RepairEvidenceEntityKind.FUNCTION
+        })
+        assertTrue(selection.evidenceFacts.declarations.any { it.entityId == entityId })
+    }
+
+    @Test
+    fun `generated repair evidence snapshot is identical across relocated equivalent projects`() {
+        val descriptor = profile(GeneratedCMakeReconstructionProfile.descriptor)
+        val repairProfile = GeneratedCRepairIndexProfile.forProfile(descriptor)
+        val model = RecoveredProgramModel(
+            inputSha256 = "d".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    "fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
+                    decompiledC = "int alpha_run(void) { return beta_read() + global_state; }",
+                    calls = setOf("fn_beta"), referencedGlobals = setOf("global_state"),
+                ),
+                RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)", decompiledC = "int beta_read(void) { return 1; }"),
+            ),
+            globals = listOf(RecoveredGlobal("global_state", "state", 0x3000UL, "int", initializer = "1")),
+            types = listOf(RecoveredType("type_state", "struct state;", 0x3000UL)),
+        )
+
+        fun contextJson(): String {
+            val project = createTempDirectory("relocated-repair-evidence-")
+            SourceTreeGenerator.generate(model, project, profile = descriptor)
+            return ModuleRevisionGraph.open(project, repairProfile).use { graph ->
+                val implementation = "src/modules/alpha.c"
+                val context = graph.selectContext("compile", "$implementation:1: compiler diagnostic")
+                graph.requireContextBinding(context)
+                context.toContextJson()
+            }
+        }
+
+        val first = contextJson()
+        val relocated = contextJson()
+
+        assertEquals(first, relocated)
+    }
 
     @Test
     fun `repair index admits schema three bytes and historical schemas without weakening closed fields`() {
@@ -182,6 +508,26 @@ class ProfiledGeneratedCRepairIndexTest {
             assertFalse("include/decomp_types.h" in selection.writablePaths)
             assertTrue("include/modules/alpha.h" in selection.readablePaths)
             assertFalse("include/modules/alpha.h" in selection.writablePaths)
+            val buildEvidence = selection.evidenceFacts.buildEvidence.single()
+            assertEquals(
+                if (base.adapterConfiguration.getValue("build-system").single() == "gnu-make")
+                    listOf("all", "build/reconstructed") else listOf("build/reconstructed"),
+                buildEvidence.explicitTargets,
+            )
+            assertEquals(
+                listOf("src/main.c", "src/modules/alpha.c", "src/modules/beta.c"),
+                buildEvidence.sourcePathsByTarget.values.first(),
+            )
+            assertFalse(buildEvidence.sourcePathsByTarget.values.flatten().contains("src/unlisted.c"))
+            val layout = profile.resolve(project, RepairResourceBudget())
+            val moduleByOwnedPath = buildMap {
+                layout.modules.forEach { module -> module.ownedPaths.forEach { put(it, module.id) } }
+                layout.fallbackModuleIdsByPath.forEach { (path, moduleId) -> putIfAbsent(path, moduleId) }
+            }
+            assertEquals(
+                listOf("alpha", "beta", "entrypoint"),
+                buildEvidence.sourcePathsByTarget.values.first().map { moduleByOwnedPath.getValue(it) }.distinct().sorted(),
+            )
             assertTrue(profile.authorizesRecoveryLayout(index.sourcePaths, index.editablePaths.sorted(), RepairResourceBudget()))
             val target = project.resolve("src/modules/alpha.c")
             val accepted = target.readBytes()

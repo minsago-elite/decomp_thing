@@ -25,7 +25,12 @@ class GeneratedCModelIndexTest {
         val historical = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget())
         SourceTreeGenerator.generate(model.copy(schemaVersion = 2), project)
         val current = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget())
-        assertEquals(historical, current)
+        // Evidence origins retain the source schema version, but schema migration must preserve
+        // the resolved ownership and dependency layout used by repair planning.
+        assertEquals(historical.sourcePaths, current.sourcePaths)
+        assertEquals(historical.editablePaths, current.editablePaths)
+        assertEquals(historical.modules, current.modules)
+        assertEquals(historical.entities, current.entities)
         assertEquals(listOf("helper"), current.entities.single { it.id == "entry" }.dependencyEntityIds)
         assertEquals(listOf("global"), current.entities.single { it.id == "helper" }.dependencyEntityIds)
         val path = project.resolve("reports/program_model.json")

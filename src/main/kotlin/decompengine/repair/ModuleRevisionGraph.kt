@@ -171,6 +171,7 @@ class RepairGraphLockTimeoutException(message: String) : IllegalStateException(m
 class RepairFailureOwnership(
     moduleIds: List<String> = emptyList(),
     val includesSharedContext: Boolean = false,
+    val evidenceOrigin: RepairEvidenceOrigin? = null,
 ) {
     val moduleIds: List<String> = immutableList(moduleIds)
 
@@ -260,6 +261,7 @@ class RepairIndexLayout(
     fallbackModuleIdsByPath: Map<String, String> = emptyMap(),
     behaviorRootModuleIds: List<String> = emptyList(),
     behaviorRootEntityIds: List<String> = emptyList(),
+    evidenceFacts: RepairEvidenceFacts = RepairEvidenceFacts.EMPTY,
 ) {
     val sourcePaths: List<String> = immutableList(sourcePaths)
     val editablePaths: List<String> = immutableList(editablePaths)
@@ -271,6 +273,7 @@ class RepairIndexLayout(
     val fallbackModuleIdsByPath: Map<String, String> = Collections.unmodifiableMap(TreeMap(fallbackModuleIdsByPath))
     val behaviorRootModuleIds: List<String> = immutableList(behaviorRootModuleIds)
     val behaviorRootEntityIds: List<String> = immutableList(behaviorRootEntityIds)
+    val evidenceFacts: RepairEvidenceFacts = evidenceFacts
 
     init {
         require(sourcePaths.isNotEmpty()) { "repair index profile has no source inputs" }
@@ -298,6 +301,17 @@ class RepairIndexLayout(
         }
         val moduleIds = modules.mapTo(hashSetOf()) { it.id }
         val entityIds = entities.mapTo(hashSetOf()) { it.id }
+        if (evidenceFacts.entities.isNotEmpty()) {
+            val factEntityIds = evidenceFacts.entities.filter { it.kind != RepairEvidenceEntityKind.MODULE }.mapTo(hashSetOf()) { it.id }
+            require(factEntityIds == entityIds) {
+                "repair semantic evidence entities must exactly match the module-owned index entities"
+            }
+            val factModuleIds = evidenceFacts.entities.filter { it.kind == RepairEvidenceEntityKind.MODULE }
+                .map { it.id.removePrefix("module:") }.toSet()
+            require(factModuleIds == moduleIds) {
+                "repair semantic evidence module facts must exactly match indexed modules"
+            }
+        }
         val ownedEntityIds = modules.flatMap { it.entityIds }
         require(ownedEntityIds.distinct().size == ownedEntityIds.size) {
             "repair entity has more than one module owner"
@@ -363,7 +377,8 @@ class RepairIndexLayout(
         pathDependencies == other.pathDependencies &&
         fallbackModuleIdsByPath == other.fallbackModuleIdsByPath &&
         behaviorRootModuleIds == other.behaviorRootModuleIds &&
-        behaviorRootEntityIds == other.behaviorRootEntityIds
+        behaviorRootEntityIds == other.behaviorRootEntityIds &&
+        evidenceFacts == other.evidenceFacts
 
     override fun hashCode(): Int = listOf(
         sourcePaths,
@@ -376,6 +391,7 @@ class RepairIndexLayout(
         fallbackModuleIdsByPath,
         behaviorRootModuleIds,
         behaviorRootEntityIds,
+        evidenceFacts,
     ).hashCode()
 
     internal fun canonicalSha256(maximumBytes: Long, configurationPrefix: String? = null): String =
@@ -388,6 +404,9 @@ class RepairIndexLayout(
                 append('\u0000')
             }
             writeCanonicalTo(this)
+            append("[evidence-facts-sha256]\n")
+                .append(evidenceFacts.sha256(maximumBytes))
+                .append('\n')
         }
 
     private fun writeCanonicalTo(sink: BoundedCanonicalDigest) = with(sink) {
@@ -505,6 +524,7 @@ private fun RepairIndexLayout.withDeclarativePerPathModules(): RepairIndexLayout
         fallbackModuleIdsByPath = declaredFallbacks,
         behaviorRootModuleIds = behaviorRootModuleIds,
         behaviorRootEntityIds = behaviorRootEntityIds,
+        evidenceFacts = evidenceFacts,
     )
 }
 
@@ -514,6 +534,13 @@ private fun exactPathModuleId(path: String): String =
 /** Program/layout-specific indexing is an explicit injected boundary, not repair-core policy. */
 interface RepairIndexProfile {
     fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout
+
+    /** Re-read admitted external evidence without repeating source discovery or source-view lookups. */
+    fun verifyEvidenceUnchanged(projectRoot: Path, budget: RepairResourceBudget, layout: RepairIndexLayout) {
+        require(layout.evidenceFacts == RepairEvidenceFacts.EMPTY) {
+            "repair profile with evidence facts must implement evidence revalidation"
+        }
+    }
 
     /** Recovery-only dependency resolution over authorized, hash-checked target preimages.
      * Source-sensitive profiles override this; the resulting full index must still match the
@@ -599,11 +626,16 @@ data class RepairContextSelection(
     val totalBytes: Long,
     val indexSha256: String,
     val sourceRevisionSha256: String,
+    val evidenceFacts: RepairEvidenceFacts = RepairEvidenceFacts.EMPTY,
+    val diagnosticHintSha256: String? = null,
+    val diagnosticEvidence: RepairDiagnosticEvidence? = null,
+    val evidenceSnapshot: RepairEvidenceSnapshot? = null,
 ) {
     init {
         require(readablePaths == readablePaths.distinct().sorted())
         require(writablePaths == writablePaths.distinct().sorted())
         require(writablePaths.all { it in readablePaths })
+        require(diagnosticHintSha256 == null || diagnosticHintSha256.matches(Regex("[0-9a-f]{64}")))
     }
 
     fun toContextJson(): String = buildString {
@@ -614,7 +646,14 @@ data class RepairContextSelection(
         append("\"deferredModules\":").append(deferredModules.jsonArray()).append(',')
         append("\"readablePaths\":").append(readablePaths.jsonArray()).append(',')
         append("\"writablePaths\":").append(writablePaths.jsonArray()).append(',')
-        append("\"totalBytes\":").append(totalBytes).append('}')
+        append("\"totalBytes\":").append(totalBytes).append(',')
+        val snapshot = evidenceSnapshot
+        if (snapshot == null) append("\"evidenceSnapshot\":null}") else {
+            val maximumBytes = snapshot.maximumCanonicalBytes
+            val encoded = snapshot.canonicalBytes(maximumBytes)
+            append("\"evidenceSnapshot\":").append(encoded.toString(Charsets.UTF_8)).append(',')
+            append("\"evidenceSnapshotSha256\":\"").append(snapshot.sha256(maximumBytes)).append("\"}")
+        }
     }
 }
 
@@ -707,6 +746,8 @@ internal class ModuleRepairIndex private constructor(
     behaviorRootModulesCandidate: List<String>?,
     sharedContextPathsCandidate: Set<String>?,
     sharedInvalidationPathsCandidate: Set<String>?,
+    evidenceFactsCandidate: RepairEvidenceFacts?,
+    layoutCandidate: RepairIndexLayout?,
     indexSha256Candidate: String?,
     sourceRevisionSha256Candidate: String?,
 ) {
@@ -725,6 +766,8 @@ internal class ModuleRepairIndex private constructor(
     private val behaviorRootModules: List<String>
     private val sharedContextPaths: Set<String>
     private val sharedInvalidationPaths: Set<String>
+    private val evidenceFacts: RepairEvidenceFacts
+    private val admittedLayout: RepairIndexLayout
     val indexSha256: String
     val sourceRevisionSha256: String
 
@@ -751,6 +794,8 @@ internal class ModuleRepairIndex private constructor(
         behaviorRootModules = immutableList(requireNotNull(behaviorRootModulesCandidate))
         sharedContextPaths = Collections.unmodifiableSet(TreeSet(requireNotNull(sharedContextPathsCandidate)))
         sharedInvalidationPaths = Collections.unmodifiableSet(TreeSet(requireNotNull(sharedInvalidationPathsCandidate)))
+        evidenceFacts = requireNotNull(evidenceFactsCandidate)
+        admittedLayout = requireNotNull(layoutCandidate)
         indexSha256 = requireNotNull(indexSha256Candidate)
         sourceRevisionSha256 = requireNotNull(sourceRevisionSha256Candidate)
     }
@@ -857,6 +902,15 @@ internal class ModuleRepairIndex private constructor(
         }
         val retainedDependencyModules = selectedDependencies.filterNot { it in deferred }.sorted()
         val total = contextBytes(readable)
+        val diagnosticHintSha256 = hint.takeIf { it.isNotEmpty() }?.let { sha256(it.toByteArray(Charsets.UTF_8)) }
+        val attributionBasis = when {
+            hasProfileBoundOwnership -> RepairDiagnosticAttributionBasis.PROFILE_BOUND_MODULES
+            hasExactPathEvidence && exactPathOwners.isNotEmpty() -> RepairDiagnosticAttributionBasis.CALLER_HINT_EXACT_PATHS
+            hasExactPathEvidence -> RepairDiagnosticAttributionBasis.CALLER_HINT_UNATTRIBUTED
+            rawTokenOwners.isNotEmpty() -> RepairDiagnosticAttributionBasis.CALLER_HINT_TOKENS
+            failureKind == "behavior" && behaviorRootModules.isNotEmpty() -> RepairDiagnosticAttributionBasis.PROFILE_BEHAVIOR_ROOTS
+            else -> RepairDiagnosticAttributionBasis.NONE
+        }
         return RepairContextSelection(
             readablePaths = readable.toList(),
             writablePaths = writable.toList(),
@@ -866,7 +920,102 @@ internal class ModuleRepairIndex private constructor(
             totalBytes = total,
             indexSha256 = indexSha256,
             sourceRevisionSha256 = sourceRevisionSha256,
+            evidenceFacts = projectEvidenceFacts(seeds + retainedDependencyModules, deferred),
+            diagnosticHintSha256 = diagnosticHintSha256,
+            diagnosticEvidence = RepairDiagnosticEvidence(
+                hintSha256 = diagnosticHintSha256,
+                subjectSourceRevisionSha256 = sourceRevisionSha256,
+                ownershipEvidenceSourceRevisionSha256 = sourceRevisionSha256.takeIf {
+                    attributionBasis == RepairDiagnosticAttributionBasis.PROFILE_BOUND_MODULES
+                },
+                attributionBasis = attributionBasis,
+                ownershipEvidenceOrigin = boundOwnership.evidenceOrigin,
+                selectedModuleIds = seeds,
+                matchedSourcePaths = explicitlyMentionedPaths.filter { it in sources }.sorted(),
+                includesSharedContext = boundOwnership.includesSharedContext || sharedWritable.isNotEmpty(),
+            ),
         ).deepFrozenCopy()
+    }
+
+    internal val semanticEvidenceEntityCount: Int get() = evidenceFacts.entities.count { it.kind != RepairEvidenceEntityKind.MODULE }
+
+    internal fun expectedEvidenceFacts(selection: RepairContextSelection): RepairEvidenceFacts =
+        projectEvidenceFacts(selection.seedModules + selection.dependencyModules, selection.deferredModules)
+
+    internal fun omittedEvidenceRecordCounts(selection: RepairContextSelection): Map<String, Int> {
+        val complete = projectEvidenceFacts(modules.keys.toList(), emptyList())
+        val retained = projectEvidenceFacts(selection.seedModules + selection.dependencyModules, selection.deferredModules)
+        val retainedEntities = retained.entities.toHashSet()
+        val retainedRelations = retained.relations.toHashSet()
+        val retainedDeclarations = retained.declarations.toHashSet()
+        val retainedDefinitions = retained.definitions.toHashSet()
+        val retainedBuildEvidence = retained.buildEvidence.toHashSet()
+        val retainedUncertainties = retained.uncertainties.toHashSet()
+        return mapOf(
+            "entities" to complete.entities.count { it !in retainedEntities },
+            "relations" to complete.relations.count { it !in retainedRelations },
+            "declarations" to complete.declarations.count { it !in retainedDeclarations },
+            "definitions" to complete.definitions.count { it !in retainedDefinitions },
+            "buildEvidence" to complete.buildEvidence.count { it !in retainedBuildEvidence },
+            "uncertainties" to complete.uncertainties.count { it !in retainedUncertainties },
+        )
+    }
+
+    private fun projectEvidenceFacts(selectedModules: List<String>, deferredModules: List<String>): RepairEvidenceFacts {
+        val selectedModuleIds = selectedModules.toHashSet()
+        val selectedEntityIds = selectedModules.flatMap { modules[it]?.entityIds.orEmpty() }.toSortedSet()
+        val selectedModuleFactIds = selectedModules.mapTo(hashSetOf()) { "module:$it" }
+        val projectedEntities = evidenceFacts.entities.filter { fact ->
+            if (fact.kind == RepairEvidenceEntityKind.MODULE) fact.id in selectedModuleFactIds
+            else fact.id in selectedEntityIds
+        }
+        val projectedRelations = evidenceFacts.relations.filter {
+            when (it.kind) {
+                RepairEvidenceRelationKind.MODULE_OWNS ->
+                    it.sourceEntityId in selectedModuleFactIds && it.targetEntityId in selectedEntityIds
+                RepairEvidenceRelationKind.CALLS, RepairEvidenceRelationKind.REFERENCES_GLOBAL ->
+                    it.sourceEntityId in selectedEntityIds && it.targetEntityId in selectedEntityIds
+            }
+        }
+        val projectedDeclarations = evidenceFacts.declarations.filter { it.entityId in selectedEntityIds }
+        val projectedDefinitions = evidenceFacts.definitions.filter { it.entityId in selectedEntityIds }
+        val projectedModuleFactIds = projectedEntities.asSequence()
+            .filter { it.kind == RepairEvidenceEntityKind.MODULE }
+            .mapTo(hashSetOf()) { it.id }
+        val projectedDefinitionIds = projectedDefinitions.asSequence().mapTo(hashSetOf()) { it.entityId }
+        val projectedDeclarationIds = projectedDeclarations.asSequence().mapTo(hashSetOf()) { it.entityId }
+        val uncertainty = buildList {
+            addAll(evidenceFacts.uncertainties.filter {
+                it.subject in selectedModuleIds || it.subject in selectedEntityIds || it.category.startsWith("build-target")
+            })
+            if (selectedModules.any { id -> "module:$id" !in projectedModuleFactIds }) {
+                selectedModules.filter { id -> "module:$id" !in projectedModuleFactIds }.forEach { id ->
+                    add(RepairEvidenceUncertainty(id, "module-evidence", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED))
+                }
+            }
+            selectedEntityIds.filter { it !in projectedDefinitionIds }.forEach { id ->
+                add(RepairEvidenceUncertainty(id, "definition", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED))
+            }
+            selectedEntityIds.filter { it !in projectedDeclarationIds }.forEach { id ->
+                add(RepairEvidenceUncertainty(id, "declaration", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED))
+            }
+            deferredModules.distinct().forEach { id ->
+                add(RepairEvidenceUncertainty(id, "context", RepairEvidenceUncertaintyReason.CONTEXT_BUDGET_DEFERRED))
+            }
+            evidenceFacts.buildEvidence.filter { it.sourcePathsByTarget.isEmpty() }.forEach { build ->
+                add(RepairEvidenceUncertainty(build.buildDefinitionPath, "build-target-membership", RepairEvidenceUncertaintyReason.RELATIONSHIP_NOT_ESTABLISHED, build.origin))
+            }
+        }
+        val origins = (evidenceFacts.origins.filter { it.locator == "/" } +
+            projectedEntities.map { it.origin } + projectedRelations.map { it.origin } +
+            projectedDeclarations.map { it.origin } + projectedDefinitions.map { it.origin } +
+            evidenceFacts.buildEvidence.mapNotNull { it.origin } + uncertainty.mapNotNull { it.origin }).toSet()
+        return RepairEvidenceFacts(
+            origins = origins.toList(), entities = projectedEntities, relations = projectedRelations,
+            declarations = projectedDeclarations, definitions = projectedDefinitions,
+            buildEvidence = evidenceFacts.buildEvidence,
+            uncertainties = uncertainty,
+        )
     }
 
     fun changedModules(paths: Collection<String>): List<String> =
@@ -897,6 +1046,21 @@ internal class ModuleRepairIndex private constructor(
             "repair source input set changed after the dependency index was created"
         }
         return captureSourceSnapshot(projectRoot, observedPaths, budget, profile)
+    }
+
+    internal fun verifyEvidenceUnchanged() {
+        profile.verifyEvidenceUnchanged(projectRoot, budget, admittedLayout)
+    }
+
+    internal fun verifyFailureOwnership(evidence: RepairDiagnosticEvidence) {
+        if (evidence.attributionBasis != RepairDiagnosticAttributionBasis.PROFILE_BOUND_MODULES) return
+        val observed = boundFailureOwnership()
+        require(observed.moduleIds == evidence.selectedModuleIds &&
+            observed.evidenceOrigin == evidence.ownershipEvidenceOrigin &&
+            (observed.includesSharedContext || evidence.matchedSourcePaths.any { it in sharedInvalidationPaths }) ==
+                evidence.includesSharedContext) {
+            "repair profile-bound diagnostic evidence changed after context selection"
+        }
     }
 
     internal fun belongsTo(root: Path): Boolean = projectRoot == root.toAbsolutePath().normalize()
@@ -1030,6 +1194,7 @@ internal class ModuleRepairIndex private constructor(
         return RepairFailureOwnership(
             moduleIds = evidence.moduleIds,
             includesSharedContext = evidence.includesSharedContext,
+            evidenceOrigin = evidence.evidenceOrigin,
         )
     }
 
@@ -1268,6 +1433,7 @@ internal class ModuleRepairIndex private constructor(
                 appendJoined(behaviorRoots)
                 append('\n')
             }
+            profile.verifyEvidenceUnchanged(root, budget, layout)
             val verifiedSnapshot = captureSourceSnapshot(root, sourcePaths, budget, profile, sourceView)
             require(revisionSha256(verifiedSnapshot) == revisionSha256(snapshot)) {
                 "repair source inputs changed while dependency evidence was indexed"
@@ -1290,6 +1456,8 @@ internal class ModuleRepairIndex private constructor(
                     behaviorRootModulesCandidate = behaviorRoots,
                     sharedContextPathsCandidate = layout.sharedContextPaths.toSet(),
                     sharedInvalidationPathsCandidate = layout.sharedInvalidationPaths.toSet(),
+                    evidenceFactsCandidate = layout.evidenceFacts,
+                    layoutCandidate = layout,
                     indexSha256Candidate = canonicalIndexSha256,
                     sourceRevisionSha256Candidate = revisionSha256(snapshot),
                 )
@@ -2620,12 +2788,47 @@ internal class ModuleRevisionGraph private constructor(
             "reopen the revision graph before selecting context for a newly accepted head"
         }
         val selected = index.select(failureKind, diagnosticHint)
-        if (state.provisionalHeadId == null) selected.deepFrozenCopy() else {
+        val boundSelection = if (state.provisionalHeadId == null) selected.deepFrozenCopy() else {
             val sources = sourcesAt(workingHeadId())
             val bytes = selected.readablePaths.fold(0L) { total, path -> Math.addExact(total, sources.getValue(path).bytes) }
             require(bytes <= state.budget.maximumContextBytes && bytes <= state.budget.maximumStagingBytes)
-            selected.copy(totalBytes = bytes, sourceRevisionSha256 = revisionSha256(sources.values)).deepFrozenCopy()
+            val workingRevision = revisionSha256(sources.values)
+            selected.copy(
+                totalBytes = bytes,
+                sourceRevisionSha256 = workingRevision,
+                diagnosticEvidence = selected.diagnosticEvidence?.withSubjectSourceRevision(workingRevision),
+            ).deepFrozenCopy()
         }
+        val workingRevision = revisionSha256(sourcesAt(workingHeadId()).values)
+        val head = state.nodes.single { it.id == state.headId }
+        val accepted = state.fullyAcceptedHeadId?.let { id -> state.nodes.single { it.id == id } }
+        val uncertainties = contextEvidenceUncertainties(boundSelection, workingRevision)
+        val snapshot = RepairEvidenceSnapshot(
+            profileId = index.profileId,
+            profileSha256 = index.profileSha256,
+            reconstructionDescriptorSha256 = index.profile.reconstructionProfile()?.sha256,
+            indexSha256 = index.indexSha256,
+            indexBasisSourceRevisionSha256 = index.sourceRevisionSha256,
+            workingRevisionSha256 = workingRevision,
+            graphHeadId = state.headId,
+            graphHeadSha256 = head.sourceRevisionSha256,
+            graphHeadStatus = head.status.name,
+            fullyAcceptedHeadId = accepted?.id,
+            fullyAcceptedHeadSha256 = accepted?.sourceRevisionSha256,
+            regressionCorpusSha256 = state.regressionCorpusSha256,
+            staticFacts = boundSelection.evidenceFacts,
+            selectedEntityIds = boundSelection.evidenceFacts.entities.filter { it.kind != RepairEvidenceEntityKind.MODULE }.map { it.id },
+            behaviorCases = state.retainedRegressionInputs.map { input ->
+                RepairBehaviorCaseEvidence(input.id, behaviorInputSha256(input), state.regressionCorpusSha256)
+            },
+            diagnosticEvidence = requireNotNull(boundSelection.diagnosticEvidence),
+            omittedEntityCount = (index.semanticEvidenceEntityCount - boundSelection.evidenceFacts.entities.count { it.kind != RepairEvidenceEntityKind.MODULE }).coerceAtLeast(0),
+            omittedRecordCounts = index.omittedEvidenceRecordCounts(boundSelection),
+            diagnosticHintSha256 = boundSelection.diagnosticHintSha256,
+            maximumCanonicalBytes = minOf(state.budget.maximumIndexEvidenceBytes, state.budget.maximumRequestBytes),
+            uncertainties = uncertainties,
+        )
+        boundSelection.copy(evidenceSnapshot = snapshot).deepFrozenCopy()
     }
 
     @Synchronized
@@ -2634,12 +2837,68 @@ internal class ModuleRevisionGraph private constructor(
         require(context.indexSha256 == index.indexSha256) {
             "repair dependency evidence changed after context selection"
         }
+        index.verifyEvidenceUnchanged()
+        index.verifyFailureOwnership(requireNotNull(context.diagnosticEvidence))
+        val evidence = requireNotNull(context.evidenceSnapshot) { "repair evidence snapshot is missing" }
         requireCurrentHead()
         val observedRevision = revisionSha256(sourcesAt(workingHeadId()).values)
         require(context.sourceRevisionSha256 == observedRevision) {
             "repair sources changed after context selection"
         }
+        val head = state.nodes.single { it.id == state.headId }
+        val accepted = state.fullyAcceptedHeadId?.let { id -> state.nodes.single { it.id == id } }
+        require(evidence.profileId == index.profileId && evidence.profileSha256 == index.profileSha256 &&
+            evidence.reconstructionDescriptorSha256 == index.profile.reconstructionProfile()?.sha256 &&
+            evidence.indexSha256 == index.indexSha256 && evidence.indexBasisSourceRevisionSha256 == index.sourceRevisionSha256 &&
+            evidence.workingRevisionSha256 == observedRevision && evidence.graphHeadId == state.headId &&
+            evidence.graphHeadSha256 == head.sourceRevisionSha256 && evidence.graphHeadStatus == head.status.name &&
+            evidence.fullyAcceptedHeadId == accepted?.id && evidence.fullyAcceptedHeadSha256 == accepted?.sourceRevisionSha256 &&
+            evidence.regressionCorpusSha256 == state.regressionCorpusSha256 &&
+            evidence.diagnosticEvidence == context.diagnosticEvidence &&
+            evidence.diagnosticEvidence.subjectSourceRevisionSha256 == observedRevision &&
+            (evidence.diagnosticEvidence.ownershipEvidenceSourceRevisionSha256 == null ||
+                evidence.diagnosticEvidence.ownershipEvidenceSourceRevisionSha256 == index.sourceRevisionSha256) &&
+            evidence.diagnosticEvidence.hintSha256 == context.diagnosticHintSha256 &&
+            evidence.diagnosticEvidence.selectedModuleIds == context.seedModules &&
+            evidence.diagnosticEvidence.matchedSourcePaths.all { it in index.sourcePaths } &&
+            context.evidenceFacts == evidence.staticFacts &&
+            evidence.staticFacts == index.expectedEvidenceFacts(context) &&
+            evidence.omittedRecordCounts == index.omittedEvidenceRecordCounts(context) &&
+            evidence.selectedEntityIds == evidence.staticFacts.entities.filter { it.kind != RepairEvidenceEntityKind.MODULE }.map { it.id }.distinct().sorted() &&
+            evidence.omittedEntityCount == (index.semanticEvidenceEntityCount - evidence.selectedEntityIds.size).coerceAtLeast(0) &&
+            evidence.behaviorCases == state.retainedRegressionInputs.map { input ->
+                RepairBehaviorCaseEvidence(input.id, behaviorInputSha256(input), state.regressionCorpusSha256)
+            }.sortedBy { it.caseId } &&
+            evidence.diagnosticHintSha256 == context.diagnosticHintSha256 &&
+            evidence.maximumCanonicalBytes == minOf(state.budget.maximumIndexEvidenceBytes, state.budget.maximumRequestBytes) &&
+            evidence.uncertainties == contextEvidenceUncertainties(context, observedRevision)) {
+            "repair semantic evidence snapshot is stale or mismatched"
+        }
+        val maximum = minOf(state.budget.maximumIndexEvidenceBytes, state.budget.maximumRequestBytes)
+        require(evidence.sha256(maximum).matches(REPAIR_BLOB_DIGEST))
     }
+
+    private fun contextEvidenceUncertainties(
+        context: RepairContextSelection,
+        workingRevision: String,
+    ): List<RepairEvidenceUncertainty> = buildList {
+        addAll(context.evidenceFacts.uncertainties)
+        if (workingRevision != index.sourceRevisionSha256) {
+            add(RepairEvidenceUncertainty(
+                "working-revision", "index-basis", RepairEvidenceUncertaintyReason.INDEX_BASIS_DIFFERS_FROM_WORKING_REVISION,
+            ))
+        }
+        if (context.diagnosticHintSha256 != null) {
+            add(RepairEvidenceUncertainty(
+                "caller-diagnostic-hint", "diagnostic-attribution", RepairEvidenceUncertaintyReason.AMBIGUOUS_ATTRIBUTION,
+            ))
+        }
+        state.retainedRegressionInputs.forEach { input ->
+            add(RepairEvidenceUncertainty(
+                input.id, "observed-outcome", RepairEvidenceUncertaintyReason.EVIDENCE_NOT_CAPTURED,
+            ))
+        }
+    }.distinct().sortedWith(compareBy({ it.subject }, { it.category }, { it.reason.name }))
 
     /** Capture the complete selected staging context before any durable attempt exists. */
     @Synchronized
@@ -2675,6 +2934,8 @@ internal class ModuleRevisionGraph private constructor(
         require(revisionSha256(sourcesAt(workingHeadId()).values) == context.sourceRevisionSha256) {
             "repair sources changed while the staging context was captured"
         }
+        index.verifyEvidenceUnchanged()
+        index.verifyFailureOwnership(requireNotNull(context.diagnosticEvidence))
         Collections.unmodifiableMap(
             captured.mapValuesTo(TreeMap<String, ByteArray>()) { (_, bytes) -> bytes.copyOf() },
         )
@@ -4548,6 +4809,18 @@ internal class ModuleRevisionGraph private constructor(
             }
         }
     }
+}
+
+private fun behaviorInputSha256(input: ProcessInput): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    fun update(bytes: ByteArray) {
+        digest.update(ByteBuffer.allocate(Int.SIZE_BYTES).putInt(bytes.size).array())
+        digest.update(bytes)
+    }
+    update(input.id.toByteArray(Charsets.UTF_8))
+    input.args.forEach { update(it.toByteArray(Charsets.UTF_8)) }
+    update(input.stdin)
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 private fun recoveryBinding(index: ModuleRepairIndex): RepairRecoveryBinding = RepairRecoveryBinding(

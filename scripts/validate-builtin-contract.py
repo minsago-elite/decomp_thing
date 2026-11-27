@@ -10,10 +10,10 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED = {
-    "decompengine.agent.AgentExecutionContractTest": 10,
+    "decompengine.agent.AgentExecutionContractTest": 11,
     "decompengine.builtin.BuiltinAgentHarnessTest": 16,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
-    "decompengine.builtin.BuiltinCapturedContextToolsTest": 6,
+    "decompengine.builtin.BuiltinCapturedContextToolsTest": 7,
     "decompengine.builtin.BuiltinContextPackageTest": 5,
     "decompengine.builtin.BuiltinJournalTest": 11,
     "decompengine.builtin.BuiltinCheckpointTest": 11,
@@ -22,6 +22,9 @@ EXPECTED = {
     "decompengine.builtin.BuiltinInvocationArchiveTest": 8,
     "decompengine.builtin.BuiltinTerminalToolsTest": 7,
     "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
+    "decompengine.repair.RepairEvidenceIndexTest": 6,
+    "decompengine.repair.ModuleRevisionGraphTest": 172,
+    "decompengine.project.ProfiledGeneratedCRepairIndexTest": 17,
 }
 
 
@@ -34,7 +37,9 @@ def main():
     environment = dict(os.environ, DECOMP_REQUIRE_LIVE_ACP_CONTRACT="1")
     result = subprocess.run(
         [str(ROOT / "gradlew"), "--no-daemon", "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
-         "--tests", "decompengine.agent.*", "--console=plain"], cwd=ROOT, env=environment,
+         "--tests", "decompengine.agent.*", "--tests", "decompengine.repair.RepairEvidenceIndexTest",
+         "--tests", "decompengine.repair.ModuleRevisionGraphTest",
+         "--tests", "decompengine.project.ProfiledGeneratedCRepairIndexTest", "--console=plain"], cwd=ROOT, env=environment,
     )
     suites, failures = [], []
     for name, expected in EXPECTED.items():
@@ -60,7 +65,7 @@ def main():
     if not source_clean:
         failures.append("Source worktree is not clean")
     verdict = {
-        "schemaVersion": 1, "corpus": "builtin-core-contract-v9",
+        "schemaVersion": 1, "corpus": "builtin-core-contract-v18",
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "requiredHost": True, "sourceClean": source_clean, "forcedTestExecution": True, "gradleExitCode": result.returncode,
         "passed": result.returncode == 0 and not failures,

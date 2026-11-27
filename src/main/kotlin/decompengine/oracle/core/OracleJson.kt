@@ -46,7 +46,7 @@ data class StrictJsonLimits(
     private companion object {
         const val HARD_MAXIMUM_BYTES = 64 * 1024 * 1024
         const val HARD_MAXIMUM_DEPTH = 256
-        const val HARD_MAXIMUM_NODES = 1_000_000
+        const val HARD_MAXIMUM_NODES = HARD_MAXIMUM_BYTES
         const val HARD_MAXIMUM_NUMBER_CHARACTERS = 4096
     }
 }

@@ -2,10 +2,17 @@ package decompengine.builtin
 
 import decompengine.agent.*
 import decompengine.builtin.provider.*
+import decompengine.project.GeneratedCRepairIndexProfile
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredProgramModel
+import decompengine.project.SourceTreeGenerator
 import decompengine.repair.*
 import kotlinx.serialization.json.*
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.time.Duration
+import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class BuiltinCapturedContextToolsTest {
@@ -66,6 +73,62 @@ class BuiltinCapturedContextToolsTest {
         assertTrue(boundedPage.getValue("text").jsonPrimitive.content.length < 4095)
         assertTrue(boundedPage.getValue("nextOffset").jsonPrimitive.int > 0)
         assertTrue(bounded.execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace"))), control(request)).content.toByteArray().size <= 1024)
+    }
+
+    @Test fun `repair evidence snapshot hash and uncertainty survive immutable evidence pagination`() {
+        val project = createTempDirectory("builtin-repair-evidence-roundtrip-")
+        SourceTreeGenerator.generate(
+            RecoveredProgramModel(
+                inputSha256 = "a".repeat(64),
+                functions = listOf(RecoveredFunction("fn_only", "only", 0x1000UL, "int only(void)")),
+            ),
+            project,
+            profile = GeneratedCMakeReconstructionProfile.descriptor,
+        )
+        val sourcePath = GeneratedCRepairIndexProfile.resolve(project, RepairResourceBudget()).sourcePaths.first { it.endsWith(".c") }
+        val contextJson = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val selected = graph.selectContext("compile", "$sourcePath: error: roundtrip")
+            graph.requireContextBinding(selected)
+            selected.toContextJson()
+        }
+        val expectedSnapshotSha256 = Json.parseToJsonElement(contextJson).jsonObject
+            .getValue("evidenceSnapshotSha256").jsonPrimitive.content
+        val request = request(listOf(AgentContextInput(
+            "dependency-indexed-repair-context", contextJson,
+            mediaType = "application/json", description = "revision-bound repair context",
+        )))
+        val tools = BuiltinCapturedContextTools(request, emptyList(), 16_384, 10)
+        val listed = Json.parseToJsonElement(
+            tools.execute(call("list_evidence"), control(request)).content,
+        ).jsonObject.getValue("evidence").jsonArray.single().jsonObject
+        val advertisedDigest = listed.getValue("sha256").jsonPrimitive.content
+        val advertisedBytes = listed.getValue("utf8Bytes").jsonPrimitive.int
+        val pages = mutableListOf<String>()
+        var offset = 0
+        while (true) {
+            val page = Json.parseToJsonElement(tools.execute(
+                call("read_evidence", mapOf("id" to JsonPrimitive("dependency-indexed-repair-context")), offset),
+                control(request),
+            ).content).jsonObject
+            pages += page.getValue("text").jsonPrimitive.content
+            val next = page.getValue("nextOffset")
+            if (next == JsonNull) break
+            offset = next.jsonPrimitive.int
+            assertEquals(advertisedDigest, page.getValue("sha256").jsonPrimitive.content)
+        }
+        val reconstructed = pages.joinToString("")
+        val digest = MessageDigest.getInstance("SHA-256").digest(reconstructed.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val transported = Json.parseToJsonElement(reconstructed).jsonObject
+        val snapshot = transported.getValue("evidenceSnapshot").jsonObject
+        assertEquals(contextJson, reconstructed)
+        assertEquals(advertisedDigest, digest)
+        assertEquals(advertisedBytes, reconstructed.toByteArray(Charsets.UTF_8).size)
+        assertEquals(expectedSnapshotSha256,
+            transported.getValue("evidenceSnapshotSha256").jsonPrimitive.content)
+        assertTrue(expectedSnapshotSha256.matches(Regex("[0-9a-f]{64}")))
+        assertTrue(snapshot.getValue("uncertainties").jsonArray.isNotEmpty())
+        assertEquals(listOf("list_evidence") + List(pages.size) { "read_evidence" }, tools.audit().map { it.tool })
     }
 
     @Test fun `invalid paths offsets and unknown evidence fail without host lookup`() {

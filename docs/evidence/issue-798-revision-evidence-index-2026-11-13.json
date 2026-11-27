@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "corpus": "builtin-core-contract-v18",
+  "commit": "1c9f5913d1efcd1bcab625d3d4e8f77234b7984e",
+  "requiredHost": true,
+  "sourceClean": true,
+  "forcedTestExecution": true,
+  "gradleExitCode": 0,
+  "passed": true,
+  "realProviderQualified": false,
+  "workflowReleaseQualified": false,
+  "qualification": {
+    "scope": "local built-in core contract for the revision-bound evidence index, including admitted long regression IDs, generated-C target/source membership, and missing-entrypoint uncertainty",
+    "sourceTreeOid": "a28ae902b5d0c0deb641d21a131f6be11f4e3bb0",
+    "workingDirectory": "repository root",
+    "command": "GRADLE_OPTS='-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx4096m' PATH=\"$PWD/build/frontend-node-24.20.0-npm-11.19.0.BpJuvR/node/bin:$PATH\" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=no /usr/bin/python3.14 scripts/validate-builtin-contract.py",
+    "environment": {
+      "os": "Linux 7.2.12-gentoo-dist-hardened x86_64",
+      "java": "OpenJDK 21.0.12.1 LTS",
+      "gradle": "9.6.1",
+      "python": "3.14.9",
+      "node": "24.20.0",
+      "npm": "11.19.0"
+    },
+    "untrackedInputsPresent": true,
+    "sourceCleanMeaning": "tracked source worktree was clean; status output suppressed pre-existing untracked artifacts",
+    "reviewFixCoverage": [
+      "module fact IDs and program entity IDs remain distinct when their text collides",
+      "retained regression IDs over 4,112 characters, admitted by the corpus budget, survive behavior-case and uncertainty projection through context selection",
+      "generated-C target identities map only renderer-owned module and entrypoint sources; build-definition/artifact paths are separate and target dependency edges remain explicitly unknown",
+      "when paired plan/model evidence implies a generated entrypoint but the expected file is absent, target membership retains the expected path and emits source-availability uncertainty; an unlisted path is excluded when the model has main"
+    ],
+    "totalTests": 318,
+    "suiteCount": 15
+  },
+  "suites": [
+    {
+      "suite": "decompengine.agent.AgentExecutionContractTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "6966dcfd46a651d071eecfde7daa9b1a14afc4d939932eb01a3e74148d16d541",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.agent.AgentExecutionContractTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinAgentHarnessTest",
+      "tests": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "91153a36e527e5c52fcc6bb06048e514d4f9a133fe6c8dea17dcbff0b114ee59",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinAgentHarnessTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinFilesystemToolsTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "423e4827ee866e81e1b29890069825bf6074317c44cf3b851a9316cb5b4bbda3",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinFilesystemToolsTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinCapturedContextToolsTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "425af2d46f1a310ad17ea0b02bfd1c90d76901236069490e7c7cb5f57e58d8bb",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCapturedContextToolsTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinContextPackageTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "1c1cc0bf71c6e7a030e14cba759cc11cb98be0546d316d270e6878adf12d4212",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinContextPackageTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinJournalTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "ada6e009201687868c1cb9457751eda2b217777e66ee418be216c4bd04cda051",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinJournalTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinCheckpointTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "c98193c6484bb384541dc31a6bbea409dd1dab97402eb63cf4f7012820c477eb",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCheckpointTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinCapturedResumeTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "e9d47d069de5efa9ae95a3bd67b9165690b1bf5b686890463e88d5f713fbedee",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinCapturedResumeTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinSourceStoreTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "c22e4525b781ab13ac62f5b7192d4fc57fd57a7c5d512466ced06f9f684633a7",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinSourceStoreTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinInvocationArchiveTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "5aeb7aed53fa7e80b628045835255f7046564a6f431ea08a6654f3aef4ffc2fe",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinInvocationArchiveTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.BuiltinTerminalToolsTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "e1cedb7f281c31f6c74e55fd626328861ecef9faa35d2cf753a27f4bff4d97e0",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.BuiltinTerminalToolsTest.xml"
+    },
+    {
+      "suite": "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest",
+      "tests": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "af2ae58d0a47b659963f4984fcd13127ead619a8a4333b728569f15f5a1d9ea4",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.builtin.provider.OpenAiCompatibleModelProviderTest.xml"
+    },
+    {
+      "suite": "decompengine.repair.RepairEvidenceIndexTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "39b5399f05c5fe74389508ccf73ab8218b8d8fc2096436d72ded80d4cfe1ae39",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.repair.RepairEvidenceIndexTest.xml"
+    },
+    {
+      "suite": "decompengine.repair.ModuleRevisionGraphTest",
+      "tests": 172,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "269ec79b5baed507c13b67fb9b280a2c4cb719a55c0c890cb104542f43a24183",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.repair.ModuleRevisionGraphTest.xml"
+    },
+    {
+      "suite": "decompengine.project.ProfiledGeneratedCRepairIndexTest",
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "22d34265f7d12f8042b7b4c40418d0a9fa84ffddc31d152d7bcf5ae1ac7bf214",
+      "junitXmlPath": "docs/evidence/issue-798-revision-evidence-index-2026-11-13-junit/TEST-decompengine.project.ProfiledGeneratedCRepairIndexTest.xml"
+    }
+  ],
+  "failures": []
+}
