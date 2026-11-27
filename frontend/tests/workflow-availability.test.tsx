@@ -129,3 +129,29 @@ it('renders general report text literally and replaces it when its declared scop
   expect(repair.getByText('SELECTED_HARNESS_NOT_READY')).toBeTruthy();
   expect(view.queryByRole('button')).toBeNull();
 });
+
+function launchSnapshot(): RuntimeSnapshot {
+  const { data } = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap-workflow-launch.json'), 'utf8')) as { data: Bootstrap };
+  const { applicationBuildId, uiBuildId, readiness, capabilities, limits, runtime } = data;
+  return { applicationBuildId, uiBuildId, readiness, capabilities, limits, runtime };
+}
+
+it('shows job input and tool requirements alongside each workflow option in the session report', () => {
+  const view = render(<WorkflowAvailability runtime={launchSnapshot()} job={{ acceptedRevisionId: null }} />);
+  const workflow = (name: string) => within(view.getByRole('heading', { name }).closest('li')!);
+  expect(workflow('Exploration').getByText('sandbox, angr')).toBeTruthy();
+  expect(workflow('Exploration').getByText('This workflow uses the uploaded binary directly.')).toBeTruthy();
+  expect(workflow('Reconstruction').getByText('HARNESS_NOT_CONFIGURED')).toBeTruthy();
+  expect(workflow('Repair').getByText(/A completed attempt may have a usable revision/)).toBeTruthy();
+  expect(workflow('Build').getByText(/did not report the input or tools/)).toBeTruthy();
+  expect(workflow('Validation').getByText(/No capability for this workflow/)).toBeTruthy();
+  expect(view.queryByRole('button')).toBeNull();
+});
+
+it('reports an accepted revision without guaranteeing availability of its retained source', () => {
+  const view = render(<WorkflowAvailability runtime={launchSnapshot()} job={{ acceptedRevisionId: 'revision_accepted_1' }} />);
+  const repair = within(view.getByRole('heading', { name: 'Repair' }).closest('li')!);
+  expect(repair.getByText('revision_accepted_1').parentElement?.textContent).toContain('The server checks its retained source');
+  view.rerender(<WorkflowAvailability runtime={snapshot([])} job={{ acceptedRevisionId: 'revision_accepted_1' }} />);
+  expect(view.queryByText('revision_accepted_1')).toBeNull();
+});
