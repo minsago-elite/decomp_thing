@@ -46,6 +46,175 @@ const longLine = `static const unsigned char embedded_table_with_a_long_identifi
 const sourceText = ['/* Synthetic audit source: long unbroken lines must stay inside the scroll region. */',
   '#include <stdint.h>', longLine, `const char *path = "${'/very/deep/source/tree'.repeat(24)}";`,
   ...Array.from({ length: 40 }, (_, index) => `int f${index}(int value) { return value * ${index} + 0x${(index * 4099).toString(16)}; }`), ''].join('\n');
+const secondSourceText = ['/* Second audit source: rotates the opened file identity between samples. */',
+  'int audit_second_source(int value) { return value ^ 0x5a; }', ''].join('\n');
+const sourceFileContract = (fileId, displayName, text) => {
+  const bytes = Buffer.from(text, 'utf8');
+  const lines = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n');
+  return Object.freeze({ fileId, displayName, sizeBytes: String(bytes.length), sha256: createHash('sha256').update(bytes).digest('hex'),
+    rows: lines.length, firstRow: lines[0], lastRow: lines.at(-1) });
+};
+/**
+ * Source-file open timing (#623): directory click into file metadata, then the explicit preview
+ * action into the first bounded chunk. Identity comes from this contract, not from the report.
+ */
+export const fileOpenContract = Object.freeze({
+  samples: 50, jobId: '1234567890abcdef1234567890abcdef', runId: 'run_example_1', revisionId: 'revision_1', directoryId: 'root',
+  sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64), offset: '0', maxBytes: '65536',
+  returnDirectory: 'Return to source directory', loadingMetadata: 'Loading recorded file metadata…', openPreview: 'Open source preview', loadingRange: 'Loading source range…',
+  deadlineMs: 10000,
+  files: Object.freeze([
+    sourceFileContract(`file_0_${'a'.repeat(64)}`, 'embedded_tables_with_long_lines.c', sourceText),
+    sourceFileContract(`file_2_${'b'.repeat(64)}`, 'audit_second_source.c', secondSourceText),
+  ]),
+});
+const fileOpenIdentityKeys = ['samples', 'jobId', 'runId', 'revisionId', 'directoryId', 'sourceSha256', 'metadataVersion', 'offset', 'maxBytes'];
+export const fileOpenPin = `?sourceSha256=${fileOpenContract.sourceSha256}&metadataVersion=${fileOpenContract.metadataVersion}`;
+const fileOpenApi = fileId => `/jobs/${fileOpenContract.jobId}/runs/${fileOpenContract.runId}/revisions/${fileOpenContract.revisionId}/source-files/${fileId}`;
+export const fileOpenChunkQuery = new URLSearchParams({ offset: fileOpenContract.offset, maxBytes: fileOpenContract.maxBytes,
+  metadataVersion: fileOpenContract.metadataVersion }).toString();
+/** Identity of a fulfilled file-metadata or chunk response, without the chunk text. */
+export function sourceResponseIdentity(data) {
+  if (!data || typeof data !== 'object') return null;
+  const chunk = typeof data.text === 'string';
+  return { kind: chunk ? 'chunk' : 'file', binding: data.binding ?? null, fileId: chunk ? data.fileId : data.item?.fileId ?? null,
+    sourceSha256: data.sourceSha256 ?? null, metadataVersion: data.metadataVersion ?? null,
+    sha256: chunk ? data.sha256 : data.item?.sha256 ?? null, sizeBytes: chunk ? data.sizeBytes : data.item?.sizeBytes ?? null,
+    ...(chunk ? { offsetBytes: data.offsetBytes, lengthBytes: data.lengthBytes, completeFile: data.completeFile,
+      textSha256: createHash('sha256').update(data.text).digest('hex') } : {}) };
+}
+
+/** Identity the contract expects for one file's metadata or chunk response. */
+export function expectedSourceResponseIdentity(kind, file) {
+  const c = fileOpenContract;
+  return { kind, binding: { jobId: c.jobId, runId: c.runId, revisionId: c.revisionId }, fileId: file.fileId,
+    sourceSha256: c.sourceSha256, metadataVersion: c.metadataVersion, sha256: file.sha256, sizeBytes: file.sizeBytes,
+    ...(kind === 'chunk' ? { offsetBytes: c.offset, lengthBytes: file.sizeBytes, completeFile: true, textSha256: file.sha256 } : {}) };
+}
+/** Compact report form of a response identity: a digest of its canonical JSON. */
+export const sourceResponseDigest = identity => `sha256:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+const sha256Json = value => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
+const sourceReadCommitment = entry => sha256Json(canonicalSourceRead(entry)).slice('sha256:'.length, 'sha256:'.length + 32);
+const canonicalSourceRead = entry => ({ method: entry?.method, path: entry?.path, status: entry?.status, query: entry?.query,
+  fulfillmentSucceeded: entry?.fulfillmentSucceeded, response: entry?.response });
+const renderedOpenKeys = ['renderedFileId', 'pageSearch', 'renderedName', 'renderedSha256', 'focus', 'previewOpen'];
+const renderedPreviewKeys = ['ariaBusy', 'focus', 'renderedRows', 'renderedBytes', 'renderedTextSha256'];
+const renderedFileOpenDetails = sample => ({ fileId: sample?.fileId,
+  open: Object.fromEntries(renderedOpenKeys.map(key => [key, sample?.open?.[key]])),
+  preview: Object.fromEntries(renderedPreviewKeys.map(key => [key, sample?.preview?.[key]])) });
+/** The rendered details and source requests a clean run must produce, from the contract alone. */
+function expectedFileOpenSample(index) {
+  const file = fileOpenContract.files[index % fileOpenContract.files.length];
+  const read = kind => ({ method: 'GET', path: kind === 'file' ? fileOpenApi(file.fileId) : `${fileOpenApi(file.fileId)}/chunk`, status: 200,
+    query: kind === 'file' ? '' : fileOpenChunkQuery, fulfillmentSucceeded: true, response: expectedSourceResponseIdentity(kind, file) });
+  return { rendered: { fileId: file.fileId,
+    open: { renderedFileId: file.fileId, pageSearch: fileOpenPin, renderedName: file.displayName, renderedSha256: file.sha256, focus: 'main-heading', previewOpen: false },
+    preview: { ariaBusy: 'false', focus: 'source-preview-title', renderedRows: file.rows, renderedBytes: Number(file.sizeBytes), renderedTextSha256: file.sha256 } },
+    requests: [read('file'), read('chunk')] };
+}
+
+/**
+ * In-page timed action. `control` locates the element to click; `observe` returns
+ * { signal: 'loading' | 'data' | null, details }. A signal counts only when the following
+ * animation frame observes the same signal and details, so transient pre-paint states are not
+ * timed. The promise rejects at the hard deadline.
+ */
+export function timedPhaseScript({ control, observe, deadlineMs = fileOpenContract.deadlineMs }) {
+  return `(async () => {
+    const visible = ${filterElementVisible.toString()};
+    const control = (${control})();
+    if (!control || typeof control.click !== 'function' || control.disabled) throw new Error('timed phase control is missing');
+    const observe = ${observe};
+    const started = performance.now();
+    let feedbackMs = null; let feedbackSignal = null; let dataMs = null; let details = null;
+    control.click();
+    return await new Promise((resolve, reject) => {
+      const deadline = started + ${Number(deadlineMs)};
+      const check = () => {
+        if (performance.now() > deadline) { reject(new Error('timed phase deadline')); return; }
+        const first = observe();
+        if (first.signal === null) { requestAnimationFrame(check); return; }
+        requestAnimationFrame(() => {
+          const presented = observe();
+          if (presented.signal === first.signal && JSON.stringify(presented.details ?? null) === JSON.stringify(first.details ?? null)) {
+            const elapsed = performance.now() - started;
+            if (feedbackMs === null) { feedbackMs = elapsed; feedbackSignal = presented.signal; }
+            if (presented.signal === 'data' && dataMs === null) { dataMs = elapsed; details = presented.details; }
+          }
+          if (feedbackMs !== null && dataMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, details });
+          else if (performance.now() > deadline) reject(new Error('timed phase deadline'));
+          else requestAnimationFrame(check);
+        });
+      };
+      requestAnimationFrame(check);
+    });
+  })()`;
+}
+
+/** Phase A: directory link to file metadata. The preview must stay closed and no chunk may load. */
+export function fileOpenMetadataPhase(file) {
+  const c = fileOpenContract;
+  return timedPhaseScript({
+    control: `() => {
+      const link = [...document.querySelectorAll('main ul.job-list a')].find(element =>
+        new URL(element.href, location.href).pathname.endsWith(${JSON.stringify(`/source-files/${file.fileId}`)}));
+      if (link) link.focus();
+      return link && document.activeElement === link ? link : null;
+    }`,
+    observe: `() => {
+      const main = document.querySelector('main');
+      if (!main || !location.pathname.endsWith(${JSON.stringify(`/source-files/${file.fileId}`)})) return { signal: null };
+      const loading = [...main.querySelectorAll('p[role="status"]')].find(element =>
+        element.textContent.trim() === ${JSON.stringify(c.loadingMetadata)} && visible(element));
+      const name = main.querySelector('h2');
+      const digest = [...main.querySelectorAll('dl.job-facts dd code')].find(element => element.textContent.trim() === ${JSON.stringify(file.sha256)});
+      const open = [...main.querySelectorAll('button')].find(element => element.textContent.trim() === ${JSON.stringify(c.openPreview)});
+      const populated = !loading && visible(name) && name.textContent.trim() === ${JSON.stringify(file.displayName)} && visible(digest)
+        && open && !open.disabled && open.getClientRects().length > 0 && !main.querySelector('[role="alert"]')
+        && !main.querySelector('section.source-preview') && document.activeElement === main.querySelector('h1');
+      if (populated) return { signal: 'data', details: { renderedFileId: location.pathname.split('/').at(-1), pageSearch: location.search,
+        renderedName: name.textContent.trim(), renderedSha256: digest.textContent.trim(), focus: 'main-heading', previewOpen: false } };
+      return { signal: loading ? 'loading' : null };
+    }`,
+  });
+}
+
+/** Phase B: the explicit preview action to the first bounded, focused, non-busy chunk. */
+export function fileOpenPreviewPhase(file) {
+  const c = fileOpenContract;
+  return timedPhaseScript({
+    control: `() => {
+      const button = [...document.querySelectorAll('main button')].find(element => element.textContent.trim() === ${JSON.stringify(c.openPreview)});
+      if (button) button.focus();
+      return button && document.activeElement === button ? button : null;
+    }`,
+    observe: `() => {
+      const section = document.querySelector('main section.source-preview');
+      if (!section) return { signal: null };
+      const busy = section.getAttribute('aria-busy');
+      const loading = [...section.querySelectorAll('p[role="status"]')].find(element =>
+        element.textContent.trim() === ${JSON.stringify(c.loadingRange)} && visible(element));
+      const heading = section.querySelector('#source-preview-title');
+      const rows = [...section.querySelectorAll('.source-rows .source-row pre')];
+      const populated = !loading && busy === 'false' && visible(heading) && document.activeElement === heading
+        && rows.length === ${file.rows} && rows[0].getClientRects().length > 0
+        && rows[0].textContent === ${JSON.stringify(file.firstRow)} && rows.at(-1).textContent === ${JSON.stringify(file.lastRow)}
+        && !section.querySelector('[role="alert"]');
+      if (populated) return { signal: 'data', details: { ariaBusy: busy, focus: 'source-preview-title', renderedRows: rows.length } };
+      return { signal: loading && busy === 'true' ? 'loading' : null };
+    }`,
+  });
+}
+
+/** Untimed digest of the rendered preview rows, so the report binds content without retaining it. */
+export const renderedPreviewDigest = `(async () => {
+  const rows = [...document.querySelectorAll('main section.source-preview .source-rows .source-row pre')];
+  const text = rows.map(row => row.textContent).join('\\n') + '\\n';
+  const bytes = new TextEncoder().encode(text);
+  if (!globalThis.crypto?.subtle) return { renderedBytes: bytes.length, renderedTextSha256: null };
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return { renderedBytes: bytes.length, renderedTextSha256: [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
+})()`;
 
 /** Contract fixtures bound to one job, attempt and revision, with long names and lines. */
 export function auditFixtures(repo, buildId) {
@@ -70,15 +239,39 @@ export function auditFixtures(repo, buildId) {
   const selected = { jobId, runId, revisionId };
   const bound = (name, binding) => { const document = load(name); document.data.binding = binding; return document; };
   const directory = bound('revision-directory-root', selected);
-  const file = bound('revision-file-root', selected);
-  const bytes = Buffer.from(sourceText, 'utf8');
-  const sha256 = createHash('sha256').update(bytes).digest('hex');
-  Object.assign(file.data.item, { displayName: 'embedded_tables_with_long_lines.c', sizeBytes: String(bytes.length), sha256 });
-  const chunk = load('source-chunk-mid-line');
-  Object.assign(chunk.data, { binding: selected, fileId: file.data.item.fileId, sourceSha256: file.data.sourceSha256,
-    metadataVersion: file.data.metadataVersion, sha256, sizeBytes: String(bytes.length), offsetBytes: '0',
-    lengthBytes: String(bytes.length), nextOffsetBytes: null, completeFile: true, text: sourceText,
-    firstLine: '1', startsMidLine: false, endsMidLine: false });
+  const fileTemplate = bound('revision-file-root', selected);
+  const chunkTemplate = load('source-chunk-mid-line');
+  for (const [key, actual] of [['jobId', jobId], ['runId', runId], ['sourceSha256', directory.data.sourceSha256],
+    ['metadataVersion', directory.data.metadataVersion], ['sourceSha256', fileTemplate.data.sourceSha256],
+    ['metadataVersion', fileTemplate.data.metadataVersion], ['fileId', fileTemplate.data.item.fileId]]) {
+    const expected = key === 'fileId' ? fileOpenContract.files[0].fileId : fileOpenContract[key];
+    if (actual !== expected) throw new Error(`Browser-audit fixture ${key} ${actual} differs from the file-open contract ${expected}`);
+  }
+  // Two distinct files rotate the timed file identity; each has its own metadata, chunk and bytes.
+  const sourceFiles = new Map(fileOpenContract.files.map((contract, index) => {
+    const text = index === 0 ? sourceText : secondSourceText;
+    const bytes = Buffer.from(text, 'utf8');
+    const metadata = structuredClone(fileTemplate);
+    Object.assign(metadata.data.item, { fileId: contract.fileId, displayName: contract.displayName, sizeBytes: contract.sizeBytes, sha256: contract.sha256 });
+    const chunk = structuredClone(chunkTemplate);
+    Object.assign(chunk.data, { binding: selected, fileId: contract.fileId, sourceSha256: metadata.data.sourceSha256,
+      metadataVersion: metadata.data.metadataVersion, sha256: contract.sha256, sizeBytes: contract.sizeBytes, offsetBytes: '0',
+      lengthBytes: contract.sizeBytes, nextOffsetBytes: null, completeFile: true, text,
+      firstLine: '1', startsMidLine: false, endsMidLine: false });
+    return [contract.fileId, { metadata, chunk, bytes }];
+  }));
+  const file = sourceFiles.get(fileOpenContract.files[0].fileId).metadata;
+  const bytes = sourceFiles.get(fileOpenContract.files[0].fileId).bytes;
+  const fileItem = directory.data.items.find(item => item.kind === 'file');
+  directory.data.items = [...directory.data.items.filter(item => item.kind !== 'file'), ...fileOpenContract.files.map(contract => ({
+    ...fileItem, fileId: contract.fileId, displayName: contract.displayName, sizeBytes: contract.sizeBytes, sha256: contract.sha256,
+    declaredUtf8Text: true, declaredViewable: true }))];
+  // The SPA requires directories before files, files in code-unit name order, and exact counts.
+  directory.data.items.sort((left, right) => left.kind !== right.kind ? (left.kind === 'directory' ? -1 : 1)
+    : left.displayName < right.displayName ? -1 : left.displayName > right.displayName ? 1 : 0);
+  directory.data.totalChildren = directory.data.items.length;
+  directory.data.sourceFileCount = directory.data.items.reduce((count, item) => count + (item.kind === 'file' ? 1 : item.sourceFileCount), 0);
+  const sourceFileFrom = pathname => sourceFiles.get(pathname.split('/source-files/')[1]?.split('/')[0]);
   const bootstrap = load('bootstrap');
   Object.assign(bootstrap.data, { basePath: '/nested/', uiBuildId: buildId,
     sessionExpiresAt: new Date(Date.now() + 3_600_000).toISOString() });
@@ -111,7 +304,8 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/recover$`), () => ({ status: 201, document: retried }), 'POST'],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/cancel$`), () => ({ status: 202, document: cancelling }), 'POST'],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/content$`),
-      () => ({ status: 200, bytes, contentType: 'application/octet-stream' })],
+      (accept, query, pathname) => sourceFileFrom(pathname) ? { status: 200, bytes: sourceFileFrom(pathname).bytes, contentType: 'application/octet-stream' }
+        : error(404, 'NOT_FOUND')],
     [/^\/recovery$/, () => ok(load('recovery-empty'))],
     [/^\/jobs$/, (accept, query) => query === jobFilter.filteredQuery ? ok(filteredJobs)
       : query === null || query === jobFilter.unfilteredQuery ? ok(jobs) : error(404, 'NOT_FOUND')],
@@ -127,8 +321,10 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
-    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), () => ok(chunk)],
-    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), () => ok(file)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), (accept, query, pathname) => sourceFileFrom(pathname)
+      ? ok(sourceFileFrom(pathname).chunk) : error(404, 'NOT_FOUND')],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), (accept, query, pathname) => sourceFileFrom(pathname)
+      ? ok(sourceFileFrom(pathname).metadata) : error(404, 'NOT_FOUND')],
   ];
   const base = `/nested/jobs/${jobId}/runs/${runId}`;
   const api = `/jobs/${jobId}/runs/${runId}`;
@@ -175,10 +371,10 @@ export function auditFixtures(repo, buildId) {
   ];
   return {
     pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId,
-    jobFilter,
+    jobFilter, fileOpen: { ...fileOpenContract, directoryPath: `${base}/revisions/${revisionId}/sources/${fileOpenContract.directoryId}` },
     respond(method, pathname, accept, query = null) {
       const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
-      return route ? route[1](accept, query) : error(404, 'NOT_FOUND');
+      return route ? route[1](accept, query, pathname) : error(404, 'NOT_FOUND');
     },
   };
 }
@@ -564,6 +760,8 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       const evidence = { method: event.request.method, path: pathname, status: response.status };
       if (pathname === '/jobs') Object.assign(evidence, { query,
         responseJobIds: response.document?.data?.items?.map(item => item.jobId) ?? [], fulfillmentSucceeded: false });
+      const sourceRead = pathname.includes('/source-files/');
+      if (sourceRead) Object.assign(evidence, { query, response: sourceResponseIdentity(response.document?.data), fulfillmentSucceeded: false });
       if (event.request.method === 'POST') Object.assign(evidence, {
         idempotencyKey: headers['idempotency-key'] ?? null, ifMatch: headers['if-match'] ?? null,
         csrf: headers['x-csrf-token'] === fixtures.csrfToken, body: event.request.postData ?? null,
@@ -574,7 +772,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       void cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: response.status, body: body.toString('base64'),
         responseHeaders: [{ name: 'Content-Type', value: response.contentType ?? 'application/json; charset=utf-8' }, { name: 'X-Request-ID', value: requestId },
           { name: 'Cache-Control', value: 'no-store' }] }, tab.sessionId).then(() => {
-        if (pathname === '/jobs') evidence.fulfillmentSucceeded = true;
+        if (pathname === '/jobs' || sourceRead) evidence.fulfillmentSucceeded = true;
       }).catch(() => undefined);
     }, tab.sessionId);
     await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/*`, requestStage: 'Request' }] }, tab.sessionId);
@@ -864,18 +1062,60 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       requestStartIndex: before, requestEndIndex: fulfilled.length,
       requestIndex: requests.length === 1 ? requests[0].index : null });
   }
+  // Source-file open (#623): each sample re-enters the pinned directory untimed, then times the
+  // directory link into metadata and the explicit preview action into the first bounded chunk.
+  const directoryPage = fixtures.pages.find((page) => page.name === 'source directory');
+  const fileOpenSamples = [];
+  const fileOpenRaw = { openFeedback: [], openData: [], previewFeedback: [], previewData: [] };
+  const phaseRecord = (start, measured, extra = {}) => ({ feedbackMs: measured.feedbackMs, dataMs: measured.dataMs,
+    feedbackSignal: measured.feedbackSignal, ...measured.details, ...extra, requestStartIndex: start, requestEndIndex: fulfilled.length });
+  const requestIn = (start, path, query) => {
+    const matches = fulfilled.map((entry, index) => ({ entry, index })).slice(start)
+      .filter(({ entry }) => entry.method === 'GET' && entry.path === path && (query === undefined || entry.query === query));
+    return matches.length === 1 ? matches[0].index : null;
+  };
+  for (let sample = 0; sample < fixtures.fileOpen.samples; sample += 1) {
+    const file = fixtures.fileOpen.files[sample % fixtures.fileOpen.files.length];
+    // Re-enter in-app after the first sample, so no extra document loads or CSP reports accrue.
+    if (sample === 0) await cdp.call('Page.navigate', { url: origin + fixtures.fileOpen.directoryPath }, tab.sessionId);
+    else assert.ok(await evaluate(tab, `(() => {
+      const link = [...document.querySelectorAll('main a')].find(element => element.textContent.trim() === ${JSON.stringify(fileOpenContract.returnDirectory)});
+      if (!link) return false; link.click(); return true;
+    })()`), `file open ${sample}: missing directory return link`);
+    await ready(tab, `${populated(directoryPage)} && location.search === ${JSON.stringify(fileOpenPin)}
+      && [...document.querySelectorAll('main ul.job-list a')].some(link => link.href.includes(${JSON.stringify(`/source-files/${file.fileId}`)}))`,
+    `source directory for file open ${sample}`);
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const openStart = fulfilled.length;
+    const open = await evaluate(tab, fileOpenMetadataPhase(file));
+    const openWindow = phaseRecord(openStart, open, { requestIndex: requestIn(openStart, fileOpenApi(file.fileId)) });
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const previewStart = fulfilled.length;
+    const preview = await evaluate(tab, fileOpenPreviewPhase(file));
+    const content = await evaluate(tab, renderedPreviewDigest);
+    const previewWindow = phaseRecord(previewStart, preview, { ...content,
+      requestIndex: requestIn(previewStart, `${fileOpenApi(file.fileId)}/chunk`) });
+    fileOpenSamples.push({ sample, fileId: file.fileId, open: openWindow, preview: previewWindow });
+    fileOpenRaw.openFeedback.push(open.feedbackMs); fileOpenRaw.openData.push(open.dataMs);
+    fileOpenRaw.previewFeedback.push(preview.feedbackMs); fileOpenRaw.previewData.push(preview.dataMs);
+  }
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
     jobFilter: { ...fixtures.jobFilter, samples: filterSamples },
+    fileOpen: { contract: fileOpenEvidenceContract(), samples: fileOpenSamples },
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
-      filterFeedback: summary(filterFeedback), filterData: summary(filterData), raw: { cold, feedback, data,
-        filterFeedback, filterData } } };
+      filterFeedback: summary(filterFeedback), filterData: summary(filterData),
+      fileOpenFeedback: summary(fileOpenRaw.openFeedback), fileOpenData: summary(fileOpenRaw.openData),
+      filePreviewFeedback: summary(fileOpenRaw.previewFeedback), filePreviewData: summary(fileOpenRaw.previewData),
+      raw: { cold, feedback, data, filterFeedback, filterData, fileOpenFeedback: fileOpenRaw.openFeedback,
+        fileOpenData: fileOpenRaw.openData, filePreviewFeedback: fileOpenRaw.previewFeedback, filePreviewData: fileOpenRaw.previewData } } };
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
-export function assertAudit(audit, manifest, responses, origin, budgets = {}, { connectionNotice = true, jobFilter = true } = {}) {
+export function assertAudit(audit, manifest, responses, origin, budgets = {}, { connectionNotice = true, jobFilter = true, fileOpen = true } = {}) {
   const budgetLimits = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500,
-    filterFeedbackP95: 100, filterDataP95: 500, ...budgets };
+    filterFeedbackP95: 100, filterDataP95: 500, fileOpenFeedbackP95: 100, fileOpenDataP95: 500,
+    filePreviewFeedbackP95: 100, filePreviewDataP95: 500, ...budgets };
   const failures = [];
   // Expectations come from the qualification contract, not the report's claimed coverage.
   const schemes = ['light', 'dark'];
@@ -962,6 +1202,12 @@ export function assertAudit(audit, manifest, responses, origin, budgets = {}, { 
       ['filterFeedback', 'filterFeedback', 50, 'job filter feedback', budgetLimits.filterFeedbackP95],
       ['filterData', 'filterData', 50, 'job filter first data', budgetLimits.filterDataP95],
     ]),
+    ...(fileOpen === false ? [] : [
+      ['fileOpenFeedback', 'fileOpenFeedback', 50, 'source file open feedback', budgetLimits.fileOpenFeedbackP95],
+      ['fileOpenData', 'fileOpenData', 50, 'source file open first data', budgetLimits.fileOpenDataP95],
+      ['filePreviewFeedback', 'filePreviewFeedback', 50, 'source preview feedback', budgetLimits.filePreviewFeedbackP95],
+      ['filePreviewData', 'filePreviewData', 50, 'source preview first chunk', budgetLimits.filePreviewDataP95],
+    ]),
   ]) {
     const timing = audit.timing?.[name];
     const raw = audit.timing?.raw?.[rawName];
@@ -981,6 +1227,7 @@ export function assertAudit(audit, manifest, responses, origin, budgets = {}, { 
     }
   }
   if (jobFilter !== false) failures.push(...jobFilterFailures(audit.jobFilter, audit.timing?.raw, audit.fulfilled));
+  if (fileOpen !== false) failures.push(...fileOpenFailures(audit.fileOpen, audit.timing?.raw, audit.fulfilled));
   return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)), budgets: budgetLimits };
 }
 
@@ -1043,39 +1290,198 @@ export function jobFilterFailures(evidence, raw, fulfilled) {
   return failures;
 }
 
-/** Keep the /jobs request windows used by the filter verdict, not every route read. */
-export function compactJobFilterAuditEvidence(audit) {
-  const fulfilled = Array.isArray(audit?.fulfilled) ? audit.fulfilled : null;
-  const samples = Array.isArray(audit?.jobFilter?.samples) ? audit.jobFilter.samples : null;
-  if (!fulfilled || !samples) return audit;
-  const retained = [];
-  const indexes = new Map();
-  const retain = sourceIndex => {
-    if (!indexes.has(sourceIndex)) {
-      indexes.set(sourceIndex, retained.length);
-      retained.push(fulfilled[sourceIndex]);
-    }
-    return indexes.get(sourceIndex);
-  };
-  for (const sample of samples) {
-    const start = sample?.requestStartIndex;
-    const end = sample?.requestEndIndex;
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > fulfilled.length) return audit;
-    for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1)
-      if (fulfilled[sourceIndex]?.method === 'GET' && fulfilled[sourceIndex]?.path === '/jobs') retain(sourceIndex);
-  }
-  const compactSamples = samples.map(sample => {
-    const sourceStart = sample.requestStartIndex;
-    const sourceEnd = sample.requestEndIndex;
-    const window = [];
-    for (let sourceIndex = sourceStart; sourceIndex < sourceEnd; sourceIndex += 1) {
-      if (indexes.has(sourceIndex)) window.push(indexes.get(sourceIndex));
-    }
-    const requestIndex = indexes.get(sample.requestIndex) ?? null;
-    return { ...sample, requestStartIndex: window[0] ?? retained.length,
-      requestEndIndex: window.length ? window.at(-1) + 1 : retained.length, requestIndex };
-  });
-  return { ...audit, fulfilled: retained,
-    fulfilledRequestSummary: { observed: fulfilled.length, retained: retained.length, scope: 'job-filter-request-windows' },
-    jobFilter: { ...audit.jobFilter, samples: compactSamples } };
+
+/** The workload identity a file-open report must carry; row text stays out of the report. */
+export function fileOpenEvidenceContract() {
+  return { ...Object.fromEntries(fileOpenIdentityKeys.map(key => [key, fileOpenContract[key]])),
+    files: fileOpenContract.files.map(({ fileId, displayName, sizeBytes, sha256, rows }) => ({ fileId, displayName, sizeBytes, sha256, rows })) };
 }
+
+/** Validate both file-open phases against the contract, their exact request windows and rendered content. */
+export function fileOpenFailures(evidence, raw, fulfilled) {
+  const failures = []; const fail = message => failures.push(`source file open: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing workload evidence'); return failures; }
+  const c = fileOpenContract;
+  if (JSON.stringify(evidence.contract) !== JSON.stringify(fileOpenEvidenceContract())) fail('unexpected workload contract');
+  if (evidence.form === 'compact-v1') return [...failures, ...compactFileOpenFailures(evidence, raw, fulfilled).map(message => `source file open: ${message}`)];
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== c.samples) fail(`requires ${c.samples} samples, found ${samples.length}`);
+  const table = Array.isArray(fulfilled) ? fulfilled : [];
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seen = new Set(); let previousEnd = 0;
+  samples.forEach((sample, index) => {
+    const file = c.files[index % c.files.length];
+    const where = `sample ${index}`;
+    if (!sample || typeof sample !== 'object' || sample.sample !== index || sample.fileId !== file.fileId) {
+      fail(`${where}: unexpected file rotation binding`); return;
+    }
+    for (const name of ['open', 'preview']) {
+      const phase = sample[name]; const at = `${where} ${name}`;
+      if (!phase || typeof phase !== 'object') { fail(`${at}: missing phase record`); continue; }
+      if (!validMs(phase.feedbackMs) || !validMs(phase.dataMs) || phase.feedbackMs > phase.dataMs
+        || phase.dataMs > c.deadlineMs) fail(`${at}: invalid feedback/data timing`);
+      if (phase.feedbackSignal !== 'loading' && phase.feedbackSignal !== 'data') fail(`${at}: invalid feedback signal`);
+      if (phase.feedbackSignal === 'data' && validMs(phase.feedbackMs) && validMs(phase.dataMs) && phase.dataMs - phase.feedbackMs > 20)
+        fail(`${at}: data feedback is not coincident with first data`);
+      const { requestStartIndex: start, requestEndIndex: end, requestIndex } = phase;
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < previousEnd || end < start || end > table.length
+        || !Number.isInteger(requestIndex) || requestIndex < start || requestIndex >= end || seen.has(requestIndex)) {
+        fail(`${at}: missing or duplicate fulfilled request index`); continue;
+      }
+      previousEnd = end; seen.add(requestIndex);
+      const path = name === 'open' ? fileOpenApi(file.fileId) : `${fileOpenApi(file.fileId)}/chunk`;
+      const request = table[requestIndex];
+      const response = request?.response;
+      const expected = expectedSourceResponseIdentity(name === 'open' ? 'file' : 'chunk', file);
+      // Live reports carry the identity object; compacted reports carry its canonical digest.
+      const mismatched = typeof response === 'string' ? (response === sourceResponseDigest(expected) ? [] : ['response'])
+        : response && typeof response === 'object' ? [...new Set([...Object.keys(expected), ...Object.keys(response)])]
+          .filter(key => JSON.stringify(response[key]) !== JSON.stringify(expected[key])).map(key => `response.${key}`) : ['response'];
+      const expectedRequest = { method: 'GET', path, status: 200, fulfillmentSucceeded: true, query: name === 'open' ? '' : fileOpenChunkQuery };
+      if (request) mismatched.unshift(...Object.keys(expectedRequest).filter(key => request[key] !== expectedRequest[key]));
+      if (!request || mismatched.length)
+        fail(`${at}: not bound to its fulfilled ${name === 'open' ? 'metadata' : 'chunk'} request (${request ? mismatched.join(', ') : 'missing'})`);
+      const windowEntries = table.slice(start, end);
+      if (name === 'open' && windowEntries.some(entry => typeof entry?.path === 'string' && entry.path.endsWith('/chunk')))
+        fail(`${at}: metadata open requested a source chunk`);
+      if (windowEntries.length !== 1 || windowEntries[0] !== request) fail(`${at}: unexpected requests in the measured window`);
+    }
+    const open = sample.open ?? {};
+    if (open.renderedFileId !== file.fileId || open.renderedName !== file.displayName || open.renderedSha256 !== file.sha256)
+      fail(`${where} open: rendered metadata does not match the file identity`);
+    if (open.pageSearch !== fileOpenPin) fail(`${where} open: snapshot pin is not bound to the source revision`);
+    if (open.focus !== 'main-heading' || open.previewOpen !== false) fail(`${where} open: unexpected focus or preview state`);
+    const preview = sample.preview ?? {};
+    if (preview.renderedRows !== file.rows || preview.renderedBytes !== Number(file.sizeBytes) || preview.renderedTextSha256 !== file.sha256)
+      fail(`${where} preview: rendered chunk content does not match the file digest`);
+    if (preview.ariaBusy !== 'false' || preview.focus !== 'source-preview-title') fail(`${where} preview: unexpected busy state or focus`);
+  });
+  for (const [name, phase, field, label] of [['fileOpenFeedback', 'open', 'feedbackMs', 'open feedback'], ['fileOpenData', 'open', 'dataMs', 'open first data'],
+    ['filePreviewFeedback', 'preview', 'feedbackMs', 'preview feedback'], ['filePreviewData', 'preview', 'dataMs', 'preview first chunk']]) {
+    const values = raw?.[name];
+    if (!Array.isArray(values) || values.length !== c.samples || !values.every(validMs)) {
+      fail(`${label}: requires ${c.samples} finite nonnegative raw samples`); continue;
+    }
+    if (samples.length !== c.samples || values.some((value, index) => value !== samples[index]?.[phase]?.[field]))
+      fail(`${label}: raw samples do not match workload records`);
+  }
+  return failures;
+}
+
+/** Validate the retained compact file-open form against the contract-derived expectation. */
+function compactFileOpenFailures(evidence, raw, fulfilled) {
+  const failures = []; const c = fileOpenContract;
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== c.samples) failures.push(`requires ${c.samples} samples, found ${samples.length}`);
+  const table = Array.isArray(fulfilled) ? fulfilled : [];
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seen = new Set(); let previousEnd = 0;
+  const expected = Array.from({ length: c.samples }, (_, index) => expectedFileOpenSample(index));
+  const sourceWindows = [];
+  samples.forEach((tuple, index) => {
+    if (!Array.isArray(tuple) || tuple.length !== 8) { failures.push(`sample ${index}: invalid compact record`); return; }
+    if (index >= expected.length) return;
+    for (const [offset, name, kind] of [[0, 'open', 'file'], [4, 'preview', 'chunk']]) {
+      const [start, end, requestIndex, signal] = tuple.slice(offset, offset + 4); const at = `sample ${index} ${name}`;
+      if (signal !== 'loading' && signal !== 'data') failures.push(`${at}: invalid feedback signal`);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < previousEnd || end < start || end > table.length
+        || !Number.isInteger(requestIndex) || requestIndex < start || requestIndex >= end || seen.has(requestIndex)) {
+        failures.push(`${at}: missing or duplicate fulfilled request index`); continue;
+      }
+      previousEnd = end; seen.add(requestIndex);
+      const window = table.slice(start, end);
+      const expectedRead = expected[index].requests[name === 'open' ? 0 : 1];
+      const readCommitment = sourceReadCommitment(expectedRead);
+      if (table[requestIndex]?.source !== kind || table[requestIndex]?.readCommitment !== readCommitment)
+        failures.push(`${at}: not bound to its fulfilled ${kind === 'file' ? 'metadata' : 'chunk'} request identity`);
+      if (name === 'open' && window.some(entry => entry?.source === 'chunk' || (typeof entry?.path === 'string' && entry.path.endsWith('/chunk'))))
+        failures.push(`${at}: metadata open requested a source chunk`);
+      if (window.length !== 1) failures.push(`${at}: unexpected requests in the measured window`);
+      sourceWindows.push({ sample: index, phase: name, start, end, requestIndex, source: kind, readCommitment });
+    }
+  });
+  if (evidence.renderedSha256 !== sha256Json(expected.map(sample => sample.rendered)))
+    failures.push('rendered metadata, chunk content, focus or pin do not match the contract');
+  if (evidence.sourceRequestsSha256 !== sha256Json(sourceWindows))
+    failures.push('source request windows are not bound to their sample and phase identities');
+  const names = [['fileOpenFeedback', 'fileOpenData', 'open'], ['filePreviewFeedback', 'filePreviewData', 'preview']];
+  for (const [feedback, data, label] of names) {
+    const feedbackValues = raw?.[feedback]; const dataValues = raw?.[data];
+    if (![feedbackValues, dataValues].every(values => Array.isArray(values) && values.length === c.samples && values.every(validMs))) {
+      failures.push(`${label}: requires ${c.samples} finite nonnegative raw samples`); continue;
+    }
+    feedbackValues.forEach((value, index) => {
+      const signal = samples[index]?.[label === 'open' ? 3 : 7];
+      if (value > dataValues[index] || dataValues[index] > c.deadlineMs) failures.push(`sample ${index} ${label}: invalid feedback/data timing`);
+      else if (signal === 'data' && dataValues[index] - value > 20) failures.push(`sample ${index} ${label}: data feedback is not coincident with first data`);
+    });
+  }
+  return failures;
+}
+
+/**
+ * Keep every fulfilled request inside the measured job-filter and file-open windows, so an
+ * unexpected request there still reaches the validator, and drop unrelated route reads.
+ * Indexes are remapped; any malformed window leaves the report untouched for the validator.
+ */
+export function compactTimedAuditEvidence(audit) {
+  const fulfilled = Array.isArray(audit?.fulfilled) ? audit.fulfilled : null;
+  const filterSamples = Array.isArray(audit?.jobFilter?.samples) ? audit.jobFilter.samples : null;
+  const fileSamples = Array.isArray(audit?.fileOpen?.samples) ? audit.fileOpen.samples : null;
+  if (!fulfilled || (!filterSamples && !fileSamples)) return audit;
+  const windows = [...(filterSamples ?? []), ...(fileSamples ?? []).flatMap(sample => [sample?.open, sample?.preview])];
+  const retainedSources = new Set();
+  for (const record of windows) {
+    const start = record?.requestStartIndex; const end = record?.requestEndIndex;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > fulfilled.length) return audit;
+    for (let index = start; index < end; index += 1) retainedSources.add(index);
+  }
+  const ordered = [...retainedSources].sort((a, b) => a - b);
+  const indexes = new Map(ordered.map((source, retained) => [source, retained]));
+  const position = source => { let low = 0; let high = ordered.length;
+    while (low < high) { const middle = (low + high) >> 1; if (ordered[middle] < source) low = middle + 1; else high = middle; }
+    return low; };
+  const remap = record => record && typeof record === 'object' ? { ...record, requestStartIndex: position(record.requestStartIndex),
+    requestEndIndex: position(record.requestEndIndex), requestIndex: indexes.get(record.requestIndex) ?? null } : record;
+  const compact = { ...audit, fulfilled: ordered.map(index => fulfilled[index]),
+    fulfilledRequestSummary: { observed: fulfilled.length, retained: ordered.length, scope: 'timed-request-windows' } };
+  if (filterSamples) compact.jobFilter = { ...audit.jobFilter, samples: filterSamples.map(remap) };
+  if (fileSamples) {
+    // The report bound leaves little room: file-open samples become index/signal tuples, each
+    // source read in a window becomes a one-letter marker, and the per-sample rendered details
+    // and source requests are bound by digests the validator recomputes from the contract.
+    // Requests in a window that are not source reads are kept verbatim.
+    const sourceEntries = [];
+    const marked = new Set();
+    const sourceMarkers = new Map();
+    for (let sampleIndex = 0; sampleIndex < fileSamples.length; sampleIndex += 1) {
+      const sample = fileSamples[sampleIndex];
+      for (const [name, phase] of [['open', sample?.open], ['preview', sample?.preview]]) {
+      for (let index = phase.requestStartIndex; index < phase.requestEndIndex; index += 1) {
+        const entry = fulfilled[index];
+        if (typeof entry?.path === 'string' && entry.path.includes('/source-files/') && !marked.has(index)) {
+          marked.add(index);
+          const readCommitment = sourceReadCommitment(entry);
+          sourceMarkers.set(index, { source: entry.path.endsWith('/chunk') ? 'chunk' : 'file', readCommitment });
+        }
+      }
+      const retainedStart = position(phase.requestStartIndex);
+      const retainedEnd = position(phase.requestEndIndex);
+      const retainedRequest = indexes.get(phase.requestIndex) ?? null;
+      const readIndex = phase.requestIndex;
+      sourceEntries.push({ sample: sampleIndex, phase: name, start: retainedStart, end: retainedEnd,
+        requestIndex: retainedRequest, source: name === 'open' ? 'file' : 'chunk',
+        readCommitment: sourceReadCommitment(fulfilled[readIndex]) });
+      }
+    }
+    compact.fulfilled = ordered.map(index => marked.has(index)
+      ? sourceMarkers.get(index) : fulfilled[index]);
+    const tuple = phase => { const record = remap(phase); return [record.requestStartIndex, record.requestEndIndex, record.requestIndex, record.feedbackSignal]; };
+    compact.fileOpen = { contract: audit.fileOpen.contract, form: 'compact-v1',
+      samples: fileSamples.map(sample => [...tuple(sample.open), ...tuple(sample.preview)]),
+      renderedSha256: sha256Json(fileSamples.map(renderedFileOpenDetails)), sourceRequestsSha256: sha256Json(sourceEntries) };
+  }
+  return compact;
+}
+/** @deprecated Kept for existing callers; compacts every timed request window. */
+export const compactJobFilterAuditEvidence = compactTimedAuditEvidence;

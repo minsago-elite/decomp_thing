@@ -146,7 +146,27 @@ sample is bound to its exact successfully fulfilled `/jobs` query, the sole job 
 and the job ID in the rendered link. The gate compares the raw p95
 against ≤100 ms filter feedback and ≤500 ms first data, using the documented loopback interaction
 budgets. These filter samples are
-reported independently from route timing in `report.json`; other explicit actions remain recorded
+reported independently from route timing in `report.json`.
+
+The audit also times opening a source file 50 times, alternating between two distinct files in
+the pinned loopback fixture revision. Each sample re-enters the pinned source directory untimed,
+then measures two phases. Phase A is the directory-link click into file metadata: the
+heading receives focus, the file's name, ID and digest render, the preview stays closed and no
+source chunk may be requested. Phase B is the explicit "Open source preview" action into the first
+bounded chunk (`offset=0`, `maxBytes=65536`, pinned `metadataVersion`; the runtime's absolute source
+view ceiling is 262,144 bytes): the preview heading takes focus, `aria-busy` is `false`, no alert is
+shown and the rendered rows and bytes hash to the file's digest. Each phase must contain exactly
+one successfully fulfilled request, bound to the
+contract's job, run, revision, file, source digest and metadata version. Each phase is gated on its
+raw p95 at exactly ≤100 ms feedback and ≤500 ms first data (metadata or chunk). The report keeps the
+raw samples and recomputed summaries, and compaction retains every request in the filter and
+source-open windows so an unexpected request is still rejected. Fixture API responses are
+loopback contract fixtures, so these timings exclude server latency and storage. They do not
+measure the constrained 4× CPU / 10 Mbit profile, cross-engine source-open timing (Playwright
+engines opt out of this Chromium DevTools measurement) or compositor presentation and pixel
+scanout. A phase is "ready" when Chromium's DOM state is unchanged across two consecutive
+`requestAnimationFrame` observations (10 s hard deadline); that is DOM readiness, not a
+measured frame on screen. Other explicit actions remain recorded
 in `interactions` without qualified latency budgets. The report retains raw samples and recomputed
 median/p95 values.
 
@@ -154,8 +174,8 @@ The API reads in this mode are contract fixtures fulfilled in DevTools; the docu
 chunks and worker are real packaged responses. That isolates browser-side navigation and
 rendering work. The filter workload renders one fixture row, so it does not measure scanning a
 large server-side job library. It is not the constrained 4× CPU / 10 Mbit profile, a fresh browser
-process per cold load, a server-latency measurement or a cross-engine filter result. Tabs, dialogs,
-file opening, and the constrained profile remain outside this filter timing qualification. CI
+process per cold load, a server-latency measurement or a cross-engine filter result. Tabs and
+dialogs remain outside this timing qualification; the constrained profile also remains unmeasured. CI
 retains its own raw and summary timing evidence.
 
 Heavy browser work is bounded rather than deferred: source previews read at most one
