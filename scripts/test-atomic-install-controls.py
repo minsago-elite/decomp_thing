@@ -87,16 +87,11 @@ def binding_diagnostic_gradle_control():
     """Exercise fallback and successful binding generation through real Gradle."""
     java_home = driver.qualified_java_home()
     helper = ROOT / 'scripts/atomic_install_prepared.py'
-    control_jdk = WORK / 'controlled-jdk'
-    (control_jdk / 'bin').mkdir(parents=True)
-    (control_jdk / 'release').write_text((java_home / 'release').read_text())
-    (control_jdk / 'bin/java').write_bytes((java_home / 'bin/java').read_bytes())
-    (control_jdk / 'bin/java').chmod(0o755)
     env = {'JAVA_HOME': str(java_home), 'PATH': str(java_home / 'bin') + os.pathsep + '/usr/bin:/bin',
            'TMPDIR': str(WORK / 'tmp'), 'GRADLE_USER_HOME': str(ROOT / 'build/.gradle-user-home')}
     (WORK / 'tmp').mkdir(exist_ok=True)
 
-    def run_control(name, script, gradle_root, path, jdk=control_jdk):
+    def run_control(name, script, gradle_root, path, jdk=java_home):
         project = WORK / name
         project.mkdir()
         (project / 'settings.gradle').write_text(f"rootProject.name = '{name}'\n")
@@ -117,9 +112,10 @@ def binding_diagnostic_gradle_control():
     assert output.count('atomic binding failure stage=gradle cause=FileNotFoundError') == 1, output[-2048:]
     assert not refused.exists()
 
-    external_jdk = WORK / 'external-edge-jdk'
+    # Keep the deliberately escaping link in excluded scratch, outside sealed evidence.
+    external_jdk = WORK / 'tmp/external-edge-jdk'
     (external_jdk / 'lib/security').mkdir(parents=True)
-    (external_jdk / 'lib/security/cacerts').symlink_to(control_jdk / 'release')
+    (external_jdk / 'lib/security/cacerts').symlink_to(java_home / 'release')
     jdk_refused = WORK / 'jdk-refused-bindings.json'
     code, output = run_control('binding-jdk-refusal-gradle', helper, current_gradle, jdk_refused, external_jdk)
     assert code != 0 and 'non-zero exit value 1' in output, output[-2048:]
@@ -137,7 +133,7 @@ def binding_diagnostic_gradle_control():
     assert code == 0, output[-2048:]
     bindings = json.loads(success_path.read_text())
     assert set(bindings) == {'jdkBinding', 'gradleBinding'}
-    assert bindings['jdkBinding']['root'] == str(control_jdk)
+    assert bindings['jdkBinding']['root'] == str(java_home)
     assert pathlib.Path(bindings['gradleBinding']['root']).is_dir()
     passed.append('real-Gradle-binding-fallback-and-success-with-pinned-local-inputs')
 

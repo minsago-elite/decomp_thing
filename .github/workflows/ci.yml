@@ -195,10 +195,23 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "21"
+      # The runner toolcache aliases the distro JDK, whose cacerts links outside its root.
+      - name: Select the complete upstream Temurin JDK for installed qualification
+        timeout-minutes: 5
+        run: |
+          mkdir -p build/atomic-install-ci
+          stage=$(mktemp -d "$GITHUB_WORKSPACE/build/atomic-install-ci/temurin.XXXXXX")
+          archive=OpenJDK21U-jdk_x64_linux_hotspot_21.0.13.1_2.tar.gz
+          url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13.1%2B2/$archive"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 180 --max-filesize 207869899 --output "$stage/$archive" "$url"
+          (cd "$stage" && echo "bb8a93f9ae6e7a693b2b721e85dbeff26ae1a77447985a8d7afcdd9c7cf6222e  $archive" | sha256sum --strict --check)
+          tar --no-same-owner -xzf "$stage/$archive" -C "$stage"
+          jdk="$stage/jdk-21.0.13.1+2"
+          test -x "$jdk/bin/javac"
+          test -x "$jdk/bin/java"
+          echo "JAVA_HOME=$jdk" >> "$GITHUB_ENV"
+          echo "$jdk/bin" >> "$GITHUB_PATH"
       - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
