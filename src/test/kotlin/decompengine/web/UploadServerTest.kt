@@ -48,6 +48,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.put
 import java.net.URI
 import java.nio.ByteBuffer
@@ -611,6 +612,206 @@ class UploadServerTest {
     }
 
     @Test
+    fun `dashboard HTTP listing remains responsive under upload and listing admission pressure`() = withServer(uiMode = WebUiMode.SPA) { server, root ->
+        fun uploadViaApi(filename: String): Response {
+            val boundary = "dashboard-admission-boundary"
+            val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"$filename\"\r\n".toByteArray() +
+                "Content-Type: application/x-elf\r\n\r\n".toByteArray() + elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+            return request(server, "POST", "/api/v1/jobs", body, mapOf(
+                "Content-Type" to "multipart/form-data; boundary=$boundary",
+                "Accept" to "application/json",
+                "Idempotency-Key" to "dashboard-${filename.substringBefore('.')}",
+            ))
+        }
+        val existingJobs = (1..5).associate { index ->
+            val filename = "slow-listing-$index.elf"
+            val response = uploadViaApi(filename)
+            assertEquals(201, response.status)
+            val id = Json.parseToJsonElement(response.body.decodeToString()).jsonObject.getValue("data").jsonObject
+                .getValue("jobId").toString().trim('"')
+            id to filename
+        }
+        val jobIds = existingJobs.keys.toList()
+        val statusJobId = jobIds.last()
+        val slowedJobIds = jobIds.dropLast(1).toSet()
+        val service = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }
+            .get(server) as WebJobService
+        val firstPhysicalRead = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val enteredReads = java.util.concurrent.LinkedBlockingQueue<String>()
+        val readPermits = java.util.concurrent.Semaphore(0)
+        service.listingReadObserver = { relative ->
+            val jobId = relative.substringBefore('/')
+            if (jobId in slowedJobIds && firstPhysicalRead.add(jobId)) {
+                enteredReads.put(jobId)
+                check(readPermits.tryAcquire(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                    "Timed out waiting to release the dashboard read for $jobId"
+                }
+            }
+        }
+
+        data class HeldUpload(val socket: java.net.Socket, val suffix: ByteArray)
+        val heldUploads = mutableListOf<HeldUpload>()
+        val callers = java.util.concurrent.Executors.newFixedThreadPool(4)
+        try {
+            // Prime the shared legacy session before concurrent requests touch the fixture map.
+            val baseline = request(server, "GET", "/api/v1/jobs/$statusJobId", headers = mapOf("Accept" to "application/json"))
+            assertEquals(200, baseline.status)
+
+            val uploadHeaders = sessions.getOrPut(server) { legacySessionHeaders(server) }
+            val quotaFile = Files.createDirectories(root.resolve(statusJobId).resolve("reports")).resolve("quota-probe")
+            FileChannel.open(quotaFile, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { channel ->
+                channel.position(WebUploadStorage.DEFAULT_MAXIMUM_BYTES)
+                channel.write(ByteBuffer.wrap(byteArrayOf(1)))
+            }
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val storageProbe = java.net.Socket("127.0.0.1", server.serverPort).apply { soTimeout = 10_000 }
+            val storageResponse = storageProbe.use { socket ->
+                val headers = buildString {
+                    append("POST /api/v1/jobs HTTP/1.1\r\nHost: 127.0.0.1:${server.serverPort}\r\n")
+                    append("Origin: $origin\r\nAccept: application/json\r\n")
+                    append("Content-Type: multipart/form-data; boundary=storage-quota-probe\r\n")
+                    append("Idempotency-Key: storage-quota-probe\r\nContent-Length: 1024\r\nConnection: close\r\n")
+                    uploadHeaders.forEach { (name, value) -> append("$name: $value\r\n") }
+                    append("\r\n")
+                }
+                socket.getOutputStream().apply { write(headers.toByteArray()); flush() }
+                val input = socket.getInputStream()
+                fun readLine(): String {
+                    val line = java.io.ByteArrayOutputStream()
+                    var previous = -1
+                    while (true) {
+                        val value = input.read()
+                        check(value >= 0) { "HTTP storage-refusal response ended before its headers" }
+                        if (previous == '\r'.code && value == '\n'.code) break
+                        if (previous >= 0) line.write(previous)
+                        previous = value
+                    }
+                    return line.toByteArray().decodeToString()
+                }
+                val statusLine = readLine()
+                var contentLength = 0
+                while (true) {
+                    val header = readLine()
+                    if (header.isEmpty()) break
+                    if (header.startsWith("Content-Length:", ignoreCase = true)) {
+                        contentLength = header.substringAfter(':').trim().toInt()
+                    }
+                }
+                check(contentLength in 1..16_384) { "HTTP storage-refusal response has no bounded body" }
+                statusLine + "\r\n" + input.readNBytes(contentLength).decodeToString()
+            }
+            assertTrue(storageResponse.startsWith("HTTP/1.1 503"), "disk quota must refuse the HTTP upload: $storageResponse")
+            assertTrue(storageResponse.contains("UPLOAD_STORAGE"), "disk quota refusal must be typed")
+            assertEquals(WebUploadStorage.DEFAULT_MAXIMUM_BYTES + 1, Files.size(quotaFile))
+            val statusDuringStorageRefusal = request(server, "GET", "/api/v1/jobs/$statusJobId", headers = mapOf("Accept" to "application/json"))
+            assertEquals(200, statusDuringStorageRefusal.status)
+            Files.delete(quotaFile)
+
+            fun holdMultipartUpload(index: Int): HeldUpload {
+                val boundary = "held-upload-$index"
+                val prefix = "--$boundary\r\n".toByteArray() +
+                    "Content-Disposition: form-data; name=\"binary\"; filename=\"held-$index.elf\"\r\n".toByteArray() +
+                    "Content-Type: application/x-elf\r\n\r\n".toByteArray()
+                val content = elfFixture()
+                val suffix = "\r\n--$boundary--\r\n".toByteArray()
+                val socket = java.net.Socket("127.0.0.1", server.serverPort).apply { soTimeout = 10_000 }
+                val requestHeaders = buildString {
+                    append("POST /api/v1/jobs HTTP/1.1\r\nHost: 127.0.0.1:${server.serverPort}\r\n")
+                    append("Origin: $origin\r\nAccept: application/json\r\n")
+                    append("Content-Type: multipart/form-data; boundary=$boundary\r\n")
+                    append("Idempotency-Key: held-dashboard-upload-$index\r\n")
+                    append("Content-Length: ${prefix.size + content.size + suffix.size}\r\nConnection: close\r\n")
+                    uploadHeaders.forEach { (name, value) -> append("$name: $value\r\n") }
+                    append("\r\n")
+                }.toByteArray()
+                socket.getOutputStream().apply {
+                    write(requestHeaders)
+                    write(prefix)
+                    write(content)
+                    flush()
+                }
+                return HeldUpload(socket, suffix)
+            }
+            fun awaitStageCount(expected: Int) {
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+                var observed = 0
+                while (System.nanoTime() < deadline) {
+                    observed = Files.newDirectoryStream(root, ".upload-stream-v1-*").use { it.count() }
+                    if (observed == expected) return
+                    Thread.sleep(10)
+                }
+                assertEquals(expected, observed, "expected $expected HTTP uploads to hold active staging reservations")
+            }
+            fun finishHeldUpload(upload: HeldUpload) {
+                upload.socket.getOutputStream().apply { write(upload.suffix); flush() }
+                val response = upload.socket.getInputStream().readBytes().decodeToString()
+                upload.socket.close()
+                assertTrue(response.startsWith("HTTP/1.1 201"), "held upload should complete after dashboard collection")
+            }
+
+            // Keep both HTTP upload reservations active while dashboard and status requests run.
+            for (index in 1..2) {
+                heldUploads += holdMultipartUpload(index)
+                awaitStageCount(index)
+            }
+            val excessUpload = uploadViaApi("over-capacity.elf")
+            assertEquals(503, excessUpload.status)
+            assertTrue(excessUpload.body.decodeToString().contains("UPLOAD_CAPACITY"))
+
+            val dashboard = callers.submit<Response> {
+                request(server, "GET", "/api/v1/jobs", headers = mapOf("Accept" to "application/json"))
+            }
+            val observedSlowRecords = mutableSetOf<String>()
+            repeat(slowedJobIds.size) {
+                val listedJob = enteredReads.poll(5, java.util.concurrent.TimeUnit.SECONDS)
+                assertNotNull(listedJob, "The dashboard did not reach each controlled legacy record read")
+                observedSlowRecords += listedJob
+                awaitStageCount(2)
+
+                val startedAt = System.nanoTime()
+                val status = callers.submit<Response> {
+                    request(server, "GET", "/api/v1/jobs/$statusJobId", headers = mapOf("Accept" to "application/json"))
+                }
+                    .get(2, java.util.concurrent.TimeUnit.SECONDS)
+                val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+                assertEquals(200, status.status, "status request during dashboard read for $listedJob")
+                val statusData = Json.parseToJsonElement(status.body.decodeToString()).jsonObject.getValue("data").jsonObject
+                assertEquals(statusJobId, statusData.getValue("jobId").toString().trim('"'))
+                assertTrue(elapsedMs <= 2_000, "status HTTP request took ${elapsedMs}ms during a stalled listing record")
+                assertTrue(!dashboard.isDone, "the dashboard must still be collecting records while status remains responsive")
+
+                val competingListing = request(server, "GET", "/api/v1/jobs", headers = mapOf("Accept" to "application/json"))
+                assertEquals(503, competingListing.status)
+                assertTrue(competingListing.body.decodeToString().contains("LISTING_BUSY"))
+                readPermits.release()
+            }
+
+            assertEquals(slowedJobIds, observedSlowRecords, "the dashboard should remain active across distinct records")
+            val completedDashboard = dashboard.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(200, completedDashboard.status)
+            val dashboardData = Json.parseToJsonElement(completedDashboard.body.decodeToString()).jsonObject
+                .getValue("data").jsonObject
+            val listedRows = dashboardData.getValue("items").jsonArray.map { it.jsonObject }
+                .associateBy { it.getValue("jobId").toString().trim('"') }
+            assertEquals(existingJobs.keys, listedRows.keys, "completed listing should contain every retained job")
+            for ((jobId, filename) in existingJobs) {
+                val row = assertNotNull(listedRows[jobId], "listing should contain a successful row for $jobId")
+                assertEquals(filename, row.getValue("displayFilename").toString().trim('"'))
+                assertEquals("uploaded", row.getValue("status").toString().trim('"'))
+            }
+            heldUploads.forEach(::finishHeldUpload)
+            awaitStageCount(0)
+        } finally {
+            // Unpark any physical read even when an assertion fails, then let the server drain.
+            readPermits.release(slowedJobIds.size + 1)
+            service.listingReadObserver = {}
+            heldUploads.forEach { it.socket.close() }
+            callers.shutdownNow()
+            assertTrue(callers.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
     fun `shutdown discards caller-queued work and late delivery cannot alter a new owner state`() {
         val dataDir = createTempDirectory("web-caller-queue-")
         val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
@@ -1062,6 +1263,264 @@ class UploadServerTest {
             assertTrue(detail.body.decodeToString().contains("verified backup"))
             kotlin.test.assertFalse(detail.body.decodeToString().contains("PRIVATE_CORRUPTION_SENTINEL"))
             kotlin.test.assertFalse(detail.body.decodeToString().contains(root.toString()))
+        }
+    }
+
+    @Test
+    fun `HTTP job status remains responsive throughout a slow multi-record dashboard listing`() = withServer { server, _ ->
+        val jobIds = (1..8).map { index ->
+            val uploaded = upload(server, "listing-$index.elf", elfFixture(), acceptJson = true)
+            Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+        }
+        // Initialize the test's legacy-session cache before the dashboard request runs on another thread.
+        assertEquals(200, request(server, "GET", "/api/jobs/${jobIds.last()}").status)
+
+        val firstRead = java.util.concurrent.CountDownLatch(1)
+        val releaseFirstRead = java.util.concurrent.CountDownLatch(1)
+        val listingReads = java.util.concurrent.atomic.AtomicInteger()
+        val distinctRecordsRead = java.util.concurrent.atomic.AtomicInteger()
+        val seenJobRecords = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val firstReadHeld = java.util.concurrent.atomic.AtomicBoolean()
+        val checkpointRecords = listOf(3, 6)
+        val checkpointReached = checkpointRecords.associateWith { java.util.concurrent.CountDownLatch(1) }
+        val releaseCheckpoint = checkpointRecords.associateWith { java.util.concurrent.CountDownLatch(1) }
+        val checkpointStatusResponses = checkpointRecords.associateWith { java.util.concurrent.CountDownLatch(4) }
+        val heldCheckpoints = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+        val statusWarmup = java.util.concurrent.CountDownLatch(4)
+        val statusWarmupResponses = java.util.concurrent.atomic.AtomicInteger()
+        val keepStatusReadersRunning = java.util.concurrent.atomic.AtomicBoolean(true)
+        data class StatusSample(
+            val elapsedMs: Long,
+            val distinctRecordsAtStart: Int,
+            val distinctRecordsAtResponse: Int,
+            val dashboardStillRunningAtResponse: Boolean,
+        )
+        val statusSamples = java.util.concurrent.ConcurrentLinkedQueue<StatusSample>()
+        val maximumStatusMillis = 2_000L
+        server.listingReadObserver = { relative ->
+            if (relative.endsWith("/job.json")) {
+                listingReads.incrementAndGet()
+                val recordNumber = if (seenJobRecords.add(relative)) distinctRecordsRead.incrementAndGet()
+                    else distinctRecordsRead.get()
+                if (recordNumber == 1 && firstReadHeld.compareAndSet(false, true)) {
+                    firstRead.countDown()
+                    check(releaseFirstRead.await(15, java.util.concurrent.TimeUnit.SECONDS))
+                }
+                if (recordNumber in checkpointRecords && heldCheckpoints.add(recordNumber)) {
+                    checkpointReached.getValue(recordNumber).countDown()
+                    check(releaseCheckpoint.getValue(recordNumber).await(10, java.util.concurrent.TimeUnit.SECONDS))
+                }
+                // Simulate a sustained slow metadata scan after the first controlled stall.
+                Thread.sleep(250)
+            }
+        }
+
+        val dashboardExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val statusExecutor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val dashboard = dashboardExecutor.submit<Response> { request(server, "GET", "/") }
+            assertTrue(firstRead.await(5, java.util.concurrent.TimeUnit.SECONDS), "Dashboard did not reach a physical metadata read")
+            assertFalse(dashboard.isDone, "Dashboard should remain parked in the selected metadata read")
+
+            // Keep two real HTTP clients requesting the unrelated status route while every
+            // physical metadata read is deliberately slow. The warmup proves both clients made
+            // progress while the first listing read is still parked; they then run until the
+            // entire multi-record dashboard response completes.
+            val statusReaders = (1..2).map {
+                statusExecutor.submit {
+                    while (keepStatusReadersRunning.get()) {
+                        val recordsAtStart = distinctRecordsRead.get()
+                        val startedAt = System.nanoTime()
+                        val status = request(server, "GET", "/api/jobs/${jobIds.last()}")
+                        val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+                        assertEquals(200, status.status, status.body.decodeToString())
+                        assertTrue(status.body.decodeToString().contains(jobIds.last()))
+                        val recordsAtResponse = distinctRecordsRead.get()
+                        val dashboardStillRunning = !dashboard.isDone
+                        statusSamples.add(StatusSample(elapsedMs, recordsAtStart, recordsAtResponse, dashboardStillRunning))
+                        if (recordsAtStart == 1 && statusWarmupResponses.incrementAndGet() <= 4) statusWarmup.countDown()
+                        if (recordsAtStart == recordsAtResponse && dashboardStillRunning) {
+                            checkpointStatusResponses[recordsAtStart]?.countDown()
+                        }
+                        Thread.sleep(10)
+                    }
+                }
+            }
+            assertTrue(statusWarmup.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                "Concurrent HTTP status reads did not complete while the dashboard metadata read was held")
+            assertEquals(1, distinctRecordsRead.get(), "Warmup must run during the first held record read")
+
+            releaseFirstRead.countDown()
+            checkpointRecords.forEach { checkpoint ->
+                assertTrue(checkpointReached.getValue(checkpoint).await(10, java.util.concurrent.TimeUnit.SECONDS),
+                    "Dashboard did not reach listing record $checkpoint")
+                assertFalse(dashboard.isDone, "Dashboard should remain active at listing record $checkpoint")
+                assertTrue(checkpointStatusResponses.getValue(checkpoint).await(2, java.util.concurrent.TimeUnit.SECONDS),
+                    "No HTTP status progress completed while listing record $checkpoint was held")
+                releaseCheckpoint.getValue(checkpoint).countDown()
+            }
+            val completedDashboard = dashboard.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            keepStatusReadersRunning.set(false)
+            statusReaders.forEach { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+            val body = completedDashboard.body.decodeToString()
+            assertEquals(200, completedDashboard.status)
+            jobIds.forEach { assertTrue(body.contains(it), "Completed dashboard omitted $it") }
+            assertTrue(distinctRecordsRead.get() >= jobIds.size,
+                "Expected physical reads across every listed record; observed ${distinctRecordsRead.get()}")
+
+            val samples = statusSamples.toList()
+            assertTrue(samples.size >= 16, "Expected sustained status traffic during listing; observed ${samples.size} responses")
+            samples.forEach { sample ->
+                assertTrue(sample.elapsedMs < maximumStatusMillis,
+                    "HTTP status request took ${sample.elapsedMs}ms after ${sample.distinctRecordsAtStart} distinct records")
+            }
+            val sortedLatencies = samples.map(StatusSample::elapsedMs).sorted()
+            val p95Index = ((sortedLatencies.size * 95 + 99) / 100 - 1).coerceAtLeast(0)
+            assertTrue(sortedLatencies[p95Index] < maximumStatusMillis,
+                "HTTP status p95 was ${sortedLatencies[p95Index]}ms across ${samples.size} responses")
+            val overlapping = samples.filter { it.dashboardStillRunningAtResponse }
+            checkpointRecords.forEach { checkpoint ->
+                assertTrue(samples.count {
+                    it.distinctRecordsAtStart == checkpoint && it.distinctRecordsAtResponse == checkpoint &&
+                        it.dashboardStillRunningAtResponse
+                } >= 4, "Expected four completed status responses while listing record $checkpoint was held")
+            }
+            println("issue-162-status-responsiveness-v1 responses=${samples.size} " +
+                "overlapping=${overlapping.size} p95_ms=${sortedLatencies[p95Index]} " +
+                "max_ms=${sortedLatencies.last()} distinct_records=${distinctRecordsRead.get()} " +
+                "physical_reads=${listingReads.get()} " +
+                "samples=${samples.joinToString(",") { "${it.elapsedMs}:${it.distinctRecordsAtStart}:${it.distinctRecordsAtResponse}:${it.dashboardStillRunningAtResponse}" }}")
+        } finally {
+            keepStatusReadersRunning.set(false)
+            releaseFirstRead.countDown()
+            checkpointRecords.forEach { releaseCheckpoint.getValue(it).countDown() }
+            server.listingReadObserver = {}
+            dashboardExecutor.shutdownNow()
+            statusExecutor.shutdownNow()
+            assertTrue(dashboardExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(statusExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `retained-byte upload refusal preserves concurrent listing and status traffic`() {
+        val reservation = WebUploadStorage.RESERVATION_BYTES
+        val maximumRetainedBytes = reservation + 1024L * 1024
+        withServer(maximumRetainedStorageBytesForTests = maximumRetainedBytes) { server, root ->
+            val jobIds = (1..8).map { index ->
+                val response = upload(server, "retained-quota-$index.elf", elfFixture(), acceptJson = true)
+                assertEquals(201, response.status, response.body.decodeToString())
+                Json.parseToJsonElement(response.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            }
+            val retainedReport = root.resolve(jobIds.last()).resolve("reports").createDirectories()
+                .resolve("retained-quota-fixture.bin")
+            Files.write(retainedReport, ByteArray(2 * 1024 * 1024) { (it % 251).toByte() })
+            val retainedBefore = decompengine.jobs.RetainedStorageUsage.measure(root, maximumRetainedBytes).logicalBytes
+            assertTrue(retainedBefore > maximumRetainedBytes - reservation,
+                "Fixture must exceed the retained-byte admission headroom: used=$retainedBefore max=$maximumRetainedBytes")
+            assertTrue(Files.getFileStore(root).usableSpace >= WebUploadStorage.FREE_HEADROOM_BYTES + reservation,
+                "Fixture should reach the retained-byte limit, not the separate free-space limit")
+            val beforeBytes = recordedProjectBytes(root).mapValues { (_, bytes) -> sha256(bytes) }
+            val beforeEntries = Files.walk(root).use { paths -> paths.map { root.relativize(it).toString() }.toList().toSet() }
+
+            val firstReadReached = java.util.concurrent.CountDownLatch(1)
+            val releaseFirstRead = java.util.concurrent.CountDownLatch(1)
+            val storageMeasureEntered = java.util.concurrent.CountDownLatch(1)
+            val releaseStorageMeasure = java.util.concurrent.CountDownLatch(1)
+            val distinctRecords = java.util.concurrent.atomic.AtomicInteger()
+            val seenRecords = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+            server.listingReadObserver = { relative ->
+                if (relative.endsWith("/job.json")) {
+                    val number = if (seenRecords.add(relative)) distinctRecords.incrementAndGet() else distinctRecords.get()
+                    if (number == 1) {
+                        firstReadReached.countDown()
+                        check(releaseFirstRead.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                    }
+                    Thread.sleep(100)
+                }
+            }
+            server.uploadStorageMeasureObserver = {
+                storageMeasureEntered.countDown()
+                check(releaseStorageMeasure.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            }
+
+            val dashboardExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val requestExecutor = java.util.concurrent.Executors.newFixedThreadPool(5)
+            try {
+                val dashboard = dashboardExecutor.submit<Response> { request(server, "GET", "/") }
+                assertTrue(firstReadReached.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Dashboard did not reach the physical job metadata read")
+                assertFalse(dashboard.isDone, "Dashboard must remain inside the held metadata read")
+
+                val rejectedUpload = requestExecutor.submit<String> { rejectUploadBeforeBody(server) }
+                assertTrue(storageMeasureEntered.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Upload did not enter retained-storage measurement")
+                assertFalse(rejectedUpload.isDone, "Upload refusal should wait for its bounded storage measurement")
+                val statusFutures = (1..4).map {
+                    requestExecutor.submit<Long> {
+                        val startedAt = System.nanoTime()
+                        val response = request(server, "GET", "/api/jobs/${jobIds.last()}")
+                        val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+                        assertEquals(200, response.status, response.body.decodeToString())
+                        assertTrue(response.body.decodeToString().contains(jobIds.last()))
+                        assertFalse(dashboard.isDone, "Status response completed after the dashboard ended")
+                        assertFalse(rejectedUpload.isDone, "Status response must finish before upload admission is released")
+                        assertEquals(1, releaseStorageMeasure.count,
+                            "Status response must complete while retained-storage measurement remains held")
+                        elapsedMs
+                    }
+                }
+                val statusLatencies = statusFutures.map { it.get(3, java.util.concurrent.TimeUnit.SECONDS) }
+                assertEquals(0, storageMeasureEntered.count, "Upload must have entered storage admission before status requests")
+                assertFalse(rejectedUpload.isDone, "Status responses must finish while upload storage measurement is held")
+                assertEquals(1, releaseStorageMeasure.count, "Storage measurement must not be released before all status responses")
+                releaseStorageMeasure.countDown()
+                val uploadResponse = rejectedUpload.get(3, java.util.concurrent.TimeUnit.SECONDS)
+                assertTrue(uploadResponse.startsWith("HTTP/1.1 503 "), "Expected storage refusal, got: $uploadResponse")
+                assertTrue(uploadResponse.contains("UPLOAD_STORAGE"), uploadResponse)
+                assertTrue(statusLatencies.all { it < 2_000 }, "HTTP status reads blocked behind listing or quota admission: $statusLatencies")
+                assertEquals(1, distinctRecords.get(), "Status and quota work must complete while listing remains held on record one")
+                assertFalse(dashboard.isDone)
+                assertEquals(beforeEntries, Files.walk(root).use { paths -> paths.map { root.relativize(it).toString() }.toList().toSet() },
+                    "Denied storage admission must not leave an upload stage")
+                assertEquals(beforeBytes, recordedProjectBytes(root).mapValues { (_, bytes) -> sha256(bytes) },
+                    "Denied storage admission must preserve every retained byte")
+                println("issue-162-retained-quota-http-v1 refusal=503/UPLOAD_STORAGE request_body_bytes_sent=0 " +
+                    "status_responses=${statusLatencies.size} status_max_ms=${statusLatencies.maxOrNull()} " +
+                    "dashboard_read_held=true storage_measure_held_through_status=true " +
+                    "distinct_records=${distinctRecords.get()} retained_bytes=$retainedBefore")
+
+                releaseFirstRead.countDown()
+                val completedDashboard = dashboard.get(10, java.util.concurrent.TimeUnit.SECONDS)
+                assertEquals(200, completedDashboard.status)
+                val dashboardBody = completedDashboard.body.decodeToString()
+                jobIds.forEach { id -> assertTrue(dashboardBody.contains(id), "Completed dashboard omitted $id") }
+                assertTrue(distinctRecords.get() >= jobIds.size,
+                    "Expected metadata reads across every job; observed ${distinctRecords.get()}")
+
+                Files.delete(retainedReport)
+                val restoredBytes = decompengine.jobs.RetainedStorageUsage.measure(root, maximumRetainedBytes).logicalBytes
+                assertTrue(restoredBytes <= maximumRetainedBytes - reservation,
+                    "Removing the retained fixture must restore reservation capacity: used=$restoredBytes max=$maximumRetainedBytes")
+                val retry = upload(server, "after-retained-quota.elf", elfFixture(), acceptJson = true)
+                assertEquals(201, retry.status, retry.body.decodeToString())
+                assertEquals(jobIds.size + 1, decompengine.jobs.JobStore(root).jobIds().size)
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+                while (server.admissionSnapshot().workers != 0 && System.nanoTime() < deadline) Thread.sleep(10)
+                assertEquals(0, server.admissionSnapshot().workers)
+                assertEquals(0, server.admissionSnapshot().queued)
+                assertEquals(0, server.admissionSnapshot().responders)
+                println("issue-162-retained-quota-http-v1 listing=complete retained_capacity_restored=true retry=201 admission=empty")
+            } finally {
+                releaseFirstRead.countDown()
+                releaseStorageMeasure.countDown()
+                server.listingReadObserver = {}
+                server.uploadStorageMeasureObserver = {}
+                dashboardExecutor.shutdownNow()
+                requestExecutor.shutdownNow()
+                assertTrue(dashboardExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+                assertTrue(requestExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS))
+            }
         }
     }
 
@@ -2691,12 +3150,16 @@ class UploadServerTest {
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
         reconstructor: JobReconstructor = JobReconstructor { _, _ -> },
         profiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
+        uiMode: WebUiMode = WebUiMode.LEGACY,
+        maximumRetainedStorageBytesForTests: Long? = null,
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
         val parent = Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories()
         val dataDir = createTempDirectory(parent, "case-")
         val directExecutor = Executor { command -> command.run() }
-        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, sourceProfiles = profiles)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor,
+            uiMode = uiMode, sourceProfiles = profiles)
+        maximumRetainedStorageBytesForTests?.let(server::configureUploadStorageLimitForTests)
         server.start()
         try {
             block(server, dataDir)
@@ -2747,6 +3210,55 @@ class UploadServerTest {
             header("Cache-Control"), header("X-Request-ID"), header("Allow"), header("Content-Length"),
             header("Content-Disposition"), header("Content-Security-Policy"), header("X-Content-Type-Options"),
             header("Referrer-Policy"))
+    }
+
+    private fun rejectUploadBeforeBody(server: UploadServer): String {
+        val origin = "http://127.0.0.1:${server.serverPort}"
+        val credentials = sessions.getOrPut(server) { legacySessionHeaders(server) }
+        val boundary = "retained-quota-header-only"
+        val socket = java.net.Socket("127.0.0.1", server.serverPort).apply { soTimeout = 5_000 }
+        return socket.use {
+            val requestHeaders = ("POST /jobs HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:${server.serverPort}\r\n" +
+                "Origin: $origin\r\n" +
+                "Cookie: ${credentials.getValue("Cookie")}\r\n" +
+                "X-CSRF-Token: ${credentials.getValue("X-CSRF-Token")}\r\n" +
+                "Accept: application/json\r\n" +
+                "Content-Type: multipart/form-data; boundary=$boundary\r\n" +
+                "Content-Length: 1000000\r\n" +
+                "Connection: close\r\n\r\n").toByteArray()
+            it.getOutputStream().write(requestHeaders)
+            it.getOutputStream().flush()
+            // Keep the request body absent and the socket open while awaiting the response. A
+            // response here proves retained-byte admission rejected from headers alone.
+            val input = java.io.BufferedInputStream(it.getInputStream())
+            fun readLine(): String {
+                val line = java.io.ByteArrayOutputStream()
+                var previous = -1
+                while (true) {
+                    val next = input.read()
+                    check(next >= 0) { "HTTP response ended before its headers were complete" }
+                    if (previous == '\r'.code && next == '\n'.code) break
+                    if (previous >= 0) line.write(previous)
+                    previous = next
+                }
+                return line.toString(Charsets.ISO_8859_1)
+            }
+            val statusLine = readLine()
+            val responseHeaders = buildMap {
+                while (true) {
+                    val line = readLine()
+                    if (line.isEmpty()) break
+                    val separator = line.indexOf(':')
+                    if (separator > 0) put(line.substring(0, separator).lowercase(), line.substring(separator + 1).trim())
+                }
+            }
+            val contentLength = responseHeaders["content-length"]?.toIntOrNull()
+                ?: error("HTTP refusal omitted Content-Length: $statusLine")
+            val body = input.readNBytes(contentLength)
+            assertEquals(contentLength, body.size, "HTTP refusal body was truncated")
+            "$statusLine\r\n${body.decodeToString()}"
+        }
     }
 
     private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null, val contentLength: String? = null, val contentDisposition: String? = null, val contentSecurityPolicy: String? = null, val contentTypeOptions: String? = null, val referrerPolicy: String? = null)
