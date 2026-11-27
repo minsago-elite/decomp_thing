@@ -74,6 +74,68 @@ it('keeps inventory filters, sorting and cursors in the URL and reads one bounde
   } finally { auth.dispose(); }
 });
 
+it('reuses the displayed first page on a repeated filter submission and goes Back to the previous filter', async () => {
+  const auth = await session();
+  const filtered = { ...inventory, matchedFunctions: 1, items: inventory.items.slice(0, 1), page: { ...inventory.page, nextCursor: null } };
+  transport.get.mockImplementation((_kind, path) => Promise.resolve({ data: path.includes('search=main') ? filtered : inventory }));
+  history.replaceState(null, '', `${revision}/functions`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const firstField = await screen.findByRole('searchbox');
+    fireEvent.input(firstField, { target: { value: 'main' } });
+    fireEvent.submit(firstField.closest('form')!);
+    await screen.findByText('Showing 1–1 of 1 matching functions (5 recorded).');
+    const results = screen.getByRole('heading', { name: copy.results });
+    await waitFor(() => expect(document.activeElement).toBe(results));
+    const entries = history.length;
+    const field = screen.getByRole('searchbox');
+    field.focus();
+    fireEvent.submit(field.closest('form')!);
+    expect(document.activeElement).toBe(results);
+    expect(history.length).toBe(entries);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+
+    await act(() => { history.back(); });
+    await screen.findByText('Showing 1–3 of 5 matching functions (5 recorded).');
+    expect(location.search).toBe('');
+    expect(screen.getByRole('searchbox')).toHaveProperty('value', '');
+    expect(transport.get).toHaveBeenCalledTimes(3);
+  } finally { auth.dispose(); }
+});
+
+it('recognizes the current filter in a bookmarked URL with explicit defaults', async () => {
+  const auth = await session();
+  transport.get.mockResolvedValue({ data: inventory });
+  history.replaceState(null, '', `${revision}/functions?order=asc&search=main&sort=address`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const field = await screen.findByRole('searchbox');
+    const entries = history.length;
+    field.focus();
+    fireEvent.submit(field.closest('form')!);
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: copy.results }));
+    expect(location.search).toBe('?order=asc&search=main&sort=address');
+    expect(history.length).toBe(entries);
+    expect(transport.get).toHaveBeenCalledTimes(1);
+  } finally { auth.dispose(); }
+});
+
+it('applies unchanged filters from a continuation by loading the first page', async () => {
+  const auth = await session();
+  transport.get.mockResolvedValue({ data: inventory });
+  history.replaceState(null, '', `${revision}/functions?search=main&cursor=${inventory.page.nextCursor}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const field = await screen.findByRole('searchbox');
+    field.focus();
+    fireEvent.submit(field.closest('form')!);
+    await waitFor(() => expect(location.search).toBe('?search=main'));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: copy.results })));
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    expect(transport.get).toHaveBeenLastCalledWith('functionInventory', `${api}/functions?search=main&limit=100`, expect.anything());
+  } finally { auth.dispose(); }
+});
+
 it.each(['wait', 'move'] as const)('respects the reader’s choice to %s during a function filter read', async choice => {
   const auth = await session();
   let finish!: (value: { data: FunctionInventory }) => void;

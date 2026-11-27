@@ -155,8 +155,13 @@ function Functions({ selected, basePath, search }: { selected: SourceSelection; 
   }, [read]);
   const data = read.state === 'ready' ? read.value : null;
   const go = (next: FunctionQuery, cursor?: string) => {
+    const nextSearch = functionSearch(withField(next, 'cursor', cursor ?? ''));
+    if (nextSearch === functionSearch(query)) {
+      results.current?.focus();
+      return;
+    }
     moveFocus.current = true;
-    location.route(structureListPath(basePath, selected, 'functions', functionSearch(withField(next, 'cursor', cursor ?? ''))));
+    location.route(structureListPath(basePath, selected, 'functions', nextSearch));
   };
   const offset = query.cursor ? Number(query.cursor.split('_')[1]) : 0;
   const unscoped = withField(withField(query, 'module', ''), 'cursor', '');
