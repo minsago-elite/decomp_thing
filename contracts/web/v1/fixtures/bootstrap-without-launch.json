@@ -25,10 +25,19 @@
         "limits": null
       },
       {
-        "id": "git_local",
-        "state": "unsupported",
-        "reasonCode": "FEATURE_NOT_IMPLEMENTED",
-        "message": "This fixture does not claim managed Git is implemented.",
+        "id": "git",
+        "state": "unavailable",
+        "reasonCode": "GIT_NOT_FOUND",
+        "message": "Git is not installed or not executable on the server.",
+        "workflows": [],
+        "agentContractVersion": null,
+        "limits": null
+      },
+      {
+        "id": "git-import",
+        "state": "unavailable",
+        "reasonCode": "GIT_NOT_FOUND",
+        "message": "Git is not installed or not executable on the server.",
         "workflows": [],
         "agentContractVersion": null,
         "limits": null
