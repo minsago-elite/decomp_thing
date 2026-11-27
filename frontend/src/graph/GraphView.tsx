@@ -5,6 +5,7 @@ import { structureCopy } from '../copy/structure';
 import { message, textMessage } from '../shared/messages';
 import { apiPath, sourceFilePath } from '../app/paths';
 import type { SourceSelection } from '../app/paths';
+import { sourceDownloadName } from '../sources/navigation';
 import { structureItemPath } from '../structure/paths';
 import { structureRecordRoute } from '../structure/navigation';
 import { NODE_HEIGHT, NODE_WIDTH } from './layout';
@@ -106,7 +107,7 @@ function Selected({ data, response, selection, selected, basePath, query }: {
 }) {
   const version = response.structureVersion;
   const record = (kind: 'program-model' | 'module-plan', label: string, value: StructureNeighborhood['model']) => value.path && value.sha256
-    ? <li><a href={apiPath(basePath, structureRecordRoute(selected, kind, version))} download="">{label}</a>{' '}
+    ? <li><a href={apiPath(basePath, structureRecordRoute(selected, kind, version))} download={sourceDownloadName(value.path)}>{label}</a>{' '}
       ({message(copy.evidenceRecord, { path: <bdi>{value.path}</bdi>, sha256: <code>{value.sha256}</code> })})</li> : null;
   const source = (label: string, path: string | null, fileId: string | null) => path === null ? null
     : <li>{fileId ? <a href={sourceFilePath(basePath, selected, fileId, response)}>{label}{structureCopy.labelSeparator}<bdi>{path}</bdi></a>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import type { MutableRef } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import type { Acceptance, Run, ScorecardComparison, ScorecardMetric, ScorecardReconciliation, StructureScorecard } from '../api/generated';
 import { ApiClientError } from '../api/errors';
@@ -8,6 +9,7 @@ import { message, textMessage } from '../shared/messages';
 import { apiPath } from '../app/paths';
 import type { SourceSelection } from '../app/paths';
 import { usePrivateTransport } from '../session/PrivateTransport';
+import { sourceDownloadName } from '../sources/navigation';
 import { structureItemPath, structureListPath } from './paths';
 import { bindStructure, revisionReadRoute, structureReadMessage, structureRecordRoute } from './navigation';
 import { Frame, useStructureRead } from './Frame';
@@ -16,6 +18,32 @@ import { SCORECARD_PAGE_LIMIT, scorecardLocation, scorecardSearch } from './scor
 import type { ScorecardQuery } from './scorecardQuery';
 
 const RUN_PAGE_LIMIT = 50;
+
+/**
+ * A heading-focus request belongs to the one read a sort or page move starts, to the results that own it, and to the
+ * control that asked. One request is pending at a time: any later move, Refresh or history navigation replaces it.
+ */
+type FocusRequest = { owner: 'scorecard' | 'comparison'; key: string; origin: string };
+type PendingFocus = FocusRequest & { from: Element | null; arrived: boolean };
+
+/** Moves focus to the owner's results once its requested read settles, unless the person moved focus meanwhile. */
+function useRequestedFocus(pending: MutableRef<PendingFocus | null>, owner: FocusRequest['owner'], key: string,
+  read: { state: string }, target: () => HTMLElement | null) {
+  useEffect(() => {
+    const request = pending.current;
+    if (!request || request.owner !== owner) return;
+    // Renders before the location changes still show the originating read; wait for the requested one.
+    if (key === request.origin && !request.arrived) return;
+    // Leaving the requested read abandons the request, including a return to its origin and a later return to it.
+    if (key !== request.key) { pending.current = null; return; }
+    request.arrived = true;
+    if (read.state === 'loading') return;
+    pending.current = null;
+    // Focus moved deliberately elsewhere while the read was pending stays where the person put it.
+    const active = document.activeElement;
+    if (active === request.from || active === null || active === document.body || !active.isConnected) target()?.focus();
+  }, [read]);
+}
 
 type Measure = Pick<ScorecardMetric, 'state' | 'reason' | 'value' | 'numerator' | 'denominator'>;
 
@@ -96,8 +124,9 @@ function Chart({ items }: { items: ModuleScores }) {
   </figure>;
 }
 
-function Comparison({ selected, basePath, query, version, onRoute }: {
-  selected: SourceSelection; basePath: string; query: ScorecardQuery; version: string; onRoute: (query: ScorecardQuery) => void;
+function Comparison({ selected, basePath, query, version, focus, onRoute }: {
+  selected: SourceSelection; basePath: string; query: ScorecardQuery; version: string; focus: MutableRef<PendingFocus | null>;
+  onRoute: (query: ScorecardQuery, focus?: FocusRequest) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   // Attempts are listed newest first, one bounded page at a time; older pages load on request, so an older
@@ -123,8 +152,9 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
       .catch(() => { if (!controller.signal.aborted) setRuns('failed'); });
     return () => controller.abort();
   }, [selected.jobId, cursor]);
-  const key = query.baseline ? [selected.jobId, selected.runId, selected.revisionId, query.baseline.runId, query.baseline.revisionId,
-    query.compareCursor ?? '', version].join('/') : '';
+  const readKey = (value: ScorecardQuery) => value.baseline ? [selected.jobId, selected.runId, selected.revisionId,
+    value.baseline.runId, value.baseline.revisionId, value.compareCursor ?? '', version].join('/') : '';
+  const key = readKey(query);
   const [read] = useStructureRead<ScorecardComparison | null>(key, async signal => {
     if (!query.baseline) return null;
     const values = new URLSearchParams({ baselineRunId: query.baseline.runId, baselineRevisionId: query.baseline.revisionId,
@@ -151,6 +181,12 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
   const unlistedBaseline = query.baseline && !candidates.some(run => run.runId === query.baseline!.runId
     && run.resultRevisionId === query.baseline!.revisionId) ? query.baseline : null;
   const data = read.state === 'ready' ? read.value : null;
+  // The pager unmounts while its page is read. Focus returns to that page's module heading, or to the comparison
+  // heading when the page fails or lists no modules.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const modulesHeading = useRef<HTMLHeadingElement>(null);
+  useRequestedFocus(focus, 'comparison', key, read, () => (read.state === 'ready' ? modulesHeading.current : null) ?? heading.current);
+  const page = (next: ScorecardQuery) => onRoute(next, { owner: 'comparison', key: readKey(next), origin: key });
   const offset = query.compareCursor ? Number(query.compareCursor.split('_')[1]) : 0;
   const side = (value: Measure | null) => value === null ? copy.notRecorded
     : value.state === 'measured' ? (value.value ?? fraction(value)) : stateText(value);
@@ -159,7 +195,7 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
     : unit === 'ratio' ? textMessage(copy.deltaValue, { value: value.value ?? '—', numerator: value.numerator ?? '—', denominator: value.denominator ?? '—' })
       : textMessage(copy.deltaCount, { numerator: value.numerator ?? '—', denominator: value.denominator ?? '—' });
   return <section aria-labelledby="scorecard-compare-title">
-    <h2 id="scorecard-compare-title">{copy.compareTitle}</h2>
+    <h2 id="scorecard-compare-title" ref={heading} tabIndex={-1}>{copy.compareTitle}</h2>
     <p>{copy.compareHint}</p>
     {runs === 'failed' && <p role="alert">{copy.baselinesUnavailable}</p>}
     {runs !== null && runs !== 'failed' && runs.nextCursor !== null && <p>
@@ -212,6 +248,7 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
         </tr>)}</tbody>
       </table></div>}
       {data.modules.total > 0 && <>
+        <h3 ref={modulesHeading} tabIndex={-1}>{copy.moduleComparisonTitle}</h3>
         <p role="status">{textMessage(copy.comparisonRange, { first: offset + 1, last: offset + data.modules.items.length, total: data.modules.total })}</p>
         <div class="structure-table"><table>
           <caption>{copy.moduleComparisonTitle}</caption>
@@ -223,9 +260,9 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
           </tr>)}</tbody>
         </table></div>
         <nav class="job-actions" aria-label={copy.moduleComparisonTitle}>
-          <button type="button" disabled={!query.compareCursor} onClick={() => { const next = { ...query }; delete next.compareCursor; onRoute(next); }}>{copy.first}</button>
+          <button type="button" disabled={!query.compareCursor} onClick={() => { const next = { ...query }; delete next.compareCursor; page(next); }}>{copy.first}</button>
           <button type="button" disabled={!data.modules.page.nextCursor} onClick={() => {
-            if (data.modules.page.nextCursor) onRoute({ ...query, compareCursor: data.modules.page.nextCursor });
+            if (data.modules.page.nextCursor) page({ ...query, compareCursor: data.modules.page.nextCursor });
           }}>{copy.next}</button>
         </nav>
       </>}
@@ -242,9 +279,14 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
   const readKey = (value: ScorecardQuery) => [selected.jobId, selected.runId, selected.revisionId, value.sort, value.order,
     value.cursor ?? '', value.version ?? ''].join('/');
   const key = readKey(query);
-  // A heading-focus request belongs to the one read a sort or page move starts, and to the control that asked for it.
   // A move that leaves the read unchanged starts no read, so it records nothing for a later Refresh to consume.
-  const moveFocus = useRef<{ key: string; origin: string; from: Element | null } | null>(null);
+  const moveFocus = useRef<PendingFocus | null>(null);
+  // Back and Forward never ask for focus, so they abandon a pending request even when they reach its read.
+  useEffect(() => {
+    const abandon = () => { moveFocus.current = null; };
+    addEventListener('popstate', abandon);
+    return () => removeEventListener('popstate', abandon);
+  }, []);
   const [read, refresh] = useStructureRead<StructureScorecard>(key, async signal => {
     const values = new URLSearchParams({ limit: String(SCORECARD_PAGE_LIMIT) });
     if (query.sort !== 'module') values.set('sort', query.sort);
@@ -263,21 +305,13 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
     return data.acceptance;
   });
   const acceptance = attempt.state === 'ready' ? attempt.value : null;
-  useEffect(() => {
-    const pending = moveFocus.current;
-    // Renders before the location changes still show the originating read; wait for the requested one.
-    if (!pending || key === pending.origin) return;
-    if (key !== pending.key) { moveFocus.current = null; return; }
-    if (read.state === 'loading') return;
-    moveFocus.current = null;
-    // Focus moved deliberately elsewhere while the read was pending stays where the person put it.
-    const active = document.activeElement;
-    if ((active === pending.from || active === null || active === document.body || !active.isConnected)) results.current?.focus();
-  }, [read]);
-  const route = (next: ScorecardQuery, focus = false) => {
-    moveFocus.current = focus && readKey(next) !== key ? { key: readKey(next), origin: key, from: document.activeElement } : null;
+  useRequestedFocus(moveFocus, 'scorecard', key, read, () => results.current);
+  // Every route replaces the pending request, so a later move by another owner, or one without focus, abandons it.
+  const route = (next: ScorecardQuery, focus?: FocusRequest) => {
+    moveFocus.current = focus && focus.key !== focus.origin ? { ...focus, from: document.activeElement, arrived: false } : null;
     location.route(structureListPath(basePath, selected, 'scorecard', scorecardSearch(next)));
   };
+  const move = (next: ScorecardQuery) => route(next, { owner: 'scorecard', key: readKey(next), origin: key });
   const data = read.state === 'ready' ? read.value : null;
   const card = data?.scorecard ?? null;
   const offset = query.cursor ? Number(query.cursor.split('_')[1]) : 0;
@@ -306,7 +340,8 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
       {data.confidence.path && data.confidence.sha256 && <p>
         {message(structureCopy.recordDigest, { path: <bdi>{data.confidence.path}</bdi>, sha256: <code>{data.confidence.sha256}</code>,
           schema: data.confidence.schemaVersion ?? structureCopy.notRecorded })}{' '}
-        <a href={apiPath(basePath, structureRecordRoute(selected, 'confidence', data.structureVersion))} download="">{copy.download}</a></p>}
+        <a href={apiPath(basePath, structureRecordRoute(selected, 'confidence', data.structureVersion))}
+          download={sourceDownloadName(data.confidence.path)}>{copy.download}</a></p>}
       <dl class="job-facts">
         <dt>{copy.acceptance}</dt><dd>{acceptance ? copy.acceptanceStates[acceptance] : copy.acceptanceUnavailable}</dd>
       </dl>
@@ -340,7 +375,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
         <Reconciliation value={card.reconciliation} />
         <h2 ref={results} tabIndex={-1}>{copy.modulesTitle}</h2>
         <form class="job-filters" aria-label={copy.applySort} onSubmit={event => {
-          event.preventDefault(); const next = { ...query, sort, order }; delete next.cursor; route(next, true);
+          event.preventDefault(); const next = { ...query, sort, order }; delete next.cursor; move(next);
         }}>
           <label>{copy.sort}<select name="sort" value={sort} onChange={event => setSort(event.currentTarget.value as ScorecardQuery['sort'])}>
             {(['module', 'score'] as const).map(value => <option key={value} value={value}>{copy.sorts[value]}</option>)}</select></label>
@@ -365,14 +400,15 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
             </tr>)}</tbody>
           </table></div>
           <nav class="job-actions" aria-label={copy.pages}>
-            <button type="button" disabled={read.state === 'loading' || !query.cursor} onClick={() => { const next = { ...query }; delete next.cursor; route(next, true); }}>{copy.first}</button>
+            <button type="button" disabled={read.state === 'loading' || !query.cursor} onClick={() => { const next = { ...query }; delete next.cursor; move(next); }}>{copy.first}</button>
             <button type="button" disabled={read.state === 'loading' || !card.modules.page.nextCursor} onClick={() => {
-              if (card.modules.page.nextCursor) route({ ...query, cursor: card.modules.page.nextCursor }, true);
+              if (card.modules.page.nextCursor) move({ ...query, cursor: card.modules.page.nextCursor });
             }}>{copy.next}</button>
           </nav>
         </>}
       </>}
-      <Comparison selected={selected} basePath={basePath} query={query} version={data.structureVersion} onRoute={next => route(next)} />
+      <Comparison selected={selected} basePath={basePath} query={query} version={data.structureVersion} focus={moveFocus}
+        onRoute={route} />
     </>}
   </Frame>;
 }

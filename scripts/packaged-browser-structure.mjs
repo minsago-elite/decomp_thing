@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { promises as fs, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
+import { nativeDownloadByClick } from './packaged-browser-native-download.mjs';
 import { applyStructureProfile, structureProfile } from './packaged-browser-structure-cold.mjs';
 
 // Kept current by WebProgramStructureTest; the seed writes manifests without the JVM profile registry.
@@ -26,6 +27,11 @@ const functionId = (index) => `fn_${hex(functionAddress(index)).padStart(16, '0'
 const moduleId = (index) => `module_${String(index).padStart(4, '0')}`;
 const globalId = (index) => `global_${hex(0x600000 + index * 8).padStart(16, '0')}`;
 const typeId = (index) => `type_${sha(`synthetic-type:${index}`)}`;
+const RECORD_DOWNLOADS = {
+  confidence: { path: 'reports/confidence.json', text: 'Download the confidence report' },
+  'program-model': { path: 'reports/program_model.json', text: 'Download the program model record' },
+  'module-plan': { path: 'reports/module_plan.json', text: 'Download the module plan record' },
+};
 const roles = (path) => {
   const template = path.replace(/^src\/modules\/[^/]+\.c$/, 'src/modules/{module}.c').replace(/^include\/modules\/[^/]+\.h$/, 'include/modules/{module}.h');
   const value = pins.declarations[template];
@@ -153,14 +159,23 @@ export async function seedStructure(root) {
     await fs.writeFile(join(directory, name), bytes, { flag: 'wx', mode: 0o600 });
   }
   const tree = join(directory, 'reports', 'runs', runId, 'source-tree');
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const contractBytes = Buffer.from(JSON.stringify(contract));
   const written = [...entries.map(({ path, bytes }) => [path, bytes]),
-    ['source_tree_manifest.json', Buffer.from(JSON.stringify(manifest))], ['reports/build_contract.json', Buffer.from(JSON.stringify(contract))]];
+    ['source_tree_manifest.json', manifestBytes], ['reports/build_contract.json', contractBytes]];
   for (const [path, bytes] of written) {
     await fs.mkdir(dirname(join(tree, path)), { recursive: true, mode: 0o700 });
     await fs.writeFile(join(tree, path), bytes, { flag: 'wx', mode: 0o600 });
   }
+  const recordSha256 = Object.fromEntries(manifest.files
+    .filter(({ path }) => Object.values(RECORD_DOWNLOADS).some(record => record.path === path))
+    .map(({ path, sha256 }) => [path, sha256]));
+  // Reproduce the seeded revision's pins from the committed bytes, independent of any browser link.
+  const metadataVersion = sha(`revision-source-metadata-v1\n${sha(manifestBytes)}\n${sha(contractBytes)}\n${sourceSha256}\n`);
+  const structureVersion = sha(['program-structure-v1', metadataVersion, recordSha256[RECORD_DOWNLOADS['program-model'].path],
+    recordSha256[RECORD_DOWNLOADS['module-plan'].path], 'available', 'available'].join('\n'));
   return { jobId, runId, revisionId, functions: FUNCTIONS, modules: modules.length, modelBytes: Buffer.byteLength(model),
-    functionAddress, functionId, moduleId };
+    functionAddress, functionId, moduleId, records: { tree, downloadParent: dirname(root), recordSha256, structureVersion } };
 }
 
 const ROWS = `[...document.querySelectorAll('table[aria-label], table')].filter(table => table.querySelector('caption')?.textContent === 'Recovered functions')
@@ -1487,7 +1502,78 @@ export async function qualifyStructureColdSample(options) {
   finally { await jvmRssSampler.stop(); }
 }
 
-async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+export async function qualifyStructureRecordDownloads({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin,
+  profile = 'loopback' }) {
+  const tab = await makeTarget();
+  await applyStructureProfile(cdp, tab.sessionId, structureProfile(profile));
+  const relativeRevision = `jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}`;
+  const revision = `${browserOrigin}/nested/${relativeRevision}`;
+  const api = `${browserOrigin}/nested/api/v1/${relativeRevision}`;
+  const { tree, downloadParent, recordSha256, structureVersion } = fixture.records;
+  const sessionCookie = async () => {
+    const { cookies } = await cdp.call('Network.getCookies', { urls: [revision] }, tab.sessionId);
+    const session = cookies.find(cookie => cookie.path === '/nested/' && cookie.httpOnly && cookie.sameSite === 'Strict');
+    assert.ok(session?.value, 'Record downloads require the authenticated workbench read session');
+    return session.value;
+  };
+  const originalSession = await sessionCookie();
+  const downloads = {};
+  const download = async (id, viewUrl) => {
+    const { path, text } = RECORD_DOWNLOADS[id];
+    const expected = await fs.readFile(join(tree, path));
+    assert.equal(sha(expected), recordSha256[path], `Seeded ${id} bytes must match their manifest commitment`);
+    const anchor = `[...document.querySelectorAll('main a')].find(a => a.textContent === ${JSON.stringify(text)})`;
+    const before = await evaluate(tab, `(() => {
+      const link = ${anchor};
+      const citation = link?.closest('li, p');
+      return { url: location.href, timeOrigin: performance.timeOrigin, href: link?.href,
+        enabled: !!link?.download && link.getAttribute('aria-disabled') !== 'true',
+        recordPath: citation?.querySelector('bdi')?.textContent, sha256: citation?.querySelector('code')?.textContent };
+    })()`);
+    assert.equal(before.url, viewUrl, `${id} must download from its workbench view`);
+    assert.equal(before.href, `${api}/records/${id}?structureVersion=${structureVersion}`);
+    assert.equal(before.enabled, true, `${id} must have an enabled native download link`);
+    assert.equal(before.recordPath, path);
+    assert.equal(before.sha256, recordSha256[path], `${id} must cite the seeded commitment`);
+    const result = await nativeDownloadByClick({ cdp, tab, evaluate, waitFor, text, expected,
+      directory: join(downloadParent, `structure-download-${id}`), timeout: 60_000 });
+    assert.equal(result.suggestedFilename, basename(path));
+    assert.equal(result.sha256, recordSha256[path]);
+    assert.equal(await evaluate(tab, 'performance.timeOrigin'), before.timeOrigin, `${id} must keep the same workbench document`);
+    downloads[id] = { ...result, structureVersion, committedSha256: recordSha256[path] };
+  };
+
+  const scorecardUrl = `${revision}/scorecard`;
+  await cdp.call('Page.navigate', { url: scorecardUrl }, tab.sessionId);
+  await ready(tab, `[...document.querySelectorAll('table caption')].some(caption => caption.textContent === 'Measures')`, 'scorecard for the confidence download');
+  await download('confidence', scorecardUrl);
+
+  const module = fixture.moduleId(0);
+  const graphUrl = `${revision}/graph?view=modules&focus=${module}&depth=2&nodeLimit=200&edgeLimit=400`;
+  await cdp.call('Page.navigate', { url: graphUrl }, tab.sessionId);
+  await ready(tab, `(() => {
+    const inspect = [...document.querySelectorAll('table button')].find(button => button.textContent === ${JSON.stringify(`Inspect ${module}`)});
+    if (!inspect) return false;
+    inspect.focus();
+    return document.activeElement === inspect;
+  })()`, 'module graph inspection control');
+  for (const type of ['keyDown', 'keyUp']) {
+    await cdp.call('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      ...(type === 'keyDown' ? { text: '\r' } : {}) }, tab.sessionId);
+  }
+  // The drawing sits above the links and can move their pointer targets while layout completes.
+  await ready(tab, `document.body.innerText.includes(${JSON.stringify(`Selected node ${module}.`)})
+    && document.querySelector('svg[role="img"] .graph-node') !== null`, 'selected module graph record links');
+  await download('program-model', graphUrl);
+  await download('module-plan', graphUrl);
+  assert.ok(await sessionCookie() === originalSession, 'Record downloads must keep the authenticated read session');
+  assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) && new URL(request.url).origin === browserOrigin),
+    'Record qualification must read only from the packaged workbench');
+  assert.deepEqual(tab.exceptions, []);
+  return downloads;
+}
+
+async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin,
   profile: profileName = 'loopback', coldSample = false }, jvmRssSampler) {
   const tab = await makeTarget();
   const profile = structureProfile(profileName);
@@ -1818,6 +1904,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance,
     ...coldEvidenceSummary, ...inventoryFailureClassification, inventoryConsumption };
   assertStructureQualification(measurements, evidenceFailures);
+  // Attachment transfer is outside the structure navigation latency and memory measurements.
+  const recordDownloads = await qualifyStructureRecordDownloads({ fixture, makeTarget, cdp, evaluate, ready, waitFor,
+    browserOrigin, profile: profileName });
   pageMs.sort((a, b) => a - b);
   return { ...measurements, recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 51, measuredInteractions: localFeedbackMs.length, maximumMountedRows: 100,
@@ -1828,5 +1917,5 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
     pinnedCrossLinks: true, moduleSourceLink: true, moduleResponse: moduleResponseEvidence, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0,
     graphTablesMs: Math.round(graphTablesMs), graphDrawnMs: Math.round(graphDrawnMs), boundedGraphReads: graphReads.length,
-    scorecardMs: Math.round(scorecardMs) };
+    scorecardMs: Math.round(scorecardMs), recordDownloads };
 }

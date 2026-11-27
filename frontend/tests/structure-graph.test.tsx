@@ -130,6 +130,11 @@ it.each([
     render(<App basePath="/nested" session={auth} />);
     fireEvent.click(await screen.findByRole('button', { name: inspect, exact: true }));
     const details = screen.getByRole('region', { name: copy.selectionTitle });
+    const record = within(details).getByRole('link', { name: view === 'calls' ? copy.links.model : copy.links.plan });
+    const workbenchUrl = location.href;
+    expect(fireEvent.click(record)).toBe(true);
+    expect(location.href).toBe(workbenchUrl);
+    expect(record.getAttribute('download')).toBe(view === 'calls' ? 'program_model.json' : 'module_plan.json');
     const sourceLink = within(details).getByRole('link', { name: new RegExp(`^${link}:`) });
     const url = new URL(sourceLink.getAttribute('href')!, location.origin);
     fileId = url.pathname.split('/').at(-1)!;
@@ -260,4 +265,59 @@ it.each([
     expect(transport.get.mock.calls[0]?.[1]).toContain(search.includes('modules') ? 'view=modules' : `unresolved=${echoed}`);
     expect(transport.get.mock.calls[0]?.[1].includes('unresolved=')).toBe(!search.includes('modules'));
   } finally { auth.dispose(); }
+});
+
+type Envelope = { data: StructureNeighborhood & { neighborhood: NonNullable<StructureNeighborhood['neighborhood']> } };
+const neighborhoodEnvelope = (name: string) =>
+  JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as Envelope;
+// The server builds the center from the requested recorded function or module, so its identity and selector are the focus.
+const foreignCenters: { name: string; fixtureName: string; search: string; edit: (data: Envelope['data']) => void }[] = [
+  { name: 'calls center is another recorded function', fixtureName: 'structure-neighborhood-calls',
+    search: 'view=calls&focus=fn_0000000000401010&depth=2', edit: data => { data.query.focus = 'fn_0000000000401010'; } },
+  { name: 'modules center is another module', fixtureName: 'structure-neighborhood-modules',
+    search: 'view=modules&focus=util', edit: data => { data.query.focus = 'util'; } },
+  { name: 'calls center carries no selector', fixtureName: 'structure-neighborhood-calls',
+    search: 'view=calls&focus=fn_0000000000401000&depth=2', edit: data => { data.neighborhood.nodes[0]!.selector = null; } },
+  { name: 'modules center carries no selector', fixtureName: 'structure-neighborhood-modules',
+    search: 'view=modules&focus=core', edit: data => { data.neighborhood.nodes[0]!.selector = null; } },
+  { name: 'calls center is an unrecorded call target', fixtureName: 'structure-neighborhood-calls',
+    search: 'view=calls&focus=fn_missing&depth=2', edit: data => {
+      data.query.focus = 'fn_missing';
+      data.neighborhood = { nodes: [{ index: 0, depth: 0, outgoing: { total: 0, shown: 0 }, incoming: { total: 0, shown: 0 },
+        kind: 'unrecorded-function', entityId: 'fn_missing', selector: null }], edges: [],
+      completeness: { state: 'complete', reasons: [], reachableNodes: 1, reachableEdges: 0, omittedNodes: 0, omittedEdges: 0,
+        edgesBeyondDepth: 0, filteredEdges: 0 } } as unknown as Envelope['data']['neighborhood'];
+    } },
+];
+
+it.each(foreignCenters)('rejects a neighborhood whose center is not the echoed focus at decode ($name)', ({ fixtureName, edit }) => {
+  const envelope = neighborhoodEnvelope(fixtureName);
+  edit(envelope.data);
+  expect(() => decodeResponse(JSON.stringify(envelope), 'structureNeighborhood')).toThrow(ApiClientError);
+});
+
+it.each(foreignCenters)('refuses a neighborhood whose center belongs to another entity despite a matching query echo ($name)', async ({ fixtureName, search, edit }) => {
+  const auth = await session();
+  const envelope = neighborhoodEnvelope(fixtureName);
+  edit(envelope.data);
+  // Bypasses the decoder: the route itself binds the center to the requested focus.
+  transport.get.mockResolvedValue({ data: envelope.data });
+  history.replaceState(null, '', `${revision}/graph?${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const outcome = await waitFor(() => {
+      if (screen.queryByRole('alert')) return { kind: 'alert' };
+      const graph = screen.queryByRole('table', { name: copy.nodesTitle });
+      if (graph) return { kind: 'graph', firstRow: within(graph).getAllByRole('row')[1]?.textContent };
+      throw new Error('waiting for graph response');
+    });
+    expect(outcome).toEqual({ kind: 'alert' });
+    expect(screen.queryByRole('table', { name: copy.edgesTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('accepts an unavailable graph for any recorded focus, since it has no center to bind', () => {
+  const envelope = neighborhoodEnvelope('structure-neighborhood-not-recorded');
+  envelope.data.query.focus = 'fn_0000000000401010';
+  expect(decodeResponse(JSON.stringify(envelope), 'structureNeighborhood').data.neighborhood).toBeNull();
 });

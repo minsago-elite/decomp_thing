@@ -75,8 +75,13 @@ it('states every measure with its state, recorded value, fraction and source, an
     // Acceptance comes from the attempt record, and no threshold applies to the heuristic.
     await screen.findByText(copy.acceptanceStates.rejected);
     expect(screen.getByText(/No validator threshold applies/)).toBeTruthy();
-    expect(screen.getByRole('link', { name: copy.download }).getAttribute('href'))
+    const download = screen.getByRole('link', { name: copy.download });
+    expect(download.getAttribute('href'))
       .toBe(`/nested/api/v1${api}/records/confidence?structureVersion=${card.structureVersion}`);
+    const workbenchUrl = location.href;
+    expect(fireEvent.click(download)).toBe(true);
+    expect(location.href).toBe(workbenchUrl);
+    expect(download.getAttribute('download')).toBe('confidence.json');
     // The chart is supplementary: an image with a text alternative, followed by the same values in a table.
     expect(screen.getByRole('img', { name: copy.chartLabel })).toBeTruthy();
     const modules = screen.getByRole('table', { name: copy.modulesTitle });
@@ -508,32 +513,58 @@ it.each([false, true])('records no focus move for an unchanged sort, so a later 
   } finally { auth.dispose(); }
 });
 
-it('abandons a sort focus request when Back interrupts its read', async () => {
+/** Lets passive effects, which run after paint, settle before focus is inspected. */
+const afterPaint = () => act(async () => {
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+});
+
+/** Records the text of every element that receives focus until stopped. */
+function recordFocus() {
+  const events: string[] = [];
+  const collect = (event: FocusEvent) => events.push((event.target as Element).textContent ?? '');
+  document.addEventListener('focusin', collect);
+  return { events, stop: () => document.removeEventListener('focusin', collect) };
+}
+
+it('abandons a sort focus request when Back interrupts its read, even when Forward returns to the requested sort', async () => {
   const auth = await session();
   serve();
   history.replaceState(null, '', `${revision}/scorecard`);
+  const focus = recordFocus();
   try {
+    // Two distinct held reads: the interrupted sort read, and the read Forward starts for the same sort.
+    const respond = transport.get.getMockImplementation()!;
+    const held: (() => void)[] = [];
+    transport.get.mockImplementation(async (...args) => {
+      if (args[0] === 'structureScorecard' && args[1].includes('sort=score')) await new Promise<void>(resolve => held.push(resolve));
+      return respond(...args);
+    });
     render(<App basePath="/nested" session={auth} />);
     fireEvent.change(await screen.findByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
-    const release = hold();
     const apply = screen.getByRole('button', { name: copy.applySort });
     apply.focus();
     fireEvent.click(apply);
+    await waitFor(() => expect(held).toHaveLength(1));
     await screen.findByText(structureCopy.loading);
     history.back();
     await waitFor(() => expect(location.search).toBe(''));
-    await waitFor(() => expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(3));
-    await act(() => Promise.resolve().then(release));
     await screen.findByRole('table', { name: copy.modulesTitle });
-    const focusAfterBack = document.activeElement;
-    const releaseForward = hold();
+    await act(() => Promise.resolve().then(held[0]));
+    await afterPaint();
     history.forward();
-    await waitFor(() => expect(location.search).toContain('sort=score'));
+    await waitFor(() => expect(held).toHaveLength(2));
     await screen.findByText(structureCopy.loading);
-    await act(() => Promise.resolve().then(releaseForward));
-    await screen.findByRole('table', { name: copy.modulesTitle });
-    expect(document.activeElement).toBe(focusAfterBack);
-  } finally { auth.dispose(); }
+    const focusBeforeCompletion = document.activeElement;
+    await act(() => Promise.resolve().then(held[1]));
+    await screen.findByRole('row', { name: /net/ });
+    await afterPaint();
+    expect({ search: location.search, focusMoved: document.activeElement !== focusBeforeCompletion,
+      headingFocused: focus.events.includes(copy.modulesTitle) })
+      .toEqual({ search: '?sort=score', focusMoved: false, headingFocused: false });
+  } finally {
+    focus.stop();
+    auth.dispose();
+  }
 });
 
 it('leaves focus where it was deliberately moved while a sort read is pending', async () => {
@@ -555,6 +586,161 @@ it('leaves focus where it was deliberately moved while a sort read is pending', 
     await waitFor(() => expect(screen.queryByText(structureCopy.loading)).toBeNull());
     expect(document.activeElement).toBe(elsewhere);
   } finally { auth.dispose(); }
+});
+
+const comparisonCursor = `${'1'.repeat(64)}_50_${'2'.repeat(32)}`;
+
+/** A decoded 51-module comparison in two pages; every second-page read is held until released, then answers or fails. */
+function servePagedComparison(failSecond = false) {
+  const sample = comparison.modules.items[0]!;
+  const items = Array.from({ length: 51 }, (_, index) => {
+    const id = `module_${String(index + 1).padStart(2, '0')}`;
+    return { ...sample, moduleId: id, selector: id };
+  });
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8')) as object;
+  const page = (second: boolean) => decodeResponse(JSON.stringify({ ...envelope, data: { ...comparison, modules: {
+    total: 51, items: second ? items.slice(50) : items.slice(0, 50),
+    page: { ...comparison.modules.page, nextCursor: second ? null : comparisonCursor },
+  } } }), 'scorecardComparison');
+  const firstPage = page(false), secondPage = page(true);
+  const held: (() => void)[] = [];
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'scorecardComparison') {
+      const second = path.includes('cursor=');
+      if (second) await new Promise<void>(resolve => held.push(resolve));
+      if (second && failSecond) throw new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' });
+      return second ? secondPage : firstPage;
+    }
+    return { data: kind === 'structureScorecard' ? ordered(path, { ...card, structureVersion: comparison.structureVersion })
+      : kind === 'run' ? run : runs };
+  });
+  return held;
+}
+
+const comparisonPages = () => within(screen.getByRole('navigation', { name: copy.moduleComparisonTitle }));
+
+/** Focuses a comparison pager button, activates it and waits for the held page read. */
+async function moveComparisonPage(held: (() => void)[], name: string) {
+  const button = await waitFor(() => comparisonPages().getByRole('button', { name }));
+  const reads = held.length;
+  button.focus();
+  fireEvent.click(button);
+  await waitFor(() => expect(held).toHaveLength(reads + 1));
+  expect(screen.queryByRole('table', { name: copy.moduleComparisonTitle })).toBeNull();
+}
+
+it('returns keyboard focus to the module comparison heading of the requested comparison page', async () => {
+  const auth = await session();
+  const held = servePagedComparison();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  const focus = recordFocus();
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('navigation', { name: copy.moduleComparisonTitle });
+    await moveComparisonPage(held, copy.next);
+    expect(location.search).toContain(`compareCursor=${comparisonCursor}`);
+    await act(() => Promise.resolve().then(held[0]));
+    await screen.findByRole('link', { name: 'module_51' });
+    await afterPaint();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: copy.moduleComparisonTitle }));
+    // The first page is answered at once; focus returns to the same heading of that page, not the pager.
+    const first = comparisonPages().getByRole('button', { name: copy.first });
+    first.focus();
+    fireEvent.click(first);
+    await screen.findByRole('link', { name: 'module_01' });
+    await afterPaint();
+    expect({ search: location.search, focused: document.activeElement?.textContent,
+      breakdownFocused: focus.events.includes(copy.modulesTitle) })
+      .toEqual({ search: '?baselineRunId=run_1&baselineRevisionId=revision_1', focused: copy.moduleComparisonTitle, breakdownFocused: false });
+  } finally {
+    focus.stop();
+    auth.dispose();
+  }
+});
+
+it('leaves focus where it was deliberately moved while a comparison page read is pending', async () => {
+  const auth = await session();
+  const held = servePagedComparison();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await moveComparisonPage(held, copy.next);
+    const elsewhere = screen.getByRole('link', { name: structureCopy.browseModules });
+    elsewhere.focus();
+    await act(() => Promise.resolve().then(held[0]));
+    await screen.findByRole('link', { name: 'module_51' });
+    await afterPaint();
+    expect(document.activeElement).toBe(elsewhere);
+  } finally { auth.dispose(); }
+});
+
+it('abandons a comparison focus request when Back interrupts its read, even when Forward returns to the requested page', async () => {
+  const auth = await session();
+  const held = servePagedComparison();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  const focus = recordFocus();
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await moveComparisonPage(held, copy.next);
+    history.back();
+    await waitFor(() => expect(location.search).not.toContain('compareCursor'));
+    await screen.findByRole('link', { name: 'module_01' });
+    await act(() => Promise.resolve().then(held[0]));
+    await afterPaint();
+    history.forward();
+    await waitFor(() => expect(held).toHaveLength(2));
+    const focusBeforeCompletion = document.activeElement;
+    await act(() => Promise.resolve().then(held[1]));
+    await screen.findByRole('link', { name: 'module_51' });
+    await afterPaint();
+    expect({ focusMoved: document.activeElement !== focusBeforeCompletion, headingFocused: focus.events.includes(copy.moduleComparisonTitle) })
+      .toEqual({ focusMoved: false, headingFocused: false });
+  } finally {
+    focus.stop();
+    auth.dispose();
+  }
+});
+
+it('moves focus to the comparison heading when the requested comparison page fails', async () => {
+  const auth = await session();
+  const held = servePagedComparison(true);
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await moveComparisonPage(held, copy.next);
+    await act(() => Promise.resolve().then(held[0]));
+    const section = screen.getByRole('region', { name: copy.compareTitle });
+    await within(section).findByRole('alert');
+    await afterPaint();
+    expect(document.activeElement).toBe(within(section).getByRole('heading', { name: copy.compareTitle }));
+  } finally { auth.dispose(); }
+});
+
+it('gives focus to the later sort move, not the comparison page it interrupts', async () => {
+  const auth = await session();
+  const held = servePagedComparison();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  const focus = recordFocus();
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await moveComparisonPage(held, copy.next);
+    fireEvent.change(screen.getByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    const apply = screen.getByRole('button', { name: copy.applySort });
+    apply.focus();
+    fireEvent.click(apply);
+    await waitFor(() => expect(location.search).toContain('sort=score'));
+    await screen.findByRole('row', { name: /net/ });
+    // The sorted card remounts the comparison, which rereads the same requested page.
+    await waitFor(() => expect(held).toHaveLength(2));
+    await act(() => Promise.resolve().then(held[1]));
+    await screen.findByRole('link', { name: 'module_51' });
+    await afterPaint();
+    expect({ focused: document.activeElement?.textContent, comparisonFocused: focus.events.includes(copy.moduleComparisonTitle) })
+      .toEqual({ focused: copy.modulesTitle, comparisonFocused: false });
+  } finally {
+    focus.stop();
+    auth.dispose();
+  }
 });
 
 it.each(['jobId', 'runId', 'revisionId'] as const)('refuses a decoded comparison whose current side names another %s', async field => {

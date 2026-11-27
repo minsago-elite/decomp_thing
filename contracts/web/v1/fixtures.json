@@ -1227,6 +1227,10 @@
       "valid": false
     },
     {
+      "file": "fixtures/invalid-structure-neighborhood-foreign-center.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/invalid-structure-scorecard-measured-without-denominator.json",
       "valid": false
     },

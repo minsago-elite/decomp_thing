@@ -77,6 +77,11 @@ export default function GraphRoute({ selected, basePath, search, runtime = graph
     if (echoed.view !== query.view || echoed.focus !== query.focus || echoed.depth !== query.depth || echoed.nodeLimit !== query.nodeLimit
       || echoed.edgeLimit !== query.edgeLimit || echoed.direction !== query.direction
       || echoed.unresolved !== (query.view === 'calls' ? query.unresolved : null)) throw new Error('Neighborhood answers another request.');
+    // The server starts from the requested recorded function or module, so the center must be that exact entity.
+    const center = data.neighborhood?.nodes[0];
+    if (data.neighborhood && !(center && center.selector === query.focus && (query.view === 'calls'
+      ? center.kind === 'function' && center.entityId === query.focus
+      : center.kind === 'module' && center.moduleId === query.focus))) throw new Error('Neighborhood is centered on another entity.');
     return data;
   });
   const data = read.state === 'ready' ? read.value : null;

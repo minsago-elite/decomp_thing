@@ -29,13 +29,21 @@ function checkStructurePage(page: Page, version: string, count: number): void {
   requireValue(page.snapshotVersion === version && count <= page.limit);
 }
 
-type Neighborhood = NonNullable<Extract<ContractDocument, { kind: 'structureNeighborhood' }>['data']['neighborhood']>;
+type NeighborhoodDocument = Extract<ContractDocument, { kind: 'structureNeighborhood' }>['data'];
+type Neighborhood = NonNullable<NeighborhoodDocument['neighborhood']>;
 type Measure = { state: string; reason: string | null; value: string | null; numerator: string | null; denominator: string | null };
 
-/** Edges join included nodes, degrees agree with the edges, and only a truncated neighborhood omits anything. */
-function checkNeighborhood(data: Neighborhood): void {
+/**
+ * The center is the echoed focus: the recorded function or module the server starts from, never an unrecorded target.
+ * Edges join included nodes, degrees agree with the edges, and only a truncated neighborhood omits anything.
+ */
+function checkNeighborhood(data: Neighborhood, query: NeighborhoodDocument['query']): void {
   const { nodes, edges, completeness } = data;
   requireValue(nodes.every((node, index) => node.index === index) && nodes[0]?.depth === 0);
+  const center = nodes[0];
+  requireValue(center !== undefined && center.selector === query.focus && (query.view === 'calls'
+    ? center.kind === 'function' && center.entityId === query.focus
+    : center.kind === 'module' && center.moduleId === query.focus));
   for (const edge of edges) {
     const target = nodes[edge.target];
     requireValue(edge.source < nodes.length && target !== undefined);
@@ -72,7 +80,7 @@ function checkStructureDocument(document: ContractDocument): void {
   switch (document.kind) {
     case 'structureNeighborhood': {
       checkStructure(document.data, []);
-      if (document.data.neighborhood) checkNeighborhood(document.data.neighborhood);
+      if (document.data.neighborhood) checkNeighborhood(document.data.neighborhood, document.data.query);
       break;
     }
     case 'structureScorecard': {

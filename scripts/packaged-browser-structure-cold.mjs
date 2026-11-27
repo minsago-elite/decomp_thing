@@ -13,6 +13,7 @@ export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
   'frontend/package.json',
   'scripts/check-packaged-web-browser.mjs',
   'scripts/packaged-browser-structure.mjs',
+  'scripts/packaged-browser-native-download.mjs',
   'scripts/packaged-browser-structure-cold.mjs',
   'scripts/packaged-browser-structure-profile.json',
   'scripts/frontend-node-sha256.txt',

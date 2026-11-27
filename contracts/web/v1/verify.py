@@ -412,6 +412,10 @@ def check_neighborhood(data: dict) -> None:
     nodes, edges, completeness = neighborhood["nodes"], neighborhood["edges"], neighborhood["completeness"]
     if [node["index"] for node in nodes] != list(range(len(nodes))) or nodes[0]["depth"] != 0:
         raise ValueError("graph nodes must be numbered in discovery order from the focus")
+    center, query = nodes[0], data["query"]
+    if center["selector"] != query["focus"] or center["kind"] != ("function" if query["view"] == "calls" else "module") \
+            or center.get("entityId" if query["view"] == "calls" else "moduleId") != query["focus"]:
+        raise ValueError("the graph center must be the recorded function or module named by the focus")
     if any(node["selector"] not in (None, node.get("entityId", node.get("moduleId"))) for node in nodes):
         raise ValueError("graph selectors must be the recorded identity")
     for edge in edges:

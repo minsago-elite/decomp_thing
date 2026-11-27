@@ -205,6 +205,13 @@ class Protocol {
     const key = `${sessionId ?? ''}:${method}`;
     if (!this.listeners.has(key)) this.listeners.set(key, []);
     this.listeners.get(key).push(listener);
+    return () => {
+      const listeners = this.listeners.get(key);
+      const index = listeners?.indexOf(listener) ?? -1;
+      if (index < 0) return;
+      listeners.splice(index, 1);
+      if (listeners.length === 0) this.listeners.delete(key);
+    };
   }
 }
 
@@ -1106,7 +1113,7 @@ try {
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
-    if (values.mode === 'structure') report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+    if (values.mode === 'structure') report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin,
       applicationPid: application.pid, profile: values['structure-profile'] });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
