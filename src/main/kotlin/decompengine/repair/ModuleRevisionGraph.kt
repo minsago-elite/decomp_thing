@@ -7443,6 +7443,10 @@ internal fun readBudgetedStableRegularFile(
             offset += count
             chargeBytes(count)
         }
+        // Each admitted entry permits one EOF probe in addition to its admitted payload.
+        // A mismatching descriptor can consume at most one extra byte, even at a zero limit.
+        cancellationCheck()
+        requireUnchanged(input.read() == -1) { "stable file-read target exceeds its reported size: $relative" }
     }
     bytes
 }

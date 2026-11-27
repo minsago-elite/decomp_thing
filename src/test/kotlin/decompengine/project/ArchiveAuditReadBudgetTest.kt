@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.repair.StableFileChangedException
 import java.nio.file.Files
 import java.nio.file.Path
 import org.junit.jupiter.api.io.TempDir
@@ -33,6 +34,20 @@ class ArchiveAuditReadBudgetTest {
                 "fixture", roles = declaration.roles, contentKind = declaration.contentKind)), unresolvedEntityIds = emptyList())
         Files.writeString(project.resolve("source_tree_manifest.json"), manifest.toJson())
         return bytes.size
+    }
+
+    @Test
+    fun `zero byte allowance accepts an empty file and rejects a nonempty zero size descriptor`() {
+        Files.createFile(project.resolve("empty"))
+        val budget = ArchiveAuditReadBudget(0, 2)
+        assertEquals(0, budget.read(project, "empty", 0).bytes.size)
+
+        // Linux procfs exposes the kernel version as a regular file with a declared size of zero.
+        val proc = Path.of("/proc")
+        assertEquals(0L, Files.size(proc.resolve("version")))
+        assertFailsWith<StableFileChangedException> { budget.read(proc, "version", 0) }
+        assertEquals(0L, budget.bytesRead)
+        assertEquals(2, budget.entriesVisited)
     }
 
     @Test
