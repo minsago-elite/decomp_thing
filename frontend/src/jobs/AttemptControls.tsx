@@ -7,6 +7,7 @@ import { runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { message as displayMessage, textMessage } from '../shared/messages';
+import { isDeletedJob } from '../shared/retainMetadata';
 import { createAttemptCommandRecovery, type AttemptCommand, type AttemptCommandRecovery } from './attemptCommandRecovery';
 
 const reason = (code: string | null) => textMessage(copy.unavailable, { reason: (code && reasons[code]) || copy.reasonUnknown });
@@ -28,10 +29,15 @@ function definite(failure: unknown): boolean {
  * every command carries that read's run version and a retained request key, and nothing is sent on mount,
  * refresh or reconnect. The reported state after a command is the server's, never an optimistic guess.
  */
-export function AttemptControls({ jobId, runId, basePath, session, run, onChanged }: {
+export function AttemptControls({ jobId, runId, basePath, session, run, onChanged, onDeleted }: {
   jobId: string; runId: string; basePath: string; session: Pick<BrowserSession, 'csrf'>; run: Run; onChanged: () => void;
+  /** A confirmed RESOURCE_GONE tombstone from a read, command reply or follow-up read ends the routed attempt (#512). */
+  onDeleted?: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
+  /** Hands a confirmed tombstone to the route; any other failure stays with this panel. */
+  const escalated = (failure: unknown) => { if (!isDeletedJob(failure) || !deletedHandler.current) return false; deletedHandler.current(failure); return true; };
   const availability = useBrowserAvailability();
   const available = availability.online && availability.visible;
   const recovery = useMemo(() => createAttemptCommandRecovery(basePath), [basePath]);
@@ -69,7 +75,7 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
       await readControls(controller);
       if (!controller.signal.aborted) setStatus(copy.verified);
     } catch (failure: unknown) {
-      if (!controller.signal.aborted) setStatus(withApiFailureReference(copy.unverified, failure));
+      if (!controller.signal.aborted && !escalated(failure)) setStatus(withApiFailureReference(copy.unverified, failure));
     } finally {
       if (active.current === controller) { active.current = null; setBusy(false); }
     }
@@ -109,10 +115,14 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
       } else setStatus(textMessage(result.state === 'cancelled' ? copy.cancelConfirmed : result.state === 'cancelling' || !['completed', 'failed', 'interrupted'].includes(result.state)
         ? copy.cancelRequested : copy.finishedFirst, { runId: result.runId, state: result.state }));
       onChanged();
-      try { await readControls(controller, false); } catch { /* The outcome stands; a fresh read is explicit. */ }
+      try { await readControls(controller, false); } catch (failure: unknown) {
+        // The outcome stands; a fresh read is explicit. Only a confirmed deletion still ends the attempt.
+        if (!controller.signal.aborted) escalated(failure);
+      }
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
       if (definite(failure)) forget();
+      if (escalated(failure)) return;
       const code = failure instanceof ApiClientError ? failure.serverCode : undefined;
       const status = failure instanceof ApiClientError ? failure.status : undefined;
       setStatus(withApiFailureReference(!definite(failure)

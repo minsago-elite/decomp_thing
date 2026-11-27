@@ -4,7 +4,7 @@ import type { RefObject } from 'preact';
 /**
  * The control a deletion transition may remove (#512). Browsers that blur a focused control when it becomes
  * disabled (Chrome while a read is outstanding) leave the document focused, so the control that the page
- * itself disabled is remembered until the user moves focus anywhere else. Focus the user moved elsewhere,
+ * itself disabled or removed is remembered until the user moves focus anywhere else. Focus the user moved elsewhere,
  * including deliberately to the document, is never captured.
  */
 export function useDepartingFocus(root: RefObject<Element>) {
@@ -14,8 +14,11 @@ export function useDepartingFocus(root: RefObject<Element>) {
     const inside = (target: EventTarget | null): target is Element => target instanceof Element && (root.current?.contains(target) ?? false);
     const into = (event: FocusEvent) => { disabledFrom.current = inside(event.target) ? event.target : null; };
     // A browser may or may not report the blur of a control it disabled; a blur of an enabled control is the user's.
+    // A control the page removes (a panel clearing stale actions) departs without the user moving focus either.
     const out = (event: FocusEvent) => {
-      if (!(inside(event.target) && event.target.matches(':disabled'))) disabledFrom.current = null;
+      const target = event.target;
+      const departed = target === disabledFrom.current && target instanceof Element && !target.isConnected;
+      if (!departed && !(inside(target) && target.matches(':disabled'))) disabledFrom.current = null;
     };
     document.addEventListener('focusin', into, true);
     document.addEventListener('focusout', out, true);
@@ -26,7 +29,7 @@ export function useDepartingFocus(root: RefObject<Element>) {
     const active = document.activeElement;
     if (active && active !== document.body) return active;
     const from = disabledFrom.current;
-    return from?.isConnected && from.matches(':disabled') ? from : null;
+    return from && (!from.isConnected || from.matches(':disabled')) ? from : null;
   };
 }
 

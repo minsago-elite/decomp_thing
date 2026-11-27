@@ -120,7 +120,7 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
       {view !== 'evidence' && <>
         <PanelBoundary name={panelBoundaryCopy.names.attemptControls}>
           <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
-            run={run} onChanged={() => { setRefresh(value => value + 1); }} />
+            run={run} onChanged={() => { setRefresh(value => value + 1); }} onDeleted={onDeleted} />
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.progressPin}>
           <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} onDeleted={onDeleted} />
@@ -131,10 +131,10 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
       </>}
       {view !== 'activity' && <>
         <PanelBoundary name={panelBoundaryCopy.names.exploration}>
-          <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+          <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} />
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.validation}>
-          <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+          <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} {...(navigation === undefined ? {} : { navigation })} />
         </PanelBoundary>
       </>}
       {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
