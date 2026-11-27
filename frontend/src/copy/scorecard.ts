@@ -109,4 +109,5 @@ export const scorecardCopy = {
   sides: { current: 'This attempt', baseline: 'Baseline' },
   reconciled: 'reconciles with its project total', notReconciled: 'does not reconcile', noBreakdown: 'has no plan',
   yes: 'Yes', no: 'No',
+  modelSchema: '(schema {version})',
 } as const;

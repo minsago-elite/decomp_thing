@@ -22,7 +22,7 @@ function Completeness({ data }: { data: NonNullable<StructureNeighborhood['neigh
   return <section aria-labelledby="graph-completeness-title">
     <h2 id="graph-completeness-title">{copy.completenessTitle}</h2>
     <p role="status">{completeness.state === 'complete' ? copy.complete
-      : <>{copy.truncated} {completeness.reasons.map(reason => copy.reasons[reason]).join('; ')}.</>}</p>
+      : <>{copy.truncated} {completeness.reasons.map(reason => copy.reasons[reason]).join('; ')}{copy.sentenceEnd}</>}</p>
     <dl class="job-facts">
       <dt>{copy.shownNodes}</dt><dd>{data.nodes.length}</dd>
       <dt>{copy.shownEdges}</dt><dd>{data.edges.length}</dd>
@@ -85,14 +85,14 @@ export default function GraphRoute({ selected, basePath, search, runtime = graph
     navigation={<p><a href={structureListPath(basePath, selected, query.view === 'calls' ? 'functions' : 'modules')}>
       {query.view === 'calls' ? structureCopy.returnFunctions : structureCopy.returnModules}</a></p>}>
     {data && <>
-      <h2>{copy.views[query.view]}: <bdi>{data.neighborhood?.nodes[0] && 'name' in data.neighborhood.nodes[0]
+      <h2>{copy.views[query.view]}{structureCopy.labelSeparator}<bdi>{data.neighborhood?.nodes[0] && 'name' in data.neighborhood.nodes[0]
         ? data.neighborhood.nodes[0].name ?? query.focus : query.focus}</bdi></h2>
       <Controls key={search} query={query} onApply={next => location.route(graphPath(basePath, selected, next, version))} />
       <p role={data.graphState === 'available' ? undefined : 'alert'}>{copy.graphStates[data.graphState]}
         {data.graphReason && <> {message(structureCopy.reason, { code: <code>{data.graphReason}</code> })}</>}</p>
       <details>
         <summary>{copy.familiesTitle}</summary>
-        <ul>{data.relationships.map(family => <li key={family.id}>{copy.families[family.id]}: {copy.familyStates[family.state]}
+        <ul>{data.relationships.map(family => <li key={family.id}>{copy.families[family.id]}{structureCopy.labelSeparator}{copy.familyStates[family.state]}
           {family.reason && <> ({message(structureCopy.reason, { code: <code>{family.reason}</code> })})</>}</li>)}</ul>
       </details>
       {data.neighborhood && <>

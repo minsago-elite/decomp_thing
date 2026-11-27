@@ -57,3 +57,25 @@ it('moves focus to the results after an explicit search or continuation changes 
   expect(new URLSearchParams(window.location.search).get('cursor')).not.toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Search results' })));
 });
+
+it('routes source-search and the generic graph section to their own views without one shadowing the other', async () => {
+  transport.get.mockImplementation(() => Promise.reject(new ApiClientError('http_error', { serverCode: 'NOT_FOUND' })));
+  const session = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  sessions.push(session);
+  await session.initialize({ kind: 'absent' });
+  const revision = base.slice(0, -'/source-search'.length);
+  // Each view renders its own heading; the search form appears only on the dedicated source-search route.
+  for (const [path, title, search] of [[base, 'Search recorded source inputs', true],
+    [`${revision}/graph`, 'Recorded relationships', false]] as const) {
+    history.replaceState(null, '', path);
+    const view = render(<App basePath="/nested" session={session} />);
+    await screen.findByRole('heading', { level: 1, name: title });
+    if (search) await screen.findByRole('searchbox', { name: /Search text/u });
+    else await waitFor(() => expect(screen.queryByText(/requested job, attempt, revision/u)).not.toBeNull());
+    expect(screen.queryByRole('searchbox', { name: /Search text/u }) !== null).toBe(search);
+    view.unmount();
+  }
+});

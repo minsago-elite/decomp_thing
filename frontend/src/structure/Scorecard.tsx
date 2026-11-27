@@ -187,7 +187,7 @@ function Comparison({ selected, basePath, query, version, onRoute }: {
     {read.state === 'loading' && query.baseline && <p role="status">{structureCopy.loading}</p>}
     {read.state === 'failed' && <p role="alert">{structureReadMessage(read.failure)}</p>}
     {data && <>
-      <p>{copy.baseline}: <bdi>{textMessage(copy.baselineOption, { run: data.baseline.binding.runId, revision: data.baseline.binding.revisionId })}</bdi></p>
+      <p>{copy.baseline}{structureCopy.labelSeparator}<bdi>{textMessage(copy.baselineOption, { run: data.baseline.binding.runId, revision: data.baseline.binding.revisionId })}</bdi></p>
       <p role="status"><strong>{copy.compatibility[data.compatibility.state]}</strong></p>
       <div class="structure-table"><table>
         <caption>{copy.checksTitle}</caption>
@@ -303,7 +303,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
               globals: card.scope.globals, types: card.scope.types })}</dd>
             <dt>{copy.modulesInScope}</dt><dd>{card.scope.modules ?? structureCopy.notRecorded}</dd>
             <dt>{copy.input}</dt><dd><code>{card.scope.inputSha256}</code></dd>
-            <dt>{copy.model}</dt><dd><code>{card.scope.modelSha256}</code> (schema {card.scope.modelSchemaVersion})</dd>
+            <dt>{copy.model}</dt><dd><code>{card.scope.modelSha256}</code> {textMessage(copy.modelSchema, { version: card.scope.modelSchemaVersion })}</dd>
           </dl>
         </details>
         <div class="structure-table"><table>

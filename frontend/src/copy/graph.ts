@@ -33,6 +33,7 @@ export const graphCopy = {
   completenessTitle: 'What this neighborhood includes',
   complete: 'Complete within the requested depth: every reachable node and relationship is shown.',
   truncated: 'Truncated: this is not the complete neighborhood.',
+  sentenceEnd: '.',
   reasons: { VISIT_LIMIT: 'exploration reached its bound, so totals are unknown', NODE_LIMIT: 'the node limit was reached',
     EDGE_LIMIT: 'the relationship limit was reached', BYTE_LIMIT: 'long recorded identities reached the response size limit' },
   shownNodes: 'Nodes shown', shownEdges: 'Relationships shown', reachableNodes: 'Reachable nodes', reachableEdges: 'Reachable relationships',

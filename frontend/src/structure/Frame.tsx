@@ -46,7 +46,7 @@ function States({ data }: { data: StructureHeader }) {
     <p>{copy.assessment[data.recoveryAssessment]}</p>
     <details>
       <summary>{copy.capabilitiesTitle}</summary>
-      <ul>{data.capabilities.map(item => <li key={item.id}>{copy.capabilityNames[item.id]}: {copy.capabilityStates[item.state]}
+      <ul>{data.capabilities.map(item => <li key={item.id}>{copy.capabilityNames[item.id]}{copy.labelSeparator}{copy.capabilityStates[item.state]}
         {item.reason && <> ({message(copy.reason, { code: <code>{item.reason}</code> })})</>}</li>)}</ul>
     </details>
   </>;

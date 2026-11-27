@@ -109,12 +109,12 @@ function Selected({ data, response, selection, selected, basePath, query }: {
     ? <li><a href={apiPath(basePath, structureRecordRoute(selected, kind, version))} download="">{label}</a>{' '}
       ({message(copy.evidenceRecord, { path: <bdi>{value.path}</bdi>, sha256: <code>{value.sha256}</code> })})</li> : null;
   const source = (label: string, path: string | null, fileId: string | null) => path === null ? null
-    : <li>{fileId ? <a href={sourceFilePath(basePath, selected, fileId, response)}>{label}: <bdi>{path}</bdi></a>
-      : <>{label}: <bdi>{path}</bdi> ({copy.noSourceFile})</>}</li>;
+    : <li>{fileId ? <a href={sourceFilePath(basePath, selected, fileId, response)}>{label}{structureCopy.labelSeparator}<bdi>{path}</bdi></a>
+      : <>{label}{structureCopy.labelSeparator}<bdi>{path}</bdi> ({copy.noSourceFile})</>}</li>;
   const entity = (node: StructureGraphNode, label: string) => node.kind === 'function' && node.selector
-    ? <li><a href={structureItemPath(basePath, selected, 'functions', node.selector, version)}>{label}: <bdi>{nodeLabel(node)}</bdi></a></li> : null;
+    ? <li><a href={structureItemPath(basePath, selected, 'functions', node.selector, version)}>{label}{structureCopy.labelSeparator}<bdi>{nodeLabel(node)}</bdi></a></li> : null;
   const module = (node: StructureGraphNode, label: string) => node.kind === 'module' && node.selector
-    ? <li><a href={structureItemPath(basePath, selected, 'modules', node.selector, version)}>{label}: <bdi>{node.moduleId}</bdi></a></li> : null;
+    ? <li><a href={structureItemPath(basePath, selected, 'modules', node.selector, version)}>{label}{structureCopy.labelSeparator}<bdi>{node.moduleId}</bdi></a></li> : null;
   const recenter = (node: StructureGraphNode) => node.index !== 0 && node.kind !== 'unrecorded-function' && node.selector
     ? <li><a href={graphPath(basePath, selected, { ...query, focus: node.selector }, version)}>{copy.links.focus}</a></li> : null;
   if (selection === null) return <p>{copy.noSelection}</p>;
@@ -144,7 +144,7 @@ function Selected({ data, response, selection, selected, basePath, query }: {
       <ul>
         {entity(node, copy.links.entity)}
         {node.kind === 'function' && node.moduleSelector && <li><a href={structureItemPath(basePath, selected, 'modules', node.moduleSelector, version)}>
-          {copy.links.module}: <bdi>{node.moduleId}</bdi></a></li>}
+          {copy.links.module}{structureCopy.labelSeparator}<bdi>{node.moduleId}</bdi></a></li>}
         {module(node, copy.links.module)}
         {node.kind !== 'unrecorded-function' && source(copy.links.source, node.implementationPath, node.implementationFileId)}
         {node.kind === 'module' && source(copy.links.header, node.interfacePath, node.interfaceFileId)}
