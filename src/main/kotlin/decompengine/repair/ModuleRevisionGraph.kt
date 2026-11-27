@@ -2314,6 +2314,10 @@ internal class ModuleRevisionGraph private constructor(
             )
         }
 
+    /** The immutable source-tree contract admitted by this graph's repair index, when present. */
+    internal val declaredRoleProfile: ReconstructionProfile?
+        get() = index.profile.reconstructionProfile()
+
     /** Preserve the original bytes before assigning honest authority to legacy head records. */
     @Synchronized
     fun enableRunContract() = graphOperation {
@@ -7274,7 +7278,7 @@ internal data class StableRegularFile(
     val identity: LinuxFileIdentity,
 )
 
-internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity)
+internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity, val validUtf8: Boolean)
 
 /** Stream a pinned regular file, then revalidate its metadata and every directory binding. */
 internal fun hashStableRegularFile(
@@ -7318,6 +7322,7 @@ internal fun hashStableRegularFile(
         requireUnchanged(before.isRegularFile) { "stable hash descriptor is not regular" }
         declaredSize(before.size())
         val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val utf8 = StrictUtf8ByteValidator()
         val buffer = ByteArray(64 * 1024)
         var size = 0L
         // This kernel-owned proc entry references our still-owned descriptor, not the workspace name.
@@ -7329,6 +7334,7 @@ internal fun hashStableRegularFile(
                 size = Math.addExact(size, count.toLong())
                 readBytes(count, size)
                 digest.update(buffer, 0, count)
+                utf8.accept(buffer, count)
             }
         }
         cancellationCheck()
@@ -7342,12 +7348,47 @@ internal fun hashStableRegularFile(
         }
         revalidateDescriptorPath(base, parts, directories.map { it.identity }, authorized.identity)
         cancellationCheck()
-        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity)
+        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity, utf8.finish())
     } finally {
         readable?.close()
         authorized?.close()
         directories.asReversed().forEach { it.close() }
     }
+}
+
+/** Incremental UTF-8 validation performed on the exact descriptor-bound bytes being hashed. */
+private class StrictUtf8ByteValidator {
+    private var remaining = 0
+    private var codePoint = 0
+    private var minimum = 0
+    private var valid = true
+
+    fun accept(bytes: ByteArray, count: Int) {
+        if (!valid) return
+        for (index in 0 until count) {
+            val value = bytes[index].toInt() and 0xff
+            if (remaining == 0) {
+                when {
+                    value <= 0x7f -> Unit
+                    value in 0xc2..0xdf -> { remaining = 1; codePoint = value and 0x1f; minimum = 0x80 }
+                    value in 0xe0..0xef -> { remaining = 2; codePoint = value and 0x0f; minimum = 0x800 }
+                    value in 0xf0..0xf4 -> { remaining = 3; codePoint = value and 0x07; minimum = 0x10000 }
+                    else -> valid = false
+                }
+            } else if (value !in 0x80..0xbf) {
+                valid = false
+            } else {
+                codePoint = (codePoint shl 6) or (value and 0x3f)
+                remaining--
+                if (remaining == 0 && (codePoint < minimum || codePoint > 0x10ffff || codePoint in 0xd800..0xdfff)) {
+                    valid = false
+                }
+            }
+            if (!valid) return
+        }
+    }
+
+    fun finish(): Boolean = valid && remaining == 0
 }
 
 internal fun readStableRegularFile(
@@ -7380,6 +7421,36 @@ internal fun readStableJobMetadataFile(
     )
 }
 
+internal fun readBudgetedStableRegularFile(
+    root: Path,
+    relative: String,
+    maximumBytes: Long,
+    cancellationCheck: () -> Unit,
+    admitSize: (Long) -> Unit,
+    chargeBytes: (Int) -> Unit,
+): StableRegularFile = readStableRegularFileInternal(
+    root, relative, maximumBytes, null, null, cancellationCheck, false,
+) { descriptorPath, size ->
+    admitSize(size.toLong())
+    cancellationCheck()
+    val bytes = ByteArray(size)
+    Files.newInputStream(descriptorPath).use { input ->
+        var offset = 0
+        while (offset < size) {
+            cancellationCheck()
+            val count = input.read(bytes, offset, minOf(size - offset, 16 * 1024))
+            requireUnchanged(count > 0) { "stable file-read target shrank: $relative" }
+            offset += count
+            chargeBytes(count)
+        }
+        // Each admitted entry permits one EOF probe in addition to its admitted payload.
+        // A mismatching descriptor can consume at most one extra byte, even at a zero limit.
+        cancellationCheck()
+        requireUnchanged(input.read() == -1) { "stable file-read target exceeds its reported size: $relative" }
+    }
+    bytes
+}
+
 private fun readStableRegularFileInternal(
     root: Path,
     relative: String,
@@ -7388,9 +7459,11 @@ private fun readStableRegularFileInternal(
     afterRead: (() -> Unit)?,
     cancellationCheck: () -> Unit,
     allowFinalDirectoryLinkCountChange: Boolean,
+    admittedRead: ((Path, Int) -> ByteArray)? = null,
 ): StableRegularFile {
     cancellationCheck()
-    require(maximumBytes in 1 until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
+    val minimumLimit = if (admittedRead == null) 1L else 0L
+    require(maximumBytes in minimumLimit until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
     val normalized = normalizedRelative(relative)
     val base = root.toAbsolutePath().normalize()
     RepairDescriptorReadSupport.requireSupported(base)
@@ -7425,7 +7498,7 @@ private fun readStableRegularFileInternal(
                 "stable file-read target $relative has ${before.size()} bytes; limit=$maximumBytes",
             )
         }
-        val bytes = try {
+        val bytes = admittedRead?.invoke(descriptorPath, before.size().toInt()) ?: try {
             LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt(), cancellationCheck)
         } catch (_: LinuxResourceLimitException) {
             throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")

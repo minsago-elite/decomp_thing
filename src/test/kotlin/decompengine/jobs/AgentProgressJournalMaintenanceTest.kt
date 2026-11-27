@@ -182,6 +182,64 @@ class AgentProgressJournalMaintenanceTest {
         assertContentEquals(original, Files.readAllBytes(other))
     }
 
+    @Test fun `filesystem retention outcomes and failures invalidate listing captures`() {
+        for (mode in listOf("expired", "later-retained", "absent", "writer", "invalid-duration") +
+            ProgressRetentionFaultPoint.entries.map { it.name }) Fixture().use { f ->
+            if (mode == "later-retained") assertEquals(ProgressRetentionResult.EXPIRED, f.expire())
+            if (mode == "absent") Files.delete(f.journal)
+            val writer = if (mode == "writer") AgentProgressJournal(f.directory, "explore") else null
+            try {
+                val failure = assertFailsWith<WorkflowStoreException>(mode) {
+                    f.owner.inspectForListing(f.job, { relative, _ -> Files.readAllBytes(f.root.resolve(relative)) }) {
+                        when (mode) {
+                            "expired" -> assertEquals(ProgressRetentionResult.EXPIRED, f.expire())
+                            "later-retained" -> assertEquals(ProgressRetentionResult.RETAINED, f.expire())
+                            "absent" -> assertEquals(ProgressRetentionResult.NO_JOURNAL, f.expire())
+                            "writer" -> assertEquals(ProgressRetentionResult.WRITER_ACTIVE, f.expire())
+                            "invalid-duration" -> assertFailsWith<WorkflowStoreException> {
+                                f.owner.expireProgressJournal(f.job, f.run.runId, false, Duration.ZERO)
+                            }
+                            else -> assertFailsWith<SimulatedCrash> {
+                                f.expire { if (it.name == mode) throw SimulatedCrash() }
+                            }
+                        }
+                    }
+                }
+                assertEquals("JOB_RECORD_UNAVAILABLE", failure.code, mode)
+            } finally { writer?.close() }
+        }
+    }
+
+    @Test fun `retention filesystem boundary is crossed only after pure admission guards`() {
+        Fixture().use { f ->
+            val retention = Duration.ofHours(48)
+            val earlyAttempts = listOf(
+                "active" to f.run.copy(state = WorkflowRunState.RUNNING, endedAt = null, terminalReason = null),
+                "publication-pending" to f.run.copy(candidate = WorkflowCandidate("revision_candidate", "ab".repeat(32))),
+                "pinned" to f.run.copy(progressRetentionPinned = true),
+            )
+            for ((name, attempt) in earlyAttempts) {
+                var entries = 0
+                assertEquals(ProgressRetentionResult.RETAINED,
+                    AgentProgressJournalMaintenance.expire(f.root, attempt, f.clock.now, retention,
+                        beforeFilesystem = { entries++ }), name)
+                assertEquals(0, entries, "$name entered filesystem retention work")
+            }
+
+            var recentEntries = 0
+            assertEquals(ProgressRetentionResult.RETAINED,
+                AgentProgressJournalMaintenance.expire(f.root, f.run, f.clock.now, retention,
+                    beforeFilesystem = { recentEntries++ }), "not-old-enough")
+            assertEquals(0, recentEntries, "a recent terminal run entered filesystem retention work")
+
+            var eligibleEntries = 0
+            assertEquals(ProgressRetentionResult.EXPIRED,
+                AgentProgressJournalMaintenance.expire(f.root, f.run, f.clock.now, Duration.ofHours(1),
+                    beforeFilesystem = { eligibleEntries++ }), "eligible")
+            assertEquals(1, eligibleEntries, "eligible expiry must announce the filesystem boundary exactly once")
+        }
+    }
+
     private class SimulatedCrash : Error("synthetic interruption")
 }
 

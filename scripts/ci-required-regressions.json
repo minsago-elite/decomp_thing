@@ -3,6 +3,7 @@
   "description": "Web-integration regression classes that every pull request must execute and pass in the kotlin-core partition (#224, #643). Each minimum is the authored passing case count; lowering one, removing a class or making a case skip requires an explicit change here.",
   "partition": "core",
   "classes": {
+    "decompengine.mvp.MvpTenCaseWorkflowTest": 3,
     "decompengine.acp.AcpHarnessFactoryTest": 16,
     "decompengine.git.GitReadsTest": 21,
     "decompengine.git.ManagedGitRepositoriesTest": 31,
