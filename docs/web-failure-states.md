@@ -61,6 +61,24 @@ siblings, axe, and that retry sends no command.
 | Replay unconfirmed request (attempt retry/resume/cancel) | The retained command with the same idempotency key, If-Match version and body; never a refreshed guard | `attempt-controls.test.tsx` (lost acknowledgement, reload, duplicate clicks send once) |
 | Upload retry | The same retained file and intent under the server's upload identity | `mutation-reconnect.test.tsx`, `upload-recovery.test.ts` |
 
+The job organization controls follow the same rule. A newer version for the same job keeps
+edited fields in page memory and shows the verified server label and archive state. It sends no
+automatic PATCH; a deliberate Save uses the version currently shown. A 412 response is a
+definitive rejection: only a same-job readback with a changed opaque version is adopted, and
+its untouched fields replace the form values. If that readback is missing, stale, foreign or
+cancelled, the page says current values could not be verified. A 2xx PATCH causes a library
+refresh hint even when its acknowledgement cannot be verified; “Saved” still requires a bound,
+value-matching acknowledgement and readback. `job-lifecycle-629.test.tsx` covers these cases
+using the production API client with mocked fetch responses.
+
+Deletion operation states and protection reasons are rendered from fixed client copy keyed by
+the bounded state/code, with a generic fallback for unknown values. The operation's free-form
+server message is never rendered. `job-lifecycle-629.test.tsx` and
+`job-deletion-reconciliation.test.tsx` cover known and unknown values. This checkpoint has
+local frontend evidence only and does not close #629: it does not qualify a live server, browser
+multi-tab race, screen-reader behavior, hosted exact-head CI or the remaining identity-bound
+command matrix.
+
 Validation errors stay attached to their field (`aria-invalid`, `aria-describedby`, focus) and
 keep the typed value (`dashboard-*.test.tsx`, `upload.test.tsx`). A dashboard filter draft and
 its submitted validation feedback survive remounting for a new session generation, for example

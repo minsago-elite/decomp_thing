@@ -115,12 +115,17 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         manifest: SourceTreeManifest,
         profile: ReconstructionProfile,
         repairLineage: ArchivedRepairReleaseLineage = ArchivedRepairReleaseLineage.NONE,
+        readBudget: ArchiveAuditReadBudget? = null,
     ): List<VerifiedCandidateAcpContribution> {
+        fun readEvidence(relative: String, limit: Int): ByteArray =
+            readBudget?.read(projectDir, relative, minOf(limit.toLong(), requirePayloadSize(relative, payloadSizes)))?.bytes
+                ?: readBoundedRegularFile(projectDir, relative, limit)
         val adapter = ReconstructionAdapters.resolve(profile)
+        if (readBudget != null) adapter.requireImplementationPurpose(profile, "repair evidence audit")
         adapter.verifyArchivePurpose(projectDir, profile, manifest, payloadSha256.keys)
         var sourceBytes = 0L
         for (file in manifest.files.filter { ProjectFileRole.BUILD_INPUT in it.roles }) {
-            val bytes = readBoundedRegularFile(projectDir, file.path,
+            val bytes = readEvidence(file.path,
                 minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L).toInt())
             sourceBytes = Math.addExact(sourceBytes, bytes.size.toLong())
             require(sourceBytes <= profile.budgets.archiveMaximumTotalBytes) { "archive source inspection exceeds its byte bound" }
@@ -133,20 +138,23 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             .singleOrNull { it.id == "module-agent-execution-evidence" }
         val manifestByPath = manifest.files.associateBy(GeneratedFileEvidence::path)
         val modelPath = profile.layout.declaration("program-model-evidence").materialize()
-        val modelBytes = readBoundedRegularFile(
-            projectDir, modelPath,
+        val modelBytes = readEvidence(
+            modelPath,
             minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L).toInt(),
         )
         requirePayloadIdentity(modelPath, modelBytes, payloadSha256, payloadSizes)
         require(sha256(modelBytes) == manifestByPath.getValue(modelPath).sha256) {
             "program model differs from its source manifest"
         }
-        val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true)) { cancellationCheck() }
+        val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true)) {
+            cancellationCheck()
+            readBudget?.checkpoint()
+        }
         require(model.inputSha256 == manifest.inputSha256) { "program model input differs from its source manifest" }
         val promptInputs by lazy {
             val planPath = profile.layout.declaration("module-plan-evidence").materialize()
             val planBound = minOf(profile.budgets.archiveMaximumFileBytes, 512L * 1024 * 1024).toInt()
-            val planBytes = readBoundedRegularFile(projectDir, planPath, planBound)
+            val planBytes = readEvidence(planPath, planBound)
             requirePayloadIdentity(planPath, planBytes, payloadSha256, payloadSizes)
             require(sha256(planBytes) == manifestByPath.getValue(planPath).sha256) {
                 "module plan differs from its source manifest"
@@ -167,8 +175,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 val checkpointManifest = requireNotNull(manifestByPath[checkpointPath]) {
                     "agent evidence checkpoint is absent from the source manifest: $checkpointPath"
                 }
-                val checkpointBytes = readBoundedRegularFile(
-                    projectDir,
+                val checkpointBytes = readEvidence(
                     checkpointPath,
                     MAXIMUM_RECONSTRUCTION_CHECKPOINT_BYTES,
                 )
@@ -298,8 +305,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 ) {
                     "ACP execution evidence manifest provenance is invalid: $evidencePath"
                 }
-                val evidenceBytes = readBoundedRegularFile(
-                    projectDir,
+                val evidenceBytes = readEvidence(
                     evidencePath,
                     MAXIMUM_RECONSTRUCTION_ACP_EVIDENCE_BYTES,
                 )

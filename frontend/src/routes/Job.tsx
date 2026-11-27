@@ -15,7 +15,7 @@ import type { ReceiptTime } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
-import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
+import { JobDeletion, JobOrganization, jobDeletionStateMessage } from '../jobs/JobLifecycle';
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
@@ -59,7 +59,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     return () => { controller.abort(); };
   }, [binding, client, jobId, refresh]);
   if (deleted) return <div class="notice" role="alert"><p>{copy.thisJobWasDeleted}</p>
-    {operation && <p>{operation.message}</p>}
+    {operation && <p>{jobDeletionStateMessage(operation)}</p>}
     {operation?.state === 'running' && <p>{jobDeletionCopy.stillRunning}</p>}
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
   return <>
