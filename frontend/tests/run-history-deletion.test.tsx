@@ -10,6 +10,7 @@ import { App } from '../src/app/App';
 import { runCopy } from '../src/copy/attempt';
 import { runHistoryCopy } from '../src/copy/history';
 import { jobCopy } from '../src/copy/job';
+import { createAttemptCommandRecovery } from '../src/jobs/attemptCommandRecovery';
 import { notifyLibraryChanged } from '../src/jobs/libraryNotify';
 import { createBrowserSession } from '../src/session/session';
 
@@ -63,6 +64,41 @@ it('shows only the deletion recovery when the first history read confirms RESOUR
     expect(transport.get).toHaveBeenCalledOnce();
   } finally { auth.dispose(); }
 });
+
+it.each(['sign-out', 'a newer authenticated generation'] as const)(
+  'keeps the saved command when a history deletion arrives during %s', async transition => {
+    const auth = await session();
+    const initial = auth.snapshot();
+    if (initial.status !== 'authenticated') throw new Error('Expected an authenticated history view');
+    const recovery = createAttemptCommandRecovery('/nested');
+    const command = recovery.command('cancel', job.jobId, run.runId, run.version, null);
+    let rejectRead!: (error: unknown) => void;
+    transport.get.mockImplementation(() => new Promise((_resolve, reject) => { rejectRead = reject; }));
+    history.replaceState(null, '', historyPath);
+    try {
+      recovery.save(command);
+      render(<App basePath="/nested" session={auth} />);
+      await waitFor(() => expect(transport.get).toHaveBeenCalledOnce());
+      await act(async () => {
+        rejectRead(failure(410, 'RESOURCE_GONE', canonicalId));
+        if (transition === 'sign-out') {
+          void auth.logout();
+          expect(auth.snapshot().status).toBe('signing-out');
+        } else {
+          // Model the interval before the route renders the new authenticated generation.
+          vi.spyOn(auth, 'snapshot').mockReturnValue({ ...initial, generation: initial.generation + 1 });
+        }
+        await Promise.resolve();
+      });
+      expect(recovery.read()).toEqual({ kind: 'pending', command });
+      expect(screen.queryByText(runHistoryCopy.thisJobWasDeleted, { exact: false })).toBeNull();
+      expect(transport.get).toHaveBeenCalledOnce();
+    } finally {
+      recovery.clear();
+      auth.dispose();
+    }
+  },
+);
 
 it('moves removed focus to the notice when loaded history is tombstoned, and sends no further reads', async () => {
   const auth = await session();

@@ -113,7 +113,8 @@ export default function RunHistory({ jobId, basePath, session }: { jobId: string
   const state = useSession(session);
   const valid = /^[0-9a-f]{32}$/.test(jobId);
   // A tombstone belongs to one authenticated view of one job, matching the Job and Run routes.
-  const viewKey = state?.status === 'authenticated' ? `${state.generation}/${jobId}` : null;
+  const generation = state?.status === 'authenticated' ? state.generation : null;
+  const viewKey = generation === null ? null : `${generation}/${jobId}`;
   // The notice keeps the confirmed failure's reference ID only after `withApiFailureReference` vets it.
   const [gone, setGone] = useState<{ key: string; message: string } | null>(null);
   const departing = useRef<Element | null>(null);
@@ -135,6 +136,8 @@ export default function RunHistory({ jobId, basePath, session }: { jobId: string
   </section>;
   const markDeleted = (failure: unknown) => {
     if (viewKey === null || gone?.key === viewKey || !isDeletedJob(failure)) return;
+    const live = session?.snapshot();
+    if (live?.status !== 'authenticated' || live.generation !== generation) return;
     departing.current = departingFocus();
     forgetAttemptCommandForDeletedJob(basePath, jobId);
     setGone({ key: viewKey, message: withApiFailureReference(copy.thisJobWasDeleted, failure) });
@@ -143,7 +146,7 @@ export default function RunHistory({ jobId, basePath, session }: { jobId: string
     {title}
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>{copy.returnToJobOverview}</a>
-      {session && state?.status === 'authenticated' ? <History key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} session={session} onDeleted={markDeleted} /> : <p>{copy.connectALocalSessionToViewAttemptHistory}</p>}
+      {session && viewKey !== null ? <History key={viewKey} jobId={jobId} basePath={basePath} session={session} onDeleted={markDeleted} /> : <p>{copy.connectALocalSessionToViewAttemptHistory}</p>}
     </> : <p role="alert">{copy.theRequestedJobIdentityIsInvalid}</p>}
   </section>;
 }
