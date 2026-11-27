@@ -1,7 +1,7 @@
 import { appCopy as copy } from '../copy/shell';
 import { sourceTitleCopy } from '../copy/sourceTitles';
 import { message as displayMessage, textMessage } from '../shared/messages';
-import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
@@ -32,20 +32,35 @@ type ShellProps = {
 };
 
 /** Browser connectivity is a hint; it never establishes freshness or server-work lifetime. */
-function ConnectionNotice() {
-  const availability = useBrowserAvailability();
+function ConnectionNotice({ availability }: { availability: ReturnType<typeof useBrowserAvailability> }) {
   if (!availability.hasBeenOffline) return null;
-  return <aside class="connection-notice notice" role="status" aria-label={copy.connectionStatus}>
-    <h2>{availability.online ? copy.refreshLoadedInformation : copy.browserReportsOffline}</h2>
+  // A labelled section holds the notice; the named status region wraps only the changing message (#1896).
+  return <section class="connection-notice notice" aria-labelledby="connection-notice-heading">
+    <div role="status" aria-label={copy.connectionStatus}>
+    <h2 id="connection-notice-heading">{availability.online ? copy.refreshLoadedInformation : copy.browserReportsOffline}</h2>
     <p>{availability.online
       ? copy.theBrowserReportsAConnectionAgainPreviouslyLoadedInformationMay
       : copy.previouslyLoadedInformationMayBeOutOfDateReconnectAnd}</p>
     {!availability.online && <p>{copy.serverWorkMayContinueWhileThisPageIsDisconnected}</p>}
-  </aside>;
+    </div>
+  </section>;
 }
 
 function Shell({ basePath, guard, identity, recovery, reload, session }: ShellProps) {
   const sessionState = useSession(session);
+  const availability = useBrowserAvailability();
+  const wasOnline = useRef(availability.online);
+  useEffect(() => {
+    if (!availability.online) {
+      wasOnline.current = false;
+      return;
+    }
+    if (wasOnline.current) return;
+    wasOnline.current = true;
+    if (!session) return;
+    const timer = setTimeout(() => { void session.revalidate(); }, 250 + Math.random() * 1000);
+    return () => clearTimeout(timer);
+  }, [availability.online, session]);
   // Every route, including the workspace landing page, loads on demand so the initial
   // closure stays the shell, session and transport (#622).
   const Home = useMemo(() => lazyRoute(() => import('../routes/Home'), recovery), [recovery]);
@@ -85,11 +100,12 @@ function Shell({ basePath, guard, identity, recovery, reload, session }: ShellPr
   const isHistory = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/runs$/.test(location.path.slice(`${basePath}/jobs/`.length));
   const isSourceDirectory = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources/[^/]+$`).test(location.path);
   const isSourceFile = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+$`).test(location.path);
+  const isSourceSearch = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search$`).test(location.path);
   const pageTitle = atHome ? copy.jobs : location.path === uploadPath ? copy.uploadABinary
     : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview
       : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence
         : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
-      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : copy.pageUnavailable;
+      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : isSourceSearch ? sourceTitleCopy.searchTitle : copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
     const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
@@ -160,7 +176,7 @@ function Shell({ basePath, guard, identity, recovery, reload, session }: ShellPr
       <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} guard={guard} />
       {sessionState?.status === 'authenticated' && <BuildMismatchNotice identity={identity} serverBuild={sessionState.runtime.uiBuildId}
         reload={reload} guard={guard} />}
-      <ConnectionNotice />
+      <ConnectionNotice availability={availability} />
       {session && <SessionStatus session={session} placement="page" />}
       <div class="app-layout">
         <nav class="app-nav" aria-label={copy.mainNavigation} ref={navigation} onKeyDown={event => {
@@ -195,9 +211,10 @@ function Shell({ basePath, guard, identity, recovery, reload, session }: ShellPr
             <Router onLoadStart={() => setLoading(true)} onLoadEnd={viewReady} onRouteChange={viewReady}>
               <Route path={homePath} component={Home} basePath={basePath} session={session} />
               <Route path={uploadPath} component={UploadPage} basePath={basePath} session={session} />
-              <Route path={runtimePath} component={Runtime} identity={identity} session={session} />
+              <Route path={runtimePath} component={Runtime} identity={identity} session={session} basePath={basePath} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/sources/:directoryId`} component={Sources} resource="directory" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-files/:fileId`} component={Sources} resource="file" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-search`} component={Sources} resource="search" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/activity`} component={Run} view="activity" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/evidence`} component={Run} view="evidence" basePath={basePath} session={session} />

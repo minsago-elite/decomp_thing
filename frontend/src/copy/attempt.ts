@@ -2,6 +2,18 @@
 
 export { activityReceiptAgeCopy, receiptAge } from './receiptAge';
 
+/**
+ * Limitations written into the exported validation record. They describe a versioned file format,
+ * so they stay stable record text even when interface copy is translated.
+ */
+export const validationExportLimitations = [
+  'This export contains the selected observation only, not a complete receipt or every case page.',
+  'A compact full-corpus mismatch index may be included; unselected case details and full outputs are not included.',
+  'Output previews are bounded prefixes; comparison flags describe the retained full-byte observations.',
+  'Failure labels and completed-pair counts are producer reports, not inferred per-case outcomes.',
+  'This export grants no acceptance, authentication, containment or equivalence qualification.',
+] as const;
+
 export const recordedValidationCopy = {
   savedSelectionInvalid: 'This saved validation selection is invalid. No validation read was made. Read validation evidence to select a current observation.',
   savedSelectionUnavailable: 'This exact saved validation selection could not be restored. No different observation was substituted. Read validation evidence to select a current observation.',
@@ -46,6 +58,9 @@ export const recordedValidationCopy = {
   noCases: 'Verified case details are unavailable for this receipt. No case result is inferred.',
   bytes: 'Observed bytes', prefix: 'Prefix bytes', truncated: 'Prefix truncated.', complete: 'Complete output prefix.',
   hex: 'Hexadecimal prefix', text: 'Escaped UTF-8 prefix', empty: 'Empty observed output',
+  previewSize: '{bytes}: {total}. {prefix}: {prefixBytes}. {completeness}', previewPart: '{title}: {part}',
+  ownerAction: '{action}: {kind} {owner}', ordinalAction: '{action}: {ordinal}',
+  comparisonFacts: '{population}: {total}. {policy}: {value}.', comparisonWindowText: '{window} {page} / {pages}. {ordinals}',
   noText: 'No UTF-8 text preview is available; inspect the hexadecimal prefix.',
   inspectFailure: 'Inspect failure', failureTitle: 'Recorded failed operation',
   failureScope: 'These producer diagnostics identify an enclosing operation. They do not establish an individual child-process outcome, successful case comparisons, process absence or independent cleanup verification.',
@@ -240,6 +255,9 @@ export const explorationCasesCopy = {
   title: 'Retained exploration cases',
   scope: 'This view reads the selected report artifact only. Filtering and inspecting records never executes an input or starts a workflow.',
   outcomesUnreported: 'This unversioned format does not record timeout or execution-failure classifications. An observed exit code alone cannot distinguish them.',
+  versionedOutcomes: 'This versioned report separates generated observations from retained regression inputs. Viewing a retained input never executes it or changes exploration confidence.',
+  retainedDisplayOnly: '{count} retained regression input(s) are shown for inspection only; they were not run by this exploration.',
+  retainedInputsOmitted: '{count} retained regression input(s) were omitted by the display budget. Download the report artifact for its bounded record.',
   partialFormat: 'This partial record cannot provide coverage or confidence. Read its retained details to inspect the reported failure and any recorded inputs or observations.',
   preparationCase: '{group} position {index}: {id}', preparationPosition: 'Retained input position',
   preparationGroups: { seeds: 'Provided seeds', angr: 'Angr-generated inputs', staticHints: 'Static-hint inputs', expanded: 'Final expanded proposal' },
@@ -267,6 +285,7 @@ export const explorationCasesCopy = {
   failureReasons: {
     'behavior-deadline-exceeded': 'Producer-reported observation timeout.',
     'sandbox-unavailable': 'Producer-reported unavailable sandbox tooling.',
+    'sandbox-wrapper-start-failed': 'Producer-reported that the sandbox invocation wrapper process could not start.',
     'output-limit-exceeded': 'Producer-reported output-limit failure.',
     'completion-unverified': 'Producer-reported unverified execution completion.',
     'producer-interrupted': 'Producer-reported observation interruption.',
@@ -296,6 +315,7 @@ export const explorationCasesCopy = {
 } as const;
 
 export const runCopy = {
+  thisJobWasDeleted: "This attempt’s job was deleted. Its files were removed and cannot be recovered.",
   attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence',
   activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence',
   "wallClockLimit": "{value} milliseconds",

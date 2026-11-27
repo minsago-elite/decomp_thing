@@ -22,6 +22,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -33,6 +34,48 @@ import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
 class AcpDoctorPreflightTest {
+    @Test
+    fun `provisioning failure context keeps the original failure and only closed coordinates`() {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        val admission = "mount-admission-v1 stage=ADMITTED initialMounts=7 initialControls=0 owner=false initialFast=true"
+        val diagnostic = constructor.newInstance(
+            phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+            outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission,
+        ) as Throwable
+        val primary = java.io.IOException("PRIVATE-message /PRIVATE/path", diagnostic)
+        var calls = 0
+        val asserted = assertFailsWith<AssertionError> {
+            withProvisioningFailureContext(7, 3) {
+                calls++
+                throw primary
+            }
+        }
+        assertEquals(1, calls)
+        assertSame(primary, asserted.cause)
+        assertEquals("ACP_DOCTOR_PROVISIONING_V1 scenarioOrdinal=7 mountOrdinal=3 admissionRecord=$admission",
+            asserted.message)
+        assertFalse("PRIVATE" in asserted.message.orEmpty() || "/" in asserted.message.orEmpty())
+
+        val directAssertion = assertFailsWith<AssertionError> {
+            withProvisioningFailureContext(9, 5) { throw diagnostic }
+        }
+        assertSame(diagnostic, directAssertion.cause)
+        assertEquals("ACP_DOCTOR_PROVISIONING_V1 scenarioOrdinal=9 mountOrdinal=5 admissionRecord=$admission",
+            directAssertion.message)
+
+        val suppressedOnly = java.io.IOException("PRIVATE-suppressed-only").apply { addSuppressed(diagnostic) }
+        val suppressedAssertion = assertFailsWith<AssertionError> {
+            withProvisioningFailureContext(8, 4) { throw suppressedOnly }
+        }
+        assertSame(suppressedOnly, suppressedAssertion.cause)
+        assertEquals("ACP_DOCTOR_PROVISIONING_V1 scenarioOrdinal=8 mountOrdinal=4", suppressedAssertion.message)
+        assertFalse("mount-admission-v1" in suppressedAssertion.message.orEmpty())
+    }
+
     @Test
     fun `doctor failure context withholds private text and retains only fixed mount witness fields`() {
         val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
@@ -90,9 +133,11 @@ class AcpDoctorPreflightTest {
     @Test
     fun `cancelled preflight retains terminal receipt before launch and during initialize`() {
         requireLiveSandboxHost()
-        for (duringInitialize in listOf(false, true)) {
+        for ((scenarioIndex, duringInitialize) in listOf(false, true).withIndex()) {
             val temporary = createTempDirectory("doctor-cancel-")
-            val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = "no-initialize"))
+            val scenarioOrdinal = scenarioIndex + 1
+            val harness = factoryHarness(provisionedConfig(scenarioOrdinal,
+                temporary.resolve("acp.json"), mode = "no-initialize"))
             val cancellation = decompengine.agent.AgentCancellation {
                 !duringInitialize || Thread.currentThread().stackTrace.any {
                     it.className.contains("AcpAgentHarness") && it.methodName.startsWith("awaitPhase")
@@ -115,7 +160,8 @@ class AcpDoctorPreflightTest {
     fun `contained preflight inspects environment terminal and unknown methods without executing them`() {
         requireLiveSandboxHost()
         val temporary = createTempDirectory("doctor-auth-variants-")
-        val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = "doctor-auth-variants"))
+        val harness = factoryHarness(provisionedConfig(1,
+            temporary.resolve("acp.json"), mode = "doctor-auth-variants"))
         val result = harness.preflight()
         assertEquals(listOf("environment-login", "terminal-login", "future-login"), result.authentication.methods.map { it.id })
         assertEquals(listOf("environment", "terminal", "unknown"), result.authentication.methods.map { it.variant })
@@ -131,9 +177,11 @@ class AcpDoctorPreflightTest {
     @Test
     fun `invalid authentication inventories fail preflight as protocol errors with cleanup`() {
         requireLiveSandboxHost()
-        for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text", "doctor-auth-unicode", "doctor-auth-payload")) {
+        for ((scenarioIndex, mode) in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank",
+            "doctor-auth-text", "doctor-auth-unicode", "doctor-auth-payload").withIndex()) {
             val temporary = createTempDirectory("doctor-auth-invalid-")
-            val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = mode))
+            val harness = factoryHarness(provisionedConfig(scenarioIndex + 1,
+                temporary.resolve("acp.json"), mode = mode))
             val error = assertFailsWith<AgentExecutionException> { harness.preflight() }
             assertEquals(AgentFailureKind.PROTOCOL, error.failure.kind,
                 if (error.failure.kind == AgentFailureKind.PROTOCOL) mode else
@@ -152,7 +200,7 @@ class AcpDoctorPreflightTest {
     fun `doctor reports the bounded invalid authentication inventory reason`() {
         requireLiveSandboxHost()
         val temporary = createTempDirectory("doctor-auth-reason-")
-        val config = writeProvisioning(temporary.resolve("acp.json"), mode = "doctor-auth-duplicate")
+        val config = provisionedConfig(1, temporary.resolve("acp.json"), mode = "doctor-auth-duplicate")
         val doctor = Doctor(environment = mapOf("ACP_CONFIG_FILE" to config.toString()),
             commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
             connectivityProbe = ConnectivityProbe { _, _ -> error("inspection must not use direct HTTP") })
@@ -170,8 +218,9 @@ class AcpDoctorPreflightTest {
         val ghidra = temporary.resolve("ghidra/support").createDirectories().resolve("analyzeHeadless")
         ghidra.writeText("fixture")
         ghidra.toFile().setExecutable(true)
-        val configuration = writeProvisioning(
-            temporary.resolve("acp.json"),
+        val configuration = provisionedConfig(
+            scenarioOrdinal = 1,
+            path = temporary.resolve("acp.json"),
             mode = "doctor-preflight",
             includeSecret = true,
         )
@@ -241,10 +290,11 @@ class AcpDoctorPreflightTest {
             ),
             FailureCase("crash-after-initialize", emptySet(), AgentFailureKind.PROCESS_CRASH, "exitCode"),
         )
-        cases.forEach { case ->
+        cases.forEachIndexed { scenarioIndex, case ->
             val temporary = createTempDirectory("doctor-acp-${case.mode}-")
-            val harness = factoryHarness(writeProvisioning(
-                temporary.resolve("acp.json"),
+            val harness = factoryHarness(provisionedConfig(
+                scenarioOrdinal = scenarioIndex + 1,
+                path = temporary.resolve("acp.json"),
                 mode = case.mode,
                 requiredCapabilities = case.requiredCapabilities,
             ))
@@ -271,8 +321,9 @@ class AcpDoctorPreflightTest {
         requireLiveSandboxHost()
         val parent = Path.of("build/test-tmp/acp-doctor-preflight").toAbsolutePath().createDirectories()
         val temporary = Files.createTempDirectory(parent, "cleanup-")
-        val childHarness = factoryHarness(writeProvisioning(
-            temporary.resolve("child.json"),
+        val childHarness = factoryHarness(provisionedConfig(
+            scenarioOrdinal = 1,
+            path = temporary.resolve("child.json"),
             mode = "doctor-preflight-child-hang",
         ))
 
@@ -282,8 +333,9 @@ class AcpDoctorPreflightTest {
         assertTrue(childResult.diagnostics.remainingProcessIds.isEmpty())
         assertTrue(childResult.diagnostics.sandboxCleanupVerified)
         assertTrue(childResult.stableDescriptor.startsWith("acp-preflight-v1:workflow-repair:"))
-        val burstHarness = factoryHarness(writeProvisioning(
-            temporary.resolve("burst.json"),
+        val burstHarness = factoryHarness(provisionedConfig(
+            scenarioOrdinal = 2,
+            path = temporary.resolve("burst.json"),
             mode = "doctor-preflight-shutdown-burst",
         ))
 
@@ -364,9 +416,60 @@ class AcpDoctorPreflightTest {
         return selection.createHarness() as AcpAgentHarness
     }
 
+    private fun provisionedConfig(
+        scenarioOrdinal: Int,
+        path: Path,
+        mode: String,
+        requiredCapabilities: Set<AcpRequiredAgentCapability> = emptySet(),
+        includeSecret: Boolean = false,
+    ): Path = withProvisioningFailureContext(scenarioOrdinal, null) {
+        writeProvisioning(path, mode, scenarioOrdinal, requiredCapabilities, includeSecret)
+    }
+
+    /** Assertion-only setup context; the original provisioning failure remains its cause. */
+    private fun <T> withProvisioningFailureContext(
+        scenarioOrdinal: Int,
+        mountOrdinal: Int?,
+        action: () -> T,
+    ): T = try {
+        action()
+    } catch (failure: Throwable) {
+        if (failure is ProvisioningFailureAssertionError) throw failure
+        val context = try {
+            provisioningFailureContext(scenarioOrdinal, mountOrdinal, failure)
+        } catch (_: Throwable) {
+            throw failure
+        }
+        throw ProvisioningFailureAssertionError(context, failure)
+    }
+
+    private fun provisioningFailureContext(scenarioOrdinal: Int, mountOrdinal: Int?, failure: Throwable): String {
+        require(scenarioOrdinal > 0)
+        require(mountOrdinal == null || mountOrdinal >= 0)
+        val diagnostic = exactMountEventDiagnostic(failure)
+        val admission = diagnostic?.admissionRecord?.takeIf {
+            it.length <= 192 && PROVISIONING_ADMISSION.matches(it)
+        }
+        return buildString {
+            append("ACP_DOCTOR_PROVISIONING_V1 scenarioOrdinal=").append(scenarioOrdinal)
+            append(" mountOrdinal=").append(mountOrdinal?.toString() ?: "MISSING")
+            if (diagnostic != null) append(" admissionRecord=").append(admission ?: "MISSING")
+        }.also { check(it.length <= 512 && it.all { character -> character.code in 32..126 }) }
+    }
+
+    private fun exactMountEventDiagnostic(failure: Throwable): AcpMountEventWitness? {
+        fun exact(value: Throwable?): AcpMountEventWitness? = value
+            ?.takeIf { it.javaClass.name == MOUNT_EVENT_DIAGNOSTIC_TYPE }
+            ?.let { it as? AcpMountEventWitness }
+        return exact(failure) ?: exact(failure.cause)
+    }
+
+    private class ProvisioningFailureAssertionError(message: String, cause: Throwable) : AssertionError(message, cause)
+
     private fun writeProvisioning(
         path: Path,
         mode: String,
+        scenarioOrdinal: Int,
         requiredCapabilities: Set<AcpRequiredAgentCapability> = emptySet(),
         includeSecret: Boolean = false,
     ): Path {
@@ -436,10 +539,10 @@ class AcpDoctorPreflightTest {
                 put("sandboxGateHelperExecutable", GATE_HELPER.toString())
                 put("systemdUserRuntimeDirectory", USER_RUNTIME.toString())
                 put("agentWorkingDirectory", "/tmp")
-                put("launcherRuntimeMounts", mountsJson(launcherMounts))
+                put("launcherRuntimeMounts", mountsJson(launcherMounts, scenarioOrdinal))
                 put("agentRuntimeMounts", mountsJson(listOf(
                     AcpSandboxReadOnlyMount(script, AGENT_SCRIPT_DESTINATION),
-                )))
+                ), scenarioOrdinal))
                 putJsonObject("agentResourceLimits") {
                     put("maximumProcesses", 16)
                     put("maximumOpenFiles", 128)
@@ -469,12 +572,14 @@ class AcpDoctorPreflightTest {
         return path.toAbsolutePath().normalize()
     }
 
-    private fun mountsJson(mounts: Collection<AcpSandboxReadOnlyMount>) = buildJsonArray {
-        mounts.forEach { mount ->
-            add(buildJsonObject {
-                put("source", mount.source.toString())
-                put("destination", mount.destination.toString())
-                put("expectedManifestSha256", calculateAcpRuntimeManifestSha256(mount.source))
+    private fun mountsJson(mounts: Collection<AcpSandboxReadOnlyMount>, scenarioOrdinal: Int) = buildJsonArray {
+        mounts.forEachIndexed { mountOrdinal, mount ->
+            add(withProvisioningFailureContext(scenarioOrdinal, mountOrdinal) {
+                buildJsonObject {
+                    put("source", mount.source.toString())
+                    put("destination", mount.destination.toString())
+                    put("expectedManifestSha256", calculateAcpRuntimeManifestSha256(mount.source))
+                }
             })
         }
     }
@@ -517,6 +622,13 @@ class AcpDoctorPreflightTest {
 
     private companion object {
         const val SECRET_CANARY = "doctor-secret-must-never-be-rendered"
+        const val MOUNT_EVENT_DIAGNOSTIC_TYPE =
+            "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic"
+        val PROVISIONING_ADMISSION = Regex(
+            "mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+                "initialMounts=(0|[1-9][0-9]{0,9}) initialControls=(0|[1-9][0-9]{0,9}) " +
+                "owner=(true|false) initialFast=(true|false)",
+        )
         val BWRAP: Path = Path.of("/usr/bin/bwrap")
         val PRLIMIT: Path = Path.of("/usr/bin/prlimit")
         val SYSTEMD_RUN: Path = Path.of("/usr/bin/systemd-run")

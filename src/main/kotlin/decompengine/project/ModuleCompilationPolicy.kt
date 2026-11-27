@@ -5,6 +5,8 @@ import java.nio.file.Path
 /** Local compilation policy, selected by a registered reconstruction profile. */
 internal interface ModuleCompilationPolicy {
     val id: String
+    /** Whether exact-source, bounded diagnostics may be offered as informational next-attempt context. */
+    val providesCompilerFeedback: Boolean get() = false
     fun command(profile: ReconstructionProfile, sourcePath: String): List<String>
     fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence
 }

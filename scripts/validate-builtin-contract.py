@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED = {
     "decompengine.agent.AgentExecutionContractTest": 10,
-    "decompengine.builtin.BuiltinAgentHarnessTest": 15,
+    "decompengine.builtin.BuiltinAgentHarnessTest": 16,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
     "decompengine.builtin.BuiltinCapturedContextToolsTest": 6,
     "decompengine.builtin.BuiltinContextPackageTest": 5,

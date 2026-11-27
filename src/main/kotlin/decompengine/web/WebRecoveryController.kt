@@ -15,6 +15,8 @@ internal class WebRecoveryController(
     private val jobs: WebJobService,
     private val jobMutations: WebJobMutationBoundary,
     private val basePath: String,
+    // Fresh readiness for the predecessor's option, read before the service monitor like a start's.
+    private val prerequisites: (decompengine.jobs.WorkflowKind, String?) -> WebWorkflowPrerequisites? = { _, _ -> WebWorkflowPrerequisites.UNCHECKED },
 ) {
     fun handle(exchange: HttpExchange, jobId: String, runId: String) {
         val mutation = jobMutations.authorizeRecovery(exchange)
@@ -34,8 +36,11 @@ internal class WebRecoveryController(
         if (exchange.requestHeaders.keys.any { it.startsWith("If-", true) && !it.equals("If-Match", true) })
             throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Only If-Match is supported for recovery.")
         val (mode, expectedInput) = readRequest(exchange)
+        // The predecessor's workflow and harness are immutable, so its option's readiness can be read first.
+        val predecessor = jobs.getAttempt(jobId, runId)
+        val readiness = prerequisites(predecessor.workflow, predecessor.harnessCapabilityId)
         val result = try {
-            mutation.request(jobId, runId, match.removeSurrounding("\""), mode, expectedInput, key)
+            mutation.request(jobId, runId, match.removeSurrounding("\""), mode, expectedInput, key, readiness)
         } catch (failure: WebJobServiceException) {
             throw when (failure.code) {
                 "VERSION_CONFLICT" -> WebAccessDenied(412, failure.code, "The attempt changed. Read its current state before a new command.")
@@ -44,6 +49,9 @@ internal class WebRecoveryController(
                 "INVALID_PREVIOUS_RUN" -> WebAccessDenied(409, "ATTEMPT_SUPERSEDED", "Only the latest unsuccessful attempt can be recovered.")
                 "STORE_LIMIT" -> WebAccessDenied(409, failure.code, "This job reached its retained attempt limit.")
                 "WORKFLOW_UNAVAILABLE" -> WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "The attempt's workflow is unavailable.")
+                "WORKFLOW_PREREQUISITE_UNAVAILABLE" -> WebAccessDenied(503, "CAPABILITY_UNAVAILABLE",
+                    "A runtime prerequisite for this workflow is unavailable. ${failure.message}")
+                "WORKFLOW_LIMITS_UNAVAILABLE" -> WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "The attempt's recorded limits are no longer server-approved.")
                 "CAPACITY_UNAVAILABLE", "UPLOAD_CAPACITY" ->
                     WebAccessDenied(429, "QUOTA_EXCEEDED", "Workflow admission is at capacity. Inspect current work before a new request.")
                 "SCHEDULING_FAILED" -> WebAccessDenied(503, failure.code, "Scheduling did not finish. Inspect the retained run before retrying.")

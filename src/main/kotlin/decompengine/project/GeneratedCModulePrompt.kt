@@ -38,7 +38,10 @@ internal object GeneratedCModulePrompt {
             ${provenanceIds.joinToString(", ")}
             Do not use generic return-value placeholders or undefined decompiler types. If evidence is insufficient,
             stop without claiming completion so the module is recorded as explicitly unresolved.
-        """.trimIndent() + "\n\n" + acceptance
+        """.trimIndent() + "\n\n" + acceptance +
+            (request.compilerDiagnostics?.takeIf(String::isNotBlank)?.let {
+                "\n\nBounded compiler diagnostics from the prior attempt (informational; the workflow will compile this exact candidate again):\n$it"
+            } ?: "")
         return ModulePromptContent(objective, evidence)
     }
 

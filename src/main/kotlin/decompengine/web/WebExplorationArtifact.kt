@@ -27,7 +27,8 @@ internal object WebExplorationArtifact {
             is WorkflowJobInspection.Unavailable -> unavailable()
         }
         val run = snapshot.attempts.singleOrNull { binding(jobId, it.runId) == match.groupValues[1] } ?: unavailable()
-        val bytes = jobs.readArtifact(jobId, "reports/runs/${run.runId}/exploration.json", 1_048_576).bytes
+        val bytes = try { jobs.readArtifact(jobId, "reports/runs/${run.runId}/exploration.json", 1_048_576).bytes }
+            catch (_: IllegalArgumentException) { unavailable() }
         if (sha256(bytes) != match.groupValues[2]) throw WebJobServiceException("ARTIFACT_CHANGED", "These report bytes differ from the displayed artifact. Refresh its evidence before downloading.")
         return bytes
     }

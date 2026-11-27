@@ -67,7 +67,7 @@ it('defers the whole changed snapshot while a row is focused and applies it on e
 it('adds new jobs automatically when no job row is focused without stealing other focus', async () => {
   transport.get.mockResolvedValueOnce(page([job(1)])).mockResolvedValueOnce(page([job(2), job(1)]));
   render(<Dashboard basePath="" />); await flush();
-  const search = screen.getByLabelText('Filename search'); search.focus();
+  const search = screen.getByLabelText('Filename or label search'); search.focus();
   await tick();
   expect(order()).toEqual(['live-2.elf', 'live-1.elf']);
   expect(document.activeElement).toBe(search);
@@ -112,7 +112,7 @@ it('cancels obsolete live reads across filter replacement and unmount without re
     .mockResolvedValue(page([job(7)]));
   const view = render(<Dashboard basePath="" />); await flush(); await tick();
   const signal = transport.get.mock.calls[1]![2].signal;
-  fireEvent.input(screen.getByLabelText('Filename search'), { target: { value: 'replacement' } });
+  fireEvent.input(screen.getByLabelText('Filename or label search'), { target: { value: 'replacement' } });
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' })); await flush();
   expect(signal.aborted).toBe(true);
   expect(transport.get.mock.calls[2]?.[1]).toBe('/jobs?search=replacement&limit=50');

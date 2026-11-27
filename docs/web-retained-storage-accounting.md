@@ -74,3 +74,14 @@ pinned Chrome driver with test-only `--no-sandbox`. It covered session restorati
 lost-response reload/retry, invalid and oversized request rejection, and a real
 throttled transfer cancelled after server-observed bytes followed by same-key retry.
 No fixture execution occurred. [Retained report](evidence/web-upload-storage-reservations-20260905.json).
+
+## Display categories and maintenance preview
+
+`JobStorageAccounting.scan` is a separate, tolerant display scan for `GET /api/v1/storage`
+and the per-job deletion preview (issue #506). Unlike `RetainedStorageUsage`, a concurrent
+change makes it partial rather than failing; symbolic links are zero-byte entries and are never
+followed. It classifies logical regular-file bytes by fixed layout names: uploaded inputs,
+reports, source snapshots (`source-tree`), logs (progress journals, `*.log`, `*.jsonl`), source
+archives (`*.zip`, `*.tar*`), metadata records, temporary files (upload stages, temp files,
+pending purges under `.job-deletions/`) and other entries. It is not an admission quota. See
+[job organization, retention and deletion](web-api.md#job-organization-retention-and-deletion).

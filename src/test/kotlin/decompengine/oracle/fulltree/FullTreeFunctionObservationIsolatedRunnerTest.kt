@@ -5,6 +5,7 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxProcessDescriptor
 import decompengine.acp.LinuxResourceLimitException
+import decompengine.acp.permissions
 import decompengine.acp.deletePrivateTreeContents
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -23,9 +24,12 @@ import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlin.test.assertNull
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -320,6 +324,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         assertEquals(JsonPrimitive("3"), current["supervisorProtocolVersion"])
         assertEquals(JsonPrimitive("1"), current["workerProtocolVersion"])
         assertEquals(JsonPrimitive("2"), current["workerRequestVersion"])
+        assertNull(current["runtimeArtifacts"])
         assertEquals(JsonPrimitive("scope-derived-systemd-lifetime-upper-bound-v1"), current["workerStartWaitPolicy"])
         val legacyV3 = JsonObject(current.toMutableMap().apply {
             remove("workerRequestVersion")
@@ -352,6 +357,22 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 configuration.workerClassPath,
             ).canonicalSha256,
         )
+
+        val artifactConfiguration = syntheticConfiguration(
+            configuration.systemLibraryMounts,
+            configuration.workerClassPath,
+            runtimeArtifacts = listOf(
+                FullTreeFunctionObservationRuntimeArtifact(
+                    FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE,
+                    Path.of("/provisioned/ghidra/decomp-ghidra-bridge.jar"), 17, "b".repeat(64),
+                ),
+            ),
+        )
+        val artifactJson = OracleJson.parseCanonical(artifactConfiguration.canonicalBytesForTest()) as JsonObject
+        assertEquals(JsonPrimitive(5), artifactJson["schemaVersion"])
+        assertEquals(JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v5"), artifactJson["provider"])
+        assertEquals(1, (artifactJson["runtimeArtifacts"] as JsonArray).size)
+        assertNotEquals(configuration.canonicalSha256, artifactConfiguration.canonicalSha256)
         assertNotEquals(
             configuration.canonicalSha256,
             syntheticConfiguration(
@@ -474,6 +495,164 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         )
         changedConfigurations.forEach { changed ->
             assertNotEquals(configuration.canonicalSha256, changed.canonicalSha256)
+        }
+    }
+
+    @Test
+    fun `typed runtime artifact snapshot bytes ownership and fixed layout are authenticated`() {
+        val base = Files.createDirectories(Path.of("build/task-tmp/runtime-artifact-snapshot-tests").toAbsolutePath())
+        fun fixture(action: (Path, MaterializedObservationClassPath, List<Pair<FullTreeFunctionObservationRuntimeArtifact, Pair<Long, String>>>) -> Unit) {
+            val tree = Files.createTempDirectory(base, "snapshot-")
+            try {
+                val run = privateDirectory(tree.resolve("run"))
+                privateDirectory(run.resolve("scratch"))
+                privateDirectory(run.resolve("tmp"))
+                privateDirectory(run.resolve("runtime"))
+                Files.write(run.resolve("runtime/contained-command-request.json"), byteArrayOf(9))
+                Files.setPosixFilePermissions(run.resolve("runtime/contained-command-request.json"),
+                    PosixFilePermissions.fromString("rw-------"))
+                val classBytes = byteArrayOf(1, 2, 3, 4)
+                val bridgeBytes = byteArrayOf(5, 6, 7)
+                val classSource = Files.write(tree.resolve("worker.jar"), classBytes)
+                val bridgeSource = Files.write(tree.resolve("decomp-ghidra-bridge.jar"), bridgeBytes)
+                val classEntry = FullTreeFunctionObservationClassPathEntry(classSource, OracleArtifacts.sha256(classBytes))
+                val artifact = FullTreeFunctionObservationRuntimeArtifact(
+                    FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE, bridgeSource,
+                    bridgeBytes.size.toLong(), OracleArtifacts.sha256(bridgeBytes),
+                )
+                StableControlFile.open(classSource, classBytes.size.toLong(), "test class path").use { classGuard ->
+                    StableControlFile.open(bridgeSource, bridgeBytes.size.toLong(), "test bridge").use { bridgeGuard ->
+                        LinuxFilesystemSyscalls.openRoot(run).use { root ->
+                            val materialized = materializeObservationClassPath(run, root,
+                                listOf(classEntry to classGuard), listOf(artifact to bridgeGuard))
+                            assertContentEquals(classBytes, Files.readAllBytes(run.resolve("runtime/classpath-0.jar")))
+                            val bridgeSnapshot = run.resolve("runtime/${artifact.role.snapshotName}")
+                            assertContentEquals(bridgeBytes, Files.readAllBytes(bridgeSnapshot))
+                            val rootIdentity = LinuxFilesystemSyscalls.identity(root.fd)
+                            val snapshotIdentity = LinuxFilesystemSyscalls.openDirectoryAt(root.fd, "runtime")
+                                .use { runtime -> requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtime.fd,
+                                    artifact.role.snapshotName)).use {
+                                    LinuxFilesystemSyscalls.identity(it.fd)
+                                } }
+                            requirePreparedRuntimeArtifactIdentity(snapshotIdentity, rootIdentity, artifact.role.snapshotName)
+                            val expected = listOf(artifact to (bridgeBytes.size.toLong() to artifact.expectedSha256))
+                            LinuxFilesystemSyscalls.openDirectoryAt(root.fd, "runtime").use { runtime ->
+                                val names = containedCommandRuntimeNames(materialized,
+                                    listOf("contained-command-request.json"))
+                                assertEquals(listOf("classpath-0.jar", artifact.role.snapshotName,
+                                    "contained-command-request.json"), names)
+                                requireExactPreparedNames(runtime, names, "test runtime directory")
+                            }
+                            action(run, materialized, expected)
+                        }
+                    }
+                }
+            } finally {
+                Files.walk(tree).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            }
+        }
+
+        fixture { run, materialized, expected ->
+            val snapshot = run.resolve("runtime/${expected.single().first.role.snapshotName}")
+            Files.setPosixFilePermissions(snapshot, PosixFilePermissions.fromString("rw-------"))
+            Files.write(snapshot, byteArrayOf(7, 7, 7))
+            assertFails { materialized.verify("tampered snapshot") }
+        }
+        fixture { run, materialized, expected ->
+            Files.write(run.resolve("runtime/unexpected.runtime"), byteArrayOf(1))
+            LinuxFilesystemSyscalls.openRoot(run).use { root ->
+                LinuxFilesystemSyscalls.openDirectoryAt(root.fd, "runtime").use { runtime ->
+                    assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                        requireExactPreparedNames(runtime, listOf("classpath-0.jar", expected.single().first.role.snapshotName,
+                            "contained-command-request.json"),
+                            "runtime directory with unexpected entry")
+                    }
+                }
+            }
+        }
+        fixture { run, materialized, expected ->
+            Files.setPosixFilePermissions(run.resolve("runtime/${expected.single().first.role.snapshotName}"),
+                PosixFilePermissions.fromString("rw-------"))
+            LinuxFilesystemSyscalls.openRoot(run).use { root ->
+                val rootIdentity = LinuxFilesystemSyscalls.identity(root.fd)
+                LinuxFilesystemSyscalls.openDirectoryAt(root.fd, "runtime").use { runtime ->
+                    val changed = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtime.fd,
+                        expected.single().first.role.snapshotName)).use { LinuxFilesystemSyscalls.identity(it.fd) }
+                    assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                        requirePreparedRuntimeArtifactIdentity(changed, rootIdentity, expected.single().first.role.snapshotName)
+                    }
+                }
+            }
+        }
+        fixture { run, materialized, expected ->
+            Files.delete(run.resolve("runtime/${expected.single().first.role.snapshotName}"))
+            assertFails { materialized.verify("missing snapshot") }
+        }
+        fixture { run, materialized, expected ->
+            val snapshot = run.resolve("runtime/${expected.single().first.role.snapshotName}")
+            val originalIdentity = LinuxFilesystemSyscalls.openRoot(run).use { root ->
+                LinuxFilesystemSyscalls.openDirectoryAt(root.fd, "runtime").use { runtime ->
+                    requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtime.fd,
+                        expected.single().first.role.snapshotName)).use { LinuxFilesystemSyscalls.identity(it.fd) }
+                }
+            }
+            Files.move(snapshot, run.parent.resolve("retained-original.snapshot"))
+            Files.write(snapshot, byteArrayOf(5, 6, 7))
+            Files.setPosixFilePermissions(snapshot, PosixFilePermissions.fromString("r--------"))
+            LinuxFilesystemSyscalls.openRoot(run).use { root ->
+                LinuxFilesystemSyscalls.openDirectoryAt(root.fd, "runtime").use { runtime ->
+                    val replacement = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtime.fd,
+                        expected.single().first.role.snapshotName)).use { LinuxFilesystemSyscalls.identity(it.fd) }
+                    assertEquals(originalIdentity.mountId, replacement.mountId)
+                    assertEquals(originalIdentity.key.device, replacement.key.device)
+                    assertNotEquals(originalIdentity.key.inode, replacement.key.inode)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `typed runtime artifact snapshot refuses source replacement and digest mismatch`() {
+        val base = Files.createDirectories(Path.of("build/task-tmp/runtime-artifact-source-tests").toAbsolutePath())
+        fun attempt(replaceSource: Boolean, expectedSha256: String) {
+            val tree = Files.createTempDirectory(base, "source-")
+            try {
+                val run = privateDirectory(tree.resolve("run"))
+                privateDirectory(run.resolve("scratch"))
+                privateDirectory(run.resolve("tmp"))
+                privateDirectory(run.resolve("runtime"))
+                val sourcePath = Files.write(tree.resolve("bridge.jar"), byteArrayOf(1, 3, 5))
+                val artifact = FullTreeFunctionObservationRuntimeArtifact(
+                    FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE,
+                    sourcePath, 3, expectedSha256,
+                )
+                StableControlFile.open(sourcePath, 3, "test bridge source").use { source ->
+                    LinuxFilesystemSyscalls.openRoot(run).use { root ->
+                        if (replaceSource) {
+                            Files.move(sourcePath, tree.resolve("original-bridge.jar"))
+                            Files.write(sourcePath, byteArrayOf(2, 4, 6))
+                        }
+                        if (replaceSource) assertFailsWith<FullTreeControlException> {
+                            materializeObservationClassPath(run, root, emptyList(), listOf(artifact to source))
+                        } else assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                            materializeObservationClassPath(run, root, emptyList(), listOf(artifact to source))
+                        }
+                    }
+                }
+            } finally {
+                Files.walk(tree).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            }
+        }
+        val original = OracleArtifacts.sha256(byteArrayOf(1, 3, 5))
+        attempt(replaceSource = true, expectedSha256 = original)
+        attempt(replaceSource = false, expectedSha256 = "f".repeat(64))
+    }
+
+    @Test
+    fun `runtime snapshots and command request remain inside the existing private file allowance`() {
+        requireContainedCommandRuntimeClosureWithinLimit(96, 32, 128)
+        assertFailsWith<FullTreeFunctionObservationIsolationException> {
+            requireContainedCommandRuntimeClosureWithinLimit(97, 32, 128)
         }
     }
 
@@ -3617,6 +3796,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         scopeInspectorExecutable: Path = Path.of("/provisioned/tools/systemctl"),
         systemdBusControllerExecutable: Path = Path.of("/provisioned/tools/busctl"),
         systemdUserRuntimeDirectory: Path = Path.of("/run/user/1000"),
+        runtimeArtifacts: List<FullTreeFunctionObservationRuntimeArtifact> = emptyList(),
         expectedBubblewrapSha256: String = "6".repeat(64),
         expectedResourceLimiterSha256: String = "7".repeat(64),
         expectedScopeSupervisorSha256: String = "8".repeat(64),
@@ -3634,6 +3814,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             systemdBusControllerExecutable = systemdBusControllerExecutable,
             systemdUserRuntimeDirectory = systemdUserRuntimeDirectory,
             workerClassPath = classPath,
+            runtimeArtifacts = runtimeArtifacts,
             expectedJavaSha256 = expectedJavaSha256,
             expectedBubblewrapSha256 = expectedBubblewrapSha256,
             expectedResourceLimiterSha256 = expectedResourceLimiterSha256,

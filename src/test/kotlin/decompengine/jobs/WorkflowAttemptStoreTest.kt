@@ -32,6 +32,53 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WorkflowAttemptStoreTest {
+    @Test fun `optimistic listing capture neither pins ownership nor returns data across close`() = withRoot { root ->
+        val job = upload(root)
+        val owner = WorkflowAttemptStore.open(root, CLOCK)
+        try {
+            var reads = 0
+            assertCode("STORE_CLOSED") {
+                owner.inspectForListing(job, { relative, maximum ->
+                    Files.readAllBytes(root.resolve(relative)).also { reads++; assertTrue(it.size <= maximum) }
+                }) { captured ->
+                    // No lifetime read lock may span this callback: close and lease handoff must
+                    // complete, but the old capture must never be returned to the listing caller.
+                    owner.close()
+                    WorkflowAttemptStore.open(root, CLOCK).use { replacement ->
+                        assertEquals(job, replacement.available(job).jobId)
+                    }
+                    captured
+                }
+            }
+            assertEquals(1, reads, "Lifecycle refusal must not retry physical reads")
+        } finally { owner.close() }
+    }
+
+    @Test fun `optimistic listings refuse recovery and failed command epochs without retrying metadata`() {
+        for (recovery in listOf(false, true)) withRoot { root ->
+            val job = upload(root)
+            WorkflowAttemptStore.open(root, CLOCK).use { owner ->
+                val before = owner.available(job)
+                var reads = 0
+                assertCode("JOB_RECORD_UNAVAILABLE") {
+                    owner.inspectForListing(job, { relative, maximum ->
+                        Files.readAllBytes(root.resolve(relative)).also { reads++; assertTrue(it.size <= maximum) }
+                    }) { captured ->
+                        if (recovery) owner.recoverForStartup() else assertCode("VERSION_CONFLICT") {
+                            owner.create(job, "stale_version", NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS))
+                        }
+                        captured
+                    }
+                }
+                assertEquals(1, reads, "Epoch refusal must not retry physical reads")
+                assertEquals(before, owner.available(job))
+                assertEquals(before, owner.inspectForListing(job, { relative, _ ->
+                    Files.readAllBytes(root.resolve(relative))
+                }) { it })
+            }
+        }
+    }
+
     @Test fun `descriptor read requests keep the buffer bound and a single overflow byte`() {
         assertEquals(8L, decompengine.acp.boundedDescriptorReadRequest(7, 0, 16 * 1024))
         assertEquals(3L, decompengine.acp.boundedDescriptorReadRequest(8, 4, 3))
@@ -45,6 +92,34 @@ class WorkflowAttemptStoreTest {
         assertEquals(4L, startup.readAllowance(64))
         startup.chargeRead(4)
         assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> { startup.readAllowance(64) }.code)
+    }
+
+    @Test fun `reconciliation evidence reservations share prior reads and latch partial outcome limits`() {
+        val budget = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(2, 8, 8))
+        budget.chargeRead(4) // Metadata admission consumed half the operation's allowance.
+        budget.beginChanges()
+        budget.reserveEvidence(3)
+        assertEquals(7L, budget.readBytes); assertEquals(3L, budget.planBytes)
+        val failure = assertFailsWith<WorkflowStoreException> { budget.reserveEvidence(2) }
+        assertEquals("STORE_LIMIT", failure.code); assertTrue(failure.outcomeUnknown)
+        kotlin.test.assertSame(failure, assertFailsWith<WorkflowStoreException> { budget.checkpoint() })
+        assertEquals(7L, budget.readBytes, "a refused capture was admitted")
+        val retained = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(2, 8, 2))
+        retained.beginChanges()
+        assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> { retained.reserveEvidence(3) }.code)
+        assertFailsWith<WorkflowStoreException> { retained.checkpoint() }
+    }
+
+    @Test fun `reconciliation cancellation is latched between capture units`() {
+        var cancelled = false
+        val budget = WorkflowStartupRecoveryBudget(cancellation = { cancelled })
+        budget.beginChanges(); budget.reserveEvidence(2)
+        cancelled = true
+        val failure = assertFailsWith<WorkflowStoreException> { budget.reserveEvidence(2) }
+        assertEquals("RECOVERY_CANCELLED", failure.code); assertTrue(failure.outcomeUnknown)
+        cancelled = false
+        assertEquals("RECOVERY_CANCELLED", assertFailsWith<WorkflowStoreException> { budget.checkpoint() }.code)
+        assertEquals(2L, budget.readBytes)
     }
 
     @Test fun `startup reader exhaustion retains the configured limit classification`() {

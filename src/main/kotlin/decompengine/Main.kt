@@ -10,6 +10,7 @@ import decompengine.doctor.DoctorReport
 import decompengine.doctor.DoctorToolKind
 import decompengine.doctor.parseDoctorInvocation
 import decompengine.doctor.requireDoctorActive
+import decompengine.mvp.MvpVulnerabilityCase
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.MvpArtifactRedactor
@@ -18,6 +19,7 @@ import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.ReconstructionAdapters
@@ -51,6 +53,7 @@ fun main(args: Array<String>) {
         "runner" -> runRunner(args.drop(1))
         "repair" -> runRepair(args.drop(1))
         "repair-history" -> runRecordedRepairHistory(args.drop(1))
+        "runs" -> runRunHistory(args.drop(1))
         "explore" -> runExplore(args.drop(1))
         "reconstruct" -> runReconstruct(args.drop(1))
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
@@ -208,7 +211,7 @@ private fun runReconstruct(args: List<String>) {
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
     val environment = System.getenv()
     val exitCode = runReconstructionCliAction(environment.values) { redactor ->
-        withReconstructionCliProgress(output, environment.values) { progress ->
+        withReconstructionCliProgress(output, environment.values, inputPath = checkNotNull(binary)) { progress ->
             val strategy = try {
                 selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
             } catch (e: IllegalArgumentException) {
@@ -354,13 +357,21 @@ private fun runExplore(args: List<String>) {
             add(CandidateInput("seed_stdin_$seedIndex", CandidateSource.SEED, stdin = value.toByteArray()))
         }
     }
-    val report = AutomaticExplorer().explore(binary, seeds, reports)
+    val binaryPath = checkNotNull(binary)
+    val reportsPath = checkNotNull(reports)
+    val report = withExplorationOutputWorkspace(binaryPath, reportsPath) {
+        AutomaticExplorer().explore(binaryPath, seeds, reportsPath)
+    }
     println(
         "exploration generated ${report.candidates.size} input(s), discovered " +
             "${report.coverage.newSignatures.size} new output signature(s), uncalibrated exploration heuristic=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
     )
     println("report: ${report.reportPath}")
 }
+
+/** Activate the selected input before exploration writes its input-bound report. */
+internal fun <T> withExplorationOutputWorkspace(binaryPath: Path, reportsPath: Path, action: () -> T): T =
+    ReconstructionOutputWorkspace.open(reportsPath, binaryPath).use { action() }
 
 private fun exploreUsageError(message: String): Nothing {
     System.err.println(message)
@@ -408,22 +419,30 @@ private fun runRepair(args: List<String>) {
     val reportsDir = decompengine.repair.repairReportsDirectory(projectDirectory, reports)
     val environment = System.getenv()
     val exitCode = runRepairCliAction(environment.values) { redactor ->
-        val regressionInputs = if (exploreInputs) {
-            val exploration = AutomaticExplorer().explore(
-                originalBinary,
-                listOf(CandidateInput("seed_default", CandidateSource.SEED)),
-                reportsDir,
-            )
-            renderRepairExplorationSummary(exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor)
-            exploration.candidates.map(CandidateInput::toProcessInput)
-        } else {
-            listOf(ProcessInput("default"))
-        }
         val configuration = prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride)
         val result = SecureRepairRuntime.open(configuration).use { runtime ->
             renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {
-                runtime.runRepair(projectDirectory, originalBinary, regressionInputs, reportsDir, maxIterations)
+                if (exploreInputs) {
+                    val snapshot = runtime.prepareExploration(projectDirectory, originalBinary)
+                    val exploration = AutomaticExplorer().explore(
+                        originalBinary,
+                        listOf(CandidateInput("seed_default", CandidateSource.SEED)),
+                        reportsDir,
+                        displayOnlyRetainedInputs = snapshot.inputs,
+                    )
+                    renderRepairExplorationSummary(
+                        exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor,
+                    )
+                    runtime.runRepair(
+                        projectDirectory, originalBinary, exploration.candidates.map(CandidateInput::toProcessInput),
+                        reportsDir, maxIterations, snapshot,
+                    )
+                } else {
+                    runtime.runRepair(
+                        projectDirectory, originalBinary, listOf(ProcessInput("default")), reportsDir, maxIterations,
+                    )
+                }
             }
         }
         renderRepairPresentation(presentRepairOutcome(result), environment.values)
@@ -522,7 +541,7 @@ internal enum class WorkflowCliCommand(val usage: String, val failurePrefix: Str
         "reconstruction failed",
     ),
     PATCH(
-        "usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]",
+        "usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--case 01..10] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]",
         "patch failed",
     ),
     REPAIR(
@@ -662,6 +681,8 @@ private fun runPatch(args: List<String>) {
     var input: Path? = null
     var output: Path? = null
     var assumeYes = false
+    var vulnerabilityCase = MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE
+    var caseSelected = false
     var harnessOverride: String? = null
     var profile = ReconstructionProfiles.default
     var profileSelected = false
@@ -673,6 +694,13 @@ private fun runPatch(args: List<String>) {
                 output = Path.of(args[index + 1]); index += 2
             }
             "--yes" -> { assumeYes = true; index++ }
+            "--case" -> {
+                if (caseSelected || index + 1 >= args.size) patchUsageError("--case requires one built-in case identifier")
+                vulnerabilityCase = try { MvpVulnerabilityCase.named(args[index + 1]) }
+                    catch (failure: IllegalArgumentException) { patchUsageError(failure.message ?: "unsupported vulnerability case") }
+                caseSelected = true
+                index += 2
+            }
             "--harness" -> {
                 if (index + 1 >= args.size) patchUsageError("--harness requires acp or legacy-openai")
                 harnessOverride = args[index + 1]; index += 2
@@ -706,7 +734,7 @@ private fun runPatch(args: List<String>) {
             harness = strategy.harness,
             environment = environment,
             harnessProvenance = strategy.harnessProvenance,
-        ).run(MvpPatchOptions(input, output, assumeYes), profile)
+        ).run(MvpPatchOptions(input, output, assumeYes, vulnerabilityCase), profile)
     }
     if (exitCode != 0) kotlin.system.exitProcess(exitCode)
 }
@@ -888,6 +916,7 @@ private fun runWeb(args: List<String>) {
     var uiMode = WebUiMode.LEGACY
     var basePath = "/"
     var devFrontendOrigin: String? = null
+    var gitImportRoot: Path? = null
     var index = 0
     while (index < args.size) {
         require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
@@ -925,6 +954,10 @@ private fun runWeb(args: List<String>) {
                 devFrontendOrigin = args[index + 1]
                 index += 2
             }
+            "--git-import-root" -> {
+                gitImportRoot = Path.of(args.getOrNull(index + 1) ?: error("--git-import-root requires a directory")).toAbsolutePath()
+                index += 2
+            }
             else -> error("unknown web argument: ${args[index]}")
         }
     }
@@ -932,10 +965,14 @@ private fun runWeb(args: List<String>) {
     val server = try {
         decompengine.web.startWebServerWithShutdownHook { cancellation ->
             UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin,
-                listenBacklog = listenBacklog, startupCancellation = cancellation)
+                listenBacklog = listenBacklog, startupCancellation = cancellation, gitImportRoot = gitImportRoot)
         }
     } catch (_: java.net.BindException) {
         System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
+        kotlin.system.exitProcess(2)
+    } catch (failure: Exception) {
+        // A refused storage migration names its fixed code and whether bytes changed, not a stack trace.
+        System.err.println(decompengine.web.webStorageStartupGuidance(failure) ?: throw failure)
         kotlin.system.exitProcess(2)
     }
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
@@ -952,10 +989,11 @@ private fun printHelp() {
         Usage:
           llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>] [--auth-methods]
           llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]
-          llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]
+          llm_bin_patch patch <input-elf> --output <directory> [--yes] [--case 01..10] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch repair-history <project-dir> [--page N] [--case-page N] [--graph SHA256]
+          llm_bin_patch runs list|replay|follow <output-directory> [run-id]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
@@ -963,7 +1001,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-full-export <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-native-calls <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173] [--git-import-root <directory>]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

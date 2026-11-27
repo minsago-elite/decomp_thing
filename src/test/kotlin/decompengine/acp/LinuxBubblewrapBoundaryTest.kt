@@ -399,12 +399,16 @@ class LinuxBubblewrapBoundaryTest {
             val registry = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
                 .getDeclaredField("ACTIVE_PRIVATE_CONTROLS").apply { isAccessible = true }.get(null)
             fun openDescriptorCount(): Long = Files.list(Path.of("/proc/self/fd")).use { it.count() }
-            val baseline = openDescriptorCount()
+            val executor = java.util.concurrent.ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS,
+                java.util.concurrent.LinkedBlockingQueue())
+            executor.prestartAllCoreThreads()
             val expected = calculateAcpRuntimeManifestSha256(source, limits)
+            // Include the warmed executor and first native-call initialization; their own resources
+            // must not look like a descriptor leak from the controls exercised below.
+            val baseline = openDescriptorCount()
             val retiredDuringScope = newControl()
             val reached = java.util.concurrent.CountDownLatch(2)
             val release = java.util.concurrent.CountDownLatch(1)
-            val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
             val futures = (0..1).map {
                 executor.submit<String> {
                     var paused = false
@@ -508,7 +512,9 @@ class LinuxBubblewrapBoundaryTest {
                                     LinuxFilesystemSyscalls.StatxIdentityScratch::class.java)
                                 fun inode(control: Any): Long =
                                     (retainedDescriptor.get(retained().getValue(control)) as LinuxDescriptor).identity.key.inode
-                                val originalOrder = listOf(inode(firstControl), inode(checkNotNull(secondControl)))
+                                // A scope retains every active registry control, including controls
+                                // admitted by an unrelated but concurrent manifest scope.
+                                val originalOrder = retained().keys.map(::inode)
                                 rootStorage.beforeDecode = { memory ->
                                     if (Thread.currentThread().stackTrace.any {
                                         it.className == retainedType.name && it.methodName == "requireUnchanged"

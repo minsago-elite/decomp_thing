@@ -20,6 +20,84 @@ class RepairRunSemanticsTest {
     private val inputs = (0..2).map { ProcessInput("case$it", listOf("arg$it"), byteArrayOf(it.toByte())) }
 
     @Test
+    fun `stale exploration snapshot refuses before retained input or run mutation`() {
+        val fixture = fixture("broken", "pass3")
+        fixture.history.retain(inputs)
+        val session = SecureRepairSession(fixture.loop, "test-harness")
+        val snapshot = session.prepareExploration(fixture.root, fixture.original)
+        assertEquals(inputs, snapshot.inputs, "the session snapshot includes retained compatibility inputs")
+        val exposed = snapshot.inputs
+        exposed.first().stdin[0] = 99
+        assertEquals(inputs, snapshot.inputs, "session snapshot must return detached input bytes")
+        val otherSession = SecureRepairSession(fixture("broken", "pass3").loop, "test-harness")
+        val crossSession = assertFailsWith<IllegalArgumentException> {
+            otherSession.runRepair(fixture.root, fixture.original, inputs, fixture.root.resolve("reports"), 1, snapshot)
+        }
+        assertTrue(crossSession.message.orEmpty().contains("not issued"))
+        otherSession.close()
+        val intervening = ProcessInput("concurrent-retained", listOf("new"), byteArrayOf(7))
+        ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            graph.retainRegressionInputs(listOf(intervening))
+        }
+
+        val stale = assertFailsWith<IllegalArgumentException> {
+            session.runRepair(
+                fixture.root, fixture.original, inputs, fixture.root.resolve("reports"), 1, snapshot,
+            )
+        }
+        assertTrue(stale.message.orEmpty().contains("stale"))
+        val replay = assertFailsWith<IllegalArgumentException> {
+            session.runRepair(fixture.root, fixture.original, inputs, fixture.root.resolve("reports"), 1, snapshot)
+        }
+        assertTrue(replay.message.orEmpty().contains("not issued") || replay.message.orEmpty().contains("consumed"))
+        assertTrue(fixture.seenSources.isEmpty(), "stale provenance must refuse before agent execution")
+        ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            assertEquals(inputs + intervening, graph.retainedRegressionCorpus().inputs)
+            assertTrue(graph.snapshot.runs.isEmpty(), "stale provenance must refuse before run admission")
+        }
+        session.close()
+    }
+
+    @Test
+    fun `exploration snapshot refuses when original binary bytes change`() {
+        val fixture = fixture("broken", "pass3")
+        val session = SecureRepairSession(fixture.loop, "test-harness")
+        val snapshot = session.prepareExploration(fixture.root, fixture.original)
+        fixture.original.writeText("different")
+
+        val stale = assertFailsWith<IllegalArgumentException> {
+            session.runRepair(fixture.root, fixture.original, inputs, fixture.root.resolve("reports"), 1, snapshot)
+        }
+        assertTrue(stale.message.orEmpty().contains("stale"))
+        assertTrue(fixture.seenSources.isEmpty())
+        ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            assertTrue(graph.snapshot.runs.isEmpty())
+            assertTrue(graph.retainedRegressionCorpus().inputs.isEmpty())
+        }
+        session.close()
+    }
+
+    @Test
+    fun `exploration run refuses a binary changed during candidate validation`() {
+        lateinit var original: Path
+        val fixture = fixture("pass0", "pass1", afterValidation = { source ->
+            if (source == "pass0") original.writeText("changed during validation")
+        })
+        original = fixture.original
+        val session = SecureRepairSession(fixture.loop, "test-harness")
+        val snapshot = session.prepareExploration(fixture.root, fixture.original)
+
+        val outcome = session.runRepair(fixture.root, fixture.original, inputs, fixture.root.resolve("reports"), 1, snapshot)
+        assertEquals(RepairRunStatus.VALIDATION_FAILED, outcome.runState.status)
+        assertTrue(fixture.seenSources.isEmpty(), "a changed input must not trigger an agent repair")
+        ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            assertNull(graph.snapshot.fullyAcceptedHeadId)
+            assertTrue(graph.snapshot.nodes.none { it.status == ModuleRevisionStatus.ACCEPTED })
+        }
+        session.close()
+    }
+
+    @Test
     fun `throwing repair progress warnings preserve workflow failure interruption and existing owner`(): Unit {
         val parent = Path.of("build/test-tmp/repair-progress-warning").toAbsolutePath().normalize()
         Files.createDirectories(parent)
@@ -526,8 +604,10 @@ class RepairRunSemanticsTest {
         val historyPath = fixture.root.resolve("reports/repair_history.json")
         val legacyHistory = "{\"schemaVersion\":2,\"regressionInputs\":[],\"iterations\":[]}\n".toByteArray()
         historyPath.writeBytes(legacyHistory)
+        SecureRepairSession(fixture.loop, "test-harness").use { session ->
+            session.prepareExploration(fixture.root, fixture.original)
+        }
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
-            graph.enableRunContract()
             assertEquals(ModuleRevisionStatus.LEGACY_UNVERIFIED, graph.snapshot.nodes.last().status)
             assertNull(graph.snapshot.fullyAcceptedHeadId)
             assertEquals("pass1", fixture.root.resolve("code.c").readText())

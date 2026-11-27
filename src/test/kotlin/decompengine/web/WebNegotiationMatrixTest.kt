@@ -40,8 +40,8 @@ class WebNegotiationMatrixTest {
             Case("missing job", "GET", "$api/jobs/${"f".repeat(32)}", "application/json", 404, "NOT_FOUND"),
             Case("unknown v1 capability", "GET", "$api/projects", "application/json", 404, "NOT_FOUND"),
             Case("unknown major", "GET", "/workbench/api/v2/jobs", "application/json", 404, "NOT_FOUND"),
-            Case("read-only run collection", "POST", "$api/jobs/$id/runs", "application/json", 405, "METHOD_NOT_ALLOWED", "GET"),
-            Case("job HEAD is unavailable", "HEAD", "$api/jobs/$id", "application/json", 405, allow = "GET"),
+            Case("unavailable run start advertises documented methods", "POST", "$api/jobs/$id/runs", "application/json", 405, "METHOD_NOT_ALLOWED", "GET, POST"),
+            Case("job HEAD is unavailable", "HEAD", "$api/jobs/$id", "application/json", 405, allow = "DELETE, GET, PATCH"),
             Case("binary download excludes HTML", "GET", "$api/jobs/$id/artifacts/missing/content", "text/html", 406, "NOT_ACCEPTABLE"),
             Case("binary download excludes JSON", "GET", "$api/jobs/$id/artifacts/missing/content", "application/json", 406, "NOT_ACCEPTABLE"),
             Case("binary download accepts its type", "GET", "$api/jobs/$id/artifacts/missing/content", "application/octet-stream", 404, "NOT_FOUND"),
@@ -270,7 +270,8 @@ class WebNegotiationMatrixTest {
         val id = JobStore(root).createFromUpload("fixture.elf", elfFixture()).id
         val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("analysis must remain inert") },
             JobReconstructor { _, _ -> error("reconstruction must remain inert") }, uiMode = mode,
-            basePath = if (mode == WebUiMode.SPA) "/workbench/" else "/")
+            // The matrix covers unavailable start execution; Allow still lists the documented methods.
+            basePath = if (mode == WebUiMode.SPA) "/workbench/" else "/", durableAdapters = emptyList())
         server.start()
         try { block(server, root, id) } finally { server.stop(); root.toFile().deleteRecursively() }
     }

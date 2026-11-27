@@ -59,9 +59,11 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 class ReconstructionAcpEvidenceArchiveVerifierTest {
     @Test
@@ -392,6 +394,64 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `reconstructor identity v4 replays the historical path-only mutation commitment`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "reconstructor-v4-policy-replay-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                val harness = ArchiveEvidenceHarness(accepted = true)
+                createAgentProject(project, accepted = true, profile = profile, harness = harness)
+
+                val currentRequest = harness.executedRequest
+                val legacyRequest = AgentExecutionRequest(
+                    objective = currentRequest.objective,
+                    workspaceRoots = currentRequest.workspaceRoots,
+                    contextInputs = currentRequest.contextInputs,
+                    accessPolicy = AgentAccessPolicy(
+                        currentRequest.accessPolicy.pathRules,
+                        currentRequest.accessPolicy.allowedOperations,
+                    ),
+                    limits = currentRequest.limits,
+                    cancellation = currentRequest.cancellation,
+                    sessionContinuation = currentRequest.sessionContinuation,
+                )
+                val legacyBinding = AgentExecutionRequestBinding.capture(legacyRequest)
+                rewriteEvidenceAndBindings(project) { text ->
+                    val root = Json.parseToJsonElement(text).jsonObject
+                    val request = root.getValue("request").jsonObject
+                    JsonObject(root + ("request" to JsonObject(request + mapOf(
+                        "accessPolicySha256" to JsonPrimitive(legacyBinding.accessPolicySha256),
+                        "requestSha256" to JsonPrimitive(legacyBinding.requestSha256),
+                    )))).toString() + "\n"
+                }
+
+                val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+                val identity = checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content
+                assertTrue(identity.endsWith(":v5"))
+                rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint + mapOf(
+                    "reconstructorIdentity" to JsonPrimitive(identity.removeSuffix(":v5") + ":v4"),
+                    "executionRequestSha256" to JsonPrimitive(legacyBinding.requestSha256),
+                )))
+
+                val manifest = SourceTreeManifestReader.read(project, profile)
+                assertEquals(1, ReconstructionAcpEvidenceArchiveVerifier.verify(
+                    project,
+                    manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                    manifest.files.associate { it.path to Files.size(project.resolve(it.path)) },
+                    manifest,
+                    profile,
+                ).size, profile.id)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `archive gate rejects checkpoint path and digest ambiguity`() {
         val temp = createTempDirectory("acp-archive-checkpoint-")
         val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
@@ -418,8 +478,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                         "\"executionTerminalOutcome\": \"returned-refused\"",
                     )
                     else -> checkpoint.replace(
-                        Regex("factory-[0-9a-f]{64}:v4"),
-                        "factory-${"0".repeat(64)}:v4",
+                        Regex("factory-[0-9a-f]{64}:v5"),
+                        "factory-${"0".repeat(64)}:v5",
                     )
                 }
             }
@@ -727,6 +787,65 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             Files.walk(temp).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
+        }
+    }
+
+    @Test
+    fun `pre-dispatch fallback independently replays bounded compiler diagnostics`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "fallback-compiler-prompt-replay-")
+        try {
+            val project = temp.resolve("project")
+            val profile = GeneratedCMakeReconstructionProfile.descriptor
+            val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
+                    "int parse_input(void)", "/* ${"context".repeat(2_000)} */"),
+            ))
+            val manifest = SourceTreeGenerator.generate(model, project, profile = profile,
+                reconstructor = BoundedLlmModuleReconstructor(
+                    AgentHarness { _, _ -> error("oversized prompt must not dispatch") }, maximumContextCharacters = 4_096))
+            val checkpointPath = project.resolve(CHECKPOINT_PATH)
+            val original = Json.parseToJsonElement(checkpointPath.readText()).jsonObject
+            val plan = ModulePlanJson.readCanonical(project.resolve("reports/module_plan.json").readBytes(), 4 * 1024 * 1024)
+            val inputs = ProfileModulePromptInputs(model, plan, profile)
+            val request = inputs.request("parse", project, null)
+            val diagnostics = "compiler context ".repeat(300)
+            val feedback = ModuleCompilerFeedback("parse", "b".repeat(64), inputs.fingerprint(request),
+                sha256(diagnostics.toByteArray()), diagnostics)
+            val withDiagnostics = request.copy(compilerDiagnostics = diagnostics)
+            val prompt = modulePromptEvidence(withDiagnostics).text
+            assertTrue(prompt.length > 4_096)
+            val updated = JsonObject(original + mapOf(
+                "preDispatchCompilerFeedback" to buildJsonObject {
+                    put("moduleId", feedback.moduleId)
+                    put("sourceSha256", feedback.sourceSha256)
+                    put("contextSha256", feedback.contextSha256)
+                    put("diagnosticsSha256", feedback.diagnosticsSha256)
+                    put("diagnostics", feedback.diagnostics)
+                },
+                "promptSha256" to JsonPrimitive(sha256(prompt.toByteArray())),
+                "promptCharacters" to JsonPrimitive(prompt.length),
+                "fingerprint" to JsonPrimitive(inputs.fingerprint(withDiagnostics)),
+                "issues" to JsonArray(listOf(JsonObject(mapOf(
+                    "code" to JsonPrimitive("context-budget-exceeded"),
+                    "message" to JsonPrimitive("module context required ${prompt.length} characters; limit=4096"),
+                    "entityIds" to JsonArray(request.module.functionIds.map(::JsonPrimitive)),
+                )))),
+            ))
+            rewriteCheckpointConfidenceAndManifest(project, updated)
+            val updatedManifest = SourceTreeManifestReader.read(project, profile)
+            assertTrue(ReconstructionAcpEvidenceArchiveVerifier.verify(project,
+                updatedManifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                updatedManifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, updatedManifest, profile).isEmpty())
+
+            val wrongContext = JsonObject(updated + ("preDispatchCompilerFeedback" to JsonObject(
+                updated.getValue("preDispatchCompilerFeedback").jsonObject + ("contextSha256" to JsonPrimitive("c".repeat(64))))))
+            rewriteCheckpointConfidenceAndManifest(project, wrongContext)
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project) }
+            assertTrue(failure.message.orEmpty().contains("compiler feedback differs from its module source context"))
+        } finally {
+            Files.walk(temp).use { paths -> paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
         }
     }
 

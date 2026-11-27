@@ -106,7 +106,10 @@ first, retaining its Python and Node directories on `PATH`. It installs the exac
 Node/npm versions, locked frontend packages and Python dependencies from
 [`requirements/oracle-generation.txt`](../requirements/oracle-generation.txt).
 Run the following commands from the repository root with those tools available;
-keep caches, generated data and investigation output inside `build/`:
+keep caches, generated data and investigation output inside `build/`. Keep the
+setup's `GRADLE_USER_HOME` (`build/frontend-dev/gradle`). A new Gradle user home
+downloads the Gradle distribution, the dependencies and the bundled Ghidra archive
+again and recompiles the build:
 
 ```sh
 mkdir -p build/fixture-debug/tmp build/fixture-debug/cache build/fixture-debug/state
@@ -114,7 +117,6 @@ export TMPDIR="$PWD/build/fixture-debug/tmp"
 export XDG_CACHE_HOME="$PWD/build/fixture-debug/cache"
 export XDG_STATE_HOME="$PWD/build/fixture-debug/state"
 export NPM_CONFIG_CACHE="$PWD/build/fixture-debug/cache/npm"
-export GRADLE_USER_HOME="$PWD/build/fixture-debug/gradle"
 export PYTHONDONTWRITEBYTECODE=1
 
 python3 contracts/web/v1/verify.py
@@ -124,7 +126,10 @@ DECOMP_DEV_BASE_PATH=/nested/ npm --prefix frontend run dev:fixtures
 ```
 
 The last command serves the visibly simulated catalogue at
-`http://127.0.0.1:5173/nested/__fixtures/`. The generator
+`http://127.0.0.1:5173/nested/__fixtures/` until stopped. Vite uses a strict port. If
+5173 is already in use, the command fails instead of moving to another port. Select
+another fixed port with `DECOMP_DEV_PORT=<port>`. Before you trust a page, check that
+it comes from your own server. The generator
 [`frontend/dev/generate-fixtures.py`](../frontend/dev/generate-fixtures.py)
 derives the running, failed, interrupted, unsupported and partial scenarios from
 `contracts/web/v1/fixtures/`, validates the shared schema and semantic invariants,
@@ -168,11 +173,13 @@ and mode together. A development-server pass cannot replace an archived-UI
 failure, and a report from another source or archive cannot qualify this attempt.
 
 The packaged driver requires an already-built ZIP, the pinned Node/browser and
-explicit JDK/Python paths. See [packaging](web-packaging.md) for tool provisioning
-and each mode's contract. With reviewed tools and the work parent above available,
-the direct session journey is:
+explicit JDK/Python paths. See [packaging](web-packaging.md) for tool provisioning,
+the checkout path length limit and each mode's contract. With reviewed tools and the
+work parent above available, the direct session journey is:
 
 ```sh
+# Once; the installer refuses an existing destination.
+python3 scripts/install-web-test-browser.py "$PWD/build/web-test-browser"
 node scripts/check-packaged-web-browser.mjs \
   --archive "$PWD/build/distributions/llm_bin_patch-0.1.0.zip" \
   --chrome "$PWD/build/web-test-browser/chrome" \
