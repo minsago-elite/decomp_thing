@@ -185,29 +185,28 @@ class AcpTerminalBrokerTest {
             retainedBytes = 8,
         )
         val audit = AcpTerminalAuditRecorder(networkIsolated = true)
-        val broker = broker(fixture, audit)
-        broker.bindSession(SESSION)
+        withOwnedTerminalFixture(fixture, audit) { broker ->
+            broker.bindSession(SESSION)
 
-        val terminalId = broker.create(
-            SESSION,
-            fixture.command,
-            fixture.args,
-            fixture.root.path.toString(),
-            fixture.env,
-            8u,
-        ).terminalId
-        assertFailsWith<AcpExpectedError> { broker.output(SESSION, terminalId) }
-        broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
+            val terminalId = broker.create(
+                SESSION,
+                fixture.command,
+                fixture.args,
+                fixture.root.path.toString(),
+                fixture.env,
+                8u,
+            ).terminalId
+            assertFailsWith<AcpExpectedError> { broker.output(SESSION, terminalId) }
+            broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
 
-        val exit = broker.waitForExit(SESSION, terminalId)
-        assertEquals(0u, exit.exitCode)
-        val output = broker.output(SESSION, terminalId)
-        assertEquals("89abcdef", output.output)
-        assertTrue(output.truncated)
-        broker.release(SESSION, terminalId)
-        assertFailsWith<AcpExpectedError> { broker.release(SESSION, terminalId) }
-        broker.close()
-        fixture.boundary.close()
+            val exit = broker.waitForExit(SESSION, terminalId)
+            assertEquals(0u, exit.exitCode)
+            val output = broker.output(SESSION, terminalId)
+            assertEquals("89abcdef", output.output)
+            assertTrue(output.truncated)
+            broker.release(SESSION, terminalId)
+            assertFailsWith<AcpExpectedError> { broker.release(SESSION, terminalId) }
+        }
 
         val records = audit.snapshot()
         assertTrue(records.any { it.reason == AcpTerminalAuditReason.CREATED })
