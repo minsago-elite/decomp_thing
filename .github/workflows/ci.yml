@@ -374,8 +374,29 @@ jobs:
       - name: Install sandbox host prerequisites
         timeout-minutes: 10
         run: |
-          # Bound stalled mirrors without changing required packages or test budgets.
+          # Use an isolated Ubuntu-signed distro view; leave runner repositories intact.
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_CODENAME" = noble
+          test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          case "$(dpkg --print-architecture)" in
+            amd64) ubuntu_archive=https://archive.ubuntu.com/ubuntu; ubuntu_security=https://security.ubuntu.com/ubuntu ;;
+            arm64) ubuntu_archive=https://ports.ubuntu.com/ubuntu-ports; ubuntu_security=$ubuntu_archive ;;
+            *) echo 'Unsupported hosted runner architecture' >&2; exit 1 ;;
+          esac
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          apt_root=$(mktemp -d "$GITHUB_WORKSPACE/build/sandbox-apt.XXXXXXXX")
+          trap 'sudo rm -rf -- "$apt_root"' EXIT
+          chmod 755 "$apt_root"
+          mkdir -p "$apt_root/lists/partial" "$apt_root/empty"
+          for suite in noble noble-updates noble-backports; do
+            echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $ubuntu_archive $suite main restricted universe multiverse"
+          done > "$apt_root/ubuntu.list"
+          echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $ubuntu_security noble-security main restricted universe multiverse" >> "$apt_root/ubuntu.list"
           apt_acquire_options=(
+            -o "Dir::Etc::sourcelist=$apt_root/ubuntu.list"
+            -o "Dir::Etc::sourceparts=$apt_root/empty"
+            -o "Dir::State::lists=$apt_root/lists"
             -o Acquire::Retries=2
             -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30
