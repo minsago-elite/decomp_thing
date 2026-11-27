@@ -3,7 +3,7 @@
   "probe": {
     "test": "frontend/tests/packaged-read-states-probe.test.tsx",
     "module": "scripts/packaged-browser-read-states.mjs",
-    "moduleSha256": "cee198a71796836f527c1aaaa4b00720b08fd351206476537f5a177919d762ea",
+    "moduleSha256": "3f72ff87b2b909aa875db6d727a7e3544af6e480d62ce3ce707332ac156a58f3",
     "generatorSha256": "28b996018b20735d4f36e6939ceb4cd6e36403c2dee64be8aca8f09a78835480",
     "outputSha256": "dc82cd6f89555aaf296f324a1fbd55282d4536e8c0c01404f6a9986843c8d1ad",
     "regenerate": "cd frontend && READ_STATES_WRITE_SEQUENCES=1 npx vitest run tests/packaged-read-states-probe.test.tsx"

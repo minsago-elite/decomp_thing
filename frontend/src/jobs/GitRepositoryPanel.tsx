@@ -199,6 +199,8 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
     </div> : <>
       <p>{copy.scope}</p>
       <p role="status" aria-live="polite">{status}</p>
+      {/* Busy marks only the non-live data region so the polite status is never suppressed by a busy ancestor. */}
+      <div class="git-repository-data" aria-busy={status === '' || busy}>
       {stale && observed && <p>{copy.mayBeOutdated}</p>}
       {workspace && <dl class="job-facts">
         <dt>{copy.head}</dt><dd>{branchLabel(workspace)}</dd>
@@ -213,6 +215,7 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
         : candidate.revisionId && !(stale && !busy)
           ? <button type="button" disabled={busy} onClick={() => { void act(true); }}>{copy.initialize}</button>
           : candidate.revisionId ? null : <p>{copy.noCandidate}</p>)}
+      </div>
     </>}
   </section>;
 }
