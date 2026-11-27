@@ -15,7 +15,23 @@ const CONTROL_SELECTOR = 'button, a[href], input, select, textarea, [tabindex], 
 export const statusRecorderSource = `(() => {
   const seen = []; Object.defineProperty(window, '__sessionStatusObservations', { value: seen });
   const trusted = []; Object.defineProperty(window, '__sessionActivationEvents', { value: trusted });
-  const record = () => { for (const node of document.querySelectorAll('.session-notice [role="status"]')) {
+  const evidence = { entries: [], overflow: 0 };
+  Object.defineProperty(window, '__sessionAnnouncementEvidence', { value: evidence });
+  const identities = new WeakMap(); let nextIdentity = 0;
+  const announcements = () => {
+    for (const node of document.querySelectorAll('[data-session-announcement]')) {
+      let identity = identities.get(node);
+      if (!identity) { identity = { id: ++nextIdentity, last: null }; identities.set(node, identity); }
+      const text = node.textContent.trim(); const role = node.getAttribute('role');
+      if (identity.last === text + ':' + role) continue;
+      identity.last = text + ':' + role;
+      if (evidence.entries.length >= 128) { evidence.overflow++; continue; }
+      const notice = node.closest('.session-notice');
+      evidence.entries.push({ id: identity.id, place: node.getAttribute('data-session-announcement'), text,
+        role, connected: node.isConnected, focusedNotice: Boolean(notice && document.activeElement === notice) });
+    }
+  };
+  const record = () => { announcements(); for (const node of document.querySelectorAll('.session-notice [role="status"]')) {
     const text = node.textContent.trim(); if (text && seen.at(-1)?.text !== text) seen.push({ text, tag: node.tagName.toLowerCase(),
       controls: node.querySelectorAll(${JSON.stringify(CONTROL_SELECTOR)}).length, ownTabIndex: node.hasAttribute('tabindex') }); } };
   new MutationObserver(record).observe(document, { subtree: true, childList: true, characterData: true });
@@ -206,6 +222,43 @@ export function assertActivation({ label, events, focused, requests, allowed }) 
   return { label, trustedEnter: true, requests: shapes, mutations: mutations.length, reads: reads.length };
 }
 
+/** Ordered, bounded observations from document start, never an inferred initial state. */
+export function assertAnnouncementHistory(evidence, text) {
+  assert.ok(evidence && Array.isArray(evidence.entries), 'Document-start announcement evidence is missing');
+  assert.equal(evidence.overflow, 0, 'Document-start announcement evidence overflowed');
+  const first = new Map();
+  for (const entry of evidence.entries) {
+    if (!first.has(entry.id)) {
+      assert.equal(entry.connected, true, 'Announcement first presence was disconnected');
+      assert.equal(entry.role, 'status', 'Announcement live role was missing at first presence');
+      assert.equal(entry.text, '', 'Announcement was already populated at first presence');
+      first.set(entry.id, entry);
+    }
+  }
+  assert.ok(evidence.entries.some(entry => entry.text.includes(text) && entry.role === 'status'
+    && first.get(entry.id) !== entry && first.get(entry.id)?.place === entry.place),
+  'No same-node empty-before-message announcement was observed');
+  return { documentStartObserver: true, emptyBeforeMessage: true, sameNode: true, observedNodes: first.size };
+}
+
+export const sessionFocusFactsExpression = `(() => {
+  const notices = [...document.querySelectorAll('.session-notice')];
+  const notice = notices[0]; const active = document.activeElement;
+  return { notices: notices.length, connected: Boolean(notice?.closest('header')),
+    focusedNotice: Boolean(notice && active === notice),
+    focusedSignOut: Boolean(notice && active?.tagName === 'BUTTON' && active.closest('.session-notice') === notice
+      && active.textContent.trim() === 'Sign out') };
+})()`;
+
+export function assertCheckSessionFocus(facts, entries) {
+  assert.equal(facts?.notices, 1, 'Check session outcome must have one active notice');
+  assert.ok(entries.some(entry => entry.text.includes('Checking local session') && entry.focusedNotice),
+    'Check session did not hand focus to the checking notice');
+  if (facts.connected) assert.equal(facts.focusedSignOut, true, 'Authenticated Check session did not focus Sign out');
+  else assert.equal(facts.focusedNotice, true, 'Check session outcome lost focus from the active page notice');
+  return { checkingNoticeFocused: true, outcome: facts.connected ? 'header-sign-out' : 'page-notice', outcomeFocused: true };
+}
+
 /** Browser-driven checkpoints, sharing the harness's CDP helpers. */
 export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource, origin, basePath = '/nested/' }) {
   assert.ok(typeof axeSource === 'string' && axeSource.includes('axe'), 'axe-core source is required');
@@ -219,6 +272,11 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
     return result;
   }
   async function checkpoint(target, name, expected) {
+    let announcementHistory = null;
+    if (expected.statusText) {
+      await ready(target, `[...document.querySelectorAll('.session-notice [role="status"]')].some(node => node.textContent.includes(${JSON.stringify(expected.statusText)}))`, `${name} live message`);
+      announcementHistory = assertAnnouncementHistory(await evaluate(target, 'window.__sessionAnnouncementEvidence'), expected.statusText);
+    }
     const facts = await evaluate(target, sessionFactsExpression);
     const verdict = assertSessionFacts(facts, expected);
     if (!(await evaluate(target, 'typeof window.axe === "object"'))) await evaluate(target, `${axeSource};void 0`);
@@ -236,13 +294,14 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
           inapplicable: r.inapplicable.map(p => ({ id: p.id })) }));
     })()`), requiredRules, expectedInapplicable);
     await capture(target, `session-${name}.png`, `session-checkpoint:${name}`);
-    const result = { name, ...verdict, activeElement: facts.activeElement, axe, screenshot: `session-${name}.png` };
+    const result = { name, ...verdict, announcementHistory, activeElement: facts.activeElement, axe, screenshot: `session-${name}.png` };
     results.checkpoints.push(result);
     return result;
   }
   async function activate(target, label, { allowed, settled, holdRequest = null }) {
     const before = target.requests.length;
     const eventsBefore = (await evaluate(target, 'window.__sessionActivationEvents.length'));
+    const announcementsBefore = label === 'Check session' ? (await evaluate(target, 'window.__sessionAnnouncementEvidence')).entries.length : null;
     let pausedRequest = null;
     let resolvePaused;
     let rejectPaused;
@@ -296,13 +355,19 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
     }
     await ready(target, settled, `${label} keyboard activation settled`);
     if (label === 'Sign out') await verifyAnnouncement(target, { place: 'page', text: 'You signed out of this browser.', focus: true });
+    let outcomeFocus = null;
+    if (label === 'Check session') {
+      const evidence = await evaluate(target, 'window.__sessionAnnouncementEvidence');
+      assert.equal(evidence.overflow, 0, 'Check session announcement evidence overflowed');
+      outcomeFocus = assertCheckSessionFocus(await evaluate(target, sessionFocusFactsExpression), evidence.entries.slice(announcementsBefore));
+    }
     const events = (await evaluate(target, 'window.__sessionActivationEvents')).slice(eventsBefore);
     const prefix = new URL(basePath, origin).pathname;
     const requests = target.requests.slice(before).filter((request) => ['Fetch', 'XHR', 'Document', 'EventSource'].includes(request.type))
       .map((request) => ({ method: request.method, path: request.url.startsWith(origin) ? new URL(request.url).pathname : request.url }));
     assert.ok(requests.every((request) => request.path.startsWith(prefix)), 'Session activation reached outside the application');
     const verdict = assertActivation({ label, events, focused, requests, allowed });
-    results.activations.push({ ...verdict, focusVisible });
+    results.activations.push({ ...verdict, focusVisible, outcomeFocus });
     return { ...verdict, focusVisible, requestStart, eventStart, allowed, during };
     } finally { await finishHold(); }
   }
@@ -314,5 +379,6 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
     assert.ok(requests.every((request) => request.path.startsWith(prefix)), 'Late session request reached outside the application');
     return assertActivation({ label: activation.label, events, focused: activation.label, requests, allowed: activation.allowed });
   }
-  return { checkpoint, activate, verifyActivationQuiet, prepareAnnouncement, verifyAnnouncement, results };
+  const observeDocumentStart = target => cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: statusRecorderSource }, target.sessionId);
+  return { checkpoint, activate, verifyActivationQuiet, prepareAnnouncement, verifyAnnouncement, observeDocumentStart, results };
 }

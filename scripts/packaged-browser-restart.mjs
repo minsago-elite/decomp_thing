@@ -175,6 +175,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const stateBefore = await fs.readFile(statePath);
   assert.equal(await fs.readFile(statePath, 'utf8'), fixture.retained['workflow-state.json']);
   const old = track(await makeTarget());
+  if (sessionSemantics) await sessionSemantics.observeDocumentStart(old);
   await cdp.call('Page.navigate', { url: first.url }, old.sessionId);
   await ready(old, `document.body.innerText.includes('Local session connected.')`, 'first-process session');
   const instanceBefore = await serverInstance(old);

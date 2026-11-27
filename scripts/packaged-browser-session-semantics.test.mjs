@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
-import { REQUIRED_AXE_PASSES, assertActivation, assertAxeResult, assertSessionFacts, assertStatusObservations, sessionSemanticsGate, statusRecorderSource, sessionFactsExpression, prepareAnnouncementExpression, announcementFactsExpression, assertAnnouncementBefore, assertAnnouncementTransition } from './packaged-browser-session-semantics.mjs';
+import { REQUIRED_AXE_PASSES, assertActivation, assertAxeResult, assertSessionFacts, assertStatusObservations, sessionSemanticsGate, statusRecorderSource, sessionFactsExpression, prepareAnnouncementExpression, announcementFactsExpression, assertAnnouncementBefore, assertAnnouncementTransition, assertAnnouncementHistory, assertCheckSessionFocus, sessionFocusFactsExpression } from './packaged-browser-session-semantics.mjs';
 
 const aside = (overrides = {}) => ({ role: null, label: 'Local session', session: true, ...overrides });
 const pageContainer = (overrides = {}) => ({ tag: 'aside', role: null, label: 'Local session', inBanner: false, ...overrides });
@@ -157,6 +157,7 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
   const facts = { asides: [aside()], sessionCount: 1, sessionContainers: [pageContainer()], statuses: [status({ text: 'Signing out…' })], buttons: [] };
   let announcementChecks = 0;
   const evaluate = async (_target, expression) => {
+    if (expression === 'window.__sessionAnnouncementEvidence') return historyEvidence('Signing out…');
     if (expression === prepareAnnouncementExpression) { announcementPrepared = true; return announcementBefore(); }
     if (expression === announcementFactsExpression) return announcementAfter({ text: announcementChecks++ === 0 ? 'Signing out…' : 'You signed out of this browser.' });
     if (expression === 'window.__sessionActivationEvents.length') return 0;
@@ -210,7 +211,7 @@ test('activation requires trusted keyboard input, correct focus and exact reques
 
 test('gate fails closed without axe and browser sources parse', () => {
   assert.throws(() => sessionSemanticsGate({ axeSource: '' }), /axe-core source is required/);
-  for (const source of [statusRecorderSource, sessionFactsExpression, prepareAnnouncementExpression, announcementFactsExpression]) assert.doesNotThrow(() => new Function(source));
+  for (const source of [statusRecorderSource, sessionFactsExpression, prepareAnnouncementExpression, announcementFactsExpression, sessionFocusFactsExpression]) assert.doesNotThrow(() => new Function(source));
 });
 
 const announcementBefore = () => ['header', 'page'].map(place => ({ place, count: 1, connected: true, tag: 'p', role: 'status', text: '' }));
@@ -259,3 +260,79 @@ test('browser expressions compare actual object identity and refuse replacement 
   delete context.window.__sessionAnnouncementBefore;
   assert.throws(() => assertAnnouncementTransition(read(), expected), /document was replaced/);
 });
+
+const historyEvidence = text => ({ overflow: 0, entries: [
+  { id: 1, place: 'page', connected: true, role: 'status', text: '' },
+  { id: 1, place: 'page', connected: true, role: 'status', text },
+] });
+
+test('document-start evidence rejects already populated startup and a new message node', () => {
+  assert.equal(assertAnnouncementHistory(historyEvidence('Sign-in required'), 'Sign-in required').emptyBeforeMessage, true);
+  assert.throws(() => assertAnnouncementHistory({ overflow: 0, entries: [historyEvidence('Sign-in required').entries[1]] }, 'Sign-in required'), /already populated/);
+  const replaced = historyEvidence('Sign-in required'); replaced.entries[1].id = 2;
+  assert.throws(() => assertAnnouncementHistory(replaced, 'Sign-in required'), /already populated/);
+  assert.throws(() => assertAnnouncementHistory({ ...historyEvidence('Sign-in required'), overflow: 1 }, 'Sign-in required'), /overflow/);
+  assert.throws(() => assertAnnouncementHistory(historyEvidence('Other state'), 'Sign-in required'), /No same-node/);
+});
+
+test('document-start observer distinguishes empty insertion from nonempty insertion without app effects', () => {
+  const notice = {}; let callback;
+  const node = { textContent: '', tagName: 'P', isConnected: true,
+    getAttribute: name => name === 'role' ? 'status' : 'page',
+    querySelectorAll: () => [], hasAttribute: () => false, closest: () => notice };
+  const document = { activeElement: notice, querySelectorAll: () => [node], addEventListener() {} };
+  const makeContext = () => vm.createContext({ document, window: {}, MutationObserver: class {
+    constructor(listener) { callback = listener; } observe() {}
+  } });
+  const context = makeContext(); vm.runInContext(statusRecorderSource, context);
+  callback(); node.textContent = 'To access private work'; callback();
+  const read = ctx => JSON.parse(JSON.stringify(ctx.window.__sessionAnnouncementEvidence));
+  assert.doesNotThrow(() => assertAnnouncementHistory(read(context), 'To access private work'));
+  const coldNonempty = makeContext(); vm.runInContext(statusRecorderSource, coldNonempty); callback();
+  assert.throws(() => assertAnnouncementHistory(read(coldNonempty), 'To access private work'), /already populated/);
+});
+
+test('Check session requires focus in checking and every required/unavailable/authenticated outcome', () => {
+  const checking = [{ text: 'Checking local session…', focusedNotice: true }];
+  for (const outcome of ['required-missing', 'unavailable-connection', 'required-after-reconnect']) {
+    assert.equal(assertCheckSessionFocus({ notices: 1, connected: false, focusedNotice: true }, checking).outcome, 'page-notice', outcome);
+    assert.throws(() => assertCheckSessionFocus({ notices: 1, connected: false, focusedNotice: false }, checking), /lost focus/, outcome);
+  }
+  assert.equal(assertCheckSessionFocus({ notices: 1, connected: true, focusedSignOut: true }, checking).outcome, 'header-sign-out');
+  assert.throws(() => assertCheckSessionFocus({ notices: 1, connected: true, focusedSignOut: false }, checking), /did not focus Sign out/);
+  assert.throws(() => assertCheckSessionFocus({ notices: 1, connected: false, focusedNotice: true }, [{ text: 'Checking local session…', focusedNotice: false }]), /checking notice/);
+});
+
+for (const outcome of ['required-missing', 'unavailable-connection', 'required-after-reconnect', 'authenticated', 'lost-focus']) {
+  test(`trusted Check session gate validates actual-style focus outcome: ${outcome}`, async () => {
+    let activated = false;
+    const target = { sessionId: 'check', requests: [] };
+    const cdp = { async call(method, params) {
+      if (method === 'Input.dispatchKeyEvent' && params.key === 'Enter' && params.type === 'keyUp') {
+        activated = true;
+        target.requests.push({ type: 'Fetch', method: 'GET', url: 'https://example.test/nested/api/v1/bootstrap' });
+      }
+    } };
+    const evidence = () => ({ overflow: 0, entries: activated
+      ? [{ text: 'Checking local session…', focusedNotice: true }] : [] });
+    const evaluate = async (_target, expression) => {
+      if (expression === 'window.__sessionActivationEvents.length') return 0;
+      if (expression === 'window.__sessionActivationEvents') return trusted('Check session');
+      if (expression === 'window.__sessionAnnouncementEvidence') return evidence();
+      if (expression === sessionFocusFactsExpression) return { notices: 1, connected: outcome === 'authenticated',
+        focusedSignOut: outcome === 'authenticated', focusedNotice: outcome !== 'lost-focus' };
+      if (expression.includes('document.activeElement?.blur()')) return true;
+      if (expression.includes('document.activeElement?.closest')) return 'Check session';
+      if (expression.includes(':focus-visible')) return true;
+      throw Error('Unexpected focus gate evaluation');
+    };
+    const gate = sessionSemanticsGate({ cdp, evaluate, ready: async () => {}, axeSource: 'axe', origin: 'https://example.test' });
+    const activate = () => gate.activate(target, 'Check session', { allowed: checkAllowed, settled: 'outcome rendered' });
+    if (outcome === 'lost-focus') await assert.rejects(activate(), /lost focus/);
+    else {
+      await activate();
+      assert.equal(gate.results.activations[0].outcomeFocus.outcomeFocused, true);
+      assert.equal(target.requests.length, 1);
+    }
+  });
+}
