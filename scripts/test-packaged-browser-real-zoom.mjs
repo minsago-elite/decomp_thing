@@ -1415,22 +1415,34 @@ test('layout readiness: a delayed valid 1x layout is waited for, then measured o
 
 test('layout readiness: a permanently 0x0 target fails at the original readyMs, without probe, retry or guessed size', async () => {
   const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  const resumePoll = Promise.withResolvers();
   try {
-    const h = harness({ layout: (key) => (key === 'calibration' ? { innerWidth: 0, innerHeight: 0 } : { innerWidth: 1280, innerHeight: CAL.innerHeight }) });
+    const zero = { innerWidth: 0, innerHeight: 0 };
+    let layoutRead = false;
+    let pollPaused = false;
+    const h = harness({ layout: () => { layoutRead = true; return zero; } });
+    // Pause the first polling delay after recording 0x0 so only the readiness timer can end the wait.
+    const delay = (ms) => {
+      if (!layoutRead || pollPaused) return h.args.delay(ms);
+      pollPaused = true;
+      return resumePoll.promise;
+    };
     const section = createRealZoomSection();
-    const started = Date.now();
-    await qualifyRealZoom({ ...h.args, section, root, deadlines: { ...REAL_ZOOM_DEADLINES, readyMs: 600 } });
-    assert.ok(Date.now() - started < 20000);
+    await qualifyRealZoom({ ...h.args, delay, section, root,
+      deadlines: { ...REAL_ZOOM_DEADLINES, readyMs: 600, calibrationMs: 3000, cancelSettleMs: 200 } });
     const c = proc(section, 'calibration');
     assert.match(c.failure, /calibration target never reported a positive layout viewport within 600 ms \(last 0x0\)/);
-    assert.deepEqual([c.layoutWaits[0].ready, c.layoutWaits[0].last], [false, { innerWidth: 0, innerHeight: 0 }]);
-    assert.ok(c.layoutWaits[0].polls >= 2 && c.layoutWaits[0].elapsedMs >= 600);
+    assert.equal(pollPaused, true, 'the readiness deadline ended a pending poll delay');
+    assert.deepEqual(c.layoutWaits.map(({ ready, polls, initial, last }) => [ready, polls, initial, last]), [[false, 1, zero, zero]]);
     assert.deepEqual(c.probes, [], 'no calibration geometry is recorded from an unusable target');
     assert.equal(c.methods.counts['Target.createTarget'], 1);
     assert.equal(c.cleanup.directoryRemoved, true);
-    assert.equal(proc(section, 'zoom200').failure, 'skipped: no valid 1x calibration');
+    assert.deepEqual(section.processes.slice(1).map((p) => p.failure), Array(2).fill('skipped: no valid 1x calibration'));
     zoomFails(section, cleanZoom().main, /calibration/);
-  } finally { await fs.rm(root, { recursive: true, force: true }); }
+  } finally {
+    resumePoll.resolve();
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test('layout readiness: a positive but wrong 1x layout still fails the exact calibration checks', async () => {
