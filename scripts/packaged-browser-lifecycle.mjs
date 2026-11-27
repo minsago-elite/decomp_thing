@@ -71,6 +71,23 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   await cdp.call('Page.navigate', { url: jobUrl }, peer.sessionId);
   await ready(peer, `document.querySelector('h2')?.textContent === 'Lifecycle label'`, 'peer tab on lifecycle job');
 
+  // #629: an unsaved peer draft survives a newer same-job version written by the other tab.
+  await cdp.call('Page.bringToFront', {}, peer.sessionId);
+  await evaluate(peer, setInput('input[name="label"]', 'Peer draft label'));
+  await cdp.call('Page.bringToFront', {}, tab.sessionId);
+  await evaluate(tab, `document.querySelector('input[name="archived"]').click()`);
+  await evaluate(tab, click('Save organization'));
+  await ready(tab, `${status('job-organize-title')} === 'Saved. The job was read again from the server.' && !document.querySelector('input[name="archived"]').checked`, 'unarchive saved and re-read');
+  await cdp.call('Page.bringToFront', {}, peer.sessionId);
+  await ready(peer, `${status('job-organize-title')} === 'The job changed in another tab or request. Current server values are shown below; your edits are kept.' && document.querySelector('input[name="label"]').value === 'Peer draft label' && !document.querySelector('input[name="archived"]').checked`, 'peer keeps its draft over the newer version');
+  assert.equal(JSON.parse(await fs.readFile(join(directory, 'organization.json'), 'utf8')).label, 'Lifecycle label', 'Peer draft was written without a deliberate save');
+  await evaluate(peer, setInput('input[name="label"]', 'Lifecycle label'));
+  await cdp.call('Page.bringToFront', {}, tab.sessionId);
+  await evaluate(tab, `document.querySelector('input[name="archived"]').click()`);
+  await evaluate(tab, click('Save organization'));
+  await ready(tab, `${status('job-organize-title')} === 'Saved. The job was read again from the server.' && document.querySelector('input[name="archived"]').checked`, 'archive restored and re-read');
+  assert.deepEqual(await evidence(), original, 'Organization edits changed job evidence');
+
   // 3. Deliberate deletion: reviewed preview, typed confirmation gate, one DELETE.
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
   await evaluate(tab, click('Review what would be deleted'));
@@ -124,7 +141,9 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   // 4. Recovery and consistency: truthful copy, peer tab, deep-link reload, API 410, focusable return.
   // The permanent message itself says "cannot be undone"; what must be absent is any control offering to undo.
-  await ready(tab, `${deletedAlert}?.textContent.includes(${JSON.stringify(operation.message)})`, 'permanent deletion message in alert');
+  // #1944 renders the localized completed-state copy, never the raw server message.
+  const completedCopy = 'The job and its stored files were permanently deleted.';
+  await ready(tab, `${deletedAlert}?.textContent.includes(${JSON.stringify(completedCopy)}) && !${deletedAlert}.textContent.includes(${JSON.stringify(operation.message)})`, 'localized permanent deletion message in alert');
   assert.deepEqual(await evaluate(tab, `[...document.querySelectorAll('button, a[href], [role="button"], [role="link"], input, select, textarea')]
     .filter(control => /undo|restore|trash|recover/i.test((control.textContent || '') + ' ' + (control.value || '') + ' ' + (control.getAttribute('aria-label') || '') + ' ' + (control.getAttribute('title') || '')))
     .map(control => control.outerHTML)`), [], 'Deleted job offers an undo, restore or trash control');
@@ -154,13 +173,14 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   // Untouched live fixture jobs survive the lifecycle scenario.
   for (const other of fixture.jobs) assert.ok((await fs.readdir(fixture.root)).includes(other.id));
   const methods = tab.requests.map(request => request.method).filter(method => !['GET', 'HEAD'].includes(method));
-  assert.deepEqual(methods.sort(), ['DELETE', 'PATCH', 'PATCH']);
+  // Label, archive, #629 unarchive and #629 re-archive are the only saves; the peer draft never PATCHes.
+  assert.deepEqual(methods.sort(), ['DELETE', 'PATCH', 'PATCH', 'PATCH', 'PATCH']);
   assert.ok(peer.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   assert.deepEqual(tab.exceptions, []);
   assert.deepEqual(peer.exceptions, []);
   return { realBackend: true, labelEditedEvidenceUnchanged: true, archiveOrganizationOnly: true, archiveDistinctFromExport: true,
     defaultListingHidesArchived: true, typedConfirmationRequiresFileName: true, deleteRequests: 1, jobDirectoryRemoved: true,
     deletionOperation: { location, state: operation.state }, detachedDataPurged: true, previewInputBytes: 64,
-    peerTabReconciled: true, deepLinkReloadShowsDeleted: true, apiGone: 410, noUndoPromised: true,
+    peerTabReconciled: true, peerDraftSurvivesNewerVersion: true, deepLinkReloadShowsDeleted: true, apiGone: 410, noUndoPromised: true,
     keyboardReturnFocus: landingFocus, mutationRequests: methods.length, executionStarted: false };
 }
