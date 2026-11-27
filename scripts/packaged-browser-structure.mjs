@@ -320,7 +320,9 @@ export function classifyFailedInventoryRequests(coldEvidence, inventoryConsumpti
       const ids = Array.isArray(action.requestIdHashes) ? action.requestIdHashes : [];
       if (ids.length !== 1 || ids[0] !== request.idHash || typeof request.urlHash !== 'string') continue;
       const key = `${request.idHash}:${request.urlHash}`;
-      candidates.set(key, (candidates.get(key) ?? 0) + 1);
+      const matches = candidates.get(key) ?? [];
+      matches.push(action);
+      candidates.set(key, matches);
     }
   }
   let provenCanceledAfterConsumptionCount = 0;
@@ -331,12 +333,15 @@ export function classifyFailedInventoryRequests(coldEvidence, inventoryConsumpti
       const headerLength = row?.responseHeaders?.['content-length'];
       const contentLength = typeof headerLength === 'string' && /^(?:0|[1-9][0-9]{0,8})$/.test(headerLength)
         ? Number(headerLength) : null;
+      const matches = candidates.get(key);
       const eligible = row?.method === 'GET' && row?.pathTemplate === '/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions' &&
         row?.status === 200 && row?.failure?.errorText === 'net::ERR_ABORTED' && row?.failure?.canceled === true &&
         /^[a-f0-9]{64}$/.test(row?.networkIdHash ?? '') && /^[a-f0-9]{64}$/.test(row?.urlHash ?? '') &&
         row?.lateFailedAfterFinished !== true && row?.loadingFinishedEncodedDataLength === null &&
         Number.isSafeInteger(contentLength) && row?.dataLength === contentLength &&
-        candidates.get(key) === 1 && !matched.has(key);
+        matches?.length === 1 && !matched.has(key) &&
+        (matches[0].kind !== 'search' || (SERVER_REQUEST_ID.test(matches[0].request.serverRequestId) &&
+          matches[0].request.serverRequestId === row.responseHeaders?.['x-request-id']));
       if (eligible) {
         matched.add(key);
         provenCanceledAfterConsumptionCount++;
@@ -859,14 +864,14 @@ export function evaluateStructureBudgets(m) {
 
 // ---------------------------------------------------------------------------------------------
 // #536 inventory consumption proof (evidence only). It never changes request behaviour, failure
-// classification or budgets: it only observes which response each of the 52 inventory actions
-// (first page, 50 next pages, reload) validated and consumed, and fails closed as "unproven".
+// classification or budgets: it observes which response each inventory action validated and
+// consumed (first page, 50 next pages, reload, search), and fails closed as "unproven".
 const PROOF_BODY_LIMIT_BYTES = 1024 * 1024;
 const PROOF_RAW_LIMIT_BYTES = 4 * 1024 * 1024;
 const PROOF_STREAM_PENDING_LIMIT = 16;
 const PROOF_DATA_EVENT_LIMIT = 4096;
 const PROOF_LEDGER_LIMIT = 128;
-const PROOF_ACTION_LIMIT = 52;
+const PROOF_ACTION_LIMIT = 53;
 const PROOF_PAYLOAD_LIMIT = 16384;
 const PROOF_READY_LIMIT = 4;
 const PROOF_DOCUMENT_BINDING = '__decompInventoryDocument';
@@ -875,6 +880,10 @@ const PROOF_READY_BINDING = '__decompInventoryReady';
 export const INVENTORY_PROOF_BINDINGS = [PROOF_DOCUMENT_BINDING, PROOF_TIMING_BINDING, PROOF_READY_BINDING];
 const INVENTORY_PATH = /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/;
 const SUMMARY_PATTERN = 'Showing \\d+\\u2013\\d+ of \\d+ matching functions(?: \\(\\d+ recorded\\))?';
+const SEARCH_INDEX = FUNCTIONS - 1;
+const SEARCH_NAME = 'synthetic_function_99999';
+const SEARCH_QUERY = `?search=${SEARCH_NAME}`;
+const SERVER_REQUEST_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
 /** Installed on every new document: nonce + timeOrigin announcement, nonce-tagged ResourceTiming and a ROWS observer. */
 export function inventoryDocumentInstrumentation() {
@@ -902,29 +911,39 @@ export function inventoryDocumentInstrumentation() {
     const rows = () => ${ROWS};
     const summaryPattern = new RegExp(${JSON.stringify(SUMMARY_PATTERN)});
     let armed = null, emitted = 0, last = null;
-    const state = () => {
+    const state = search => {
       const list = rows();
       const summary = (document.body?.innerText ?? '').match(summaryPattern)?.[0] ?? null;
-      return { list, summary, key: JSON.stringify([list, summary]) };
+      let result = null;
+      if (search && list.length === 1) {
+        const table = [...document.querySelectorAll('table')].find(table => table.querySelector('caption')?.textContent === 'Recovered functions');
+        const link = table?.querySelector('tbody tr td:nth-child(2) a');
+        const id = table?.querySelector('tbody tr td:nth-child(3) code')?.textContent;
+        if (link) result = { name: link.textContent, href: link.getAttribute('href'), id, location: location.pathname + location.search };
+      }
+      return { list, summary, result, key: JSON.stringify([list, summary, result]) };
     };
     const emit = (current, token) => {
       if (++emitted > ${PROOF_LEDGER_LIMIT}) { if (emitted === ${PROOF_LEDGER_LIMIT + 1}) send(${JSON.stringify(PROOF_READY_BINDING)}, { nonce, overflow: true }); return; }
       send(${JSON.stringify(PROOF_READY_BINDING)}, { nonce, token, readyAt: performance.now(), count: current.list.length,
-        addresses: current.list, summary: current.summary });
+        addresses: current.list, summary: current.summary, result: current.result });
     };
     const check = () => {
-      const current = state();
-      if (current.list.length !== 100 || current.list.some(value => typeof value !== 'string')) return;
+      const current = state(armed?.search);
+      if (current.list.length !== (armed?.count ?? 100) || current.list.some(value => typeof value !== 'string')) return;
       if (armed) {
         if (current.key === armed.baselineKey && armed.stale !== true) return;
         if (JSON.stringify(current.list) !== armed.addresses || !current.summary?.startsWith(armed.summary)) return;
+        if (armed.search && (current.result?.name !== armed.search.name || current.result.id !== armed.search.id
+          || current.result.location !== armed.search.location || !current.result.href?.startsWith(armed.search.linkPrefix))) return;
         const token = armed.token; armed = null; last = current.key; emit(current, token);
       } else if (current.key !== last) { last = current.key; emit(current, null); }
     };
-    Object.defineProperty(window, '__decompArmInventory', { value: (token, addresses, summary) => {
-      const current = state();
+    Object.defineProperty(window, '__decompArmInventory', { value: (token, addresses, summary, search) => {
+      const current = state(search);
       const baselineMatches = JSON.stringify(current.list) === JSON.stringify(addresses) && current.summary?.startsWith(summary) === true;
-      armed = { token: String(token), addresses: JSON.stringify(addresses), summary: String(summary), baselineKey: current.key, stale: baselineMatches };
+      armed = { token: String(token), addresses: JSON.stringify(addresses), summary: String(summary), baselineKey: current.key, stale: baselineMatches,
+        count: addresses.length, search };
       last = current.key;
       return { nonce, baselineMatches };
     } });
@@ -937,16 +956,17 @@ export function inventoryDocumentInstrumentation() {
 }
 
 /** Ordered id/address oracle for one inventory page of the seeded fixture. */
-export function inventoryPageOracle(fixture, start) {
+export function inventoryPageOracle(fixture, start, count = 100) {
   const ids = [], addresses = [];
-  for (let index = start; index < start + 100; index++) {
+  for (let index = start; index < start + count; index++) {
     ids.push(fixture.functionId(index)); addresses.push(`0x${fixture.functionAddress(index).toString(16)}`);
   }
   return { start, ids, addresses, digest: sha(JSON.stringify(ids.map((id, i) => [id, addresses[i]]))),
-    addressDigest: sha(JSON.stringify(addresses)), first: addresses[0], last: addresses[99] };
+    addressDigest: sha(JSON.stringify(addresses)), first: addresses[0], last: addresses.at(-1) };
 }
 
 export function inventorySummaryPrefix(start, kind) {
+  if (kind === 'search') return 'Showing 1–1 of 1 matching functions (100000 recorded)';
   return kind === 'first' ? `Showing 1–100 of 100000 matching functions (100000 recorded)` : `Showing ${start + 1}–${start + 100} of 100000 matching functions`;
 }
 
@@ -1090,6 +1110,11 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
       summary: typeof value.summary === 'string' ? value.summary.slice(0, 128) : null, loaderAtReady: mainLoaderId };
     const action = ready.token !== null ? byToken.get(ready.token) : current;
     if (!action || closed) { counters.unattributedReadies++; return; }
+    if (action.search) {
+      const fields = ['name', 'href', 'id', 'location'];
+      if (fields.some(key => typeof value.result?.[key] !== 'string' || value.result[key].length > 1024)) { counters.invalid++; return; }
+      ready.result = Object.fromEntries(fields.map(key => [key, value.result[key]]));
+    }
     if (action.readies.length >= PROOF_READY_LIMIT) { action.readyOverflow++; return; }
     action.readies.push(ready);
   }
@@ -1137,6 +1162,10 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
       protocol: typeof response.protocol === 'string' ? response.protocol.slice(0, 32) : null, contentLength,
       contentEncoding: typeof headers['content-encoding'] === 'string' ? headers['content-encoding'].slice(0, 32) : null,
       type: event.type ?? null, frameId: event.frameId ?? null, loaderId: event.loaderId ?? null };
+    if (record.action.search) {
+      record.response.urlHash = sameOrigin ? sha(response.url) : null;
+      record.response.serverRequestId = SERVER_REQUEST_ID.test(headers['x-request-id']) ? headers['x-request-id'] : null;
+    }
   }
   function dataReceived(event) {
     tick();
@@ -1197,15 +1226,20 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
     if (doc?.apiVersion !== 1 || doc?.kind !== 'functionInventory' || !data) reasons.push('body-envelope');
     if (data?.state !== 'available') reasons.push('body-state');
     if (data?.binding?.jobId !== fixture.jobId || data?.binding?.runId !== fixture.runId || data?.binding?.revisionId !== fixture.revisionId) reasons.push('body-revision');
-    if (data?.totalFunctions !== fixture.functions || data?.matchedFunctions !== fixture.functions) reasons.push('body-total');
+    if (data?.totalFunctions !== fixture.functions || data?.matchedFunctions !== (record.action.search ? 1 : fixture.functions)) reasons.push('body-total');
     if (data?.page?.limit !== 100) reasons.push('body-limit');
     if (!/^[a-f0-9]{64}$/.test(String(data?.structureVersion))) reasons.push('body-structure-version');
     const items = Array.isArray(data?.items) ? data.items : [];
-    if (items.length !== 100) reasons.push('body-count');
+    if (items.length !== oracle.ids.length) reasons.push('body-count');
     if (items.some(item => item?.kind !== 'function' || item?.recorded !== true)) reasons.push('body-recorded');
     const ids = items.map(item => item?.entityId), addresses = items.map(item => item?.address);
     const digest = sha(JSON.stringify(ids.map((id, i) => [id, addresses[i]])));
     if (digest !== oracle.digest) reasons.push('body-oracle-mismatch');
+    if (record.action.search) {
+      if (!record.response?.serverRequestId || doc?.requestId !== record.response.serverRequestId) reasons.push('body-request-id');
+      if (items[0]?.name !== record.action.search.name || items[0]?.selector !== oracle.ids[0]) reasons.push('body-search-entity');
+      if (data?.page?.nextCursor !== null || data?.page?.snapshotVersion !== data?.structureVersion) reasons.push('body-search-page');
+    }
     return { reasons, digest, first: addresses[0] ?? null, last: addresses.at(-1) ?? null,
       binding: Object.fromEntries(['jobId', 'runId', 'revisionId'].map(key => [key, String(data?.binding?.[key] ?? '').slice(0, 128)])),
       total: Number.isSafeInteger(data?.totalFunctions) ? data.totalFunctions : null,
@@ -1271,11 +1305,16 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
     if (actions.length >= expectedActions) { counters.actionOverflow++; current = null; return null; }
     const token = `${label}:${crypto.randomUUID()}`;
     const priorDocument = [...documents.values()].at(-1) ?? null;
-    current = { label, kind, token, start, oracle: inventoryPageOracle(fixture, start), summaryPrefix: inventorySummaryPrefix(start, kind),
+    const oracle = inventoryPageOracle(fixture, start, kind === 'search' ? 1 : 100);
+    const revision = `/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}`;
+    const search = kind === 'search' ? { name: SEARCH_NAME, id: oracle.ids[0], location: `/nested${revision}/functions${SEARCH_QUERY}`,
+      linkPrefix: `/nested${revision}/functions/${oracle.ids[0]}?structureVersion=` } : null;
+    current = { label, kind, token, start, oracle, search, summaryPrefix: inventorySummaryPrefix(start, kind),
+      searchUrlHash: search ? sha(`${origin}/nested/api/v1${revision}/functions${SEARCH_QUERY}&limit=100`) : null,
       startOrdinal: ordinal, priorNonce: priorDocument?.nonce ?? null, priorLoader: mainLoaderId, arm: null,
       requests: [], readies: [], readyOverflow: 0, requestOverflow: 0 };
     actions.push(current); byToken.set(token, current);
-    return { token, addresses: current.oracle.addresses, summary: current.summaryPrefix };
+    return { token, addresses: current.oracle.addresses, summary: current.summaryPrefix, search };
   }
   function armResult(result) {
     if (!current) return;
@@ -1306,9 +1345,12 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
     if (ready) {
       if (!doc) reasons.push('ready-unknown-document');
       else if (!doc.boundToMain) reasons.push('ready-document-not-main-context');
-      if (ready.count !== 100 || ready.addressDigest !== action.oracle.addressDigest) reasons.push('ready-dom-mismatch');
+      if (ready.count !== action.oracle.ids.length || ready.addressDigest !== action.oracle.addressDigest) reasons.push('ready-dom-mismatch');
       if (!ready.summary?.startsWith(action.summaryPrefix)) reasons.push('ready-summary-mismatch');
       if (doc && ready.loaderAtReady !== doc.loaderId) reasons.push('ready-loader-changed');
+      if (action.search && (ready.result?.name !== action.search.name || ready.result?.id !== action.search.id
+        || ready.result?.location !== action.search.location
+        || ready.result?.href !== action.search.linkPrefix + request?.body?.structureVersion)) reasons.push('ready-search-entity');
     }
     let timing = null;
     if (request) {
@@ -1317,6 +1359,10 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
       if (request.loaderId === null || request.loaderId !== request.mainLoaderAtRequest) reasons.push('request-not-current-loader');
       if (doc && request.loaderId !== doc.loaderId) reasons.push('request-loader-not-ready-document');
       if (!['Fetch', 'XHR'].includes(request.type)) reasons.push('request-type');
+      if (action.search) {
+        if (request.urlHash !== action.searchUrlHash || response?.urlHash !== action.searchUrlHash) reasons.push('search-request-url');
+        if (!(request.requestOrdinal > action.arm?.ordinal)) reasons.push('search-request-before-arm');
+      }
       if (!response) reasons.push('response-missing');
       else {
         if (response.status !== 200) reasons.push('response-status');
@@ -1358,7 +1404,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
         request.body.bytes === response.contentLength && ready && ready.ordinal > request.failure.ordinal &&
         matches.length === 1 && timing.responseStatus === 200 &&
         timing.encodedBodySize === response.contentLength && timing.decodedBodySize === response.contentLength &&
-        timing.responseEnd <= ready.readyAt);
+        timing.responseEnd <= ready.readyAt && (!action.search || reasons.length === 0));
       if (request.failure && !canceledAfterConsumption) reasons.push('loading-failed');
       request.terminalEvidence = canceledAfterConsumption ? 'canceled-after-consumption'
         : request.failure ? 'unproven-loading-failure' : request.finished ? 'finished' : 'pending';
@@ -1372,6 +1418,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
         mainLoaderAtRequestHash: request.mainLoaderAtRequest === null ? null : sha(request.mainLoaderAtRequest),
         ordinals: { request: request.requestOrdinal, response: request.response?.ordinal ?? null, finished: request.finished?.ordinal ?? null, failed: request.failure?.ordinal ?? null },
         status: request.response?.status ?? null, protocol: request.response?.protocol ?? null, sameOrigin: request.response?.sameOrigin ?? null,
+        ...(action.search && { serverRequestId: request.response?.serverRequestId ?? null, responseUrlHash: request.response?.urlHash ?? null }),
         fromDiskCache: request.response?.fromDiskCache ?? null, fromServiceWorker: request.response?.fromServiceWorker ?? null,
         fromPrefetchCache: request.response?.fromPrefetchCache ?? null, contentLength: request.response?.contentLength ?? null,
         servedFromCache: request.servedFromCache, stream: { ...request.stream, dataEvents: request.dataEvents }, bodyCross: { ...request.bodyCross },
@@ -1385,7 +1432,8 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
       timing: timing && { encodedBodySize: timing.encodedBodySize, decodedBodySize: timing.decodedBodySize, responseEnd: timing.responseEnd,
         nextHopProtocol: timing.nextHopProtocol, initiatorType: timing.initiatorType, deliveryType: timing.deliveryType, responseStatus: timing.responseStatus },
       ready: ready && { ordinal: ready.ordinal, readyAt: ready.readyAt, addressDigest: ready.addressDigest, first: ready.first, last: ready.last,
-        documentNonceHash: sha(ready.nonce), freshDocument: action.kind === 'reload' ? ready.nonce !== action.priorNonce : null } };
+        documentNonceHash: sha(ready.nonce), freshDocument: action.kind === 'reload' ? ready.nonce !== action.priorNonce : null,
+        ...(action.search && { result: ready.result }) } };
   }
   function summary({ exceptions = 0 } = {}) {
     const global = [];
@@ -1490,7 +1538,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   await tab.initialize('Page.addScriptToEvaluateOnNewDocument', { source: inventoryDocumentInstrumentation() });
   const armProof = async (expectation) => {
     if (!expectation) return;
-    try { proof.armResult(await evaluate(tab, `window.__decompArmInventory?.(${JSON.stringify(expectation.token)}, ${JSON.stringify(expectation.addresses)}, ${JSON.stringify(expectation.summary)}) ?? null`)); }
+    try { proof.armResult(await evaluate(tab, `window.__decompArmInventory?.(${JSON.stringify(expectation.token)}, ${JSON.stringify(expectation.addresses)}, ${JSON.stringify(expectation.summary)}, ${JSON.stringify(expectation.search)}) ?? null`)); }
     catch { proof.armResult(null); }
   };
   const phase = value => { coldEvidence.phase(value); jvmRssSampler.phase(value); };
@@ -1647,9 +1695,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   // Handshake: the fresh document (new nonce/loader) must itself report the restored rows; bounded observation only.
   for (let waited = 0; waited < 2000 && !proof.freshReady('reload'); waited += 25) await new Promise(resolve => setTimeout(resolve, 25));
   await proof.drain(proofCall);
-  proof.close();
 
   phase('search');
+  await armProof(proof.beginAction({ label: 'search', kind: 'search', start: SEARCH_INDEX }));
   started = performance.now();
   await evaluate(tab, `(() => {
     const field = document.querySelector('input[name="search"]');
@@ -1662,6 +1710,8 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   assert.ok(await evaluate(tab, `document.body.innerText.includes('No owning module') && document.body.innerText.includes('Excluded')`));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99999').click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99999' && document.body.innerText.includes('Excluded: the recorded module plan assigns this entity to no module.')`, 'excluded function facts');
+  proof.close();
+  await proof.drain(proofCall);
   assert.match(await evaluate(tab, 'location.search'), /^\?structureVersion=[a-f0-9]{64}$/);
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Recovery assessment: unassessed')`));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99998').click()`);
