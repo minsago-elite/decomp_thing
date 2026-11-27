@@ -67,6 +67,16 @@ function Reference({ kind, digest, identities, event, basePath, onSelectTask }: 
   </dd>;
 }
 
+function RecordedPermission({ decision }: { decision: keyof typeof copy.permissionDecisions | undefined }) {
+  return <div role="group" aria-label={copy.permissionRecorded}>
+    <dl class="job-facts">
+      <dt>{copy.permissionRecorded}</dt>
+      <dd>{decision ? copy.permissionDecisions[decision] : copy.permissionNotRecorded}</dd>
+    </dl>
+    <p>{copy.permissionReadOnly}</p>
+  </div>;
+}
+
 export function ActivityRow({ event, basePath, selected = false, inspectionHref, identities = null, onSelectTask }: {
   event: WebEvent; basePath: string; selected?: boolean; inspectionHref?: string;
   identities?: IdentityDigests | null; onSelectTask?: (digest: string) => void;
@@ -83,6 +93,7 @@ export function ActivityRow({ event, basePath, selected = false, inspectionHref,
     {event.type === 'workflow.observation' ? <>
       <p>{displayMessage(copy.observed, { kind: event.payload.observationKind, phase: event.payload.fields.phase ? displayMessage(copy.phase, { phase: event.payload.fields.phase }) : '' })}</p>
       {thought && <p>{correlationCopy.thought}</p>}
+      {event.payload.observationKind === 'permission' && <RecordedPermission decision={event.payload.fields.decision} />}
       {event.payload.fields.status && <p>{displayMessage(copy.observedStatus, { status: event.payload.fields.status })}</p>}
       <p>{displayMessage(copy.writer, { writer: event.payload.writerId })}</p>
       {event.payload.observationKind === 'plan' && <p>{displayMessage(copy.planEntries, { count: event.payload.fields.entryCount ?? copy.notRecorded, truncated: event.payload.fields.entriesTruncated ? copy.truncatedPlan : '' })}</p>}
