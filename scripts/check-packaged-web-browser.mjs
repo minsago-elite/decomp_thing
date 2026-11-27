@@ -14,7 +14,7 @@ import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
-import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
+import { qualifyRestart, assertGracefulShutdown, scrubTokens, writePackagedReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence, encodeAuditEvidence, summarizeAuditEvidence } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
@@ -1248,6 +1248,7 @@ try {
   report.status = 'failed';
   report.contentSecurityPolicy = cspEvidence();
   report.error = safeDiagnostic(error.stack);
+  if (Array.isArray(error.failedChecks)) report.failedChecks = error.failedChecks;
   report.applicationError = safeDiagnostic(applicationError);
   report.browserError = safeDiagnostic(browserError);
   report.viteError = safeDiagnostic(viteError);
@@ -1312,10 +1313,8 @@ try {
     }
   }
   if (values.mode === 'structure' || values.mode === 'structure-cold') report.structureServerTiming = structureServerTimingSummary(applicationError);
-  const retained = boundReport(scrubTokens(report, sensitiveValues));
-  // boundReport enforces the compact JSON byte ceiling. Pretty printing here would expand the
-  // retained artifact beyond that same ceiling even though the bounded object passed validation.
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained));
+  const retained = await writePackagedReport(join(root, 'report.json'), report, sensitiveValues);
+  if (retained.reportBound?.status === 'exceeded') process.exitCode = 1;
   console.log(JSON.stringify(retained, null, 2));
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }

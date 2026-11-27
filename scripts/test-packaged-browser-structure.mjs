@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { appendStructureFeedbackSample, assertStructureSourceLink, createBrowserHeapSummary, createJvmRssSummary, createModuleResponseInterceptor,
+import { appendStructureFeedbackSample, assertStructureQualification, assertStructureSourceLink, createBrowserHeapSummary, createJvmRssSummary, createModuleResponseInterceptor,
   classifyFailedInventoryRequests, createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets,
   isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordBrowserHeapSample, recordJvmRssSample,
   startBrowserHeapSampler, structureFeedbackInstrumentation, summarizeBrowserHeap, summarizeJvmRss } from './packaged-browser-structure.mjs';
@@ -284,11 +284,16 @@ test('every D0 budget is evaluated even when several fail', () => {
   const constrained = { ...passing, firstPageBudgetMs: 1000, firstPageMs: 900, pageDataP95Ms: 900, searchMs: 900, requestP95Ms: 900 };
   assert.deepEqual(evaluateStructureBudgets(constrained), []);
   assert.ok(evaluateStructureBudgets({ ...constrained, firstPageMs: 1001 }).some(failure => failure.includes('1000ms budget')));
-  const failures = evaluateStructureBudgets({ ...passing, firstPageMs: 501, localFeedbackP95Ms: 101,
+  const exceeded = { ...passing, firstPageMs: 501, localFeedbackP95Ms: 101,
     peakBrowserHeapBytes: 128 * 1024 * 1024 + 1,
     browserHeapMemory: { coverageComplete: true, sampledPeakBytes: 128 * 1024 * 1024 + 1 },
-    jvmMemory: { coverageComplete: true, incrementalPeakBytes: 256 * 1024 * 1024 + 1 } });
+    jvmMemory: { coverageComplete: true, incrementalPeakBytes: 256 * 1024 * 1024 + 1 } };
+  const failures = evaluateStructureBudgets(exceeded);
   assert.equal(failures.length, 4);
+  assert.throws(() => assertStructureQualification(exceeded, ['missing request evidence']), error => {
+    assert.deepEqual(error.failedChecks, ['missing request evidence', ...failures]);
+    return true;
+  });
   assert.ok(evaluateStructureBudgets({ ...passing,
     browserHeapMemory: { coverageComplete: false, sampledPeakBytes: 1 } })
     .some(failure => failure.startsWith('Browser heap sampling was incomplete:')));

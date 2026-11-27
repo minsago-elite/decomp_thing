@@ -299,7 +299,11 @@ export function createColdEvidenceRecorder(browserOrigin, now = () => performanc
 
 export function assertStructureQualification(measurements, evidenceFailures = []) {
   const budgetFailures = evaluateStructureBudgets(measurements);
-  if (budgetFailures.length || evidenceFailures.length) throw new Error(`Structure qualification failed: ${JSON.stringify({ evidenceFailures, budgetFailures, measurements })}`);
+  if (budgetFailures.length || evidenceFailures.length) {
+    const error = new Error(`Structure qualification failed: ${JSON.stringify({ evidenceFailures, budgetFailures, measurements })}`);
+    error.failedChecks = [...evidenceFailures, ...budgetFailures];
+    throw error;
+  }
 }
 
 /**

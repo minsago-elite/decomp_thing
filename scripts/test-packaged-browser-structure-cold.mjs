@@ -386,3 +386,32 @@ test('timeout sends SIGTERM then SIGKILL to a real launcher and descendant that 
   const state = stat === null ? null : stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
   assert.ok(stat === null || state === 'Z', 'the real descendant must be gone or reaped after timeout escalation');
 });
+
+test('missing, over-cap and failed child reports keep the first actual failure instead of a provenance mismatch', async () => {
+  let launches = 0;
+  const reports = [
+    null,
+    { status:'failed', driverCommit:'a'.repeat(40), error:'AssertionError: first inventory page failed\n    at private/stack', reportBound:{ status:'exceeded', maxBytes:524288, error:'Report exceeds its byte bound' } },
+    { status:'failed', driverCommit:'a'.repeat(40), reportBound:{ status:'exceeded', maxBytes:524288, error:'Report exceeds its byte bound' } },
+    { status:'failed', driverCommit:'a'.repeat(40), driverPullRequestHeadCommit:'d'.repeat(40), driverPullRequestBaseCommit:'f'.repeat(40),
+      sourceIdentity:{ verified:true, commit:'a'.repeat(40), sourceSha256:'e'.repeat(64), files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],
+        revisionBinding:revisionBinding('a'.repeat(40),'d'.repeat(40),'f'.repeat(40)) }, browserIdentity:approvedBrowserIdentity, tools:{chromeSha256:'c'.repeat(64)},
+      error:'Error: Inventory request returned 503\n    at private/stack' },
+    { status:'failed', driverCommit:'a'.repeat(40), driverPullRequestHeadCommit:'0'.repeat(40), error:'Error: unrelated' },
+  ];
+  const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback', expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40),
+    spawnImpl: () => { launches++; return fakeChild(1, 'private diagnostic'); },
+    reportReader: async () => { const report = reports[(launches - 1) % reports.length]; return report && { path:`/tmp/r-${launches}.json`, sha256:String(launches), report }; } });
+  const [missing, capped, cappedUnknown, reported, mismatched] = result.samples;
+  assert.equal(missing.failureClass, 'report-unavailable');
+  assert.equal(missing.error, 'Child exited with code 1 without a retained report; primary failure unavailable');
+  assert.equal(capped.failureClass, 'report-cap');
+  assert.equal(capped.error, 'Child report exceeded its byte bound; primary failure: AssertionError: first inventory page failed');
+  assert.equal(cappedUnknown.error, 'Child report exceeded its byte bound; primary failure: unavailable');
+  assert.equal(reported.failureClass, 'reported');
+  assert.equal(reported.error, 'Error: Inventory request returned 503');
+  assert.equal(mismatched.error, 'Child report did not match the declared pull-request head SHA');
+  assert.ok(result.samples.every(sample => sample.status === 'failed' && sample.shutdownConfirmed === true));
+  assert.equal(result.passed, false);
+  assert.ok(!JSON.stringify(result).includes('private'));
+});

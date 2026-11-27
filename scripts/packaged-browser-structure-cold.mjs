@@ -350,12 +350,17 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         runtimeProcesses: report?.runtimeProcesses ?? null,
         shutdownConfirmed, processTreeForced, timedOut, error: outcome.timeout ? 'Cold sample timed out'
           : outcome.error ? String(outcome.error.message).slice(0, 512)
+          : !report ? `Child exited with code ${exitCode ?? 'unknown'} without a retained report; primary failure unavailable`
+          : report.reportBound?.status === 'exceeded'
+            ? `Child report exceeded its byte bound; primary failure: ${firstDiagnosticLine(report.error) ?? 'unavailable'}`
           : !sourceHeadMatches ? 'Child report did not match the declared pull-request head SHA'
           : !sourceBaseMatches ? 'Child report did not match the declared pull-request base SHA'
           : !revisionBindingMatches ? 'Child report did not bind the source commit to the declared pull-request revisions'
           : !browserIdentityVerified ? 'Child report did not verify the reviewed browser installation'
-          : evidence?.failures?.[0] ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
+          : evidence?.failures?.[0] ?? (report.status !== 'passed' ? firstDiagnosticLine(report.error) : null) ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
             : evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
+        failureClass: passed ? null : outcome.timeout ? 'timeout' : outcome.error ? 'launch' : !report ? 'report-unavailable'
+          : report.reportBound?.status === 'exceeded' ? 'report-cap' : 'reported',
         diagnostic });
       if (!shutdownConfirmed) break; // Never overlap another run with an unconfirmed child process tree.
       if (interrupted) break;
@@ -410,6 +415,12 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
     passed: summary.successfulSamples === count && summary.rawFailedRequests === 0 && identityConsistent && runDirectoriesUnique
       && processIdentitiesPresent && processIdentitiesUnique
       && Number.isFinite(summary.nearestRankP95FirstPageMs) && summary.nearestRankP95FirstPageMs <= profile.firstPageLimitMs };
+}
+
+function firstDiagnosticLine(value) {
+  if (typeof value !== 'string') return null;
+  const line = value.slice(0, 1024).split('\n').find(part => part.trim());
+  return line ? line.trim().slice(0, 512) : null;
 }
 
 async function readChildReport(stdout) {

@@ -49,6 +49,44 @@ export function scrubTokens(value, tokens) {
   return typeof value === 'string' ? text(value) : value;
 }
 
+class ReportByteLimitError extends Error {}
+
+/** Publish the scrubbed report. An oversized report must still record the failed run and its cleanup. */
+export async function writePackagedReport(path, report, tokens) {
+  const scrubbed = scrubTokens(report, tokens);
+  let retained;
+  try {
+    retained = boundReport(scrubbed);
+  } catch (error) {
+    if (!(error instanceof ReportByteLimitError)) throw error;
+    retained = { status: 'failed', primaryStatus: scrubbed.status, reportBound: {
+      status: 'exceeded', maxBytes: MAX_REPORT_BYTES, error: error.message.slice(0, 1024) } };
+    for (const key of ['mode', 'startedAt', 'driverNode', 'driverCommit', 'driverPullRequestHeadCommit',
+      'driverPullRequestBaseCommit', 'archiveSha256', 'applicationJarSha256', 'testDirectory', 'browserProfileDirectory',
+      'failureScreenshot', 'failureScreenshotSkipped']) {
+      if (typeof scrubbed[key] === 'string') retained[key] = scrubbed[key].slice(0, 1024);
+    }
+    for (const key of ['shutdownConfirmed', 'workRetained', 'workCleanupConfirmed', 'forcedShutdown']) {
+      if (typeof scrubbed[key] === 'boolean') retained[key] = scrubbed[key];
+    }
+    for (const key of ['error', 'applicationError', 'browserError', 'viteError', 'workCleanupError', 'auditEvidenceError']) {
+      if (typeof scrubbed[key] === 'string') retained[key] = scrubbed[key].slice(0, 4096);
+    }
+    const failures = scrubbed.failedChecks ?? scrubbed.structureCold?.failures ?? scrubbed.auditVerdict?.failures;
+    if (Array.isArray(failures)) {
+      retained.failedCheckCount = failures.length;
+      retained.failedChecks = failures.slice(0, 64).map(message => String(message).slice(0, 512));
+    }
+    if (Array.isArray(scrubbed.cleanupErrors)) {
+      retained.cleanupErrors = scrubbed.cleanupErrors.slice(0, 3).map(message => String(message).slice(0, 1024));
+    }
+  }
+  const bytes = JSON.stringify(retained);
+  assert.ok(Buffer.byteLength(bytes) <= MAX_REPORT_BYTES, 'Retained browser report exceeds the publication limit');
+  await fs.writeFile(path, bytes);
+  return retained;
+}
+
 /** Keeps a retained report under a byte bound by replacing request lists with counts. */
 export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
   if (Buffer.byteLength(JSON.stringify(report), 'utf8') <= maxBytes) return report;
@@ -76,7 +114,9 @@ export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
   const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
   const largestFields = Object.entries(bounded).map(([name, value]) => [name, Buffer.byteLength(JSON.stringify(value), 'utf8')])
     .sort((left, right) => right[1] - left[1]).slice(0, 5);
-  assert.ok(boundedBytes <= maxBytes, `Report exceeds its byte bound after truncation (${boundedBytes}/${maxBytes} bytes; largest fields ${JSON.stringify(largestFields)})`);
+  if (boundedBytes > maxBytes) {
+    throw new ReportByteLimitError(`Report exceeds its byte bound after truncation (${boundedBytes}/${maxBytes} bytes; largest fields ${JSON.stringify(largestFields)})`);
+  }
   return bounded;
 }
 

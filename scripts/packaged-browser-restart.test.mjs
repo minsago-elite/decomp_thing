@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests, MAX_REPORT_BYTES } from './packaged-browser-restart.mjs';
+import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, writePackagedReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests, MAX_REPORT_BYTES } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
 
@@ -39,6 +39,37 @@ test('bounds reports by replacing request lists with counts', () => {
   assert.throws(() => boundReport({ blob: 'x'.repeat(5000), requests: {} }, 1000));
   assert.throws(() => boundReport({ blob: 'é'.repeat(600), requests: {} }, 1000),
     'UTF-8 encoded report bytes must be bounded, not JavaScript code units');
+});
+
+test('publishes compact failed reports with scrubbed gates and cleanup when diagnostics exceed the byte limit', async t => {
+  const dir = await mkdtemp(join(process.cwd(), 'build', 'report-publication-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'report.json');
+  const token = 'private_fixture_value';
+  const diagnostic = 'inventory gate failed #bootstrap=hidden_link ' + token + '界'.repeat(420000);
+  const report = { status: 'failed', mode: 'structure-cold', driverPullRequestHeadCommit: 'd'.repeat(40),
+    error: diagnostic, applicationError: diagnostic, requests: { inventory: [] }, structureCold: {
+      failures: ['first-page budget', 'heap budget', 'unexpected request ' + token] },
+    shutdownConfirmed: false, workRetained: true, cleanupErrors: ['cleanup ' + token] };
+  const retained = await writePackagedReport(path, report, [token]);
+  const bytes = await readFile(path);
+  assert.ok(bytes.length <= MAX_REPORT_BYTES);
+  assert.deepEqual(JSON.parse(bytes), retained);
+  assert.equal(retained.status, 'failed');
+  assert.equal(retained.primaryStatus, 'failed');
+  assert.equal(retained.driverPullRequestHeadCommit, report.driverPullRequestHeadCommit);
+  assert.equal(retained.reportBound.status, 'exceeded');
+  assert.equal(retained.failedCheckCount, 3);
+  assert.deepEqual(retained.failedChecks, ['first-page budget', 'heap budget', 'unexpected request [redacted]']);
+  assert.match(retained.error, /^inventory gate failed/);
+  assert.equal(retained.shutdownConfirmed, false);
+  assert.equal(retained.workRetained, true);
+  assert.deepEqual(retained.cleanupErrors, ['cleanup [redacted]']);
+  assert.ok(!bytes.includes(token) && !bytes.includes('hidden_link'));
+  const oversizedPass = await writePackagedReport(path, { status: 'passed', extra: diagnostic }, []);
+  assert.equal(oversizedPass.status, 'failed');
+  assert.equal(oversizedPass.primaryStatus, 'passed');
+  assert.deepEqual(await writePackagedReport(path, { status: 'passed' }, []), { status: 'passed' });
 });
 
 function generatedAuditReport() {
