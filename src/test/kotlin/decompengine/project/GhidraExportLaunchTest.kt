@@ -37,6 +37,145 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 class GhidraExportLaunchTest {
+    @Test fun `blocked lifecycle factory expires while fallback owns cleanup`() = blockedFactory(true)
+
+    @Test fun `blocked lifecycle factory cancels while fallback owns cleanup`() = blockedFactory(false)
+
+    private fun blockedFactory(expire: Boolean): Unit = inControlTemporaryDirectory { root ->
+        val fixture = GatedExportFixture(root, Duration.ofSeconds(30))
+        val controller = BoundedAnalysisProcessLaunch()
+        val entered = CountDownLatch(1)
+        val interrupted = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val process = AtomicReference<Process>()
+        val callbackThread = AtomicReference<Thread>()
+        val lateTree = AtomicReference<ExportProcessTree>()
+        val observed = AtomicBoolean()
+        val adapter = fixture.analyzer { command, work ->
+            ProcessBuilder(command).directory(work.toFile()).start().also(process::set)
+        }.withProcessLifecycleForTests(controller) { worker, grace ->
+            callbackThread.set(Thread.currentThread())
+            entered.countDown()
+            while (release.count > 0) try {
+                release.await()
+            } catch (_: InterruptedException) { interrupted.countDown() }
+            ExportProcessTree(worker, grace).also(lateTree::set)
+        }.withPrePermitObserverForTests { observed.set(true) }
+        val caller = ExportCall {
+            adapter.analyzeWithDeadline(fixture.input, fixture.work, deadline(if (expire) 1000 else 30000))
+        }
+        val owner = try {
+            caller.thread.start()
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            if (!expire) caller.thread.interrupt()
+            assertTrue(interrupted.await(2, TimeUnit.SECONDS))
+            caller.thread.interrupt()
+            caller.thread.join(8000)
+            val held = process.get()
+            assertFalse(caller.thread.isAlive,
+                "caller still blocked in factory; workerAlive=${held.isAlive} quarantined=${controller.hasQuarantinedProcess(held)}")
+            if (expire) assertIs<GhidraAnalysisException>(caller.failure.get())
+            else assertIs<InterruptedException>(caller.failure.get())
+            assertFalse(held.isAlive)
+            assertFalse(observed.get())
+            fixture.assertPriorEvidence()
+            val retained = assertIs<ExportProcessCleanupOwner>(controller.retainedQuarantineOwnerForTests(held))
+            assertTrue(retained.process === held && retained.taskSettlements.any { !it.get() })
+            retained
+        } finally {
+            release.countDown()
+            caller.thread.join(3000)
+            callbackThread.get()?.join(3000)
+            process.get()?.let(::ensureStopped)
+        }
+        assertFalse(callbackThread.get().isAlive)
+        assertTrue(lateTree.get() != null && lateTree.get() !== owner.processTree)
+        assertTrue(controller.retainedQuarantineOwnerForTests(process.get()) === owner)
+        assertTrue(owner.taskSettlements.all { it.get() })
+        assertFalse(observed.get())
+        fixture.assertPriorEvidence()
+    }
+
+    @Test fun `unacknowledged pre permit read quarantines its owner at the original cleanup cutoff`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val fixture = GatedExportFixture(root)
+            val controller = BoundedAnalysisProcessLaunch()
+            val entered = CountDownLatch(1)
+            val interruptedRead = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val settled = CountDownLatch(1)
+            val launched = AtomicReference<Process>()
+            val adapter = fixture.analyzer { command, work ->
+                ProcessBuilder(command).directory(work.toFile()).start().also(launched::set)
+            }.withProcessLifecycleForTests(controller, ::ExportProcessTree).withPrePermitObserverForTests {
+                entered.countDown()
+                try {
+                    while (release.count > 0) try {
+                        release.await()
+                    } catch (_: InterruptedException) { interruptedRead.countDown() }
+                } finally { settled.countDown() }
+            }
+            val caller = ExportCall {
+                adapter.analyzeWithDeadline(fixture.input, fixture.work, deadline(1000))
+            }
+            try {
+                caller.thread.start()
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                assertTrue(interruptedRead.await(2, TimeUnit.SECONDS))
+                caller.thread.interrupt()
+                caller.assertFailure<GhidraAnalysisException>(8000)
+                assertTrue(controller.hasQuarantinedProcess(launched.get()))
+                assertEquals(1L, settled.count)
+                assertFalse(launched.get().isAlive)
+                fixture.assertPriorEvidence()
+            } finally {
+                release.countDown()
+                assertTrue(settled.await(2, TimeUnit.SECONDS))
+                launched.get()?.let(::ensureStopped)
+            }
+        }
+
+    @Test fun `owned pre permit observer or factory failure reaps gated worker without activation`(): Unit =
+        inControlTemporaryDirectory { root ->
+            for (scenario in listOf("factory", "observer", "deadline", "interruption")) {
+                val fixture = GatedExportFixture(root.resolve(scenario))
+                val launched = AtomicReference<Process>()
+                val entered = CountDownLatch(1)
+                val failure = IllegalStateException("controlled")
+                val controller = BoundedAnalysisProcessLaunch()
+                val adapter = fixture.analyzer { command, work ->
+                    ProcessBuilder(command).directory(work.toFile()).start().also(launched::set)
+                }.withPrePermitObserverForTests { observed ->
+                    assertTrue(observed === launched.get())
+                    fixture.assertPriorEvidence()
+                    entered.countDown()
+                    if (scenario == "observer") throw failure
+                    CountDownLatch(1).await()
+                }.withProcessLifecycleForTests(controller) { process, grace ->
+                    if (scenario == "factory") throw failure
+                    ExportProcessTree(process, grace)
+                }
+                val caller = ExportCall {
+                    adapter.analyzeWithDeadline(fixture.input, fixture.work, deadline(if (scenario == "deadline") 600 else 5000))
+                }
+                try {
+                    caller.thread.start()
+                    if (scenario != "factory") assertTrue(entered.await(2, TimeUnit.SECONDS))
+                    if (scenario == "interruption") caller.thread.interrupt()
+                    caller.thread.join(3000)
+                    assertFalse(caller.thread.isAlive)
+                    if (scenario == "deadline") assertIs<GhidraAnalysisException>(caller.failure.get())
+                    else if (scenario == "interruption") assertIs<InterruptedException>(caller.failure.get())
+                    else assertTrue(caller.failure.get() === failure)
+                    assertFalse(launched.get().isAlive)
+                    fixture.assertPriorEvidence()
+                } finally {
+                    caller.thread.interrupt()
+                    launched.get()?.let(::ensureStopped)
+                }
+            }
+        }
+
     @Test
     fun `unconfirmed retained descendant quarantines launch and preserves prior model`() = inControlTemporaryDirectory { root ->
         val work = root.resolve("analysis")
@@ -903,6 +1042,7 @@ class GhidraExportLaunchTest {
     fun `budget binding preserves the custom starter and permit for a timely canonical export`(): Unit =
         inControlTemporaryDirectory { root ->
             val fixture = GatedExportFixture(root)
+            val factoryThread = AtomicReference<Thread>()
             val starts = AtomicInteger()
             val launched = AtomicReference<Process?>()
             val analyzer = fixture.analyzer { command, work ->
@@ -912,6 +1052,14 @@ class GhidraExportLaunchTest {
                     assertWorkerReady(process)
                     fixture.assertPriorEvidence()
                 }
+            }.withProcessLifecycleForTests(BoundedAnalysisProcessLaunch()) { process, grace ->
+                assertTrue(process === launched.get())
+                factoryThread.set(Thread.currentThread())
+                ExportProcessTree(process, grace)
+            }.withPrePermitObserverForTests { observed ->
+                assertFalse(factoryThread.get().isAlive)
+                assertTrue(observed === launched.get())
+                fixture.assertPriorEvidence()
             }.withExportBudgets(GeneratedCMakeReconstructionProfile.descriptor.budgets.copy(
                 exportWallClockMillis = 3_000,
                 exportMaximumResidentBytes = 64L * 1024 * 1024,
@@ -1075,7 +1223,7 @@ class GhidraExportLaunchTest {
         assertTrue(sharedFailure.suppressed.isEmpty(), "the same throwable must not suppress itself")
     }
 
-    private class GatedExportFixture(root: Path) {
+    private class GatedExportFixture(root: Path, private val exportTimeout: Duration = Duration.ofSeconds(5)) {
         val work = root.resolve("analysis")
         val input = root.resolve("authored-input")
         val model = work.resolve("reports/program_model.json")
@@ -1117,7 +1265,7 @@ class GhidraExportLaunchTest {
                     printf 'new analysis evidence\n' > "${'$'}4"
                 """.trimIndent(), "gated-export", activation.toString(), canonical.toString(), scriptArguments.last(), report.toString())
             },
-            limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+            limits = GhidraProgramModelExportLimits(wallClockTimeout = exportTimeout, terminationGrace = Duration.ZERO),
             processStarter = starter,
             requiresLaunchPermit = true,
         )

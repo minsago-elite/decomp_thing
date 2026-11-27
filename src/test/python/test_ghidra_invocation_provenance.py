@@ -206,6 +206,22 @@ class BuildProvenanceControls(unittest.TestCase):
         for script in scripts:
             self.assertEqual(w.digest(script), artifacts[script.relative_to(w.ROOT).as_posix()])
 
+    def test_production_shadow_in_helper_directory_refuses(self):
+        relative = 'decompengine/analysis/GhidraJvmAnalyzer.class'
+        shadow = self.helpers / relative
+        shadow.parent.mkdir(parents=True, exist_ok=True)
+        shadow.write_bytes(b'shadow')
+        with self.assertRaises(ValueError): w.seal()
+
+    def test_removing_bridge_or_manifest_pin_after_sealing_refuses(self):
+        w.seal()
+        pin = w.read(w.SEALED)
+        for item in (self.bridge, self.bridge.with_name('bundle.sha256')):
+            missing = json.loads(json.dumps(pin))
+            del missing['artifacts'][item.relative_to(w.ROOT).as_posix()]
+            w.publish(w.SEALED, missing)
+            with self.assertRaises(ValueError): w.verify()
+
     def test_missing_split_script_rejects(self):
         self.split_scripts()[0].unlink()
         with self.assertRaises(ValueError): w.seal()
@@ -277,14 +293,60 @@ class BuildProvenanceControls(unittest.TestCase):
     def upload_fixture(self):
         source = w.ROOT / 'qualified'
         source.mkdir()
-        (source / 'retained-invocation.json').write_text('{"schemaVersion":2}')
-        (source / 'observed-worker.json').write_text('{"runId":"run-authored"}')
+        work = '/private/run-authored/.decomp_engine/jobs/authored/reports/analysis'
+        alias = '/proc/self/cwd/ghidra_project'
+        binary = '/private/run-authored/authored-input.elf'
+        exporter = 'e' * 64
+        args = ['/release', 'await-parent-launch', 'analyze', alias, 'archival_reconstruction', binary,
+                work + '/scripts', 'ExportProgramModelOwned.java', '6', exporter, 'a' * 64, 'full',
+                work + '/reports/program_model.json', 'owned-model-candidate-v1', work + '/reports/.candidate']
+        os_fields = dict(executable='/java', mainClass='decompengine.ghidra.BundledGhidraWorker',
+                         workerArguments=args, workingDirectory=work)
+        receipt = dict(**os_fields, status='captured', commandKind='bundled-java',
+                       processStarterKind='default-process-builder', observation='process-starter-returned-and-exit-value',
+                       commandDisclosure='qualified-worker-fields-only', exitCode=0, analysisArgumentOffset=2)
+        report = dict(schemaVersion=2, analysisOutcome='succeeded', invocation=receipt, binary=binary, metadataInputSha256='f'*64)
+        observed = dict(schemaVersion=2, runId='run-authored', pid=22, startTicks='77', parentPid=12,
+                        projectIdentity='1:2', projectAliasTarget=work+'/ghidra_project', projectArgument=alias,
+                        cwd=work, osInvocation=os_fields, inputSha256='f'*64, interval='owned-exporter-pre-permit',
+                        samples=3, coverage='sampled-direct-children-only', lifecycleInstrumented=True,
+                        observerSettledBeforePermit=True, processReaped=True, retainedIdentityAbsent=True, finalDirectChildren=0)
+        (source / 'retained-invocation.json').write_text(json.dumps(report))
+        (source / 'observed-worker.json').write_text(json.dumps(observed))
         (source / 'compiler.json').write_text('{"exitCode":0}')
         evidence = {p.name: w.digest(p) for p in source.iterdir()}
-        (source / 'provenance.json').write_text(json.dumps(dict(schemaVersion=1, runId='run-authored', evidence=evidence)))
+        provenance = dict(schemaVersion=2, runId='run-authored', evidence=evidence, probePid=12, exporterPid=22,
+                          exporterStartTicks='77', projectIdentityAfter='1:2',
+                          activeExporterSha256=exporter, stagedExporterSha256=exporter,
+                          build=dict(sources={'src/main/resources/ghidra_scripts/ExportProgramModelOwned.java': exporter}))
+        encoded = (json.dumps(provenance['build'], sort_keys=True, separators=(',', ':')) + '\n').encode()
+        provenance['buildManifestSha256'] = w.hashlib.sha256(encoded).hexdigest()
+        (source / 'provenance.json').write_text(json.dumps(provenance))
         copied = w.ROOT / 'downloaded'
         shutil.copytree(source, copied)
         return source, copied
+
+    def test_one_sided_evidence_mutations_with_recomputed_digests(self):
+        source, copied = self.upload_fixture()
+        original = {path.name: json.loads(path.read_text()) for path in source.iterdir()}
+        receipt = original['retained-invocation.json']['invocation']
+        fields = [('retained-invocation.json', ('invocation', field)) for field in receipt]
+        fields += [('observed-worker.json', (field,)) for field in original['observed-worker.json']]
+        fields += [('provenance.json', (field,)) for field in ('stagedExporterSha256', 'exporterPid', 'projectIdentityAfter', 'buildManifestSha256')]
+        for name, keys in fields:
+            with self.subTest(name=name, keys=keys):
+                values = json.loads(json.dumps(original))
+                target = values[name]
+                for key in keys[:-1]:
+                    target = target[key]
+                target[keys[-1]] = 'changed'
+                for directory in (source, copied):
+                    for member in values.keys() - {'provenance.json'}:
+                        (directory / member).write_text(json.dumps(values[member]))
+                        values['provenance.json']['evidence'][member] = w.digest(directory / member)
+                    (directory / 'provenance.json').write_text(json.dumps(values['provenance.json']))
+                with self.assertRaises((ValueError, TypeError, KeyError)):
+                    w.verify_uploaded(source, copied)
 
     def diagnostics_fixture(self):
         source = w.ROOT / 'failed'; run = source / 'run-authored'; run.mkdir(parents=True)

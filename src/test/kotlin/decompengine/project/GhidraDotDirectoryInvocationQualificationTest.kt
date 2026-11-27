@@ -145,8 +145,21 @@ object GhidraInstalledInvocationProbe {
             put("exitCode", 0); put("bytes", compilerOutput.size); put("sha256", q.digest(compilerOutput))
         })
         val sampler = InvocationQualification.ProcSampler(object : InvocationQualification.ProcSource {
-            override fun children() = ProcessHandle.current().children().use { children ->
-                children.limit(257).map { it.pid() }.toList()
+            override fun children() = workerChildren(ProcessHandle.current().pid())
+            override fun workerChildren(pid: Long): List<Long> {
+                val result = mutableListOf<Long>()
+                Files.list(proc(pid).resolve("task")).use { tasks ->
+                    tasks.limit((q.CHILD_LIMIT + 1).toLong()).toList().also {
+                        q.requireProof(it.size in 1..q.CHILD_LIMIT)
+                    }.forEach { task ->
+                        val text = q.read(task.resolve("children"), 8192).toString(Charsets.US_ASCII).trim()
+                        if (text.isNotEmpty()) for (token in text.split(' ')) {
+                            q.requireProof(result.size < q.CHILD_LIMIT)
+                            result += token.toLong()
+                        }
+                    }
+                }
+                return result
             }
             private fun proc(pid: Long) = Path.of("/proc", pid.toString())
             override fun stat(pid: Long) = q.read(proc(pid).resolve("stat"), 8192)
@@ -163,9 +176,39 @@ object GhidraInstalledInvocationProbe {
             q.writeFailure(run.resolve("observer-failure.json"), it)
         }
         phase = InvocationQualification.Phase.ANALYSIS_OBSERVER_OWNERSHIP
-        val analysis = q.observe(sampler, cleanupSink = { q.writeFailure(run.resolve("observer-cleanup.json"), it) }) {
-            GhidraJvmAnalyzer().analyze(input, work)
+        val observerThread = java.util.concurrent.atomic.AtomicReference<Thread?>()
+        val adapter = GhidraHeadlessProgramModelAnalyzer().withPrePermitObserverForTests { process ->
+            q.requireProof(observerThread.compareAndSet(null, Thread.currentThread()))
+            sampler.observeOwned(process) { sample ->
+                val args = sample.command.drop(sample.command.indexOf(BundledGhidra.WORKER_CLASS) + 1)
+                val output = work.resolve("reports/program_model.json")
+                q.requireProof(args.size == 15 && args.take(14) == listOf(
+                    bundle.resolve("ghidra_${BundledGhidra.VERSION}_PUBLIC").toString(), "await-parent-launch",
+                    "analyze", "/proc/self/cwd/ghidra_project", "archival_reconstruction", input.toString(),
+                    work.resolve("scripts").toString(), "ExportProgramModelOwned.java", "6", q.digest(active),
+                    BundledGhidra.ARCHIVE_SHA256, GhidraProgramModelRecoveryMode.FULL.wireName,
+                    output.toString(), "owned-model-candidate-v1"))
+                val candidate = Path.of(args.last())
+                q.requireProof(candidate.parent == output.parent && candidate.fileName.toString().matches(
+                    Regex("\\.program_model\\.json-model-[a-f0-9]+-[a-f0-9]+\\.candidate")))
+                q.requireProof(sample.cwd == work && sample.project == project)
+            }
         }
+        val analysis = try {
+            GhidraJvmAnalyzer(adapter).analyze(input, work)
+        } catch (failure: Throwable) {
+            val thread = observerThread.get()
+            val first = sampler.fault.get()?.original
+            if (first != null && first !== failure && first !== failure.cause) failure.addSuppressed(first)
+            q.publishFailure(run.resolve("observer-cleanup.json"), buildJsonObject {
+                put("schemaVersion", 2); put("kind", "observer_cleanup"); put("runId", sampler.runId)
+                put("analysisBody", "threw"); put("observerStarted", thread != null)
+                put("observerThreadSettled", thread?.let { JsonPrimitive(!it.isAlive) } ?: JsonNull)
+                put("workerCleanup", "unknown")
+            }, failure)
+            throw failure
+        }
+        sampler.confirmReaped()
         phase = InvocationQualification.Phase.RECEIPT_COMPARISON
         val worker = checkNotNull(sampler.observed) { "Invocation qualification did not observe its worker" }
         val reportBytes = q.read(analysis.reportPath)
@@ -199,10 +242,23 @@ object GhidraInstalledInvocationProbe {
             put("runId", run.fileName.toString()); put("pid", worker.identity.pid); put("startTicks", worker.identity.start)
             put("cwd", worker.cwd.toString()); put("projectArgument", workerArgs[3])
             put("projectAliasTarget", worker.project.toString()); put("projectIdentity", worker.projectKey)
-            put("inputSha256", q.hash(input)); put("invocation", invocation)
+            put("inputSha256", q.hash(input))
+            put("schemaVersion", 2); put("parentPid", ProcessHandle.current().pid())
+            put("interval", "owned-exporter-pre-permit"); put("samples", 3)
+            put("coverage", "sampled-direct-children-only"); put("lifecycleInstrumented", true)
+            put("observerSettledBeforePermit", true); put("processReaped", true)
+            put("retainedIdentityAbsent", true); put("finalDirectChildren", 0)
+            put("osInvocation", buildJsonObject {
+                put("executable", worker.command.first()); put("mainClass", worker.command[workerIndex])
+                put("workerArguments", buildJsonArray { workerArgs.forEach { add(it) } })
+                put("workingDirectory", worker.cwd.toString())
+            })
         })
         q.publish(run.resolve("provenance.json"), buildJsonObject {
-            put("schemaVersion", 1); put("runId", run.fileName.toString()); put("probePid", ProcessHandle.current().pid())
+            put("schemaVersion", 2); put("runId", run.fileName.toString()); put("probePid", ProcessHandle.current().pid())
+            put("exporterPid", worker.identity.pid); put("exporterStartTicks", worker.identity.start)
+            put("projectIdentityAfter", Files.readAttributes(project, "unix:dev,ino").let {
+                "${it.getValue("dev")}:${it.getValue("ino")}" })
             put("buildManifestSha256", q.digest(pinBytes)); put("build", pin)
             put("definingCodeSources", buildJsonObject { defined.forEach { (name, path) -> put(name, path) } })
             put("activeExporterSha256", q.digest(active)); put("stagedExporterSha256", q.hash(staged))

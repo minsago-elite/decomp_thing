@@ -196,6 +196,8 @@ class GhidraInvocationReportTest {
                 listOf("/fixture/java", "-Dfixture=private", "fixture.Worker", "/fixture/release", "await-parent-launch", "analyze"),
                 2, 5,
             )
+            val startedProcesses = ConcurrentHashMap<Process, String>()
+            val observedProcesses = ConcurrentHashMap<String, Process>()
             val adapter = GhidraHeadlessProgramModelAnalyzer.forInvocationReceiptTests(
                 prepared, GhidraProgramModelExportLimits(),
             ) { command, directory ->
@@ -209,7 +211,10 @@ class GhidraInvocationReportTest {
                 bothStarted.countDown()
                 val release = if (key == dotWork.toAbsolutePath().toString()) releaseFirst else releaseSecond
                 check(release.await(10, TimeUnit.SECONDS)) { "concurrent test did not release both starters" }
-                GhidraInvocationTestProcess { observedExits[key] = it }
+                GhidraInvocationTestProcess { observedExits[key] = it }.also { startedProcesses[it] = key }
+            }.withPrePermitObserverForTests { process ->
+                val work = startedProcesses.getValue(process)
+                check(observedProcesses.putIfAbsent(work, process) == null)
             }
             val analyzer = GhidraJvmAnalyzer(adapter)
             val first = executor.submit<GhidraAnalysis> { analyzer.analyze(firstInput, dotWork) }
@@ -226,6 +231,7 @@ class GhidraInvocationReportTest {
                 val work = analysis.reportsDir.parent.toAbsolutePath().toString()
                 val report = Json.parseToJsonElement(analysis.reportPath.readText()).jsonObject
                 val invocation = report.getValue("invocation").jsonObject
+                assertEquals(work, startedProcesses.getValue(observedProcesses.getValue(work)))
                 val command = checkNotNull(captured[work])
                 assertEquals(command.first(), invocation.getValue("executable").jsonPrimitive.content)
                 assertEquals(command.drop(3), invocation.getValue("workerArguments").jsonArray.map { it.jsonPrimitive.content })
@@ -266,7 +272,11 @@ class GhidraInvocationReportTest {
                 candidate.writeText(RecoveredProgramModel(inputSha256 = sha256(bytes), functions = emptyList()).toJson())
                 GhidraInvocationTestProcess()
             }
-            val analyzer = GhidraJvmAnalyzer(adapter)
+            val rejectFirst = java.util.concurrent.atomic.AtomicBoolean(true)
+            val analyzer = GhidraJvmAnalyzer(adapter.withPrePermitObserverForTests {
+                check(!rejectFirst.getAndSet(false)) { "controlled observation refusal" }
+            })
+            kotlin.test.assertFails { analyzer.analyze(input, work) }
 
             val firstAnalysis = analyzer.analyze(input, work)
             val firstReport = Json.parseToJsonElement(firstAnalysis.reportPath.readText()).jsonObject
@@ -428,10 +438,11 @@ class GhidraInvocationReportTest {
             val bytes = elfFixture()
             val input = root.toRealPath().resolve("input.elf").also { it.writeBytes(bytes) }
             val template = PreparedGhidraCommand.controlledTest(listOf("java", "Worker", "release", "gate", "analyze"), 1, 4)
+            val observations = java.util.concurrent.atomic.AtomicInteger()
             val adapter = GhidraHeadlessProgramModelAnalyzer.forInvocationReceiptTests(template) { command, _ ->
                 Path.of(command.last()).writeText(RecoveredProgramModel(inputSha256 = sha256(bytes), functions = emptyList()).toJson())
                 GhidraInvocationTestProcess()
-            }
+            }.withPrePermitObserverForTests { observations.incrementAndGet() }
             val clones = listOf(adapter,
                 adapter.withExportBudgets(decompengine.project.GeneratedCMakeReconstructionProfile.descriptor.budgets),
                 adapter.withStreamCloseSubmitterForTests { java.util.concurrent.CompletableFuture.runAsync(it) },
@@ -442,8 +453,30 @@ class GhidraInvocationReportTest {
                     AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(10), "clone control"))
                 assertEquals(GhidraCommandKind.CONTROLLED_TEST_JAVA, result.receipt!!.prepared.kind)
                 assertEquals(GhidraProcessStarterKind.INJECTED, result.receipt.starterKind)
+                assertEquals(i + 1, observations.get())
                 assertEquals(0, result.receipt.exitCode)
             }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun `default starter without lifecycle callbacks completes metadata and report for authored input`() {
+        val root = temporaryRoot("default-lifecycle-")
+        try {
+            val bytes = elfFixture()
+            val input = root.toRealPath().resolve("input.elf").also { it.writeBytes(bytes) }
+            val factory: (GhidraInvocation) -> List<String> = { invocation ->
+                Path.of(invocation.postScripts.single().arguments.last()).writeText(
+                    RecoveredProgramModel(inputSha256 = sha256(bytes), functions = emptyList()).toJson())
+                listOf("/bin/true")
+            }
+            val analysis = GhidraJvmAnalyzer(GhidraHeadlessProgramModelAnalyzer(factory)).analyze(input, root.resolve("work"))
+            val report = Json.parseToJsonElement(analysis.reportPath.readText()).jsonObject
+            assertEquals(sha256(bytes), report.getValue("metadataInputSha256").jsonPrimitive.content)
+            val receipt = report.getValue("invocation").jsonObject
+            assertEquals("custom", receipt.getValue("commandKind").jsonPrimitive.content)
+            assertEquals("default-process-builder", receipt.getValue("processStarterKind").jsonPrimitive.content)
+            assertEquals("0", receipt.getValue("exitCode").jsonPrimitive.content)
         } finally { root.toFile().deleteRecursively() }
     }
 
@@ -463,7 +496,7 @@ class GhidraInvocationReportTest {
                     GhidraInvocationTestProcess()
                 }) to GhidraProcessStarterKind.INJECTED)
             adapters.forEachIndexed { index, (adapter, expected) ->
-                val clone = adapter.withExportBudgets(decompengine.project.GeneratedCMakeReconstructionProfile.descriptor.budgets)
+                val clone = adapter.withPrePermitObserverForTests { assertTrue(it.pid() > 0) }.withExportBudgets(decompengine.project.GeneratedCMakeReconstructionProfile.descriptor.budgets)
                 val receipt = clone.analyzeWithInvocationReceipt(input, root.resolve("work-$index"),
                     AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(10), "custom clone")).receipt!!
                 assertEquals(GhidraCommandKind.CUSTOM, receipt.prepared.kind)
