@@ -347,7 +347,8 @@ class CiPartitionRoutingTest(unittest.TestCase):
         self.assertEqual([
             [":verifyAnalysisIoHelperInstalled", ":testClasses", ":installDist", ":stageOracleNativeLibraries", "--no-daemon"],
             ["cleanTest", "test", "--tests", "decompengine.project.GeneratedCValidationSnapshotFixtureTest",
-             "-x", ":buildLlvmBehaviorHelper", "-x", ":buildAnalysisIoHelper", "--no-daemon", *extra],
+             "-x", ":buildLlvmBehaviorHelper", "-x", ":buildAnalysisIoHelper",
+             "-x", ":c4aShutdownIsolated", "--no-daemon", *extra],
         ], invocations)
 
     def test_quota_followup_keeps_main_partition_and_host_preparation(self):
