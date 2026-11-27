@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { nativeDownloadByClick } from './packaged-browser-native-download.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 // Deliberately pinned to GeneratedCMakeReconstructionProfile, like the legacy fixture. A profile change must
@@ -126,7 +127,19 @@ export async function seedSources(root) {
   // An incomplete archive for the head attempt: present, digest-identified, and never verifiable.
   const archive = storedZip('Makefile', trees.run_source_b.Makefile);
   await fs.writeFile(join(directory, 'reports', 'runs', 'run_source_b', 'source-tree.zip'), archive, { flag: 'wx', mode: 0o600 });
-  return { jobId, directory, trees, candidates, archiveSha256: sha256(archive) };
+  return { jobId, directory, trees, candidates, archive, archiveSha256: sha256(archive) };
+}
+
+/** Independent expected unified diff for src/modules/core.c between the two seeded trees. */
+function expectedCorePatch(trees) {
+  const before = trees.run_source_a['src/modules/core.c'].split('\n');
+  const after = trees.run_source_b['src/modules/core.c'].split('\n');
+  const lines = ['--- a/src/modules/core.c\t', '+++ b/src/modules/core.c\t', '@@ -17,7 +17,7 @@'];
+  for (let index = 16; index < 23; index++) {
+    if (before[index] === after[index]) lines.push(` ${before[index]}`);
+    else lines.push(`-${before[index]}`, `+${after[index]}`);
+  }
+  return Buffer.from(lines.join('\n') + '\n');
 }
 
 async function press(cdp, tab, key = 'Enter') {
@@ -250,7 +263,10 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(patch.status, 200);
   assert.equal(patch.type, 'application/octet-stream');
   assert.match(patch.disposition, /^attachment;/);
-  assert.ok(patch.text.startsWith('--- a/src/modules/core.c\t\n+++ b/src/modules/core.c\t\n@@ -17,7 +17,7 @@\n'), patch.text.slice(0, 120));
+  assert.equal(patch.text, expectedCorePatch(fixture.trees).toString(), 'Direct HTTP attachment body differs from the fixture patch');
+  const downloads = join(fixture.directory, '..', '..', 'source downloads');
+  const patchDownload = await nativeDownloadByClick({ cdp, tab, evaluate, waitFor, directory: downloads,
+    text: 'Download the complete unified diff', expected: expectedCorePatch(fixture.trees) });
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 320, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
   assert.ok(await evaluate(tab, `document.documentElement.scrollWidth <= document.documentElement.clientWidth`), 'File comparison must fit 320 px');
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
@@ -272,6 +288,10 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   await ready(tab, `document.querySelector('[data-archive-state]')?.dataset.archiveState === 'not-verified'`, 'unverified archive status');
   assert.ok(await evaluate(tab, `document.querySelector('[aria-label="Source archive identity"]').textContent.includes(${JSON.stringify(fixture.archiveSha256)})`));
   assert.ok(await evaluate(tab, `[...document.querySelectorAll('a[download]')].some(a => a.textContent === 'Download the source archive (ZIP, not verified)')`));
+  const archiveDownload = await nativeDownloadByClick({ cdp, tab, evaluate, waitFor, directory: downloads,
+    text: 'Download the source archive (ZIP, not verified)', expected: fixture.archive });
+  assert.equal(archiveDownload.sha256, fixture.archiveSha256, 'Saved archive digest differs from the fixture archive');
+  assert.equal(await evaluate(tab, `document.querySelector('[data-archive-state]')?.dataset.archiveState`), 'not-verified');
   await activate(cdp, ready, tab, 'button', 'Verify archive integrity');
   await ready(tab, `document.querySelector('[data-archive-state]')?.dataset.archiveState === 'failed'`, 'refused archive verification', 40_000);
   assert.ok(await evaluate(tab, `document.activeElement?.dataset.archiveState === 'failed'`), 'Focus must move to the new verification result');
@@ -283,6 +303,6 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   return { directoryKeyboardNavigation: true, opaqueLinks: true, manifestOnlyEntries: ['reports/confidence.json', 'UNRESOLVED.md'],
     emptyDirectoriesExplained: true, markupInert: true, lineLinkReload: true, hexFallback: 'invalid-utf8',
     workerAsset: workerAsset.path, workerExitedAfterAnswer: true, workerTerminatedOnLeave: true,
-    diff: { statuses: 5, parentSuggested: true, patchDownload: true, narrowViewport: 320, historicalBase: true },
-    archive: { explicitStatusRead: true, digestShown: true, verification: 'failed', verifiedLabelWithheld: true }, mutationRequests: 1 };
+    diff: { statuses: 5, parentSuggested: true, patchHttpAttachment: true, patchDownload: true, nativePatchDownload: patchDownload, narrowViewport: 320, historicalBase: true },
+    archive: { explicitStatusRead: true, digestShown: true, archiveDownload, verification: 'failed', verifiedLabelWithheld: true }, mutationRequests: 1 };
 }

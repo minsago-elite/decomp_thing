@@ -166,6 +166,13 @@ export class TargetProtocol {
     const key = `${sessionId ?? ''}:${method}`;
     if (!this.listeners.has(key)) this.listeners.set(key, []);
     this.listeners.get(key).push(listener);
+    return () => {
+      const listeners = this.listeners.get(key);
+      const index = listeners?.indexOf(listener) ?? -1;
+      if (index < 0) return;
+      listeners.splice(index, 1);
+      if (listeners.length === 0) this.listeners.delete(key);
+    };
   }
 }
 
