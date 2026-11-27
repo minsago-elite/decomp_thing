@@ -303,11 +303,22 @@ class WebJobService(
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     /** Excludes other writers inside the store root (the listener's audit log) during upload accounting. */
     @Volatile internal var storageWriterExclusion: (() -> Long) -> Long = { measure -> measure() }
-    private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes, measure = {
-        storageWriterExclusion { decompengine.jobs.RetainedStorageUsage.measure(store.storageRoot, maximumRetainedStorageBytes).logicalBytes }
+    @Volatile private var uploadStorage = newUploadStorage(maximumRetainedStorageBytes)
+
+    private fun newUploadStorage(maximumBytes: Long) = WebUploadStorage(store.storageRoot, maximumBytes, measure = {
+        storageWriterExclusion { decompengine.jobs.RetainedStorageUsage.measure(store.storageRoot, maximumBytes).logicalBytes }
     })
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
     private val programStructureCache = WebProgramStructureCache()
+
+    /** Installs a deterministic retained-byte ceiling before tests admit any upload. */
+    @Synchronized internal fun configureUploadStorageLimitForTests(maximumBytes: Long) {
+        check(!closed && !stopping && uploads.isEmpty()) { "Upload storage limit can only change while upload admission is idle." }
+        uploadStorage = newUploadStorage(maximumBytes)
+    }
+    internal var uploadStorageMeasureObserver: () -> Unit
+        get() = uploadStorage.beforeMeasureObserver
+        set(value) { uploadStorage.beforeMeasureObserver = value }
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
