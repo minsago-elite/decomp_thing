@@ -440,6 +440,7 @@ class WebApiControllerTest {
             // Unknown build-time environment assignments and complete Digest fields must not
             // depend on the web listener having the same credential values in its environment.
             val unknownCredentials = listOf(
+                "Fetching https://user:Build'PasswordCanary0123456789@example.com/repo.git" to listOf("Build'PasswordCanary0123456789"),
                 "Fetching https://BuildEmptyPasswordCanary0123456789:@example.com/repo.git" to listOf("BuildEmptyPasswordCanary0123456789"),
                 "Fetching https://:BuildEmptyUsernameCanary0123456789@example.com/repo.git" to listOf("BuildEmptyUsernameCanary0123456789"),
                 "DATABASE_PASSWORD=build-only-password-canary" to listOf("build-only-password-canary"),
