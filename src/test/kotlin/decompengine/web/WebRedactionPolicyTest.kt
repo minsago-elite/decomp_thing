@@ -466,7 +466,7 @@ class WebRedactionPolicyTest {
         ).apply { isAccessible = true }
         val urlField = policyClass.getDeclaredField("URL_USER_INFO").apply { isAccessible = true }
         val urlPattern = urlField.get(null) as Regex
-        assertEquals("""(?i)\b([a-z][a-z0-9+.-]{1,31}://)[^/\s:@"'<>]{1,256}(?::[^/\s@"'<>]{0,512})?@""", urlPattern.pattern)
+        assertEquals("""(?i)\b([a-z][a-z0-9+.-]{1,31}://)[^/\s:@"<>]*+(?::[^/\s@"<>]*+)?@""", urlPattern.pattern)
         assertEquals(setOf(RegexOption.IGNORE_CASE), urlPattern.options)
 
         fun signature(match: MatchResult, keepPrefix: Boolean, endOffset: Int = 1): String {
@@ -522,6 +522,9 @@ class WebRedactionPolicyTest {
                 add("$context$witness$context")
             }
             addAll(listOf("no syntax words", "token=ordinary", "private path /home/person/file", "https://alpha@example.test/x"))
+            add("https://:sample@example.test/x")
+            add("https://o'brien:sample@example.test/x")
+            add("https://user:" + "x".repeat(513) + "@example.test/x")
             for (left in witnesses) for (right in witnesses) add("$left\n$right")
             for (key in listOf("api_key", "apikey", "api-key", "access_key", "secret_key", "access_token",
                 "refresh_token", "auth_token", "client_secret", "password", "passwd", "passphrase", "secret", "token",
