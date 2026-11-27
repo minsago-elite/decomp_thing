@@ -274,3 +274,99 @@ it('drops a held search deletion after the URL moves to a different query on the
     expect(screen.getByRole('link', { name: sourceCopy.returnAttempt })).toBeTruthy();
   } finally { auth.dispose(); }
 });
+
+// R15: Chrome blurs a focused control as the page removes it, reporting a still-connected, enabled element with no
+// related target. jsdom drops focus silently, so these cases reproduce Chrome's sequence around each DOM removal.
+function chromeRemovalBlur() {
+  const blurIfRemoving = (node: Node) => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && node.contains(active)) {
+      active.dispatchEvent(new FocusEvent('blur', { relatedTarget: null }));
+      active.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    }
+  };
+  const { removeChild } = Node.prototype as { removeChild: (this: Node, child: Node) => Node };
+  const { remove } = Element.prototype as { remove: (this: Element) => void };
+  vi.spyOn(Node.prototype, 'removeChild').mockImplementation(function <T extends Node>(this: Node, child: T): T {
+    blurIfRemoving(child); return removeChild.call(this, child) as T;
+  });
+  vi.spyOn(Element.prototype, 'remove').mockImplementation(function (this: Element) { blurIfRemoving(this); remove.call(this); });
+}
+
+it('keeps Refresh focus ownership across the first automatic pin remount until the genuine 410 (R15)', async () => {
+  chromeRemovalBlur();
+  const held = heldRead();
+  let answer: () => Promise<unknown> = () => Promise.resolve({ data: directory });
+  transport.get.mockImplementation((kind: string) => kind === 'revisionDirectory' ? answer() : Promise.reject(new Error(kind)));
+  const auth = await mount(directoryUrl);
+  try {
+    const refresh = await screen.findByRole('button', { name: sourceCopy.refresh });
+    await waitFor(() => expect(refresh.matches(':disabled')).toBe(false));
+    // The view started unpinned; its first read pinned the address.
+    expect(location.search).toMatch(/metadataVersion=/);
+    refresh.focus();
+    answer = () => held.promise;
+    fireEvent.keyDown(refresh, { key: 'Enter' }); fireEvent.click(refresh);
+    await waitFor(() => expect(reads('revisionDirectory')).toBe(2));
+    await new Promise(done => setTimeout(done, 20));
+    expect(refresh.isConnected).toBe(false);
+    await act(async () => { held.reject(gone()); await Promise.resolve(); });
+    const notice = await waitFor(expectGone);
+    expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+  } finally { auth.dispose(); }
+});
+
+it('keeps Open source preview focus ownership as the preview panel replaces it (R15)', async () => {
+  chromeRemovalBlur();
+  transport.get.mockImplementation((kind: string) => kind === 'revisionFile' ? Promise.resolve({ data: file })
+    : kind === 'sourceChunk' ? Promise.reject(gone()) : Promise.reject(new Error(kind)));
+  const auth = await mount(fileUrl);
+  try {
+    const open = await screen.findByRole('button', { name: sourceCopy.openPreview });
+    open.focus(); fireEvent.click(open);
+    await screen.findByText(sourceCopy.jobDeleted, { exact: false });
+    const notice = expectGone();
+    expect(reads('sourceChunk')).toBe(1);
+    expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus the user moved to another control after the pin remount alone (R15)', async () => {
+  chromeRemovalBlur();
+  const held = heldRead();
+  let answer: () => Promise<unknown> = () => Promise.resolve({ data: directory });
+  transport.get.mockImplementation((kind: string) => kind === 'revisionDirectory' ? answer() : Promise.reject(new Error(kind)));
+  const auth = await mount(directoryUrl);
+  try {
+    const refresh = await screen.findByRole('button', { name: sourceCopy.refresh });
+    await waitFor(() => expect(refresh.matches(':disabled')).toBe(false));
+    refresh.focus();
+    answer = () => held.promise;
+    fireEvent.click(refresh);
+    await waitFor(() => expect(reads('revisionDirectory')).toBe(2));
+    await new Promise(done => setTimeout(done, 20));
+    const surviving = screen.getByRole('button', { name: 'Sign out' }); surviving.focus();
+    await act(async () => { held.reject(gone()); await Promise.resolve(); });
+    await waitFor(expectGone);
+    expect(document.activeElement).toBe(surviving);
+  } finally { auth.dispose(); }
+});
+
+it('does not hold focus for a blur that happens outside the operation transition (R15)', async () => {
+  chromeRemovalBlur();
+  const held = heldRead();
+  transport.get.mockImplementation((kind: string) => kind === 'revisionFile' ? Promise.resolve({ data: file })
+    : kind === 'sourceChunk' ? held.promise : Promise.reject(new Error(kind)));
+  const auth = await mount(fileUrl);
+  try {
+    const open = await screen.findByRole('button', { name: sourceCopy.openPreview });
+    open.focus(); fireEvent.click(open);
+    await waitFor(() => expect(reads('sourceChunk')).toBe(1));
+    const refreshFile = screen.getByRole('button', { name: sourceCopy.refreshFile });
+    await waitFor(() => expect(refreshFile.matches(':disabled')).toBe(false));
+    refreshFile.focus(); refreshFile.blur();
+    await act(async () => { held.reject(gone()); await Promise.resolve(); });
+    await waitFor(expectGone);
+    expect(document.activeElement).toBe(document.body);
+  } finally { auth.dispose(); }
+});

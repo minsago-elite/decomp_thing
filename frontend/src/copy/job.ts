@@ -21,7 +21,7 @@ export const jobCopy = {
   "inputSHA256": "Input SHA-256",
   "notReportedByTheJobAPI": "Not reported by the job API",
   "completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision": "Completion is an attempt outcome. Only the recorded accepted revision identifies accepted reconstruction.",
-  "theAttemptPageRetainsItsExactIdentityAsNewerWork": "The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.",
+  "theAttemptPageRetainsItsExactIdentityAsNewerWork": "The attempt page retains its exact identity as newer work is recorded. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.",
   "startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn": "Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.",
   "viewReportedWorkflowAvailability": "View reported workflow availability",
   "workflowAvailabilityForThisJob": "Workflow availability for this job",

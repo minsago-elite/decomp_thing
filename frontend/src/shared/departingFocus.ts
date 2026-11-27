@@ -1,6 +1,18 @@
 import { useLayoutEffect, useRef } from 'preact/hooks';
 import type { RefObject } from 'preact';
 
+// The control whose own operation is synchronously re-rendering the view (#512). Chrome reports the removal of a focused
+// control as an ordinary blur of a still-connected, enabled element, so only that operation's synchronous transition may
+// keep it as the departing control; the claim lapses before any later user action can be mistaken for it.
+let transitionHolder: Element | null = null;
+
+/** Keeps `control` as the departing control while its own operation's synchronous view transition replaces it. */
+export function holdFocusThroughTransition(control: Element | null) {
+  if (!(control instanceof Element)) return;
+  transitionHolder = control;
+  setTimeout(() => { if (transitionHolder === control) transitionHolder = null; }, 0);
+}
+
 /**
  * The control a deletion transition may remove (#512). Browsers that blur a focused control when it becomes
  * disabled (Chrome while a read is outstanding) leave the document focused, so the control that the page
@@ -18,7 +30,8 @@ export function useDepartingFocus(root: RefObject<Element>) {
     const out = (event: FocusEvent) => {
       const target = event.target;
       const departed = target === disabledFrom.current && target instanceof Element && !target.isConnected;
-      if (!departed && !(inside(target) && target.matches(':disabled'))) disabledFrom.current = null;
+      const held = target === disabledFrom.current && target === transitionHolder && (event.relatedTarget === null);
+      if (!departed && !held && !(inside(target) && target.matches(':disabled'))) disabledFrom.current = null;
     };
     document.addEventListener('focusin', into, true);
     document.addEventListener('focusout', out, true);

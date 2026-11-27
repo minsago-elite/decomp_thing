@@ -24,7 +24,7 @@ import { onLibraryChange } from '../jobs/libraryChannel';
 import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
 import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
-import { focusSurvivingNotice, useDepartingFocus } from '../shared/departingFocus';
+import { focusSurvivingNotice, holdFocusThroughTransition, useDepartingFocus } from '../shared/departingFocus';
 
 /** Reports a confirmed tombstone from one of this view's own reads to the route (#512); other failures stay in place. */
 type OnDeleted = (failure: unknown) => void;
@@ -77,6 +77,7 @@ function Directory({ selected, basePath, pin, search, historyEntry, onDeleted }:
     }
   }, [current]);
   function first() {
+    holdFocusThroughTransition(document.activeElement);
     expected.current = undefined; moveFocus.current = true;
     location.route(sourceDirectoryPath(basePath, selected, selected.directoryId, undefined, effectivePin ?? undefined));
     setRefresh(value => value + 1);
@@ -212,7 +213,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry, onDelete
       {policy.preview === 'available' && ((previewOpened !== null && previewOpened.sourceSha256 === data.sourceSha256 && previewOpened.metadataVersion === data.metadataVersion) || search !== ''
         ? <PanelBoundary name={panelBoundaryCopy.names.sourcePreview}><SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
             maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} historyEntry={historyEntry} onDeleted={onDeleted} {...(effectivePin ? { snapshotPin: effectivePin } : {})} /></PanelBoundary>
-        : <button type="button" onClick={() => setPreviewOpened({ sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion })}>{copy.openPreview}</button>)}
+        : <button type="button" onClick={() => { holdFocusThroughTransition(document.activeElement); setPreviewOpened({ sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion }); }}>{copy.openPreview}</button>)}
       {policy.download && <PanelBoundary name={panelBoundaryCopy.names.digestCheck}><SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} /></PanelBoundary>}
       {policy.download
         ? <a href={apiPath(basePath, sourceDownloadRoute(selected, selected.fileId, data.metadataVersion))} download={sourceDownloadName(data.item.displayName)}>{copy.download}</a>

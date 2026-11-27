@@ -515,7 +515,7 @@ try {
   recordInstallation(installation);
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
-  const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
+  const historyFixture = values.mode === 'history' ? await seedHistory(data, { includeAccepted: true }) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
@@ -943,6 +943,15 @@ try {
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'reset job library');
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
     report.dashboard = { emptyLibrary: !populated, populatedLibrary: populated, noMatches: true, filtersSurviveReload: true, resetFilters: true };
+    // #495: documented dashboard filters through real browser Back/Forward (isolated acceptance addition).
+    const searchField = `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input').value`;
+    await evaluate(authenticated, 'history.back()');
+    await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.') && ${searchField} === 'absent fixture'`, 'Back restores applied dashboard filter');
+    assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '?search=absent+fixture');
+    await evaluate(authenticated, 'history.forward()');
+    await ready(authenticated, `document.body.innerText.includes('${libraryText}') && ${searchField} === ''`, 'Forward restores reset dashboard filters');
+    assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
+    report.dashboard.filtersBackForward = true;
     if (historyFixture) {
       const row = await evaluate(authenticated, `(() => {
         const row = document.querySelector('ul[aria-label="Uploaded jobs"] li');
@@ -955,7 +964,7 @@ try {
       assert.equal(Date.parse(row.facts.Created), Date.parse(JSON.parse(historyFixture.retained['job.json']).created_at));
       assert.equal(row.facts['Workflow state'], 'Completed');
       assert.equal(row.facts['Latest attempt'], 'run_fixture_54');
-      assert.equal(row.facts['Accepted revision'], 'No accepted revision recorded');
+      assert.equal(row.facts['Accepted revision'], historyFixture.acceptedRevision.revisionId);
       assert.ok(row.facts.Updated);
       report.dashboard.exactRowMetadata = true;
       report.dashboard.jobAndRunIdentityDistinct = true;

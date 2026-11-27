@@ -22,9 +22,13 @@ type Client = ReturnType<typeof createApiClient>;
 const status = (failure: unknown) => failure instanceof ApiClientError ? failure.status ?? 0 : 0;
 const code = (failure: unknown) => failure instanceof ApiClientError ? failure.serverCode ?? '' : '';
 
-/** Display label and archive flag. A fresh GET after each mutation becomes the next editable job. */
-export function JobOrganization({ job, client, basePath, session, onChanged, onDeleted }: {
-  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>; onChanged: (job: Job) => void; onDeleted?: (failure: unknown) => void;
+/**
+ * Display label and archive flag. A fresh GET after each mutation becomes the next editable job. With `readJob`, the
+ * owning page issues and orders that GET against its other job reads, so a newer observation is never rewound.
+ */
+export function JobOrganization({ job, client, basePath, session, onChanged, readJob, onDeleted }: {
+  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>;
+  onChanged?: (job: Job) => void; readJob?: (signal: AbortSignal) => Promise<Job | null>; onDeleted?: (failure: unknown) => void;
 }) {
   const copy = jobOrganizationCopy;
   const availability = useBrowserAvailability();
@@ -38,6 +42,12 @@ export function JobOrganization({ job, client, basePath, session, onChanged, onD
   useEffect(() => () => { active.current?.abort(); }, [job.jobId, available]);
   const trimmed = label.trim();
   const invalid = trimmed.length > 0 && [...trimmed].length > 120;
+  /** One GET of this job; a response naming another job is ignored. */
+  async function reread(signal: AbortSignal) {
+    if (readJob) { await readJob(signal); return; }
+    const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal });
+    if (!signal.aborted && fresh.data.jobId === job.jobId) onChanged?.(fresh.data);
+  }
   async function save(event: Event) {
     event.preventDefault();
     if (active.current || !available) return;
@@ -55,9 +65,8 @@ export function JobOrganization({ job, client, basePath, session, onChanged, onD
         csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal,
       }, 'PATCH');
       notifyLibraryChanged(basePath);
-      const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal: controller.signal });
+      await reread(controller.signal);
       if (controller.signal.aborted) return;
-      if (fresh.data.jobId === job.jobId) onChanged(fresh.data);
       setNotice(copy.saved);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
@@ -69,8 +78,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged, onD
         : code(failure) === 'STORAGE_UNCONFIRMED' ? copy.unconfirmed : copy.failed, failure));
       if (status(failure) === 412) {
         try {
-          const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal: controller.signal });
-          if (!controller.signal.aborted && fresh.data.jobId === job.jobId) onChanged(fresh.data);
+          await reread(controller.signal);
         } catch (readFailure: unknown) {
           if (!controller.signal.aborted && isDeletedJob(readFailure)) onDeleted?.(readFailure);
         }

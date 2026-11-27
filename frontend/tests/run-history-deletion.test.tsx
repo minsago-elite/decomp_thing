@@ -106,7 +106,7 @@ it('moves removed focus to the notice when loaded history is tombstoned, and sen
   history.replaceState(null, '', historyPath);
   try {
     render(<App basePath="/nested" session={auth} />);
-    const link = await screen.findByRole('link', { name: new RegExp(run.runId) });
+    const link = await screen.findByRole('link', { name: `${run.workflow}: ${run.runId}` });
     link.focus();
     await act(async () => { notifyLibraryChanged('/nested/'); await Promise.resolve(); });
     await screen.findByText(runHistoryCopy.thisJobWasDeleted);
@@ -123,7 +123,7 @@ it('leaves surviving focus outside the history alone when it is tombstoned', asy
   history.replaceState(null, '', historyPath);
   try {
     render(<App basePath="/nested" session={auth} />);
-    await screen.findByRole('link', { name: new RegExp(run.runId) });
+    await screen.findByRole('link', { name: `${run.workflow}: ${run.runId}` });
     const surviving = screen.getByRole('button', { name: 'Sign out' });
     surviving.focus();
     await act(async () => { notifyLibraryChanged('/nested/'); await Promise.resolve(); });
@@ -150,7 +150,7 @@ async function heldHistoryRefresh(retry = false) {
   transport.get.mockImplementation(() => new Promise((_ok, fail) => { settle = fail; }));
   history.replaceState(null, '', historyPath);
   render(<App basePath="/nested" session={auth} />);
-  if (!retry) await screen.findByRole('link', { name: new RegExp(run.runId) });
+  if (!retry) await screen.findByRole('link', { name: `${run.workflow}: ${run.runId}` });
   const refresh = await screen.findByRole('button', { name: retry ? runHistoryCopy.retryHistoryPage : runHistoryCopy.refreshHistory });
   refresh.focus(); fireEvent.click(refresh);
   await waitFor(() => expect(refresh.matches(':disabled')).toBe(true));

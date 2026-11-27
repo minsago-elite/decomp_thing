@@ -1,10 +1,42 @@
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+
+async function seedAcceptedSources(directory, jobId, input) {
+  const runId = 'run_fixture_0';
+  const revisionId = 'revision_fixture_0';
+  const path = 'Makefile';
+  const source = '# Authored browser fixture for accepted source browsing.\n';
+  const sourceInput = { path, bytes: Buffer.byteLength(source), sha256: sha256(source) };
+  const sourceSha256 = sha256(`${path.length}:${path}:${sourceInput.bytes}:${sourceInput.sha256}\n`);
+  // Match the bundled GeneratedCMakeReconstructionProfile and its canonical build-input descriptor.
+  const manifest = { schemaVersion: 3, profileId: 'generated-c-make-v1',
+    profileSha256: 'a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f',
+    inputSha256: sha256(input), files: [{ path, sha256: sourceInput.sha256, generator: 'packaged-browser-fixture',
+      promptSha256: null, acceptedImplementation: null, contentKind: 'utf8-text',
+      roles: ['archive-payload', 'build-definition', 'build-input', 'editable', 'viewable'], entityIds: [] }],
+    unresolvedEntityIds: [], unresolvedImplementationIds: [] };
+  const descriptor = JSON.stringify({ schemaVersion: 3, sourceRevisionSha256: sourceSha256, sourceInputs: [sourceInput] });
+  const sourceTree = join(directory, 'reports', 'runs', runId, 'source-tree');
+  const acceptedSources = {
+    [join(sourceTree, path)]: source,
+    [join(sourceTree, 'source_tree_manifest.json')]: JSON.stringify(manifest),
+    [join(sourceTree, 'reports', 'build_contract.json')]: descriptor,
+  };
+  for (const [fixturePath, bytes] of Object.entries(acceptedSources)) {
+    await fs.mkdir(dirname(fixturePath), { recursive: true, mode: 0o700 });
+    await fs.writeFile(fixturePath, bytes, { flag: 'wx', mode: 0o600 });
+  }
+  const acceptedRevision = { jobId, runId, revisionId, sourceSha256, graphNodeId: 'node_fixture_0',
+    artifactId: 'artifact_fixture_0', artifactSha256: sha256(descriptor) };
+  return { acceptedRevision, acceptedSources };
+}
+
 /** Test-only persisted data, written before server ownership; never invokes a workflow. */
-export async function seedHistory(root) {
+export async function seedHistory(root, { includeAccepted = false } = {}) {
   await fs.mkdir(root, { mode: 0o700 }); // Refuse any existing root, including links.
   const jobId = 'd'.repeat(32);
   const directory = join(root, jobId);
@@ -19,22 +51,27 @@ export async function seedHistory(root) {
       elf_version: 1, os_abi: 'System V', object_type: 'executable', machine: 'x86-64', entry_point: 0,
       elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
   const jobBytes = JSON.stringify(job);
+  const { acceptedRevision, acceptedSources } = includeAccepted
+    ? await seedAcceptedSources(directory, jobId, input)
+    : { acceptedRevision: null, acceptedSources: {} };
   const attempts = Array.from({ length: 55 }, (_, index) => {
     const state = ['completed', 'failed', 'interrupted'][index % 3];
     const time = new Date(Date.parse(at) + index * 2000).toISOString();
-    return { runId: `run_fixture_${index}`, jobId, workflow: 'reconstruct', state, version: `version_fixture_${index}`,
+    const runId = `run_fixture_${index}`;
+    const acceptance = acceptedRevision?.runId === runId ? acceptedRevision : null;
+    return { runId, jobId, workflow: 'reconstruct', state, version: `version_fixture_${index}`,
       createdAt: time, startedAt: time, endedAt: new Date(Date.parse(time) + 1000).toISOString(),
       previousRunId: index ? `run_fixture_${index - 1}` : null, inputRevisionId: null, harnessCapabilityId: null,
       limits: { wallClockMs: '60000', idleMs: '15000', maxOutputBytes: '1048576', maxToolCalls: '16' },
       terminalReason: { completed: 'COMPLETED', failed: 'FAILED', interrupted: 'PROCESS_INTERRUPTED' }[state],
       usage: { inputTokens: '18446744073709551615', outputTokens: null, cachedInputTokens: null, toolCalls: '0', wallClockMs: '1000' },
-      candidate: state === 'completed' ? { revisionId: `revision_fixture_${index}`, sourceSha256: 'e'.repeat(64) } : null,
-      acceptedRevision: null };
+      candidate: state === 'completed' ? { revisionId: `revision_fixture_${index}`, sourceSha256: acceptance?.sourceSha256 ?? 'e'.repeat(64) } : null,
+      acceptedRevision: acceptance };
   });
   // Durable snapshot versions are validated as version_<32 lowercase hex> (#472).
   const state = { schemaVersion: 1, jobId, version: `version_${'f'.repeat(32)}`,
     legacy: { originalJobSha256: createHash('sha256').update(jobBytes).digest('hex'), status: 'uploaded', recoveredInterrupted: false },
-    attempts, acceptedRevision: null };
+    attempts, acceptedRevision };
   const retained = { 'input.elf': input, 'job.json': jobBytes, 'workflow-state.json': JSON.stringify(state) };
   for (const [name, bytes] of Object.entries(retained)) await fs.writeFile(join(directory, name), bytes, { flag: 'wx', mode: 0o600 });
   const reportDirectory = join(directory, 'reports', 'runs', 'run_fixture_3');
@@ -56,13 +93,47 @@ export async function seedHistory(root) {
       ...(sequence !== 1 && sequence !== 2 ? { phase: 'planning', path: '/Synthetic-private-root/input', text: `Synthetic private content ${sequence}` } : {}),
       inputTokens: '18446744073709551615' })) });
   await fs.writeFile(progressPath, progress, { flag: 'wx', mode: 0o600 });
-  return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress };
+  return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress, acceptedRevision, acceptedSources };
 }
 
 export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
   const tab = await makeTarget();
   const path = `/nested/jobs/${fixture.jobId}/runs`;
-  const rows = `Array.from(document.querySelectorAll('ul[aria-label="Recorded attempts"] a')).map(a => a.textContent)`;
+  const { runId, revisionId, sourceSha256 } = fixture.acceptedRevision;
+  const evidencePath = `${path}/${runId}/evidence`;
+  const sourcesPath = `${path}/${runId}/revisions/${revisionId}/sources/root`;
+  const sourcesEndpoint = `/nested/api/v1/jobs/${fixture.jobId}/runs/${runId}/revisions/${revisionId}/source-directories/root`;
+  const acceptedWork = `document.querySelector('section[aria-labelledby="accepted-work-title"]')`;
+  const acceptedEvidence = `[...(${acceptedWork}?.querySelectorAll('a') ?? [])].find(a => a.textContent === 'Accepted attempt evidence and report snapshots')`;
+  const revisionSourceLink = `[...document.querySelectorAll('a')].find(a => a.textContent === 'Browse recorded source inputs')`;
+  const facts = selector => `Object.fromEntries([...document.querySelectorAll(${JSON.stringify(selector)})].map(dt =>
+    [dt.textContent.trim(), dt.nextElementSibling.textContent.trim()]))`;
+  await cdp.call('Page.navigate', { url: browserOrigin + `/nested/jobs/${fixture.jobId}` }, tab.sessionId);
+  await ready(tab, `!!(${acceptedEvidence})`, 'accepted evidence link from the job');
+  assert.equal(await evaluate(tab, `(${acceptedEvidence}).getAttribute('href')`), evidencePath);
+  assert.equal(await evaluate(tab, `[...${acceptedWork}.querySelectorAll('a')].find(a => a.textContent === 'Latest attempt evidence and reports').getAttribute('href')`),
+    `${path}/run_fixture_54/evidence`);
+  await evaluate(tab, `(${acceptedEvidence}).click()`);
+  await ready(tab, `location.pathname === '${evidencePath}' && document.querySelector('h1')?.textContent === 'Attempt evidence' && !!(${revisionSourceLink})`,
+    'accepted attempt evidence with its source link');
+  const evidenceFacts = await evaluate(tab, facts('dl.job-facts dt'));
+  assert.equal(evidenceFacts['Attempt identity'], runId);
+  assert.equal(evidenceFacts.Acceptance, 'accepted');
+  assert.equal(evidenceFacts['Result revision'], revisionId);
+  const beforeSources = tab.requests.length;
+  await evaluate(tab, `(${revisionSourceLink}).click()`);
+  await ready(tab, `location.pathname === '${sourcesPath}' && document.querySelector('h1')?.textContent === 'Recorded source inputs'
+    && document.querySelector('ul[aria-label="Recorded source inputs"] a')?.textContent === 'Makefile'`, 'populated accepted source directory');
+  const sourceFacts = await evaluate(tab, facts('dl[aria-label="Source selection"] dt'));
+  assert.deepEqual(sourceFacts, { Job: fixture.jobId, Attempt: runId, Revision: revisionId, 'Source commitment': sourceSha256 });
+  const sourceReads = tab.requests.slice(beforeSources).filter(request => new URL(request.url).pathname.includes('/source-directories/'));
+  assert.ok(sourceReads.length > 0, 'Clicking the evidence source link must read the bound directory');
+  assert.ok(sourceReads.every(request => request.method === 'GET' && new URL(request.url).pathname === sourcesEndpoint),
+    'Source reads must stay bound to the accepted job, attempt and revision');
+  const sourceRequestIds = new Set(sourceReads.map(request => request.requestId));
+  assert.ok(tab.responses.some(response => sourceRequestIds.has(response.requestId) && response.status === 200));
+  // The first link of each row names the attempt; the row's view and source links follow it.
+  const rows = `Array.from(document.querySelectorAll('ul[aria-label="Recorded attempts"] > li > a:first-child')).map(a => a.textContent)`;
   await cdp.call('Page.navigate', { url: browserOrigin + path }, tab.sessionId);
   await ready(tab, `(${rows}).length === 50`, 'first populated attempt page');
   assert.deepEqual(await evaluate(tab, rows), Array.from({ length: 50 }, (_, i) => `reconstruct: run_fixture_${54 - i}`));
@@ -75,6 +146,22 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   await ready(tab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes('18446744073709551615')`, 'earlier populated attempt');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('not-evaluated') && document.body.innerText.includes('revision_fixture_3') && document.body.innerText.includes('Not reported')`));
   assert.equal(await evaluate(tab, 'location.pathname'), `${path}/run_fixture_3`);
+  // Browser history restores the saved history page and the earlier attempt's named evidence view.
+  const secondPage = Array.from({ length: 5 }, (_, i) => `reconstruct: run_fixture_${4 - i}`);
+  await evaluate(tab, 'history.back()');
+  await ready(tab, `location.pathname === '${path}' && location.search.startsWith('?cursor=') && (${rows}).length === 5`, 'Back restores the saved attempt-history page');
+  assert.deepEqual(await evaluate(tab, rows), secondPage);
+  assert.equal(await evaluate(tab, `document.querySelector('a[aria-label="Result revision sources of revision revision_fixture_3 from attempt run_fixture_3"]')?.getAttribute('href')`),
+    `${path}/run_fixture_3/revisions/revision_fixture_3/sources/root`);
+  await evaluate(tab, `document.querySelector('a[href="${path}/run_fixture_3/evidence"]').click()`);
+  await ready(tab, `location.pathname === '${path}/run_fixture_3/evidence' && document.querySelector('h1')?.textContent === 'Attempt evidence' && document.body.innerText.includes('revision_fixture_3')`, 'earlier attempt evidence view from history');
+  await evaluate(tab, 'history.back()');
+  await ready(tab, `location.pathname === '${path}' && (${rows}).length === 5`, 'Back from evidence restores the saved attempt-history page');
+  assert.deepEqual(await evaluate(tab, rows), secondPage);
+  await evaluate(tab, 'history.forward()');
+  await ready(tab, `location.pathname === '${path}/run_fixture_3/evidence' && document.querySelector('h1')?.textContent === 'Attempt evidence'`, 'Forward restores the earlier attempt evidence view');
+  await evaluate(tab, `document.querySelector('nav[aria-label="Attempt views"] a[href="${path}/run_fixture_3"]').click()`);
+  await ready(tab, `location.pathname === '${path}/run_fixture_3' && document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes('revision_fixture_3')`, 'earlier attempt overview view');
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('revision_fixture_3')`, 'pinned earlier attempt reload');
   const progressEndpoint = `/nested/api/v1/jobs/${fixture.jobId}/runs/run_fixture_3`;
@@ -393,6 +480,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
+  for (const [path, bytes] of Object.entries(fixture.acceptedSources)) assert.equal(await fs.readFile(path, 'utf8'), bytes);
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
   // Exercise policy mutations only after proving the existing read-only history journey.
   await cdp.call('Page.navigate', { url: browserOrigin + path + '/run_fixture_3' }, tab.sessionId);
@@ -412,6 +500,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   const normalize = attempt => ({ ...attempt, createdAt: new Date(attempt.createdAt).toISOString(),
     startedAt: new Date(attempt.startedAt).toISOString(), endedAt: new Date(attempt.endedAt).toISOString() });
   const before = JSON.parse(fixture.retained['workflow-state.json']);
+  assert.deepEqual(changed.acceptedRevision, before.acceptedRevision);
   changed.attempts.forEach((attempt, index) => {
     const expected = before.attempts[index];
     if (attempt.runId === 'run_fixture_3') { assert.notEqual(attempt.version, expected.version); attempt = { ...attempt, version: expected.version }; }
@@ -419,7 +508,8 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   });
   for (const name of ['input.elf', 'job.json']) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(fixture.retained[name]));
   assert.deepEqual(tab.exceptions, []);
-  return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true, historyPageAndAttemptViewBackForward: true,
+    acceptedEvidenceToSources: { jobId: fixture.jobId, runId, revisionId, sourceSha256, sourcesEndpoint, populatedDirectory: true },
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, explorationChart: { accessibleName: true, reportAndRunIdentityDescribed: true,
       measurementAndDenominatorTable: true, noProgramCoverageClaim: true, accessibilityTreeRole: true },

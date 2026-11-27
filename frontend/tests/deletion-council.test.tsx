@@ -749,3 +749,40 @@ it('aborts the outstanding job read after the DELETE confirms deletion', async (
     expect(screen.queryByRole('button', { name: jobCopy.refreshJob })).toBeNull();
   } finally { auth.dispose(); }
 });
+
+// #1978 × #1778 integration: the organization reread now goes through the route's ordered readJob.
+async function organizedJob() {
+  const auth = await session();
+  const reread = deferred<Job>();
+  let reads = 0; let saved = false;
+  transport.get.mockImplementation((kind: string) => kind !== 'job' ? Promise.reject(unavailable())
+    : saved ? (++reads, reread.promise) : Promise.resolve({ data: job }));
+  transport.put.mockImplementation(() => { saved = true; return Promise.resolve({ data: {} }); });
+  history.replaceState(null, '', `/nested/jobs/${job.jobId}`);
+  render(<App basePath="/nested" session={auth} />);
+  const save = await screen.findByRole('button', { name: jobOrganizationCopy.save });
+  // Let the first job read and the accepted-work lookup settle before editing.
+  await act(async () => { await new Promise(done => setTimeout(done, 20)); });
+  const field = screen.getByRole('textbox', { name: /label/i });
+  fireEvent.input(field, { target: { value: 'Renamed' } });
+  await waitFor(() => expect((field as HTMLInputElement).value).toBe('Renamed'));
+  return { auth, reread, save, reads: () => reads, submit: () => fireEvent.submit(field.closest('form')!) };
+}
+
+it('ends the job once, with the reference, when the ordered organization reread confirms the tombstone', async () => {
+  const { auth, reread, save, reads, submit } = await organizedJob();
+  try {
+    save.focus(); submit();
+    await waitFor(() => expect(reads()).toBeGreaterThan(0));
+    // The save's library notification also refreshes this view; both reads share the held answer.
+    await act(async () => { await new Promise(done => setTimeout(done, 20)); });
+    const issued = reads();
+    await reread.settle({ err: goneWith(canonicalId) });
+    const notice = await screen.findByText(`${jobCopy.thisJobWasDeleted} Reference ID: ${canonicalId}.`);
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(save.isConnected).toBe(false);
+    expect(document.activeElement).toBe(notice);
+    await act(async () => { await new Promise(done => setTimeout(done, 20)); });
+    expect(reads()).toBe(issued);
+  } finally { auth.dispose(); }
+});
