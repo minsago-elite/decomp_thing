@@ -14,6 +14,11 @@ const sample = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/
 const sessions: ReturnType<typeof createBrowserSession>[] = [];
 afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
+/** Live paragraphs take text only after they have been in the document for a paint. */
+async function liveReady() {
+  await act(() => new Promise<void>(resolve => { setTimeout(resolve, 40); }));
+}
+
 function setup() {
   const data = { ...structuredClone(sample.data), sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
   const gateway = {
@@ -232,6 +237,7 @@ it('keeps live status semantics on text-only regions through every session trans
   let release!: () => void;
   const { session, gateway, data } = setup();
   gateway.bootstrap.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(data); }));
+  await liveReady();
   expect(gateway.bootstrap).not.toHaveBeenCalled();
   expect(gateway.logout).not.toHaveBeenCalled();
   let pending!: Promise<void>;
@@ -276,6 +282,7 @@ it('keeps live status semantics on text-only regions through every session trans
 
 it('announces an application instance change as text only beside the Sign out action', async () => {
   const { session, gateway, data } = setup();
+  await liveReady();
   await act(async () => { await session.initialize({ kind: 'absent' }); });
   gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: `${data.serverInstanceId ?? 'instance'}-changed` });
   await act(async () => { await session.refresh(); });
@@ -363,6 +370,7 @@ function shell() {
 it('keeps the same live node in each placement across every transition, with text in exactly one', async () => {
   let releaseLogout!: () => void;
   const { session, gateway, data, region } = shell();
+  await liveReady();
   const header = region('header'); const page = region('page');
   expect(header).not.toBeNull(); expect(page).not.toBeNull();
   const spoken = () => [header, page].filter(node => node?.textContent !== '').map(node => node?.textContent);
@@ -436,4 +444,79 @@ it('negative control: a conditionally mounted status replaces the live node, whi
   view.rerender(<div data-testid="former"><Former text="Signing out…" /></div>);
   const born = screen.getByTestId('former').querySelector('[role="status"]');
   expect(born?.textContent).toBe('Signing out…'); // region was born populated
+});
+
+for (const [kind, expected] of [['absent', 'Checking local session…'], ['invalid', /incomplete or invalid/], ['removal-failed', /could not be cleared/]] as const) {
+  it(`cold startup (${kind}) inserts an empty live paragraph before giving it text`, async () => {
+    const data = { ...structuredClone(sample.data), sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+    const gateway = {
+      exchange: vi.fn(() => Promise.resolve({ csrfToken: data.csrfToken, expiresAt: data.sessionExpiresAt })),
+      bootstrap: vi.fn(() => new Promise<typeof data>(() => {})),
+      logout: vi.fn(() => Promise.resolve()),
+    };
+    const session = createBrowserSession(gateway, '/');
+    sessions.push(session);
+    // Same order as main.tsx: the session publishes its first state before the first App render.
+    void session.initialize({ kind });
+    const firstState = session.snapshot();
+    render(<SessionStatus session={session} placement="page" />);
+    const live = document.querySelector<HTMLElement>('[data-session-announcement="page"]');
+    expect(live?.getAttribute('role')).toBe('status');
+    expect(live?.textContent).toBe('');
+    const notice = screen.getByRole('complementary', { name: 'Local session' });
+    expect(notice.textContent).toMatch(expected); // first screen still shows the message
+    await liveReady();
+    expect(document.querySelector('[data-session-announcement="page"]')).toBe(live);
+    expect(live?.textContent).toMatch(expected);
+    expect(notice.textContent?.match(new RegExp(typeof expected === 'string' ? expected : expected.source, 'g'))?.length).toBe(1);
+    expect(session.snapshot()).toEqual(firstState);
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(kind === 'absent' ? 1 : 0); // no extra checks
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(await axeViolations(document.body)).toEqual([]);
+  });
+}
+
+async function checkFrom(outcome: 'connected' | 'expired' | 'connection', focus: 'button' | 'elsewhere' | 'programmatic') {
+  const { session, gateway, data } = shell();
+  gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'SESSION_EXPIRED', status: 401 }));
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  let release!: () => void;
+  gateway.bootstrap.mockImplementationOnce(() => new Promise((resolve, reject) => {
+    release = () => {
+      if (outcome === 'connected') resolve(data);
+      else reject(outcome === 'expired' ? new ApiClientError('http_error', { serverCode: 'SESSION_EXPIRED', status: 401 }) : new ApiClientError('network_error'));
+    };
+  }));
+  const check = screen.getByRole('button', { name: 'Check session' });
+  const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+  if (focus === 'programmatic') { check.focus(); check.blur(); void act(() => { void session.refresh(); }); }
+  else { (focus === 'button' ? check : elsewhere).focus(); fireEvent.click(check); }
+  const duringChecking = document.activeElement;
+  await act(async () => { release(); await Promise.resolve(); await Promise.resolve(); });
+  await screen.findByText(outcome === 'connected' ? 'Local session connected.' : outcome === 'expired' ? /Your local session expired/ : /could not be checked/);
+  return { duringChecking, after: document.activeElement, elsewhere, gateway };
+}
+
+for (const outcome of ['connected', 'expired', 'connection'] as const) {
+  it(`moves focus from an activated Check session button to a surviving target (${outcome})`, async () => {
+    const { duringChecking, after, gateway } = await checkFrom(outcome, 'button');
+    expect(duringChecking).toBe(screen.queryByRole('complementary', { name: 'Local session' }) ?? duringChecking);
+    expect((duringChecking as HTMLElement).tagName).toBe('ASIDE');
+    if (outcome === 'connected') expect(after).toBe(screen.getByRole('button', { name: 'Sign out' }));
+    else expect(after).toBe(screen.getByRole('complementary', { name: 'Local session' }));
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    expect(gateway.exchange).not.toHaveBeenCalled();
+  });
+}
+
+it('keeps intentional focus elsewhere while a Check session request runs', async () => {
+  const { duringChecking, after, elsewhere } = await checkFrom('connected', 'elsewhere');
+  expect(duringChecking).toBe(elsewhere);
+  expect(after).toBe(elsewhere);
+});
+
+it('does not move focus for a programmatic or peer-triggered check', async () => {
+  const { duringChecking, after } = await checkFrom('connected', 'programmatic');
+  expect(duringChecking).toBe(document.body);
+  expect(after).toBe(document.body);
 });
