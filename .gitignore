@@ -1,4 +1,5 @@
 .gradle/
+.gradle-ci-user-home/
 .kotlin/
 .env
 .pytest_cache/
