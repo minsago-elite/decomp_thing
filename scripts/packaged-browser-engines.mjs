@@ -5,7 +5,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
+import { assertAudit, auditFixtures, auditProfileEvidence, auditViewports, captureOutputSignatureChart, chartCaptureSets, engineSupplementalInteractionContexts, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
 import { createEngineDiagnostics, diagnosticOverflowFailure } from './packaged-browser-engine-diagnostics.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
@@ -550,7 +550,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       throw failure;
     }
   };
-  const layout = []; const contrast = []; const focus = [];
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = []; const chartCaptures = [];
   for (const viewport of auditViewports) await diagnostics.phase(`viewport:${viewport.name}`, async () => {
     const { context: created, record } = await context({ viewport: { width: viewport.width, height: viewport.height },
       deviceScaleFactor: viewport.deviceScaleFactor, ...(values.engine === 'firefox' ? {} : { isMobile: viewport.mobile }) });
@@ -590,8 +590,24 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
           })
           : null;
         layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured, ...(overflowDiagnostics ? { overflowDiagnostics } : {}) });
+        if (page.name === 'attempt evidence') chart.push({ page: page.name, viewport: viewport.name, scheme,
+          viewportWidth: viewport.width, ...await target.evaluate(measureOutputSignatureChart) });
         if (viewport.width === 1440 || (viewport.width === 320 && viewport.deviceScaleFactor === 1))
           contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await target.evaluate(measureContrast) });
+      }
+      if (page.name === 'attempt evidence' && (viewport.name === 'desktop 1440x900' || viewport.name === 'zoom 400% of 1280x800')) {
+        await target.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
+        const phase = `screenshot:${viewport.name}:attempt evidence`;
+        await target.evaluate((value) => { globalThis.__decompAuditPhase = value; }, phase);
+        try {
+          // Viewport-only tiles (no full-element capture), with geometry and occlusion re-measured around each.
+          const set = chartCaptureSets.find((candidate) => candidate.viewport === viewport.name);
+          const captured = await captureOutputSignatureChart({ set, evaluate: (expression) => target.evaluate(expression),
+            shoot: ({ file, viewportClip }) => target.screenshot({ path: join(root, file), clip: viewportClip }) });
+          chartCaptures.push(captured);
+          chartScreenshots.push(...captured.tiles.map((tile) => tile.file));
+        }
+        finally { await target.evaluate(() => { globalThis.__decompAuditPhase = null; }).catch(() => undefined); }
       }
       if (viewport.deviceScaleFactor === 4 || ['job detail', 'source file'].includes(page.name)) {
         const phase = `screenshot:${viewport.name}:${page.name}`;
@@ -697,10 +713,13 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
     return { samples: list.length, median: at(0.5), p95: at(0.95) }; };
   const workerTargets = records.flatMap((record) => record.workers ?? []);
   const responses = records.flatMap((record) => record.responses);
-  const result = { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
+  const interactionTimes = interactions.map(({ elapsedMs }) => elapsedMs);
+  const result = { profile: auditProfileEvidence('reference'), fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
+    layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
     workers: { highlightedTokens,
       targets: workerTargets.map((worker) => ({ ...worker, responses: responses.filter((response) => response.url === worker.url) })) },
-    keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
+    keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+      interactions: summary(interactionTimes), raw: { cold, feedback, data, interactions: interactionTimes } } };
   return { result, records, responses, origin };
 }
 
@@ -719,7 +738,11 @@ try {
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin, undefined,
-    { connectionNotice: false }); // #1896 trusted-network evidence is qualified by Chrome DevTools only.
+    // Chrome-only connection, explicit-filter and source-file-open timings are qualified by DevTools
+    // (#1896, #623); this runner does not measure them, so their verdicts are omitted rather than claimed.
+    { connectionNotice: false, jobFilter: false, fileOpen: false,
+      interactionPages: auditFixtures(repo, installation.manifest.buildId).pages,
+      extraInteractionContexts: engineSupplementalInteractionContexts });
   const records = [smoked.record, ...audited.records];
   const cspEvents = records.flatMap((record) => record.csp);
   const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);

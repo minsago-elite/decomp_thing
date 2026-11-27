@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "decomp-gcc-oracle-toolchain:16.2.0"
 SCRATCH = "build/gcc-reproduction-adapter"
 RUNTIME_BASE = ".d"
+ALLOWED_STORES = ("overlay2", "vfs")
 # Linux sockaddr_un reserves one of its 108 bytes for the terminating NUL.
 SOCKET_PATH_BYTES = 107
 LOCK = "oracle/gcc/16.2.0/toolchain-reproduction.json"
@@ -320,9 +321,15 @@ def admit_version(version, *, scoped=False):
         raise Refusal("effective client API must be exactly 1.49")
 
 
-def admit_store(info):
-    if info["ServerVersion"] != "29.7.2" or info["Driver"] != "overlay2":
-        raise Refusal("actual engine/store must be 29.7.2/classic overlay2")
+def admit_store(info, expected_driver="overlay2"):
+    if expected_driver not in ALLOWED_STORES:
+        raise Refusal("expected store is not explicitly allowed")
+    if info["ServerVersion"] != "29.7.2" or info["Driver"] != expected_driver:
+        raise Refusal(f"actual engine/store must be 29.7.2/{expected_driver}")
+    if expected_driver == "vfs":
+        if "DriverStatus" not in info or info["DriverStatus"] is not None:
+            raise Refusal("VFS DriverStatus must be explicitly null")
+        return
     status = info["DriverStatus"]
     if not isinstance(status, list) or not status:
         raise Refusal("missing actual storage driver status")
@@ -337,7 +344,7 @@ def admit_store(info):
 
 
 def capture(endpoint, output_dir, provenance, *, root=ROOT, clock=time.monotonic,
-            transport=run_cli, environment=None, sources=SOURCES):
+            transport=run_cli, environment=None, sources=SOURCES, expected_driver="overlay2"):
     end = clock() + TOTAL_SECONDS
     receipt = {"schemaVersion": 1, "authority": "descriptive only; no service or hosted qualification",
                "status": "rejected", "provenance": provenance, "endpoint": endpoint,
@@ -404,7 +411,7 @@ def capture(endpoint, output_dir, provenance, *, root=ROOT, clock=time.monotonic
         version = strict_json(command("default-version", ["version", "--format", "{{json .}}"]))
         info = strict_json(command("default-info", ["info", "--format", "{{json .}}"]))
         admit_version(version)
-        admit_store(info)
+        admit_store(info, expected_driver)
         # Diagnostic bytes remain separate, never used as the strict verifier input.
         strict_json(command("default-inspect", ["image", "inspect", IMAGE]))
         scoped_version = strict_json(command("api149-version", ["version", "--format", "{{json .}}"], scoped=True))
@@ -472,6 +479,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-runtime-root", action="store_true")
     parser.add_argument("--endpoint")
+    parser.add_argument("--expected-driver", choices=ALLOWED_STORES, default="overlay2")
     parser.add_argument("--output-dir", default=SCRATCH + "/capture")
     parser.add_argument("--executed-commit")
     parser.add_argument("--executed-tree")
@@ -495,7 +503,7 @@ def main():
             or not all(isinstance(provenance[k], str) and re.fullmatch(r"[1-9][0-9]*", provenance[k])
                        for k in ("run", "attempt"))):
         parser.error("complete run/attempt/head/executed commit/tree provenance is required")
-    return capture(args.endpoint, args.output_dir, provenance)
+    return capture(args.endpoint, args.output_dir, provenance, expected_driver=args.expected_driver)
 
 
 if __name__ == "__main__":

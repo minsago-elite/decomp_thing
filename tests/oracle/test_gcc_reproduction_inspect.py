@@ -156,12 +156,12 @@ class CaptureTest(unittest.TestCase):
              patch.object(adapter, "RECORD", str(ROOT / "oracle/gcc/16.2.0/build-record.json")), \
              patch("subprocess.Popen", side_effect=AssertionError("real child forbidden")), \
              contextlib.redirect_stderr(self.stderr):
-            return adapter.capture(kw.get("endpoint", self.endpoint), kw.get("output", self.output),
+            return adapter.capture(kw.pop("endpoint", self.endpoint), kw.pop("output", self.output),
                                    self.provenance, root=self.root, clock=self.clock,
                                    transport=self.cli, environment={"DOCKER_HOST": "tcp://ambient:2375",
                                    "DOCKER_CONTEXT": "ambient", "DOCKER_API_VERSION": "1.55",
                                    "DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": "/untrusted"},
-                                   sources=("source-control.py",))
+                                   sources=("source-control.py",), **kw)
 
     def receipt(self):
         return json.loads((self.root / self.output / "receipt.json").read_bytes())
@@ -196,6 +196,57 @@ class CaptureTest(unittest.TestCase):
             else:
                 self.assertIn("-B", argv)
         self.assertIn("no service", receipt["authority"])
+
+    def test_vfs_capture_is_byte_identical_strict_verified_and_uses_effective_api(self):
+        self.cli.info["Driver"] = "vfs"
+        self.cli.info["DriverStatus"] = None
+        self.assertEqual(0, self.capture(expected_driver="vfs"), self.stderr.getvalue())
+        receipt = self.receipt()
+        self.assertEqual("strict-verified-only", receipt["status"])
+        self.assertEqual(original("historical"), (self.root / self.output / "image-inspect.json").read_bytes())
+        self.assertEqual([original("historical")], self.cli.inputs)
+        self.assertEqual([None, None, None, "1.49", "1.49", None],
+                         [env.get("DOCKER_API_VERSION") for _, env in self.cli.calls])
+
+    def test_vfs_default_rejection_and_unapproved_expected_driver(self):
+        self.cli.info["Driver"] = "vfs"
+        self.cli.info["DriverStatus"] = None
+        self.assert_refused()
+        self.assertEqual(2, len(self.cli.calls))
+        self.output = adapter.SCRATCH + "/unknown-expected-driver"
+        self.cli = InjectedCLI(self.clock)
+        self.cli.info["Driver"] = "other"
+        with self.assertRaisesRegex(adapter.Refusal, "expected store is not explicitly allowed"):
+            adapter.admit_store(self.cli.info, "other")
+        self.assert_refused(expected_driver="other")
+        self.assertIn("expected store is not explicitly allowed", self.stderr.getvalue())
+        self.assertEqual(2, len(self.cli.calls))
+        self.assertEqual([], self.cli.inputs)
+
+    def test_vfs_status_and_store_shape_fail_closed(self):
+        cases = [
+            ("overlay2-paired-with-vfs", "overlay2", "vfs", None),
+            ("vfs-paired-with-overlay2", "vfs", "overlay2", [["Backing Filesystem", "extfs"]]),
+            ("overlay2-null-status", "overlay2", "overlay2", None),
+            ("vfs-missing", "vfs", "vfs", "missing"),
+            ("vfs-status-list", "vfs", "vfs", []),
+            ("vfs-malformed-status", "vfs", "vfs", "vfs"),
+            ("vfs-snapshotter", "vfs", "vfs", [["driver-type", "io.containerd.snapshotter.v1"]]),
+            ("vfs-engine", "vfs", "vfs", None),
+        ]
+        for name, expected, driver, status in cases:
+            with self.subTest(name=name):
+                self.output = adapter.SCRATCH + "/" + name
+                self.cli = InjectedCLI(self.clock)
+                self.cli.info["Driver"] = driver
+                self.cli.info["DriverStatus"] = status
+                if status == "missing":
+                    self.cli.info.pop("DriverStatus")
+                if name == "vfs-engine":
+                    self.cli.info["ServerVersion"] = "29.7.1"
+                self.assert_refused(expected_driver=expected)
+                self.assertEqual(2, len(self.cli.calls))
+                self.assertEqual([], self.cli.inputs)
 
     def test_original_attribution_hashes_and_distinct_refusals(self):
         for name, item in BUNDLE["originals"].items():
@@ -630,7 +681,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("runtime-basedir: ${{ github.workspace }}/.d", job)
         self.assertLess(job.index("--check-runtime-root"), job.index("uses: docker/setup-docker-action@v5"))
         self.assertIn("set-host: true", job)
-        self.assertIn('daemon-config: \'{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}\'', job)
+        self.assertIn('daemon-config: \'{"features":{"containerd-snapshotter":false},"storage-driver":"vfs"}\'', job)
+        self.assertIn("--expected-driver vfs", job)
         self.assertIn("DOCKER_HOST: ${{ steps.gcc-reproduction-docker.outputs.sock }}", job)
         self.assertNotIn("unix://${{ steps.gcc-reproduction-docker.outputs.sock }}", job)
         self.assertNotIn("DOCKER_API_VERSION", job)
