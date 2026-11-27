@@ -667,6 +667,16 @@ hexadecimal strings shown as sent. Timestamps keep their original fractional dig
 offset; the SPA only replaces `T` with a space and a trailing `Z` with ` UTC`. The exploration
 confidence `score` is the one JSON number, a producer ratio in `[0, 1]`, shown as received in both
 the SPA and legacy HTML (the optional legacy gauge uses a numeric value only for its visual scale).
+The output-signature chart compares counters using `BigInt`. It calculates the approximate
+bar width with `Number(added) / Number(total)`. The table, accessible description, report
+summary and exported counts retain the original decimal strings.
+
+The exploration and recorded revision-validation report contracts contain no address fields.
+The job metadata contract carries the ELF entry address, and revision structure APIs describe
+addresses within a selected revision. Validation stream totals use decimal strings. Preview
+prefix and text lengths use bounded JSON integers, with at most 128 retained bytes per stream.
+A validation case page contains at most 20 rows.
+
 Each report carries its provenance: the `binding` (job, run, revision), `sourceArtifact`
 digest descriptor, `producerSchemaVersion`, `adapterVersion` and `limitations`.
 
