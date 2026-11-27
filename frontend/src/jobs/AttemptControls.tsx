@@ -136,7 +136,7 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   const describedBy = `attempt-controls-scope-${runId}`;
   return <section aria-labelledby={`attempt-controls-title-${runId}`}>
     <h2 id={`attempt-controls-title-${runId}`}>{copy.title}</h2>
-    <p id={describedBy}>{textMessage(copy.scope, { runId, version: controls?.runVersion ?? run.version })}</p>
+    <p id={describedBy} class="attempt-controls-scope">{textMessage(copy.scope, { runId, version: controls?.runVersion ?? run.version })}</p>
     {run.state === 'cancelling' && <p class="notice">{copy.cancelling}</p>}
     {run.recovery && run.previousRunId && <p>{displayMessage(run.recovery.mode === 'retry' ? copy.retriedFrom
       : run.recovery.restores === 'agent-session' ? copy.resumedAgent : copy.resumedEvidence,

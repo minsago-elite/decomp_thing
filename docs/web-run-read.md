@@ -103,21 +103,18 @@ Run IDs, timestamps, outcomes, limits and usage are deterministic. The required
 stored binary path is derived only inside the disposable test installation's data
 root. No user binaries, providers or execution adapters participate.
 
-The real browser and HTTP service traverse 50 then 5 exact identities, restore the
-second-page cursor after reload, open and reload an earlier completed candidate,
-and follow its previous interrupted attempt. The page preserves unsigned maximum
-usage as `18446744073709551615` and distinguishes null usage and unaccepted output.
-Every recorded attempt has no accepted reference; this does not test accepted
-publication attestation. All three retained fixture files and the job directory's
-entry set remain unchanged after browsing, and all view requests are GET/HEAD.
+The September 2026 browser run traversed 50 attempts on the first page and five on
+the second. It restored the cursor after reload, opened an earlier completed
+candidate and followed its previous interrupted attempt. The fixture recorded
+unsigned usage of `18446744073709551615` and contained no accepted revision. The
+job directory and its three retained files were unchanged after browsing.
+[September 2026 packaged history report](evidence/web-populated-history-20260905.json)
 
-[Retained passed report](evidence/web-populated-history-20260905.json) supersedes
-the earlier populated-history coverage limitation. It also includes session,
-asset-recovery and missing-route checks. Pinned Chrome used test-only --no-sandbox.
-This is packaged integration coverage with inert persisted fixtures, distinct from
-mock transport tests and from live workflow execution. Evidence/source/artifact
-navigation, active history changes and broader fixture families remain outstanding.
-
+The current history journey seeds acceptance on the earliest attempt. It follows
+the accepted link to that attempt’s source directory, where the packaged JVM
+serves the recorded files. The newest attempt has its own Activity and Evidence
+links. The seeder writes these records directly. Production publication and its
+attestation require a separate workflow.
 
 ## Earlier-attempt and accepted-work navigation
 
@@ -200,10 +197,10 @@ The job overview has a **Current and accepted work** section that keeps the two 
 Browser history restores the saved history page after opening an earlier attempt or one
 of its named views, and Forward returns to that view. This is covered by
 `frontend/tests/attempt-navigation.test.tsx` and by the packaged `history` journey in
-`scripts/packaged-browser-history.mjs`. The general artifact catalog (progress journal,
-manifest, build contract, source archive) is not linked yet; it depends on the catalog
-route proposed in #1698. Per-attempt artifacts reachable today are the exploration and
-validation reports in the evidence view and source-file downloads.
+`scripts/packaged-browser-history.mjs`. The attempt Overview and Evidence views also offer an explicit
+catalog read for artifacts bound to the job and attempt. When a result revision
+is available, the reader can filter the catalog to that revision. The Evidence
+view also links the exploration and validation reports.
 
 ## Recorded harness identity
 
