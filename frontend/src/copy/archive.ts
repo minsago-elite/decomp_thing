@@ -4,7 +4,13 @@ export const archiveCopy = {
   distinction: 'This is the generated source archive of this revision: a ZIP of the reconstructed source tree for independent extraction and rebuild. It is not the application JAR that runs this workbench.',
   inspect: 'Show source archive status',
   refresh: 'Refresh source archive status',
-  changed: 'The archive changed. Refresh source archive status to see the current digest.',
+  // Verification refusals that establish the displayed digest, label and download no longer describe the retained
+  // archive. Each withdraws them; only an explicit Refresh reads the current state.
+  withdrawn: {
+    ARCHIVE_CHANGED: 'The archive changed. Refresh source archive status to see the current digest.',
+    ARCHIVE_NOT_FOUND: 'The source archive is no longer retained for this attempt, so its digest and download were withdrawn. Refresh source archive status to see the current state.',
+    ARCHIVE_TOO_LARGE: 'The retained archive now exceeds the 64 MiB verifier limit, so its digest and download were withdrawn. Refresh source archive status to see the current state.',
+  },
   loading: 'Reading source archive status…',
   identity: 'Source archive identity',
   revision: 'Revision', sourceCommitment: 'Source commitment',

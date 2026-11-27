@@ -330,3 +330,139 @@ it('recovers after a deliberate blur: the next focused activation lands on its r
   const committed = await verify(panel!, 'completed', verified);
   expect(document.activeElement).toBe(committed);
 });
+
+// #1805 round 14: the verifier's admission refusals 404 ARCHIVE_NOT_FOUND and 413 ARCHIVE_TOO_LARGE establish that the
+// displayed digest, verified label, download and Verify action no longer describe a retained, verifiable archive.
+const missing = status('source-archive-missing');
+const tooLarge: Status = decodeResponse(JSON.stringify((({ data, ...envelope }) => ({ ...envelope,
+  data: { ...data, archive: { ...data.archive, state: 'too-large' }, verification: { ...data.verification, state: 'too-large' } } }))(
+  JSON.parse(read('source-archive-missing')) as { data: Status })), 'sourceArchive').data;
+const requestId = '0f8e2c1a-6b3d-4e5f-9a7b-1c2d3e4f5a6b';
+const refusals = [
+  { status: 404, serverCode: 'ARCHIVE_NOT_FOUND', text: copy.withdrawn.ARCHIVE_NOT_FOUND, after: missing },
+  { status: 413, serverCode: 'ARCHIVE_TOO_LARGE', text: copy.withdrawn.ARCHIVE_TOO_LARGE, after: tooLarge },
+] as const;
+const placements = ['verify', 'link', 'elsewhere', 'blur'] as const;
+const intact = { badge: 'verified', digest: true, verify: true, link: true };
+
+/** Verified panel whose next POST is held until the returned callback rejects it. */
+async function heldRefusal(panel: HTMLElement) {
+  await inspect(panel, verified);
+  let reject!: (reason: Error) => void;
+  transport.post.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+  return (reason: Error) => reject(reason);
+}
+function verifiedControls(panel: HTMLElement) {
+  return { badge: result(panel)?.dataset.archiveState, digest: within(panel).queryByText(verified.archive.sha256!) !== null,
+    verify: within(panel).queryByRole('button', { name: copy.verify }) !== null,
+    link: within(panel).queryByRole('link', { name: copy.downloadVerified }) !== null };
+}
+
+it.each(refusals.flatMap(refusal => placements.map(placement => ({ ...refusal, placement }))))(
+  'withdraws the verified archive on $status $serverCode with focus on $placement and recovers only on explicit Refresh',
+  async ({ status: code, serverCode, text, after, placement }) => {
+    const { panels: [panel, peer] } = mount(2);
+    const refuse = await heldRefusal(panel!);
+    const action = button(panel!, copy.verify), refresh = button(panel!, copy.refresh);
+    const anchor = within(panel!).getByRole('link', { name: copy.downloadVerified });
+    action.focus(); action.click(); await microtasks();
+    const elsewhere = button(peer!, copy.inspect);
+    if (placement === 'link') anchor.focus();
+    if (placement === 'elsewhere') elsewhere.focus();
+    if (placement === 'blur') { action.blur(); await microtasks(); }
+    refuse(new ApiClientError('http_error', { status: code, serverCode, requestId }));
+    await microtasks();
+    // No verified badge, digest, verified download or Verify action survives the authoritative refusal.
+    expect(verifiedControls(panel!)).toEqual({ badge: undefined, digest: false, verify: false, link: false });
+    expect(within(panel!).queryByRole('link')).toBeNull();
+    const alert = within(panel!).getByRole('alert');
+    expect(alert.textContent).toContain(text);
+    expect(alert.textContent).toContain(requestId);
+    expect(within(panel!).getAllByRole('alert')).toHaveLength(1);
+    expect(document.activeElement).toBe({ verify: refresh, link: refresh, elsewhere, blur: document.body }[placement]);
+    // Bounded: the refusal starts no status read, poll or second verification on its own.
+    await vi.advanceTimersByTimeAsync(10_000); paint(); await microtasks();
+    expect(pending).toHaveLength(0);
+    expect(transport.get).toHaveBeenCalledTimes(1);
+    expect(transport.post).toHaveBeenCalledTimes(1);
+    expect(log.filter(entry => entry.includes('/archive-verifications/'))).toEqual([]);
+    // Recovery: one explicit read shows the server's current state without the withdrawn identity.
+    await inspect(panel!, after, copy.refresh);
+    expect(within(panel!).queryByRole('alert')).toBeNull();
+    expect(within(panel!).queryByRole('link')).toBeNull();
+    expect(within(panel!).queryByRole('button', { name: copy.verify })).toBeNull();
+    expect(within(panel!).getAllByText(copy.archiveStates[after.archive.state]).length).toBeGreaterThan(0);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    expect(transport.post).toHaveBeenCalledTimes(1);
+  });
+
+it.each(refusals)('recovers from $serverCode to a restored verified archive and verifies it again', async ({ status: code, serverCode, text }) => {
+  const { panels: [panel] } = mount();
+  const refuse = await heldRefusal(panel!);
+  button(panel!, copy.verify).focus(); button(panel!, copy.verify).click(); await microtasks();
+  refuse(new ApiClientError('http_error', { status: code, serverCode }));
+  await microtasks();
+  expect(within(panel!).getByRole('alert').textContent).toBe(text);
+  await inspect(panel!, verified, copy.refresh);
+  expect(verifiedControls(panel!)).toEqual(intact);
+  paint(); await microtasks();
+  button(panel!, copy.verify).focus();
+  const committed = await verify(panel!, 'completed', verified);
+  expect(document.activeElement).toBe(committed);
+  expect(transport.post).toHaveBeenCalledTimes(2);
+});
+
+// Retention controls: transient refusals, other codes and mismatched status/code pairs keep the last authoritative status.
+it.each([
+  { status: 404, serverCode: 'ARCHIVE_TOO_LARGE' }, { status: 413, serverCode: 'ARCHIVE_NOT_FOUND' },
+  { status: 409, serverCode: 'ARCHIVE_NOT_FOUND' }, { status: 409, serverCode: 'ARCHIVE_TOO_LARGE' },
+  { status: 404, serverCode: 'ARCHIVE_CHANGED' }, { status: 413, serverCode: 'ARCHIVE_CHANGED' },
+  { status: 404, serverCode: undefined }, { status: 413, serverCode: undefined }, { status: 413, serverCode: 'REQUEST_TOO_LARGE' },
+  { status: 404, serverCode: 'OPERATION_NOT_FOUND' }, { status: 409, serverCode: 'SOURCE_REVISION_CHANGED' },
+  { status: 409, serverCode: 'IDEMPOTENCY_CONFLICT' }, { status: 429, serverCode: 'ARCHIVE_VERIFICATION_BUSY' },
+  { status: 503, serverCode: 'ARCHIVE_VERIFICATION_UNAVAILABLE' },
+])('keeps the verified status on $status $serverCode', async ({ status: code, serverCode }) => {
+  const { panels: [panel] } = mount();
+  const refuse = await heldRefusal(panel!);
+  const action = button(panel!, copy.verify);
+  action.focus(); action.click(); await microtasks();
+  refuse(new ApiClientError('http_error', { status: code, ...(serverCode === undefined ? {} : { serverCode }) }));
+  await microtasks();
+  expect(verifiedControls(panel!)).toEqual(intact);
+  expect(button(panel!, copy.verify)).toBe(action);
+  const alert = within(panel!).getByRole('alert').textContent;
+  for (const withdrawal of Object.values(copy.withdrawn)) expect(alert).not.toContain(withdrawal);
+  expect(document.activeElement).toBe(action);
+  expect(transport.get).toHaveBeenCalledTimes(1);
+});
+
+it.each(['network_error', 'timeout', 'invalid_response', 'unexpected_response'] as const)(
+  'keeps the verified status when the client reports %s even with an archive refusal code', async code => {
+    const { panels: [panel] } = mount();
+    const refuse = await heldRefusal(panel!);
+    button(panel!, copy.verify).click(); await microtasks();
+    refuse(new ApiClientError(code, { status: 404, serverCode: 'ARCHIVE_NOT_FOUND' }));
+    await microtasks();
+    expect(verifiedControls(panel!)).toEqual(intact);
+    expect(within(panel!).getByRole('alert')).toBeTruthy();
+  });
+
+it.each(refusals)('ignores $serverCode delivered after the session or revision changes', async ({ status: code, serverCode }) => {
+  for (const change of ['session', 'revision'] as const) {
+    transport.get.mockClear(); transport.post.mockClear(); pending = []; log = [];
+    const view = render(<LocationProvider scope="/"><SourceArchive selected={selected} basePath="/" session={session} /></LocationProvider>);
+    const panel = view.container.querySelector<HTMLElement>('section.source-archive')!;
+    const refuse = await heldRefusal(panel);
+    button(panel, copy.verify).focus(); button(panel, copy.verify).click(); await microtasks();
+    const next = change === 'session' ? { selected, session: { csrf: () => 'csrf_token_2' } }
+      : { selected: { ...selected, revisionId: 'revision_2' }, session };
+    view.rerender(<LocationProvider scope="/"><SourceArchive selected={next.selected} basePath="/" session={next.session} /></LocationProvider>);
+    paint(); await microtasks();
+    refuse(new ApiClientError('http_error', { status: code, serverCode }));
+    await microtasks();
+    expect(within(panel).queryByRole('alert')).toBeNull();
+    if (change === 'session') expect(verifiedControls(panel)).toEqual(intact);
+    expect(transport.post).toHaveBeenCalledTimes(1);
+    view.unmount();
+  }
+});

@@ -14,8 +14,13 @@ import { archiveOperationRoute, archiveStatusRoute, archiveVerificationsRoute, b
 export const ARCHIVE_POLL_MS = 1000;
 export const ARCHIVE_POLL_LIMIT = 120;
 const terminal = (operation: Operation) => operation.state === 'completed' || operation.state === 'failed' || operation.state === 'interrupted';
-const archiveChanged = (failure: unknown) => failure instanceof ApiClientError && failure.code === 'http_error'
-  && failure.status === 409 && failure.serverCode === 'ARCHIVE_CHANGED';
+// Verification refusals whose exact status and code establish that the displayed digest no longer names the retained,
+// verifiable archive (WebSourceArchives.start). Any other pairing, including transient and capacity refusals, keeps it.
+const withdrawals = { ARCHIVE_CHANGED: 409, ARCHIVE_NOT_FOUND: 404, ARCHIVE_TOO_LARGE: 413 } as const;
+type Withdrawal = keyof typeof withdrawals;
+const withdrawal = (failure: unknown): Withdrawal | null => failure instanceof ApiClientError && failure.code === 'http_error'
+  && failure.serverCode !== undefined && Object.hasOwn(withdrawals, failure.serverCode)
+  && withdrawals[failure.serverCode as Withdrawal] === failure.status ? failure.serverCode as Withdrawal : null;
 type Progress = { state: 'submitting' } | { state: 'running' | 'done'; value: Operation }
   | { state: 'paused'; readKey: string } | { state: 'failed'; failure: unknown };
 
@@ -167,8 +172,9 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
         if (controller.signal.aborted) return;
         busy.current = false;
         awaiting.current = null;
-        if (archiveChanged(failure)) {
-          // The server rejected the digest behind this status and download URL. Only a new status read can restore them.
+        if (withdrawal(failure)) {
+          // The server established that the digest behind this status and download URL no longer names a retained,
+          // verifiable archive. Only a new, explicit status read can restore them.
           const active = document.activeElement;
           if (active && (active === control || active === link.current)) refreshControl.current?.focus();
           setRead({ key, state: 'failed', failure });
@@ -180,6 +186,7 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
     })();
   }
   const verification = data?.verification;
+  const withdrawn = current?.state === 'failed' ? withdrawal(current.failure) : null;
   return <section class="source-archive" aria-labelledby="source-archive-title">
     <h2 id="source-archive-title">{copy.title}</h2>
     <p>{copy.distinction}</p>
@@ -190,8 +197,8 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
       setRefresh(next);
     }}>{refresh === 0 ? copy.inspect : copy.refresh}</button>
     {current?.state === 'loading' && <p role="status">{copy.loading}</p>}
-    {current?.state === 'failed' && <p role="alert">{archiveChanged(current.failure)
-      ? withApiFailureReference(copy.changed, current.failure) : sourceReadMessage(current.failure)}</p>}
+    {current?.state === 'failed' && <p role="alert">{withdrawn
+      ? withApiFailureReference(copy.withdrawn[withdrawn], current.failure) : sourceReadMessage(current.failure)}</p>}
     {data && verification && <>
       <dl class="job-facts" aria-label={copy.identity}>
         <dt>{copy.revision}</dt><dd><code>{data.binding.runId}</code> · <code>{data.binding.revisionId}</code></dd>
