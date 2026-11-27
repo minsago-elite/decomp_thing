@@ -43,6 +43,13 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   // Keep DELETE response headers so the test follows the server's own operation Location.
   const responseHeaders = new Map();
   cdp.on('Network.responseReceived', event => responseHeaders.set(event.requestId, event.response.headers), tab.sessionId);
+  // Read each DELETE body as soon as it finishes loading; Chrome may evict it before a later read.
+  const deleteIds = new Set(); const deleteBodies = new Map();
+  cdp.on('Network.requestWillBeSent', event => { if (event.request.method === 'DELETE') deleteIds.add(event.requestId); }, tab.sessionId);
+  cdp.on('Network.loadingFinished', event => {
+    if (deleteIds.has(event.requestId)) deleteBodies.set(event.requestId, cdp.call('Network.getResponseBody', { requestId: event.requestId }, tab.sessionId)
+      .catch(error => ({ error: String(error.message ?? error) })));
+  }, tab.sessionId);
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
   await cdp.call('Page.navigate', { url: jobUrl }, tab.sessionId);
   await ready(tab, `document.querySelector('h2')?.textContent === 'lifecycle-fixture.elf' && document.querySelector('input[name="label"]:not(:disabled)') !== null`, 'lifecycle job route');
@@ -90,6 +97,11 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   // 3. Deliberate deletion: reviewed preview, typed confirmation gate, one DELETE.
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
+  // bringToFront flips visibilityState before Preact re-renders the availability-gated control;
+  // a click on the still-disabled button is a no-op, so act only once the physical control is enabled.
+  const reviewControl = `[...document.querySelectorAll('button')].find(button => button.textContent === 'Review what would be deleted')`;
+  await ready(tab, `document.visibilityState === 'visible' && ${reviewControl}?.disabled === false`, 'enabled deletion review control');
+  const previewsBefore = tab.requests.filter(request => request.url.includes('/deletion-preview')).length;
   await evaluate(tab, click('Review what would be deleted'));
   await ready(tab, `${deletion}?.innerText.includes('Job to delete') && ${deletion}.innerText.includes('Retained after deletion: a deletion record') && ${deletion}.querySelector('input[name="confirm"]') !== null`, 'deletion preview');
   // The reviewed preview, scoped to the deletion section, names exactly this fixture and its 64-byte input.
@@ -110,6 +122,7 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   const deletesBefore = tab.requests.filter(request => request.method === 'DELETE').length;
   await evaluate(tab, click('Delete permanently'));
   await ready(tab, deletedNotice, 'deleted notice in deleting tab');
+  assert.equal(tab.requests.filter(request => request.url.includes('/deletion-preview')).length - previewsBefore, 1, 'Deletion was not gated by exactly one reviewed preview');
   const deleteRequests = tab.requests.filter(request => request.method === 'DELETE').slice(deletesBefore);
   assert.equal(deleteRequests.length, 1);
   assert.equal(new URL(deleteRequests[0].url).pathname, '/nested/api/v1/jobs/' + job.id);
@@ -118,6 +131,14 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   const location = headers.location;
   assert.match(location ?? '', new RegExp(`^/nested/api/v1/jobs/${job.id}/operations/jobdel_[0-9a-f]{32}$`), 'DELETE did not return an operation Location');
   const operationId = location.split('/').pop();
+  // The page reports the operation DELETE actually acknowledged. When a background resumer already
+  // owns the purge, that acknowledgment is truthfully still running even though completion follows.
+  await waitFor(async () => deleteBodies.has(deleteRequests[0].requestId), 'DELETE response body', 10_000);
+  const deleteBody = await deleteBodies.get(deleteRequests[0].requestId);
+  assert.ok(!deleteBody.error, 'DELETE response body unavailable: ' + deleteBody.error);
+  const acknowledged = JSON.parse(deleteBody.body).data;
+  assert.equal(acknowledged.operationId, operationId, 'DELETE body and Location name different operations');
+  assert.ok(['running', 'completed'].includes(acknowledged.state), 'DELETE acknowledged an unexpected state ' + acknowledged.state);
   // Disappearance from the library is not completion: await the server's completed operation.
   let operation = null;
   await waitFor(async () => {
@@ -141,9 +162,11 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   // 4. Recovery and consistency: truthful copy, peer tab, deep-link reload, API 410, focusable return.
   // The permanent message itself says "cannot be undone"; what must be absent is any control offering to undo.
-  // #1944 renders the localized completed-state copy, never the raw server message.
-  const completedCopy = 'The job and its stored files were permanently deleted.';
-  await ready(tab, `${deletedAlert}?.textContent.includes(${JSON.stringify(completedCopy)}) && !${deletedAlert}.textContent.includes(${JSON.stringify(operation.message)})`, 'localized permanent deletion message in alert');
+  const localizedMessage = acknowledged.state === 'running' ? 'The deletion is running.' : 'The job and its stored files were permanently deleted.';
+  const stillRunning = 'File cleanup is still running and resumes after a restart if interrupted.';
+  await ready(tab, `${deletedAlert}?.textContent.includes(${JSON.stringify(localizedMessage)})
+    && !${deletedAlert}.textContent.includes(${JSON.stringify(acknowledged.message)})
+    && ${deletedAlert}.textContent.includes(${JSON.stringify(stillRunning)}) === ${acknowledged.state === 'running'}`, 'acknowledged deletion message in alert');
   assert.deepEqual(await evaluate(tab, `[...document.querySelectorAll('button, a[href], [role="button"], [role="link"], input, select, textarea')]
     .filter(control => /undo|restore|trash|recover/i.test((control.textContent || '') + ' ' + (control.value || '') + ' ' + (control.getAttribute('aria-label') || '') + ' ' + (control.getAttribute('title') || '')))
     .map(control => control.outerHTML)`), [], 'Deleted job offers an undo, restore or trash control');
@@ -180,7 +203,7 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.deepEqual(peer.exceptions, []);
   return { realBackend: true, labelEditedEvidenceUnchanged: true, archiveOrganizationOnly: true, archiveDistinctFromExport: true,
     defaultListingHidesArchived: true, typedConfirmationRequiresFileName: true, deleteRequests: 1, jobDirectoryRemoved: true,
-    deletionOperation: { location, state: operation.state }, detachedDataPurged: true, previewInputBytes: 64,
+    deletionOperation: { location, acknowledgedState: acknowledged.state, state: operation.state }, detachedDataPurged: true, previewInputBytes: 64,
     peerTabReconciled: true, peerDraftSurvivesNewerVersion: true, deepLinkReloadShowsDeleted: true, apiGone: 410, noUndoPromised: true,
     keyboardReturnFocus: landingFocus, mutationRequests: methods.length, executionStarted: false };
 }
