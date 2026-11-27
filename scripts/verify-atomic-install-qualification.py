@@ -862,8 +862,10 @@ def read_bytes(path: pathlib.Path, limit: int):
     return data
 
 
-def read_json(path: pathlib.Path, limit: int = MAX_JSON):
+def read_json(path: pathlib.Path, limit: int = MAX_JSON, *, expected_sha256=None):
     data = read_bytes(path, limit)
+    if expected_sha256 is not None:
+        require(hashlib.sha256(data).hexdigest() == expected_sha256, "task receipt digest differs")
     try:
         return json.loads(data, object_pairs_hook=no_duplicate_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError) as failure:
@@ -984,6 +986,37 @@ def task_arguments(command: dict) -> set[str]:
     return set(command_args(command))
 
 
+def validate_failed_publication(command, receipt, output, probe):
+    require(command["status"] == "failed" and command["exitCode"] != 0,
+            "injected update command did not fail")
+    tasks = [task for task in receipt["tasks"] if task["path"] == ":installDist"]
+    require(len(tasks) == 1 and all(tasks[0].get(k) is True for k in ("enabled", "executed", "failure")) and
+            all(tasks[0].get(k) is False for k in ("skipped", "upToDate", "noSource")) and
+            receipt.get("actionsStarted") is True and receipt.get("publisherCompleted") is False and
+            "publisherCompletedAtUnixNs" not in receipt, "injected update lacks the failed installDist action")
+
+    # validate_probe_files independently checks this READY against the barrier and installed classpath.
+    target = probe["ready"].get("mainOrigin")
+    events = receipt.get("events")
+    require(isinstance(events, list) and events and all(isinstance(e, dict) for e in events),
+            "injected update lacks publisher events")
+    require(all(e.get("phase") in {"source-before-copy", "source-after-copy", "staged", "published"}
+                for e in events[:-1]) and events[-1].get("phase") == "before-rename" and
+            events[-1].get("path") == target and isinstance(target, str) and pathlib.Path(target).is_absolute(),
+            "injected update did not stop at the first rename of the live application JAR")
+    times = [probe.get("readyAtUnixNs"), command["startedAtUnixNs"], receipt.get("actionsStartedAtUnixNs"),
+             *(e.get("atUnixNs") for e in events), tasks[0]["atUnixNs"], command["finishedAtUnixNs"],
+             probe.get("releasedAtUnixNs")]
+    require(all(type(t) is int for t in times) and times == sorted(times),
+            "failed install event timing differs from the live probe and command")
+    prefix = "installDist atomic publication failed during "
+    summaries = [line.partition(prefix)[2] for line in output.splitlines() if prefix in line]
+    expected = (f"rename {target}; completed renames=0, prunes=0, rename attempts=0, prune attempts=0; "
+                "protected targets unchanged (unprotected Sync files may have changed)")
+    require(summaries and all(summary == expected for summary in summaries),
+            "injected update lacks the target-specific zero-mutation publisher result")
+
+
 def validate_commands(record: dict, run_dir: pathlib.Path, repo=None):
     repo = ROOT if repo is None else repo
     commands = record.get("commands")
@@ -1001,20 +1034,23 @@ def validate_commands(record: dict, run_dir: pathlib.Path, repo=None):
         require(command.get("phase") == COMMAND_PHASES[index], "command phase differs from producer plan")
         require(command.get("commandId") == index, "command identity differs")
         init_path = child_path(run_dir, f"command-{index:02d}.init.gradle", "init script")
-        init_digest = file_receipt(init_path, MAX_JSON)["sha256"]
+        init_bytes = read_bytes(init_path, MAX_JSON)
+        init_digest = hashlib.sha256(init_bytes).hexdigest()
         require(command.get("init") == str(init_path) and command.get("initSha256") == init_digest,
                 "immutable command init path/hash differs")
         expected_config = {"commandId": index, "runRoot": str(run_dir), "generation": generations[index],
                            "failBeforeRename": index == 3, "replay": index == 2,
                            "exclusions": prepared.EXCLUSIONS if index == 2 else []}
         config = read_json(init_path.with_suffix(".json"))
-        require(config == expected_config == command.get("initConfig"), "init role/configuration differs")
+        require(all(value == expected_config and
+                    all(type(value[key]) is type(expected) for key, expected in expected_config.items())
+                    for value in (config, command.get("initConfig"))), "init role/configuration differs")
         expected_text = producer.init_text(config, root=repo, work=run_dir)
-        require(read_bytes(init_path, MAX_JSON).decode() == expected_text, "immutable init bytes differ from exact producer")
+        require(init_bytes == expected_text.encode(), "immutable init bytes differ from exact producer")
         receipt_path = child_path(run_dir, f"command-{index:02d}-events.json", "task receipt")
         require(command.get("taskReceipt") == str(receipt_path) and
-                command.get("taskReceiptSha256") == digest(receipt_path), "task receipt path/hash differs")
-        receipt = read_json(receipt_path, MAX_LOG)
+                isinstance(command.get("taskReceiptSha256"), str), "task receipt path/hash differs")
+        receipt = read_json(receipt_path, MAX_LOG, expected_sha256=command["taskReceiptSha256"])
         require(receipt.get("commandId") == index and receipt.get("runRoot") == str(run_dir), "task receipt role differs")
         require(type(command.get("startedAtUnixNs")) is int and type(command.get("finishedAtUnixNs")) is int and
                 command["startedAtUnixNs"] <= command["finishedAtUnixNs"], "command timestamps missing/reversed")
@@ -1037,7 +1073,12 @@ def validate_commands(record: dict, run_dir: pathlib.Path, repo=None):
                                            "-Dorg.gradle.java.installations.paths=")), "unexpected Gradle task/option")
         log = child_path(run_dir, command.get("log", ""), "command log")
         require(log.parent == run_dir, "command log is not directly under its run")
-        read_log(run_dir, command)
+        output = read_log(run_dir, command)
+        if index == 3:
+            probes = record.get("probes")
+            require(isinstance(probes, list) and len(probes) == 8 and isinstance(probes[1], dict) and
+                    isinstance(probes[1].get("ready"), dict), "missing live failure probe")
+            validate_failed_publication(command, receipt, output, probes[1])
         info = log.stat(follow_symlinks=False)
         key = (info.st_dev, info.st_ino)
         require(log not in logs and key not in log_keys, "duplicate command log")
@@ -1048,13 +1089,6 @@ def validate_commands(record: dict, run_dir: pathlib.Path, repo=None):
             "probe-agent build command did not pass")
     require(all(command.get("status") == "passed" for command in commands[1:3]), "initial/no-update install command failed")
 
-    injected = commands[3]
-    injected_log = read_log(run_dir, injected)
-    require(injected.get("status") == "failed" and isinstance(injected.get("exitCode"), int) and
-            injected["exitCode"] != 0 and "atomic-probe injected before first rename" in injected_log and
-            "completed renames=0" in injected_log,
-            "expected injected failed-before-rename command was not recorded")
-    require("installDist" in task_arguments(injected), "pre-rename control did not invoke installDist")
     require(all(command.get("status") == "passed" for command in [*commands[4:9], commands[10]]),
             "A/B transition or retained-authority setup install failed")
 
@@ -1336,6 +1370,9 @@ def _validate_prepared(record, run, repo):
         require(prepared.difference(before, after) == values[prefix + "-diff.json"] == prepared.EMPTY_DIFF,
                 "nonempty/altered no-update snapshot diff")
     require(manifest["mapping"] == prepared.mapping(plan, entries, run), "protected source mapping differs")
+    installed_app = manifest["mapping"]["lib/" + pathlib.Path(plan["originalJar"]).name]["destination"]
+    require(all(probe["ready"]["mainOrigin"] == installed_app for probe in record["probes"][:2]),
+            "live no-update/failure probe origin differs from the prepared application JAR")
     protected = values["protected-before.json"]["entries"]
     require(set(protected) == {"root-build/install/llm_bin_patch/" + n for n in manifest["mapping"]}, "protected snapshot membership differs")
     for logical, item in manifest["mapping"].items():
