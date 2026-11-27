@@ -164,6 +164,34 @@ it('shows measured bytes separately from publication and stops progress polling 
 });
 
 
+it('suspends progress sampling in a background tab without stopping the transfer', async () => {
+  vi.useFakeTimers();
+  let finish: (value: ResponseOf<'job'>) => void = () => undefined;
+  let uploadSignal: AbortSignal | undefined;
+  transport.upload.mockImplementation((_file, options) => { uploadSignal = options.signal; return new Promise(resolve => { finish = resolve; }); });
+  transport.get.mockImplementation((_kind, path) => Promise.resolve({
+    apiVersion: 1, kind: 'uploadProgress', requestId: 'progress_fixture',
+    data: { uploadId: path.split('/').at(-1)!, receivedBytes: '65536', totalBytes: null, state: 'receiving', jobId: null },
+  }));
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  try {
+    await mount(); select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    const visiblePolls = transport.get.mock.calls.length;
+    expect(visiblePolls).toBeGreaterThan(0);
+    visibility.mockReturnValue('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(transport.get).toHaveBeenCalledTimes(visiblePolls);
+    expect(uploadSignal?.aborted).toBe(false);
+    visibility.mockReturnValue('visible');
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(transport.get.mock.calls.length).toBeGreaterThan(visiblePolls);
+    await act(async () => { finish(fixture<ResponseOf<'job'>>('job-lossless')); await Promise.resolve(); });
+    expect(transport.route).toHaveBeenCalledOnce();
+  } finally { visibility.mockRestore(); }
+});
+
 it('associates a rejected multiple-file selection with the picker and clears it on valid reselection without moving focus', async () => {
   await mount();
   const picker = screen.getByLabelText<HTMLInputElement>('Binary file'); picker.focus();

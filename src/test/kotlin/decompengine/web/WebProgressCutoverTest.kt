@@ -276,6 +276,38 @@ class WebProgressCutoverTest {
             }
         } finally { readerWorker.shutdownNow(); assertTrue(readerWorker.awaitTermination(5, TimeUnit.SECONDS)) }
     }
+    @Test fun `two observing tabs receive identical frames and closing streams never changes the running attempt`() = Fixture().use { f ->
+        val running = f.owner.transition(f.job.id, f.run.runId, f.run.version, WorkflowTransition.Start).attempt
+        val metadata = Files.readAllBytes(f.root.resolve("${f.job.id}/workflow-state.json"))
+        val cursor = data(f.get("/snapshot")).getValue("throughCursor").jsonPrimitive.content
+        val readers = Executors.newFixedThreadPool(2)
+        try {
+            val tabs = listOf(f.stream(cursor), f.stream(cursor))
+            tabs.forEach { assertEquals(200, it.statusCode()) }
+            val streams = tabs.map { it.body().bufferedReader() }
+            val pending = streams.map { reader -> readers.submit<List<Map<String, String>>> { listOf(frame(reader), frame(reader)) } }
+            f.publish(0, 2)
+            val delivered = pending.map { it.get(5, TimeUnit.SECONDS) }
+            // Both tabs observe the same attempt over the same signed session cursors; neither acknowledges for the other.
+            assertEquals(delivered[0], delivered[1])
+            assertEquals(listOf("1", "2"), delivered[0].map { Json.parseToJsonElement(it.getValue("data")).jsonObject.getValue("sequence").jsonPrimitive.content })
+            // Closing one tab leaves the other stream delivering later publications.
+            streams[0].close()
+            val later = readers.submit<Map<String, String>> { frame(streams[1]) }
+            f.publish(0, 3)
+            assertEquals("3", Json.parseToJsonElement(later.get(5, TimeUnit.SECONDS).getValue("data")).jsonObject.getValue("sequence").jsonPrimitive.content)
+            streams[1].close()
+            assertEquals(running, f.service.getAttempt(f.job.id, f.run.runId), "Observation streams must not control attempt lifetime")
+            // Server-owned stream shutdown closes observers only; the attempt, its version and durable bytes are unchanged.
+            assertTrue(f.resources.shutdown())
+            assertEquals(0, f.resources.snapshot().active)
+            assertEquals(WorkflowRunState.RUNNING, f.service.getAttempt(f.job.id, f.run.runId).state)
+            assertEquals(running, f.service.getAttempt(f.job.id, f.run.runId))
+            assertContentEquals(metadata, Files.readAllBytes(f.root.resolve("${f.job.id}/workflow-state.json")))
+            assertEquals(listOf("1", "2", "3"), replay(f, cursor))
+        } finally { readers.shutdownNow(); assertTrue(readers.awaitTermination(5, TimeUnit.SECONDS)) }
+    }
+
     @Test fun `owned terminal expiry reaches SSE and polling with recoverable empty snapshots`() {
         val controls = ControlledWorkflowFixture()
         Fixture(controls).use { f ->

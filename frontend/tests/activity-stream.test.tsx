@@ -168,6 +168,63 @@ it('uses polling when the server explicitly reports exhausted stream capacity', 
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
+it('falls back to polling after two general 503 stream refusals without losing rows', async () => {
+  const error = fixture<{ error: { code: string } }>('error-validation');
+  error.error.code = 'STREAMS_DRAINING';
+  fetcher.mockImplementation(() => Promise.resolve(new Response(JSON.stringify(error), { status: 503,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })));
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'snapshot' ? snapshot
+    : { data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } }));
+  await start();
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(screen.getByRole('status').textContent).toContain('Reconnecting');
+  await advance(1000);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  await advance(2000);
+  expect(transport.get.mock.calls.at(-1)![1]).toContain(`transport=poll&limit=199&after=${page.data.nextCursor}`);
+  expect(screen.getByRole('status').textContent).toContain('Using periodic refresh');
+  expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+// Injected-503 recovery control for a possible journal-publication read failure (#514).
+// This does not establish the cause of the historical packaged appended-SSE timeout.
+it('retries a stream refused during journal republication over a fresh stream without polling', async () => {
+  const error = fixture<{ error: { code: string } }>('error-validation');
+  error.error.code = 'PROGRESS_UNAVAILABLE';
+  const resumed = connection();
+  fetcher.mockResolvedValueOnce(new Response(JSON.stringify(error), { status: 503,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })).mockResolvedValueOnce(resumed.response);
+  transport.get.mockResolvedValueOnce(snapshot);
+  await start();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('status').textContent).toContain('Reconnecting');
+  await advance(1000);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(new Headers(fetcher.mock.calls[1]![1]?.headers).get('Last-Event-ID')).toBe(page.data.nextCursor);
+  await act(async () => { await Promise.resolve(); resumed.send(next(1)); }); await advance(0);
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('status').textContent).not.toContain('Using periodic refresh');
+  // Catch-up page, then exactly one reconciling snapshot; no polling page after the refusal.
+  expect(transport.get.mock.calls.map(call => call[0])).toEqual(['snapshot', 'events', 'snapshot']);
+});
+
+it('reports a persistently unavailable journal after bounded jittered retries', async () => {
+  const error = fixture<{ error: { code: string } }>('error-validation');
+  error.error.code = 'PROGRESS_UNAVAILABLE';
+  fetcher.mockImplementation(() => Promise.resolve(new Response(JSON.stringify(error), { status: 503,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })));
+  transport.get.mockResolvedValue(snapshot);
+  await start();
+  await advance(60_000);
+  expect(fetcher).toHaveBeenCalledTimes(5);
+  expect(screen.getByRole('alert').textContent).toContain('could not be verified');
+  await advance(60_000);
+  expect(fetcher).toHaveBeenCalledTimes(5);
+});
+
 // These consumer controls reuse the existing in-memory transport and fake clock.
 const contextUpdate = (offset: number): WebEvent => ({
   ...first, sequence: String(BigInt(first.sequence) + BigInt(offset)), cursor: `cursor_usage_${offset}`,

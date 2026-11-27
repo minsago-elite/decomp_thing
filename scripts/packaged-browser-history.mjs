@@ -16,7 +16,7 @@ export async function seedHistory(root) {
   const at = new Date(Date.now() - 300_000).toISOString();
   const job = { id: jobId, filename: 'synthetic-history.elf', status: 'uploaded', created_at: at, updated_at: at,
     size_bytes: 64, binary_path: join(directory, 'input.elf'), metadata: { format: 'ELF64', endianness: 'little',
-      elf_version: 1, os_abi: 'System V', object_type: 'EXEC', machine: 'x86-64', entry_point: 0,
+      elf_version: 1, os_abi: 'System V', object_type: 'executable', machine: 'x86-64', entry_point: 0,
       elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
   const jobBytes = JSON.stringify(job);
   const attempts = Array.from({ length: 55 }, (_, index) => {
@@ -31,7 +31,8 @@ export async function seedHistory(root) {
       candidate: state === 'completed' ? { revisionId: `revision_fixture_${index}`, sourceSha256: 'e'.repeat(64) } : null,
       acceptedRevision: null };
   });
-  const state = { schemaVersion: 1, jobId, version: 'version_fixture_history',
+  // Public job projection requires the same opaque version format as the real writer.
+  const state = { schemaVersion: 1, jobId, version: 'version_' + 'd'.repeat(32),
     legacy: { originalJobSha256: createHash('sha256').update(jobBytes).digest('hex'), status: 'uploaded', recoveredInterrupted: false },
     attempts, acceptedRevision: null };
   const retained = { 'input.elf': input, 'job.json': jobBytes, 'workflow-state.json': JSON.stringify(state) };
@@ -119,21 +120,24 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
     assert.equal(event.payload.fields.text, undefined);
     assert.equal(event.payload.fields.entries, undefined);
     assert.equal(event.payload.fields.path, undefined);
+    assert.equal(event.payload.fields.taskId, undefined);
+    // The classifier also withholds taskId: plans omit taskId + entries,
+    // file changes omit taskId + path, and other rows omit taskId + path + text.
     if (event.sequence === '1') {
       assert.equal(event.payload.observationKind, 'plan');
       assert.equal(event.payload.fields.entriesTruncated, false);
       assert.equal(event.payload.fields.entryCount, '1');
       assert.equal(event.payload.fields.textOmitted, undefined);
-      assert.equal(event.payload.omittedFieldCount, '1');
+      assert.equal(event.payload.omittedFieldCount, '2');
     } else if (event.sequence === '2') {
       assert.equal(event.payload.observationKind, 'file_change');
       assert.equal(event.payload.fields.change, 'modified');
       assert.equal(event.payload.fields.afterSha256, 'c'.repeat(64));
       assert.equal(event.payload.fields.textOmitted, undefined);
-      assert.equal(event.payload.omittedFieldCount, '1');
+      assert.equal(event.payload.omittedFieldCount, '2');
     } else {
       assert.equal(event.payload.fields.textOmitted, true);
-      assert.equal(event.payload.omittedFieldCount, '2');
+      assert.equal(event.payload.omittedFieldCount, '3');
     }
   }
   assert.ok(!JSON.stringify(polling).includes('Synthetic private'));
@@ -325,7 +329,15 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.ok(accessibility.nodes.some(node => node.role?.value === 'status' && node.properties?.some(property => property.name === 'live' && property.value.value === 'polite')));
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read exploration evidence').click()`);
-  await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
+  try {
+    await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Uncalibrated exploration breadth heuristic')`, 'bound exploration summary');
+  } catch (failure) {
+    const page = await evaluate(tab, `({ pathname: location.pathname,
+      heading: document.querySelector('h1')?.textContent ?? null,
+      evidence: document.querySelector('[aria-labelledby="exploration-evidence-title"]')?.innerText.slice(0, 2000) ?? null,
+      alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.innerText.slice(0, 500)) })`).catch(() => null);
+    throw new Error(`Bound exploration summary diagnostic: ${JSON.stringify({ page, requests: tab.requests.slice(-12), responses: tab.responses.slice(-12) })}`, { cause: failure });
+  }
   assert.ok(await evaluate(tab, `document.body.innerText.includes('not proof of equivalence')`));
   assert.equal(await fs.readFile(fixture.reportPath, 'utf8'), fixture.exploration);
   const downloads = join(fixture.directory, '..', '..', 'browser downloads');
