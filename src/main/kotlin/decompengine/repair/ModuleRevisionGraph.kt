@@ -1469,6 +1469,22 @@ class RetainedRegressionCorpus(inputs: Collection<ProcessInput>, val sha256: Str
     val inputs: List<ProcessInput> get() = immutableList(content.map(ProcessInput::deepCopy))
 }
 
+/** Data-only snapshot issued to one secure repair session for exploration-before-repair flows. */
+class RepairExplorationSnapshotData(
+    val formatVersion: Int,
+    val projectPath: String,
+    inputs: Collection<ProcessInput>,
+    val corpusSha256: String,
+    val graphSha256: String,
+    val profileSha256: String,
+    val indexSha256: String,
+    val headId: String,
+    val originalBinarySha256: String,
+) {
+    private val corpus = RetainedRegressionCorpus(inputs, corpusSha256)
+    val inputs: List<ProcessInput> get() = corpus.inputs
+}
+
 class ModuleRevisionAttempt internal constructor(val id: String)
 
 internal sealed interface ModuleRevisionFaultPoint {
@@ -2298,6 +2314,10 @@ internal class ModuleRevisionGraph private constructor(
             )
         }
 
+    /** The immutable source-tree contract admitted by this graph's repair index, when present. */
+    internal val declaredRoleProfile: ReconstructionProfile?
+        get() = index.profile.reconstructionProfile()
+
     /** Preserve the original bytes before assigning honest authority to legacy head records. */
     @Synchronized
     fun enableRunContract() = graphOperation {
@@ -2560,6 +2580,36 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun retainedRegressionCorpus(): RetainedRegressionCorpus = graphOperation {
         RetainedRegressionCorpus(state.retainedRegressionInputs, state.regressionCorpusSha256)
+    }
+
+    /** Capture the graph and retained inputs in one graph operation under the lifetime root lock. */
+    @Synchronized
+    fun captureExplorationSnapshot(originalBinarySha256: String): RepairExplorationSnapshotData = graphOperation {
+        require(originalBinarySha256.matches(REPAIR_BLOB_DIGEST)) { "exploration binary digest is invalid" }
+        RepairExplorationSnapshotData(
+            1,
+            portableProjectRoot.toAbsolutePath().normalize().pathString,
+            state.retainedRegressionInputs,
+            state.regressionCorpusSha256,
+            sha256(renderGraph(state).toByteArray(Charsets.UTF_8)),
+            state.profileSha256,
+            state.indexSha256,
+            state.headId,
+            originalBinarySha256,
+        )
+    }
+
+    /** Must run before any graph mutation while the caller retains this graph's root lock. */
+    @Synchronized
+    fun requireCurrentExplorationSnapshot(snapshot: RepairExplorationSnapshotData) = graphOperation {
+        require(snapshot.formatVersion == 1 &&
+            snapshot.projectPath == portableProjectRoot.toAbsolutePath().normalize().pathString &&
+            snapshot.graphSha256 == sha256(renderGraph(state).toByteArray(Charsets.UTF_8)) &&
+            snapshot.corpusSha256 == state.regressionCorpusSha256 &&
+            snapshot.profileSha256 == state.profileSha256 && snapshot.indexSha256 == state.indexSha256 &&
+            snapshot.headId == state.headId) {
+            "retained exploration snapshot is stale for the current repair graph"
+        }
     }
 
     @Synchronized
@@ -5523,10 +5573,14 @@ private fun recordedHistoryCapture(
                     RepairRecordedValidationContext(state.profileId, state.budget))
             }, normalObservation(it.id, it.baselineId))
     }
+    // An assessed baseline accepts the root itself; expose it only with a proof bound to the root's source.
+    val acceptedBaseline = state.nodes.singleOrNull { it.id == state.fullyAcceptedHeadId && it.status == ModuleRevisionStatus.ROOT }
+        ?.let { root -> state.acceptedProof?.takeIf { it.sourceRevisionSha256 == root.sourceRevisionSha256 }
+            ?.let { proof -> RepairRecordedAcceptedBaseline(identities.revision(root.id), root.sourceRevisionSha256, proof.assurance) } }
     val snapshot = RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),
         state.regressionCorpusSha256, identities.revision(state.headId), identity(state.provisionalHeadId),
         identity(state.fullyAcceptedHeadId), runs, attempts, pending,
-        state.retainedRegressionInputs.map { identities.case(it.id) })
+        state.retainedRegressionInputs.map { identities.case(it.id) }, acceptedBaseline)
     return RepairHistoryArtifactCapture(snapshot, artifactPaths)
 }
 
@@ -7224,7 +7278,7 @@ internal data class StableRegularFile(
     val identity: LinuxFileIdentity,
 )
 
-internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity)
+internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity, val validUtf8: Boolean)
 
 /** Stream a pinned regular file, then revalidate its metadata and every directory binding. */
 internal fun hashStableRegularFile(
@@ -7268,6 +7322,7 @@ internal fun hashStableRegularFile(
         requireUnchanged(before.isRegularFile) { "stable hash descriptor is not regular" }
         declaredSize(before.size())
         val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val utf8 = StrictUtf8ByteValidator()
         val buffer = ByteArray(64 * 1024)
         var size = 0L
         // This kernel-owned proc entry references our still-owned descriptor, not the workspace name.
@@ -7279,6 +7334,7 @@ internal fun hashStableRegularFile(
                 size = Math.addExact(size, count.toLong())
                 readBytes(count, size)
                 digest.update(buffer, 0, count)
+                utf8.accept(buffer, count)
             }
         }
         cancellationCheck()
@@ -7292,12 +7348,47 @@ internal fun hashStableRegularFile(
         }
         revalidateDescriptorPath(base, parts, directories.map { it.identity }, authorized.identity)
         cancellationCheck()
-        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity)
+        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity, utf8.finish())
     } finally {
         readable?.close()
         authorized?.close()
         directories.asReversed().forEach { it.close() }
     }
+}
+
+/** Incremental UTF-8 validation performed on the exact descriptor-bound bytes being hashed. */
+private class StrictUtf8ByteValidator {
+    private var remaining = 0
+    private var codePoint = 0
+    private var minimum = 0
+    private var valid = true
+
+    fun accept(bytes: ByteArray, count: Int) {
+        if (!valid) return
+        for (index in 0 until count) {
+            val value = bytes[index].toInt() and 0xff
+            if (remaining == 0) {
+                when {
+                    value <= 0x7f -> Unit
+                    value in 0xc2..0xdf -> { remaining = 1; codePoint = value and 0x1f; minimum = 0x80 }
+                    value in 0xe0..0xef -> { remaining = 2; codePoint = value and 0x0f; minimum = 0x800 }
+                    value in 0xf0..0xf4 -> { remaining = 3; codePoint = value and 0x07; minimum = 0x10000 }
+                    else -> valid = false
+                }
+            } else if (value !in 0x80..0xbf) {
+                valid = false
+            } else {
+                codePoint = (codePoint shl 6) or (value and 0x3f)
+                remaining--
+                if (remaining == 0 && (codePoint < minimum || codePoint > 0x10ffff || codePoint in 0xd800..0xdfff)) {
+                    valid = false
+                }
+            }
+            if (!valid) return
+        }
+    }
+
+    fun finish(): Boolean = valid && remaining == 0
 }
 
 internal fun readStableRegularFile(

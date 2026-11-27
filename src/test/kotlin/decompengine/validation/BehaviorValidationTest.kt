@@ -7,6 +7,7 @@ import decompengine.project.RecoveredCModuleReconstructor
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.SourceTreeGenerator
+import java.io.IOException
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -24,6 +25,26 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 
 class BehaviorValidationTest {
+    @Test
+    fun `sandbox process creation failure is typed without wrapping unrelated failures`() {
+        val launchCause = IOException("private launch diagnostic")
+        val launchFailure = assertFailsWith<BehaviorExecutionLaunchException> {
+            startBehaviorSandboxProcess { throw launchCause }
+        }
+        assertTrue(launchFailure.cause === launchCause)
+        assertFalse(launchFailure.message!!.contains(launchCause.message!!))
+
+        val denied = SecurityException("private process policy diagnostic")
+        assertTrue(assertFailsWith<BehaviorExecutionLaunchException> {
+            startBehaviorSandboxProcess { throw denied }
+        }.cause === denied)
+
+        val unrelated = IllegalStateException("unrelated")
+        assertTrue(assertFailsWith<IllegalStateException> {
+            startBehaviorSandboxProcess { throw unrelated }
+        } === unrelated)
+    }
+
     @Test
     fun `completed programs exceeding stream or aggregate bounds preserve prior reports`() {
         val root = createTempDirectory("validation-output-bounds-")

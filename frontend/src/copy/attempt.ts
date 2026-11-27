@@ -255,6 +255,9 @@ export const explorationCasesCopy = {
   title: 'Retained exploration cases',
   scope: 'This view reads the selected report artifact only. Filtering and inspecting records never executes an input or starts a workflow.',
   outcomesUnreported: 'This unversioned format does not record timeout or execution-failure classifications. An observed exit code alone cannot distinguish them.',
+  versionedOutcomes: 'This versioned report separates generated observations from retained regression inputs. Viewing a retained input never executes it or changes exploration confidence.',
+  retainedDisplayOnly: '{count} retained regression input(s) are shown for inspection only; they were not run by this exploration.',
+  retainedInputsOmitted: '{count} retained regression input(s) were omitted by the display budget. Download the report artifact for its bounded record.',
   partialFormat: 'This partial record cannot provide coverage or confidence. Read its retained details to inspect the reported failure and any recorded inputs or observations.',
   preparationCase: '{group} position {index}: {id}', preparationPosition: 'Retained input position',
   preparationGroups: { seeds: 'Provided seeds', angr: 'Angr-generated inputs', staticHints: 'Static-hint inputs', expanded: 'Final expanded proposal' },
@@ -282,6 +285,7 @@ export const explorationCasesCopy = {
   failureReasons: {
     'behavior-deadline-exceeded': 'Producer-reported observation timeout.',
     'sandbox-unavailable': 'Producer-reported unavailable sandbox tooling.',
+    'sandbox-wrapper-start-failed': 'Producer-reported that the sandbox invocation wrapper process could not start.',
     'output-limit-exceeded': 'Producer-reported output-limit failure.',
     'completion-unverified': 'Producer-reported unverified execution completion.',
     'producer-interrupted': 'Producer-reported observation interruption.',

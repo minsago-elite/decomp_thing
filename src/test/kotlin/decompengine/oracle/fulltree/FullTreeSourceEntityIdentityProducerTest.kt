@@ -795,7 +795,7 @@ class FullTreeSourceEntityIdentityProducerTest {
         val source = rowRoot.resolve("edge-bound.cpp")
         Files.writeString(
             source,
-            "inline int edge_bound($formalParameters);\n" +
+            "int edge_bound($formalParameters) { return p0; }\n" +
                 "int (*edge_bound_reference)($formalParameters) = &edge_bound;\n",
             StandardCharsets.UTF_8,
         )
@@ -825,8 +825,17 @@ class FullTreeSourceEntityIdentityProducerTest {
             rowRoot,
             "edge-bound-dwarf-shape.txt",
         )
-        assertTrue(Regex("DW_AT_name.*edge_bound").containsMatchIn(dwarfShape), "33-parameter declaration DIE was not emitted")
-        assertTrue(dwarfShape.contains("DW_AT_declaration"), "declaration-only edge-bound shape was not emitted")
+        val edgeBoundDeclaration = Regex(
+            "(?ms)^ <1><[0-9a-f]+>: Abbrev Number: \\d+ \\(DW_TAG_subprogram\\)\\n(.*?)(?=^ <1><[0-9a-f]+>: Abbrev Number: |\\z)",
+        ).findAll(dwarfShape).map { it.groupValues[1] }.firstOrNull { die ->
+            Regex("(?m)^\\s+<[^>]+>\\s+DW_AT_name\\s*:\\s+.*\\bedge_bound(?:\\s|$)").containsMatchIn(die)
+        }
+        assertTrue(edgeBoundDeclaration != null, "33-parameter subprogram DIE was not emitted")
+        assertEquals(
+            33,
+            Regex("\\(DW_TAG_formal_parameter\\)").findAll(edgeBoundDeclaration.orEmpty()).count(),
+            "edge-bound subprogram declaration must retain all 33 formal parameters",
+        )
         val scope = scopeForArtifact(originalScope, fixtureSha256(artifact), Files.size(artifact))
         val inventoryPath = rowRoot.resolve("edge-bound-inventory.json")
         val inventory = FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)

@@ -4,6 +4,7 @@ import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.BestEffortProgressJournal
+import decompengine.jobs.FullRunJournalWriterHooks
 import java.io.PrintStream
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
@@ -19,12 +20,37 @@ internal fun <T> withReconstructionCliProgress(
     reportsDirectory: Path,
     sensitiveValues: Collection<String> = emptyList(),
     output: PrintStream = System.err,
+    inputPath: Path? = null,
     action: (ReconstructionCliProgress) -> T,
-): T = ReconstructionCliProgress.open(reportsDirectory, sensitiveValues, output).use(action)
+): T = ReconstructionCliProgress.open(reportsDirectory, sensitiveValues, output, inputPath = inputPath).use(action)
+
+private fun retireWorkspaceAfterWritersStop(
+    journal: BestEffortProgressJournal?,
+    observer: CliProgressObserver?,
+    workspace: decompengine.project.ReconstructionOutputWorkspace?,
+) {
+    val ownedWorkspace = workspace ?: return
+    if (journal?.writerAlive != true && observer?.workerAlive != true) {
+        ownedWorkspace.close()
+        return
+    }
+    Thread({
+        try {
+            journal?.awaitWriterTermination()
+            observer?.awaitWorkerTermination()
+        } finally {
+            ownedWorkspace.close()
+        }
+    }, "reconstruction-workspace-retirement").apply {
+        isDaemon = true
+        start()
+    }
+}
 
 internal class ReconstructionCliProgress private constructor(
     private val journal: BestEffortProgressJournal,
     private val observer: CliProgressObserver,
+    private val workspace: decompengine.project.ReconstructionOutputWorkspace?,
 ) : AgentWorkflowProgress by journal, AutoCloseable {
     private val closed = AtomicBoolean()
 
@@ -33,8 +59,13 @@ internal class ReconstructionCliProgress private constructor(
         try {
             journal.close()
         } finally {
-            observer.close()
+            try { observer.close() } finally { retireWorkspaceAfterWritersStop(journal, observer, workspace) }
         }
+    }
+
+    override fun runContext(inputSha256: String, profileSha256: String) {
+        workspace?.let { require(it.inputSha256 == inputSha256) { "reconstruction input changed after workspace activation" } }
+        journal.runContext(inputSha256, profileSha256)
     }
 
     companion object {
@@ -43,20 +74,30 @@ internal class ReconstructionCliProgress private constructor(
             sensitiveValues: Collection<String>,
             output: PrintStream,
             readSnapshot: (Path) -> JsonObject? = { directory -> AgentProgressJournal.read(directory) },
+            inputPath: Path? = null,
+            fullRunWriterHooks: FullRunJournalWriterHooks? = null,
         ): ReconstructionCliProgress {
-            val observer = CliProgressObserver(reportsDirectory, output, CliProgressWorkflow.RECONSTRUCTION, readSnapshot)
+            val workspace = inputPath?.let { decompengine.project.ReconstructionOutputWorkspace.open(reportsDirectory, it) }
+            var observer: CliProgressObserver? = null
             var journal: BestEffortProgressJournal? = null
             try {
+                observer = CliProgressObserver(reportsDirectory, output, CliProgressWorkflow.RECONSTRUCTION, readSnapshot)
                 val owned = BestEffortProgressJournal(
                     reportsDirectory, "reconstruction", sensitiveValues,
                     onPhase = observer::reconstructionPhase,
+                    recordFullRun = true,
                     onUnavailable = observer::unavailable,
+                    fullRunWriterHooks = fullRunWriterHooks,
                 )
                 journal = owned
-                owned.journalRunId?.let(observer::bindReconstructionRun)
-                return ReconstructionCliProgress(owned, observer)
+                owned.journalRunId?.let(requireNotNull(observer)::bindReconstructionRun)
+                return ReconstructionCliProgress(owned, requireNotNull(observer), workspace)
             } catch (failure: Throwable) {
-                try { journal?.close() } finally { observer.close() }
+                try { journal?.close() } finally {
+                    try { observer?.close() } finally {
+                        retireWorkspaceAfterWritersStop(journal, observer, workspace)
+                    }
+                }
                 throw failure
             }
         }
@@ -86,6 +127,20 @@ internal class CliProgressObserver(
         runCatching { readSnapshot(reportsDirectory) }.getOrNull(), workflow,
     ) else null
     private val worker = Thread(::observe, "${workflow.wireName}-cli-progress").apply { isDaemon = true; start() }
+    internal val workerAlive: Boolean get() = worker.isAlive
+
+    internal fun awaitWorkerTermination() {
+        if (Thread.currentThread() === worker) return
+        var interrupted = false
+        while (worker.isAlive) {
+            try {
+                worker.join()
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
+    }
 
     fun unavailable() {
         warningRequested.set(true)

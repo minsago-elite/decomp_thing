@@ -11,6 +11,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  c-vulnerability-repairs:
+    name: Ten C vulnerability reference repairs
+    uses: ./.github/workflows/c-vul-qualification.yml
+    permissions:
+      contents: read
+
   frontend:
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
@@ -171,6 +177,7 @@ jobs:
           sudo apt-get update
           mapfile -t web_browser_dependencies < "$RUNNER_TEMP/web-test-browser/deb.deps"
           sudo apt-get satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
+          sudo apt-get install -y --no-install-recommends xvfb
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Record browser pin and check driver lifecycle
         run: |
@@ -180,6 +187,10 @@ jobs:
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
           node --test scripts/packaged-browser-upload.test.mjs
+          node --check scripts/packaged-browser-restart.mjs
+          node --test scripts/packaged-browser-restart.test.mjs
+          node --check scripts/packaged-browser-cdp-diagnostics.mjs
+          node --test scripts/packaged-browser-cdp-diagnostics.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
@@ -244,6 +255,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Exercise same-origin JVM restart and two-tab stale progress pin
+        run: |
+          xvfb-run -a node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode restart --no-sandbox
       - name: Audit packaged routes for reflow, contrast, focus, assets under CSP and timing
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -333,6 +350,8 @@ jobs:
             bubblewrap \
             binutils \
             build-essential \
+            clang \
+            llvm \
             dbus-user-session \
             e2fsprogs \
             bzip2 \
@@ -488,6 +507,14 @@ jobs:
             build/reports/tests/gccCompilerEnginePlanningIsolated
             build/test-results/gccCompilerEnginePlanningIsolated
             build/analysis-native-installed-verification.txt
+      - name: Retain bounded ACP integration failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: acp-required-contract-diagnostics-${{ matrix.shard }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: build/acp-required-contract-diagnostics/
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh
@@ -563,9 +590,13 @@ jobs:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/gradle-user-home
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -600,6 +631,7 @@ jobs:
           mkdir -p build/exporter-rendering-v16
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
+            --tests decompengine.analysis.BundledGhidraManifestRejectionTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
             --tests decompengine.project.GhidraReferencedBytesExporterTest \
@@ -612,6 +644,23 @@ jobs:
             --tests decompengine.web.SourceTreeJobReconstructorTest
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
+      - name: Verify atomic bundle publication and refusal controls
+        run: ./gradlew --no-daemon --offline verifyAtomicGhidraBundlePublication
+      - name: Verify installed Ghidra publication overlap coordinator controls
+        run: python3 scripts/qualify-ghidra-install-overlap.py --self-test
+      - name: Qualify real installed reconstruction during same-bundle publication
+        timeout-minutes: 30
+        env:
+          QUALIFICATION_PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          QUALIFICATION_PR_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 -B scripts/qualify-ghidra-install-overlap.py --offline --deadline-seconds 1500 --cleanup-reserve-seconds 240
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundled-ghidra-install-overlap
+          include-hidden-files: true
+          retention-days: 14
+          path: build/ghidra-install-overlap
       - uses: actions/upload-artifact@v7
         if: always()
         with:
