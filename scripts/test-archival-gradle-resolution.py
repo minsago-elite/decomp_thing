@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Exercise the archival installDist command against a loopback Gradle plugin repository."""
+"""Exercise CI Gradle dependency resolution against a loopback plugin repository."""
 import argparse
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
 from zipfile import ZipFile
@@ -120,8 +123,11 @@ def archival_command(gradle):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gradle", type=Path, default=ROOT / "gradlew", help="pinned Gradle wrapper or distribution executable")
+    parser.add_argument("--target", choices=("archival", "builtin"), default="archival")
     args = parser.parse_args()
-    command = archival_command(args.gradle.resolve())
+    gradle = args.gradle.resolve()
+    builtin = args.target == "builtin"
+    command = [sys.executable, "scripts/validate-builtin-contract.py"] if builtin else archival_command(gradle)
     build = ROOT / "build"
     build.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="archival-gradle-", dir=build) as work:
@@ -138,6 +144,13 @@ def main():
         for scenario, expected in cases.items():
             project = base / scenario
             project.mkdir()
+            if builtin:
+                (project / "scripts").mkdir()
+                shutil.copyfile(ROOT / "scripts/validate-builtin-contract.py", project / "scripts/validate-builtin-contract.py")
+                (project / "gradlew").symlink_to(gradle)
+                test_sources = project / "src/test/java"
+                test_sources.mkdir(parents=True)
+                (test_sources / "FixtureProbe.java").write_text("class FixtureProbe {}\n")
             # Share only the pinned wrapper distribution. Each scenario must fetch its own metadata.
             gradle_home = base / f"gradle-{scenario}"
             gradle_home.mkdir()
@@ -149,8 +162,8 @@ def main():
 }}
 rootProject.name = 'archival-resolver-control'
 """)
-                (project / "build.gradle").write_text("""plugins { id 'fixture.archival' version '1.0' }
-tasks.register('installDist') {
+                task = "tasks.named('test') {\n    filter { failOnNoMatchingTests = false }" if builtin else "tasks.register('installDist') {"
+                (project / "build.gradle").write_text("plugins { id 'fixture.archival' version '1.0' }\n" + task + """
     doLast {
         file('task-runs').append('ran\\n')
         if (projectDir.name == 'task-failure') {
@@ -164,11 +177,18 @@ tasks.register('installDist') {
                                         stderr=subprocess.STDOUT, text=True, timeout=150)
             ran = project / "task-runs"
             runs = ran.read_text().splitlines() if ran.exists() else []
-            if ((result.returncode == 0) != (scenario == "recover")
+            gradle_exit = result.returncode
+            if builtin:
+                # The fixture has no real contract suites. Even a successful Gradle invocation must fail validation.
+                verdict = json.loads((project / "build/builtin-contract-qualification/summary.json").read_text())
+                if result.returncode != 1 or verdict["passed"] or not any(reason.startswith("Missing suite:") for reason in verdict["failures"]):
+                    raise AssertionError(f"{scenario}: builtin validator did not refuse the absent suite inventory")
+                gradle_exit = verdict["gradleExitCode"]
+            if ((gradle_exit == 0) != (scenario == "recover")
                     or statuses != [("GET", code) for code in expected]
                     or runs != (["ran"] if scenario in ("recover", "task-failure") else [])):
                 raise RuntimeError(f"{scenario}: exit {result.returncode}, BOM {statuses}, task runs {runs}\n{result.stdout[-3500:]}")
-            print(f"{scenario}: BOM {statuses}, installDist ran {len(runs)} time(s), exit {result.returncode}", flush=True)
+            print(f"{scenario}: BOM {statuses}, {args.target} task ran {len(runs)} time(s), Gradle exit {gradle_exit}", flush=True)
 
 
 if __name__ == "__main__":
