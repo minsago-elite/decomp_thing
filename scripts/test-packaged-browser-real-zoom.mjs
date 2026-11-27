@@ -368,7 +368,9 @@ async function stop(child) {
 /** Scripted CDP that derives zoom from the seeded profile, as a stand-in for HostZoomMap. */
 function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null, product = PRODUCT, stopImpl = stop, shot = 'dip', gutterCal = GUTTER_CAL, openState = null, scrolling = null, layout = null } = {}) {
   const launches = []; const children = []; const clips = []; const viewportPngs = new Map(); const layoutPolls = new Map();
+  let scriptedInteractions = false;
   const spawnChrome = (binary, argv, options) => {
+    scriptedInteractions = false;
     const key = REAL_ZOOM_PROCESSES[launches.length].key;
     const profile = argv.find((a) => a.startsWith('--user-data-dir=')).slice(16);
     launches.push({ key, binary, argv, tmpdir: options.env.TMPDIR, profile });
@@ -396,7 +398,10 @@ function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null
       if (method === 'Target.createTarget') return { targetId: `t-${launch.key}` };
       if (method === 'Target.attachToTarget') return { sessionId: 's' };
       if (method === 'Browser.getWindowForTarget') return { bounds: { ...g.bounds } };
-      if (method === 'Fetch.enable') setTimeout(() => listeners.get('s:Fetch.requestPaused')?.({ requestId: 'r', request: { url: 'http://127.0.0.1:1/nested/api/v1/bootstrap', method: 'GET', headers: {} } }), 0);
+      if (method === 'Fetch.enable') {
+        scriptedInteractions = true;
+        setTimeout(() => listeners.get('s:Fetch.requestPaused')?.({ requestId: 'r', request: { url: 'http://127.0.0.1:1/nested/api/v1/bootstrap', method: 'GET', headers: {} } }), 0);
+      }
       if (method === 'Page.captureScreenshot') {
         // One synthetic document surface: a clip is document-DIP ('dip'), CSS-sized ('css') or viewport-relative ('origin');
         // the unclipped capture is the 1280 x vv.height*f viewport at sY*f with the scrollbar beyond vv.width*f.
@@ -453,13 +458,17 @@ function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null
     };
     return { close, on(method, listener, sessionId) { listeners.set(`${sessionId ?? ''}:${method}`, listener); },
       call(method, params = {}, sessionId) {
+        if (method === 'Fetch.disable' || method === 'Browser.close') scriptedInteractions = false;
         if (closed) return Promise.reject(new Error('DevTools connection closed'));
         if (hang && hang(method, launch.key)) return new Promise((resolve, reject) => pending.add({ resolve, reject }));
         return Promise.resolve(reply(method, params, sessionId));
       } };
   };
+  // Scripted CDP replies have no UI animation to wait for. Yield for fixture events during the
+  // responsive drive and keep the real intervals for process startup, target layout and cleanup.
+  const delay = (ms) => new Promise((r) => setTimeout(r, scriptedInteractions ? 0 : ms));
   return { launches, children, clips, args: { repo, chromeBinary: '/fake/chrome', chromeSha256: CHROME_SHA, baseArgs: BASE_ARGS, spawnChrome, stop: stopImpl, connect,
-    origin: 'http://127.0.0.1:1', fixtures: () => fixtures(), delay: (ms) => new Promise((r) => setTimeout(r, ms)) } };
+    origin: 'http://127.0.0.1:1', fixtures: () => fixtures(), delay } };
 }
 const owned = async () => (await fs.readdir(repo)).filter((n) => n.startsWith('.cz-'));
 
