@@ -420,8 +420,14 @@ test('only exact complete Chromium cancellations proven consumed by every invent
     failure: { errorText: 'net::ERR_ABORTED', canceled: true }, lateFailedAfterFinished: false,
     loadingFinishedEncodedDataLength: null, responseHeaders: { 'content-length': '123' }, dataLength: 123 };
   const cold = { failedInventoryRequests: [row], failedInventoryRequestCount: 1, failedInventoryRequestOverflow: 0 };
-  assert.deepEqual(classifyFailedInventoryRequests(cold, proof), { failedInventoryRequestEvidenceComplete: true,
-    provenCanceledAfterConsumptionCount: 1, unprovenFailedInventoryRequestCount: 0 });
+  const classification = classifyFailedInventoryRequests(cold, proof);
+  assert.deepEqual(classification, { failedInventoryRequestEvidenceComplete: true,
+    provenCanceledAfterConsumptionCount: 1, unprovenFailedInventoryRequestCount: 0,
+    failedInventoryRequests: [{ sequence: null, requestIdHash: matched.idHash, urlHash: matched.urlHash,
+      pathTemplate: '/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions', method: 'GET', status: 200,
+      failure: { error: 'net::ERR_ABORTED', canceled: true }, lateFailedAfterFinished: false,
+      contentLength: 123, dataLength: 123, classification: 'canceled-after-consumption' }] });
+  assert.doesNotMatch(JSON.stringify(classification), /private|https?:\/\//);
 
   for (const mutation of [
     value => { value.failedInventoryRequests[0].networkIdHash = digest('different request'); },

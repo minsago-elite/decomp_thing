@@ -313,8 +313,32 @@ export function classifyFailedInventoryRequests(coldEvidence, inventoryConsumpti
   const unprovenFailedInventoryRequestCount = captureComplete
     ? count - provenCanceledAfterConsumptionCount
     : Math.max(1, Number.isSafeInteger(count) && count >= 0 ? count - provenCanceledAfterConsumptionCount : 0);
+  const safeFailedInventoryRequests = (Array.isArray(rows) ? rows : []).slice(0, 16).map(row => {
+    const headerLength = row?.responseHeaders?.['content-length'];
+    const parsedContentLength = typeof headerLength === 'string' && /^(?:0|[1-9][0-9]{0,8})$/.test(headerLength)
+      ? Number(headerLength) : null;
+    const key = `${row?.networkIdHash}:${row?.urlHash}`;
+    return {
+      sequence: Number.isSafeInteger(row?.seq) && row.seq > 0 ? row.seq : null,
+      requestIdHash: /^[a-f0-9]{64}$/.test(row?.networkIdHash ?? '') ? row.networkIdHash : null,
+      urlHash: /^[a-f0-9]{64}$/.test(row?.urlHash ?? '') ? row.urlHash : null,
+      pathTemplate: row?.pathTemplate === '/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions'
+        ? row.pathTemplate : 'other',
+      method: row?.method === 'GET' || row?.method === 'HEAD' ? row.method : 'other',
+      status: Number.isSafeInteger(row?.status) && row.status >= 100 && row.status <= 599 ? row.status : null,
+      failure: {
+        error: row?.failure?.errorText === 'net::ERR_ABORTED' ? 'net::ERR_ABORTED' : row?.failure?.errorText ? 'other' : null,
+        canceled: typeof row?.failure?.canceled === 'boolean' ? row.failure.canceled : null,
+      },
+      lateFailedAfterFinished: typeof row?.lateFailedAfterFinished === 'boolean' ? row.lateFailedAfterFinished : null,
+      contentLength: parsedContentLength,
+      dataLength: Number.isSafeInteger(row?.dataLength) && row.dataLength >= 0 ? row.dataLength : null,
+      classification: matched.has(key) ? 'canceled-after-consumption' : 'unproven',
+    };
+  });
   return { failedInventoryRequestEvidenceComplete: captureComplete,
-    provenCanceledAfterConsumptionCount, unprovenFailedInventoryRequestCount };
+    provenCanceledAfterConsumptionCount, unprovenFailedInventoryRequestCount,
+    failedInventoryRequests: safeFailedInventoryRequests };
 }
 
 /** Retain bounded, same-origin phase timings without storing request URLs or response bodies. */
@@ -1580,6 +1604,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
       jvmRssIncrementBytes: JVM_RSS_BUDGET_BYTES }, firstPageMs, firstPageRequestMs, inventoryReads,
       failedInventoryRequestCount: coldEvidenceSummary.failedInventoryRequestCount,
       failedInventoryRequestEvidenceComplete: inventoryFailureClassification.failedInventoryRequestEvidenceComplete,
+      provenCanceledAfterConsumptionCount: inventoryFailureClassification.provenCanceledAfterConsumptionCount,
+      unprovenFailedInventoryRequestCount: inventoryFailureClassification.unprovenFailedInventoryRequestCount,
+      failedInventoryRequests: inventoryFailureClassification.failedInventoryRequests,
       inventoryConsumption, resourceEvidence: { resourceTimingCount: coldEvidenceSummary.resourceTimings?.length ?? 0,
         resourceTimingOverflow: coldEvidenceSummary.resourceTimingOverflow ?? null, firstPageRequestCount: coldEvidenceSummary.firstPageRequestCount,
         terminalEvidenceOverflow: coldEvidenceSummary.terminalEvidenceOverflow, invalidTransportEvidence: coldEvidenceSummary.invalidTransportEvidence,
