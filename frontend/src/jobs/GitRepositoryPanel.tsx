@@ -68,27 +68,42 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setStatus(initialize ? copy.requestingInitialization : copy.readingRepository);
     try {
+      let outcome: Operation | null = null;
       if (initialize) {
         const runId = job.latestRunId; const revisionId = observed?.revisionId;
         const csrfToken = session.csrf();
         if (!runId || !revisionId) throw new ApiClientError('invalid_request');
         if (!csrfToken) { setStatus(copy.reconnectBeforeInitializing); return; }
-        let operation = (await client.post('operation', repositoriesPath, 'gitRepositoryInitRequest',
+        const operation = (await client.post('operation', repositoriesPath, 'gitRepositoryInitRequest',
           { action: 'git.init', runId, revisionId, initialBranch: null },
           { csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal })).data;
-        for (let poll = 0; !terminal.has(operation.state); poll++) {
-          if (poll >= maximumPolls) { setStatus(copy.stillRunning); break; }
+        if (operation.jobId !== job.jobId || operation.action !== 'git.init' || !operation.repositoryId || !operation.operationId) {
+          throw new ApiClientError('invalid_response');
+        }
+        const expected = { jobId: job.jobId, action: 'git.init' as const,
+          repositoryId: operation.repositoryId, operationId: operation.operationId };
+        outcome = operation;
+        for (let poll = 0; !terminal.has(outcome.state); poll++) {
+          if (poll >= maximumPolls) break;
           setStatus(copy.initializationRunning);
           await sleep(pollIntervalMs, controller.signal);
-          operation = (await client.get('operation',
-            `${repositoriesPath}/${operation.repositoryId}/operations/${operation.operationId}`, { signal: controller.signal })).data;
+          const next = (await client.get('operation',
+            `${repositoriesPath}/${expected.repositoryId}/operations/${expected.operationId}`, { signal: controller.signal })).data;
+          if (next.jobId !== expected.jobId || next.action !== expected.action || next.repositoryId !== expected.repositoryId
+            || next.operationId !== expected.operationId) throw new ApiClientError('invalid_response');
+          outcome = next;
         }
       }
+      if (controller.signal.aborted) return;
       const next = await read(controller.signal);
       if (controller.signal.aborted) return;
       setObserved(next);
       const latest = next.listing.operations[0];
-      setStatus(next.workspace ? copy.repositoryRead
+      // This click's outcome comes only from its identity-bound acknowledgement or poll, never the listing order.
+      setStatus(outcome && !terminal.has(outcome.state) ? copy.stillRunning
+        : outcome && outcome.state !== 'completed' ? textMessage(copy.lastOperation, { state: outcome.state, message: outcome.message ?? '' })
+        : outcome ? (next.workspace?.repositoryId === outcome.repositoryId ? copy.repositoryRead : copy.initializationUnconfirmed)
+        : next.workspace ? copy.repositoryRead
         : latest && latest.state !== 'completed' ? textMessage(copy.lastOperation, { state: latest.state, message: latest.message ?? '' })
         : copy.noRepository);
     } catch (failure: unknown) {

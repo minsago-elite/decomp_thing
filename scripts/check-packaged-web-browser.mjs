@@ -14,6 +14,7 @@ import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { qualifyGitInitIdentity } from './packaged-browser-git-init.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -452,6 +453,11 @@ async function prepareArchive(archivePath) {
   for (const name of ['uname', 'ls', 'xargs', 'sed', 'tr']) {
     const executable = execFileSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
     await fs.symlink(executable, join(bins, name));
+  }
+  if (values.mode === 'history' || values.mode === 'session') {
+    const gitExecutable = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    assert.ok(isAbsolute(gitExecutable), 'Packaged Git initialization qualification requires an installed Git executable');
+    await fs.symlink(gitExecutable, join(bins, 'git'));
   }
   // Gradle uses xargs with its default external echo command while parsing JVM options.
   await fs.symlink('/usr/bin/echo', join(bins, 'echo'));
@@ -926,6 +932,9 @@ try {
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'reset job library');
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
     report.dashboard = { emptyLibrary: !populated, populatedLibrary: populated, noMatches: true, filtersSurviveReload: true, resetFilters: true };
+    if (values.mode === 'session') {
+      report.gitInitializationIdentity = await qualifyGitInitIdentity({ repo, origin: browserOrigin, makeTarget, cdp, evaluate, ready });
+    }
     if (historyFixture) {
       const row = await evaluate(authenticated, `(() => {
         const row = document.querySelector('ul[aria-label="Uploaded jobs"] li');
