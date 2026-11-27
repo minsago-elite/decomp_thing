@@ -4,8 +4,8 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { auditFixtures, auditViewports } from './packaged-browser-audit.mjs';
-import { engineContentReady, enginePageReady, isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
+import { auditFixtures, auditViewports, clickJourneyLink, runGraphJourney } from './packaged-browser-audit.mjs';
+import { engineContentReady, enginePageReady, isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures, waitForEngineExpression } from './packaged-browser-engine-adapter.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = () => auditFixtures(repo, 'b'.repeat(64));
@@ -176,4 +176,82 @@ test('HTTP fixture boundary serves native attachment bytes without reaching auth
     await audit?.close();
     await new Promise(resolve => { packaged.close(resolve); packaged.closeAllConnections(); });
   }
+});
+
+// Hosted job 140711948565: Playwright's string waitForFunction compiles the journey predicate with eval()
+// in the page, which the packaged CSP refuses in Firefox and WebKit. Model that page: string predicates
+// passed to waitForFunction raise EvalError, while protocol-level evaluate() runs the string over the DOM.
+function cspJourneyPage({ settleAfter = 2 } = {}) {
+  const state = { heading: null, polls: 0, clicks: [] };
+  const link = text => ({ textContent: text, getClientRects: () => ({ length: 1 }), click() { state.clicks.push(text); state.heading = null; state.polls = 0; } });
+  const document = {
+    get body() { return { innerText: state.heading ? 'Attempt identity Showing 1\u20133 of 5 matching functions' : '' }; },
+    querySelector: selector => selector === 'main h1' ? (state.heading ? { textContent: state.heading } : null)
+      : selector === 'main .graph-canvas svg[role="img"]' && state.heading ? {} : null,
+    querySelectorAll: selector => selector === 'main a' ? ['Read the recorded scorecard', 'Browse recovered functions', 'main', 'Explore its recorded call neighborhood'].map(link)
+      : selector === 'main table' ? [{ textContent: '0.6500' }] : [],
+  };
+  return { state, target: {
+    waitForFunction: async predicate => { if (typeof predicate === 'string') throw new EvalError('call to eval() blocked by CSP'); },
+    evaluate: async expression => {
+      assert.equal(typeof expression, 'string');
+      if (!state.heading && (state.polls += 1) >= settleAfter) state.heading = state.clicks.length === 1 ? 'Recorded scorecard' : 'Recorded relationships';
+      return runInNewContext(expression, { document });
+    },
+  } };
+}
+
+test('engine graph journey readiness polls static predicates driver-side under an eval-refusing CSP', async () => {
+  const steps = fixtures().graphJourney;
+  const journey = (target, ready) => runGraphJourney({ steps, fulfilled: [], navigate: async () => {},
+    click: text => target.evaluate(clickJourneyLink(text)), ready, evaluate: async () => null });
+  // Red: the previous engine callback stops at the first step with the CSP EvalError as its cause.
+  const old = cspJourneyPage();
+  await assert.rejects(journey(old.target, (expression, label) => old.target.waitForFunction(expression, undefined, { timeout: 20000 })
+    .catch(failure => { throw new Error(`Timed out waiting for ${label}`, { cause: failure }); })),
+  error => error.cause instanceof EvalError && /Attempt|nested|graph journey/.test(error.message));
+  // Green: the same steps settle through bounded protocol-level polls and click every link once.
+  const page = cspJourneyPage();
+  const evidence = await journey(page.target, (expression, label) => waitForEngineExpression(page.target, expression, label, { interval: 1 }));
+  assert.equal(evidence.steps.length, steps.length);
+  assert.deepEqual(page.state.clicks, steps.filter(step => step.link).map(step => step.link));
+});
+
+test('engine expression wait enforces its deadline and keeps raw causes', async () => {
+  const timing = { timeout: 30, interval: 1 };
+  await assert.rejects(waitForEngineExpression({ evaluate: async () => false }, 'false', 'never', timing),
+    error => /Timed out waiting for never after 30 ms/.test(error.message) && error.cause === false);
+  const raw = new TypeError('document.querySelector(...) is null');
+  await assert.rejects(waitForEngineExpression({ evaluate: async () => { throw raw; } }, 'x', 'raw', timing), error => error === raw);
+  const navigation = new Error('Execution context was destroyed, most likely because of a navigation');
+  await assert.rejects(waitForEngineExpression({ evaluate: async () => { throw navigation; } }, 'x', 'nav', timing),
+    error => error.cause === navigation);
+  let calls = 0;
+  const target = { async evaluate() {
+    calls += 1;
+    if (calls === 1) throw navigation;
+    return calls === 3;
+  } };
+  await waitForEngineExpression(target, 'x', 'settles', { interval: 1 });
+  assert.equal(calls, 3);
+});
+
+test('graph readiness stops when an outstanding evaluation never replies', async () => {
+  const target = { evaluate: () => new Promise(() => {}) };
+  let watchdog;
+  try {
+    const guard = new Promise((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('driver exceeded its deadline')), 500);
+    });
+    await assert.rejects(Promise.race([waitForEngineExpression(target, 'false', 'stalled', { timeout: 20 }), guard]),
+      /Timed out waiting for stalled after 20 ms/);
+  } finally {
+    clearTimeout(watchdog);
+  }
+});
+
+test('graph readiness preserves unrelated browser errors that mention navigation', async () => {
+  const raw = new Error('navigation timing data unavailable');
+  await assert.rejects(waitForEngineExpression({ evaluate: async () => { throw raw; } }, 'false', 'readiness', { timeout: 20 }),
+    error => error === raw);
 });

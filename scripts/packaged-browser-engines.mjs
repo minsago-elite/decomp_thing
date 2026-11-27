@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertAudit, auditFixtures, clickJourneyLink, runGraphJourney, auditProfileEvidence, auditViewports, captureOutputSignatureChart, chartCaptureSets, engineSupplementalInteractionContexts, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
 import { createEngineDiagnostics, diagnosticOverflowFailure } from './packaged-browser-engine-diagnostics.mjs';
-import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
+import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures, waitForEngineExpression } from './packaged-browser-engine-adapter.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
 // is Chromium-only; this runner drives Firefox, WebKit or Chromium through Playwright against the
@@ -680,7 +680,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       record.workerPurpose = 'graph-layout';
       graph = await diagnostics.phase('graph-journey', () => runGraphJourney({ steps: fixtures.graphJourney, fulfilled,
         navigate: path => target.goto(origin + path), click: text => target.evaluate(clickJourneyLink(text)),
-        ready: (expression, label) => target.waitForFunction(expression, undefined, { timeout: 20000 }).catch(failure => { throw new Error(`Timed out waiting for ${label}`, { cause: failure }); }),
+        ready: (expression, label) => waitForEngineExpression(target, expression, label, { timeout: 20000 }),
         evaluate: expression => target.evaluate(expression) }));
       record.workerPurpose = null;
     });
