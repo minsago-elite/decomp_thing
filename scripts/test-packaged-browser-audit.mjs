@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, compactJobFilterAuditEvidence, compactTimedAuditEvidence, focusTrajectoryFrames, focusTrajectoryMs, fileOpenChunkQuery, fileOpenContract, fileOpenEvidenceContract, fileOpenFailures, fileOpenMetadataPhase, fileOpenPin, fileOpenPreviewPhase, renderedPreviewDigest, sourceResponseIdentity, timedPhaseScript, filterElementVisible, focusFilterSubmitForTiming, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, applyAuditProfile, auditProfileEvidence, chromiumSupplementalInteractionContexts, engineSupplementalInteractionContexts } from './packaged-browser-audit.mjs';
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, compactJobFilterAuditEvidence, compactTimedAuditEvidence, focusTrajectoryFrames, focusTrajectoryMs, fileOpenChunkQuery, fileOpenContract, fileOpenEvidenceContract, fileOpenFailures, fileOpenMetadataPhase, fileOpenPin, fileOpenPreviewPhase, renderedPreviewDigest, sourceResponseIdentity, timedPhaseScript, filterElementVisible, focusFilterSubmitForTiming, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, applyAuditProfile, auditProfileEvidence, chromiumSupplementalInteractionContexts, engineSupplementalInteractionContexts, preparedFocusInteractionContexts } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -246,8 +246,9 @@ test('interaction records match each fixture action and are summarized without a
   slow.timing.interactions = { samples: slow.interactions.length, median: 10_000, p95: 10_000 };
   assert.deepEqual(verdict(slow), [], 'interaction timings are summarized but have no unapproved threshold');
 
+  const engineContexts = engineSupplementalInteractionContexts(interactionPages);
   const crossEngine = clean();
-  for (const { page: pageName, context } of engineSupplementalInteractionContexts) {
+  for (const { page: pageName, context } of engineContexts) {
     const page = interactionPages.find(entry => entry.name === pageName);
     for (const [stepIndex, step] of page.preparation.entries()) {
       crossEngine.interactions.push({ page: page.name, action: step.action, stepIndex,
@@ -258,9 +259,82 @@ test('interaction records match each fixture action and are summarized without a
   crossEngine.timing.interactions.samples = crossEngine.interactions.length;
   assert.deepEqual(assertAudit(crossEngine, manifest, responses, origin, undefined, {
     interactionPages,
-    extraInteractionContexts: engineSupplementalInteractionContexts,
+    extraInteractionContexts: engineContexts,
   }).failures, []);
   assert.match(verdict(crossEngine).join('\n'), /unexpected action/);
+});
+
+test('Firefox/WebKit focus contexts derive from every prepared fixture page (#1805 hosted 91 vs 89)', () => {
+  const engineVerdict = (audit, extra) => assertAudit(audit, manifest, responses, origin, undefined, {
+    connectionNotice: false, jobFilter: false, fileOpen: false, interactionPages, extraInteractionContexts: extra }).failures;
+  const preparedNames = interactionPages.filter(page => (page.preparation ?? []).length > 0).map(page => page.name);
+  assert.ok(preparedNames.includes('structure functions'), 'structure functions declares a Refresh preparation step');
+  const focusContexts = preparedFocusInteractionContexts(interactionPages);
+  assert.deepEqual(focusContexts, preparedNames.flatMap(page => ['focus light', 'focus dark'].map(context => ({ page, context }))));
+  assert.deepEqual(chromiumSupplementalInteractionContexts(interactionPages).filter(entry => entry.context.startsWith('focus ')), focusContexts,
+    'Chromium and engine runners share one focus derivation');
+  const engineContexts = engineSupplementalInteractionContexts(interactionPages);
+  assert.deepEqual(engineContexts.filter(entry => !entry.context.startsWith('focus ')), [
+    { page: 'attempt overview', context: 'keyboard commands' },
+    { page: 'source file', context: 'keyboard download' },
+    { page: 'source file', context: 'worker/CSP qualification' }]);
+
+  // Replay the hosted shape: the Playwright runner prepares every page in each focus scheme.
+  const hosted = clean();
+  const push = (audit, pageName, context) => {
+    const page = interactionPages.find(entry => entry.name === pageName);
+    for (const [stepIndex, step] of page.preparation.entries()) {
+      audit.interactions.push({ page: page.name, action: step.action, stepIndex, elapsedMs: 5, reads: [...step.reads], context });
+      audit.timing.raw.interactions.push(5);
+    }
+  };
+  // Summary values are unchanged by these rows (clean() timings already bracket them); only the count moves.
+  const seal = audit => { audit.timing.interactions.samples = audit.interactions.length; return audit; };
+  for (const { page, context } of engineContexts) push(hosted, page, context);
+  seal(hosted);
+  assert.equal(hosted.interactions.filter(entry => entry.page === 'structure functions' && entry.context.startsWith('focus ')).length, 2);
+  assert.deepEqual(engineVerdict(hosted, engineContexts), [], 'hosted Firefox/WebKit interaction set is accepted');
+
+  // Regression control: the old hand-kept engine list omitted structure functions.
+  const legacy = [...['attempt overview', 'attempt activity', 'attempt evidence', 'source file'].flatMap(page =>
+    ['focus light', 'focus dark'].map(context => ({ page, context }))),
+  { page: 'attempt overview', context: 'keyboard commands' }, { page: 'source file', context: 'keyboard download' },
+  { page: 'source file', context: 'worker/CSP qualification' }];
+  const legacyFailures = engineVerdict(hosted, legacy).join('\n');
+  assert.match(legacyFailures, /unexpected action \["structure functions",0,"Refresh from the first page","focus light"\]/);
+  assert.match(legacyFailures, /requires 89 finite/);
+
+  // Missing focus record for structure functions fails closed.
+  const missing = structuredClone(hosted);
+  const drop = missing.interactions.findIndex(entry => entry.page === 'structure functions' && entry.context === 'focus dark');
+  missing.interactions.splice(drop, 1); missing.timing.raw.interactions.splice(drop, 1); seal(missing);
+  assert.match(engineVerdict(missing, engineContexts).join('\n'), /missing action \["structure functions",0,"Refresh from the first page","focus dark"\]/);
+
+  // Duplicate and unexpected rows still fail.
+  const duplicated = structuredClone(hosted);
+  duplicated.interactions.push(structuredClone(duplicated.interactions.at(-1))); duplicated.timing.raw.interactions.push(5); seal(duplicated);
+  assert.match(engineVerdict(duplicated, engineContexts).join('\n'), /duplicate action/);
+  const wrongRead = structuredClone(hosted);
+  wrongRead.interactions.find(entry => entry.page === 'structure functions' && entry.context === 'focus light').reads = [];
+  assert.match(engineVerdict(wrongRead, engineContexts).join('\n'), /structure functions \/ Refresh from the first page \(focus light\) reads do not match fixture/);
+  const wrongStep = structuredClone(hosted);
+  wrongStep.interactions.find(entry => entry.page === 'structure functions' && entry.context === 'focus light').stepIndex = 1;
+  assert.match(engineVerdict(wrongStep, engineContexts).join('\n'), /unexpected action \["structure functions",1,/);
+
+  // Forged or unprepared pages and undeclared contexts are rejected by the derivation and the verdict.
+  assert.throws(() => preparedFocusInteractionContexts([...interactionPages, { name: 'forged', preparation: [{ action: 'x', reads: [] }] }]), /undeclared fixture page/);
+  assert.throws(() => preparedFocusInteractionContexts([{ name: 'structure functions', preparation: 'Refresh' }]), /invalid preparation/);
+  assert.throws(() => preparedFocusInteractionContexts(undefined), /fixture page contract/);
+  assert.ok(!preparedFocusInteractionContexts(interactionPages).some(entry => entry.page === 'workspace'), 'unprepared pages get no focus context');
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'workspace', context: 'focus light' }]).join('\n'), /extra context for unprepared page \["workspace","focus light"\]/);
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'forged', context: 'focus light' }]).join('\n'), /invalid extra context contract/);
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'source file', context: 'focus sepia' }]).join('\n'), /undeclared extra context \["source file","focus sepia"\]/);
+  assert.match(engineVerdict(hosted, [...engineContexts, engineContexts[0]]).join('\n'), /duplicate extra context/);
+  assert.match(engineVerdict(hosted, 'focus light').join('\n'), /invalid extra context contract/);
+  const forgedRow = structuredClone(hosted);
+  forgedRow.interactions.push({ page: 'workspace', action: 'Refresh from the first page', stepIndex: 0, elapsedMs: 5, reads: [], context: 'focus light' });
+  forgedRow.timing.raw.interactions.push(5); seal(forgedRow);
+  assert.match(engineVerdict(forgedRow, engineContexts).join('\n'), /unexpected action \["workspace",0/);
 });
 
 test('the constrained profile is explicit, applies 4x CPU and 10 Mbit/s, and does not apply reference budgets', async () => {

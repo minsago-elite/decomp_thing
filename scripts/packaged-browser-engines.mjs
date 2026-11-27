@@ -715,12 +715,12 @@ try {
   const audited = await audit(origin, installation.manifest);
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
+  const interactionPages = auditFixtures(repo, installation.manifest.buildId).pages;
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin, undefined,
     // Chrome-only connection, explicit-filter and source-file-open timings are qualified by DevTools
     // (#1896, #623); this runner does not measure them, so their verdicts are omitted rather than claimed.
     { connectionNotice: false, jobFilter: false, fileOpen: false,
-      interactionPages: auditFixtures(repo, installation.manifest.buildId).pages,
-      extraInteractionContexts: engineSupplementalInteractionContexts });
+      interactionPages, extraInteractionContexts: engineSupplementalInteractionContexts(interactionPages) });
   const records = [smoked.record, ...audited.records];
   const cspEvents = records.flatMap((record) => record.csp);
   const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);

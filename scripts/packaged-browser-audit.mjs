@@ -12,13 +12,35 @@ import { join } from 'node:path';
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
   'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file', 'structure functions'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
-export const engineSupplementalInteractionContexts = [
-  ...['attempt overview', 'attempt activity', 'attempt evidence', 'source file'].flatMap(page =>
-    ['focus light', 'focus dark'].map(context => ({ page, context }))),
-  { page: 'attempt overview', context: 'keyboard commands' },
-  { page: 'source file', context: 'keyboard download' },
-  { page: 'source file', context: 'worker/CSP qualification' },
-];
+export const focusInteractionContexts = Object.freeze(['focus light', 'focus dark']);
+export const supplementalInteractionContextNames = Object.freeze([...focusInteractionContexts,
+  'keyboard commands', 'keyboard download', 'worker/CSP qualification']);
+/**
+ * Every fixture page whose trusted contract declares preparation is re-prepared once per focus
+ * scheme (both the DevTools and Playwright runners open each page with preparation before the
+ * Tab walk), so focus contexts derive from the fixture contract rather than a hand-kept list.
+ */
+export function preparedFocusInteractionContexts(pages) {
+  if (!Array.isArray(pages)) throw new TypeError('preparedFocusInteractionContexts: pages must be the fixture page contract');
+  return pages.filter(page => {
+    if (!page || typeof page.name !== 'string' || !auditPageNames.includes(page.name)) {
+      throw new TypeError(`preparedFocusInteractionContexts: undeclared fixture page ${JSON.stringify(page?.name)}`);
+    }
+    if (page.preparation !== undefined && !Array.isArray(page.preparation)) {
+      throw new TypeError(`preparedFocusInteractionContexts: invalid preparation for ${page.name}`);
+    }
+    return (page.preparation ?? []).length > 0;
+  }).flatMap(({ name }) => focusInteractionContexts.map(context => ({ page: name, context })));
+}
+/** Firefox/WebKit: per-scheme focus preparation plus the engine runner's keyboard and worker passes. */
+export function engineSupplementalInteractionContexts(pages) {
+  return [
+    ...preparedFocusInteractionContexts(pages),
+    { page: 'attempt overview', context: 'keyboard commands' },
+    { page: 'source file', context: 'keyboard download' },
+    { page: 'source file', context: 'worker/CSP qualification' },
+  ];
+}
 export const auditProfileEvidence = (profile) => {
   if (profile === 'reference') return { name: 'reference', cpuThrottlingRate: 1, network: 'browser-default' };
   if (profile === 'constrained') return { name: 'constrained', cpuThrottlingRate: 4,
@@ -35,8 +57,7 @@ export async function applyAuditProfile(cdp, sessionId, profile) {
 }
 export function chromiumSupplementalInteractionContexts(pages) {
   return [
-    ...pages.filter(page => (page.preparation ?? []).length > 0).flatMap(({ name }) =>
-      ['focus light', 'focus dark'].map(context => ({ page: name, context }))),
+    ...preparedFocusInteractionContexts(pages),
     { page: 'source file', context: 'worker/CSP qualification' },
   ];
 }
@@ -1187,9 +1208,28 @@ export function interactionEvidenceFailures(audit, pages, extraContexts = []) {
   const failures = [];
   if (!Array.isArray(pages)) return ['interactions: missing expected fixture contract'];
   const contextsByPage = new Map(pages.map(page => [page.name, auditViewports.map(viewport => viewport.name)]));
+  const preparedPages = new Set(pages.filter(page => Array.isArray(page?.preparation) && page.preparation.length > 0).map(page => page.name));
+  if (!Array.isArray(extraContexts)) {
+    failures.push('interactions: invalid extra context contract');
+    extraContexts = [];
+  }
   for (const extra of extraContexts) {
-    if (!extra || typeof extra.page !== 'string' || typeof extra.context !== 'string' || !contextsByPage.has(extra.page)) {
+    if (!extra || typeof extra.page !== 'string' || typeof extra.context !== 'string' || !contextsByPage.has(extra.page) ||
+        !auditPageNames.includes(extra.page)) {
       failures.push('interactions: invalid extra context contract');
+      continue;
+    }
+    const where = JSON.stringify([extra.page, extra.context]);
+    if (!supplementalInteractionContextNames.includes(extra.context)) {
+      failures.push(`interactions: undeclared extra context ${where}`);
+      continue;
+    }
+    if (!preparedPages.has(extra.page)) {
+      failures.push(`interactions: extra context for unprepared page ${where}`);
+      continue;
+    }
+    if (contextsByPage.get(extra.page).includes(extra.context)) {
+      failures.push(`interactions: duplicate extra context ${where}`);
       continue;
     }
     contextsByPage.get(extra.page).push(extra.context);
