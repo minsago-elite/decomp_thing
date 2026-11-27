@@ -452,6 +452,21 @@ def check_measure(measure: dict, unit: str) -> None:
         raise ValueError("a result that is not measured must state why")
 
 
+def check_offset_page(page: dict, count: int, total) -> None:
+    """A structure page starts at a multiple of its limit below the total: a continued page is full and its cursor names
+    the next such offset, and a final page holds the rows that remain after the last multiple below the total."""
+    limit, cursor = page["limit"], page["nextCursor"]
+    if cursor is not None:
+        match = re.fullmatch(r"([a-f0-9]{64})_(0|[1-9][0-9]{0,6})_[a-f0-9]{32}", cursor)
+        if match is None or match.group(1) != page["snapshotVersion"]:
+            raise ValueError("a structure page continues at a cursor signed for its own snapshot")
+        offset = int(match.group(2))
+        if count != limit or offset < limit or offset % limit or (total is not None and offset >= total):
+            raise ValueError("a continued structure page is full and continues within its total")
+    elif total is not None and count != (0 if total == 0 else (total - 1) % limit + 1):
+        raise ValueError("a final structure page holds exactly the rows remaining in its total")
+
+
 def check_scorecard(data: dict) -> None:
     card = data["scorecard"]
     if card is None:
@@ -462,6 +477,7 @@ def check_scorecard(data: dict) -> None:
             raise ValueError("only an empty population keeps its recorded placeholder value")
     if card["modules"]["page"]["snapshotVersion"] != data["structureVersion"]:
         raise ValueError("scorecard pages must be bound to the structure version")
+    check_offset_page(card["modules"]["page"], len(card["modules"]["items"]), card["modules"]["total"])
 
 
 BLOCKING_COMPARISON_CHECKS = frozenset(("input-binary", "reconstruction-profile", "confidence-schema",
@@ -555,6 +571,7 @@ def check_comparison(data: dict) -> None:
         raise ValueError("comparison module pages must be bound to the current structure version")
     if len(items) > page["limit"] or len(items) > modules["total"] or (page["nextCursor"] is not None and not items):
         raise ValueError("a comparison module page exceeds its bound or continues without rows")
+    check_offset_page(page, len(items), modules["total"])
     if state == "unavailable" and (data["metrics"] or modules["total"] or page["nextCursor"] is not None):
         raise ValueError("an unavailable scorecard cannot be compared")
     if len({item["id"] for item in data["metrics"]}) != len(data["metrics"]) or len({item["moduleId"] for item in items}) != len(items):

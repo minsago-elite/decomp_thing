@@ -1,3 +1,4 @@
+import type { Page } from '../api/generated';
 import { ApiClientError } from '../api/errors';
 
 export const SCORECARD_PAGE_LIMIT = 50;
@@ -51,4 +52,20 @@ export function scorecardSearch(query: ScorecardQuery): string {
   if (query.compareCursor) values.set('compareCursor', query.compareCursor);
   const text = values.toString();
   return text ? `?${text}` : '';
+}
+
+/**
+ * The page the producer returns for this request: it echoes the requested limit, starts at the requested cursor's
+ * offset in the snapshot that cursor names, and holds the rows from there, continuing only after a full page.
+ */
+export function admitScorecardPage(page: Page, count: number, total: number | null, cursor: string | undefined): void {
+  const [version, offset] = cursor ? cursor.split('_') : [page.snapshotVersion, '0'];
+  const start = Number(offset);
+  const next = page.nextCursor === null ? null : Number(page.nextCursor.split('_')[1]);
+  const admitted = page.limit === SCORECARD_PAGE_LIMIT && version === page.snapshotVersion
+    && (total === null || (start === 0 ? count <= total : start < total))
+    && (next === null
+      ? count <= page.limit && (total === null || count === total - start) && (start === 0 || count > 0)
+      : count === page.limit && next === start + page.limit);
+  if (!admitted) throw new ApiClientError('invalid_response');
 }

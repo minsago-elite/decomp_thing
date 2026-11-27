@@ -1303,6 +1303,30 @@
       "valid": false
     },
     {
+      "file": "fixtures/invalid-scorecard-comparison-module-page-without-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-final-page-missing-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-cursor-beyond-total.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-final-page-missing-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-continued-page-without-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-cursor-for-another-snapshot.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/invalid-scorecard-comparison-incompatible-unwithheld-delta.json",
       "valid": false
     }

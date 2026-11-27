@@ -29,6 +29,25 @@ function checkStructurePage(page: Page, version: string, count: number): void {
   requireValue(page.snapshotVersion === version && count <= page.limit);
 }
 
+/** The producer's continuation: `<snapshot>_<offset>_<signature>`, where the offset is the first row of the next page. */
+const CURSOR = /^([a-f0-9]{64})_(0|[1-9][0-9]{0,6})_[a-f0-9]{32}$/;
+
+/**
+ * A scorecard or comparison page starts at a multiple of its limit below the total. A continued page is full and
+ * its cursor names the next such offset within the total; a final page holds exactly the rows after the last one.
+ */
+function checkOffsetPage(page: Page, count: number, total: number | null): void {
+  const { limit, nextCursor } = page;
+  if (nextCursor !== null) {
+    const match = CURSOR.exec(nextCursor);
+    requireValue(match !== null && match[1] === page.snapshotVersion);
+    const offset = Number(match![2]);
+    requireValue(count === limit && offset >= limit && offset % limit === 0 && (total === null || offset < total));
+  } else if (total !== null) {
+    requireValue(count === (total === 0 ? 0 : (total - 1) % limit + 1));
+  }
+}
+
 type NeighborhoodDocument = Extract<ContractDocument, { kind: 'structureNeighborhood' }>['data'];
 type Neighborhood = NonNullable<NeighborhoodDocument['neighborhood']>;
 type Measure = { state: string; reason: string | null; value: string | null; numerator: string | null; denominator: string | null };
@@ -172,6 +191,7 @@ function checkStructureDocument(document: ContractDocument): void {
       if (card) {
         for (const metric of [...card.metrics, ...card.modules.items.map(item => item.metric)]) checkMeasure(metric, metric.unit);
         checkStructurePage(card.modules.page, document.data.structureVersion, card.modules.items.length);
+        checkOffsetPage(card.modules.page, card.modules.items.length, card.modules.total);
       }
       break;
     }
@@ -184,6 +204,7 @@ function checkStructureDocument(document: ContractDocument): void {
       requireValue(current.structureVersion === structureVersion);
       checkStructurePage(modules.page, structureVersion, modules.items.length);
       requireValue(modules.items.length <= modules.total && (modules.page.nextCursor === null || modules.items.length > 0));
+      checkOffsetPage(modules.page, modules.items.length, modules.total);
       // Nothing is paired when either scorecard is unavailable.
       if (compatibility.state === 'unavailable') requireValue(metrics.length === 0 && modules.total === 0 && modules.page.nextCursor === null);
       requireValue(new Set(metrics.map(item => item.id)).size === metrics.length && new Set(modules.items.map(item => item.moduleId)).size === modules.items.length);

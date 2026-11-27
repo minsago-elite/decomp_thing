@@ -14,7 +14,7 @@ import { structureItemPath, structureListPath } from './paths';
 import { bindStructure, revisionReadRoute, structureReadMessage, structureRecordRoute } from './navigation';
 import { Frame, useStructureRead } from './Frame';
 
-import { SCORECARD_PAGE_LIMIT, scorecardLocation, scorecardSearch } from './scorecardQuery';
+import { SCORECARD_PAGE_LIMIT, admitScorecardPage, scorecardLocation, scorecardSearch } from './scorecardQuery';
 import type { ScorecardQuery } from './scorecardQuery';
 
 const RUN_PAGE_LIMIT = 50;
@@ -125,11 +125,47 @@ function Chart({ items }: { items: ModuleScores }) {
   </figure>;
 }
 
-function Comparison({ selected, basePath, query, version, focus, onRoute }: {
-  selected: SourceSelection; basePath: string; query: ScorecardQuery; version: string; focus: MutableRef<PendingFocus | null>;
+/** Exact equality of recorded JSON values: the same keys, in any order, with the same values, and arrays in order. */
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = Object.entries(a), right = b as Record<string, unknown>;
+  return left.length === Object.keys(right).length && left.every(([key, value]) => Object.hasOwn(right, key) && same(value, right[key]));
+}
+
+const measureOf = ({ state, reason, value, numerator, denominator }: Measure): Measure => ({ state, reason, value, numerator, denominator });
+
+/**
+ * A comparison's current side is the scorecard shown beside it: the same records and digests, scope and reconciliation,
+ * every paired measure as recorded there, and the recorded score of each module that this scorecard page also lists.
+ */
+function describesScorecard(comparison: ScorecardComparison, scorecard: StructureScorecard): boolean {
+  const current = comparison.current, card = scorecard.scorecard;
+  if (current.structureVersion !== scorecard.structureVersion || current.sourceSha256 !== scorecard.sourceSha256
+    || current.manifestSha256 !== scorecard.manifestSha256 || !same(current.model, scorecard.model)
+    || !same(current.plan, scorecard.plan) || !same(current.confidence, scorecard.confidence)) return false;
+  if (card === null) return current.scope === null && comparison.metrics.length === 0;
+  if (!same(current.scope, card.scope) || !same(current.reconciliation, card.reconciliation)) return false;
+  // The producer pairs every current measure unless a side is unavailable, and then pairs none.
+  if (comparison.compatibility.state === 'unavailable') { if (comparison.metrics.length !== 0) return false; }
+  else if (comparison.metrics.length !== card.metrics.length || !comparison.metrics.every((metric, position) => {
+    const recorded = card.metrics[position]!;
+    return metric.id === recorded.id && metric.unit === recorded.unit && same(metric.current, measureOf(recorded));
+  })) return false;
+  if (comparison.compatibility.state !== 'unavailable' && card.modules.total !== null && comparison.modules.total < card.modules.total) return false;
+  const shown = new Map(card.modules.items.map(item => [item.moduleId, item.metric]));
+  return comparison.modules.items.every(item => {
+    const recorded = shown.get(item.moduleId);
+    return recorded === undefined || (item.current !== null && same(item.current, measureOf(recorded)));
+  });
+}
+
+function Comparison({ selected, basePath, query, scorecard, focus, onRoute }: {
+  selected: SourceSelection; basePath: string; query: ScorecardQuery; scorecard: StructureScorecard; focus: MutableRef<PendingFocus | null>;
   onRoute: (query: ScorecardQuery, focus?: FocusRequest) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
+  const version = scorecard.structureVersion;
   // Attempts are listed newest first, one bounded page at a time; older pages load on request, so an older
   // baseline stays selectable and "no baselines" is said only once every page has been listed.
   const [runs, setRuns] = useState<{ items: Run[]; nextCursor: string | null } | 'failed' | null>(null);
@@ -172,6 +208,7 @@ function Comparison({ selected, basePath, query, version, focus, onRoute }: {
     if (data.structureVersion !== version || data.current.structureVersion !== version) {
       throw new ApiClientError('http_error', { serverCode: 'STRUCTURE_CHANGED' });
     }
+    admitScorecardPage(data.modules.page, data.modules.items.length, data.modules.total, query.compareCursor);
     return data;
   });
   const candidates = runs && runs !== 'failed' ? runs.items.filter((run: Run, position, all) => run.resultRevisionId !== null
@@ -181,12 +218,16 @@ function Comparison({ selected, basePath, query, version, focus, onRoute }: {
   // Keep that exact submitted identity until an equivalent candidate arrives; never substitute a newer result.
   const unlistedBaseline = query.baseline && !candidates.some(run => run.runId === query.baseline!.runId
     && run.resultRevisionId === query.baseline!.revisionId) ? query.baseline : null;
-  const data = read.state === 'ready' ? read.value : null;
+  // The reply is checked against the scorecard displayed with it, so a sort, page or Refresh of that scorecard
+  // rechecks the same reply without reading it again.
+  const reply = read.state === 'ready' ? read.value : null;
+  const contradicts = reply !== null && !describesScorecard(reply, scorecard);
+  const data = contradicts ? null : reply;
   // The pager unmounts while its page is read. Focus returns to that page's module heading, or to the comparison
   // heading when the page fails or lists no modules.
   const heading = useRef<HTMLHeadingElement>(null);
   const modulesHeading = useRef<HTMLHeadingElement>(null);
-  useRequestedFocus(focus, 'comparison', key, read, () => (read.state === 'ready' ? modulesHeading.current : null) ?? heading.current);
+  useRequestedFocus(focus, 'comparison', key, read, () => (data ? modulesHeading.current : null) ?? heading.current);
   const page = (next: ScorecardQuery) => onRoute(next, { owner: 'comparison', key: readKey(next), origin: key });
   const offset = query.compareCursor ? Number(query.compareCursor.split('_')[1]) : 0;
   const side = (value: Measure | null) => value === null ? copy.notRecorded
@@ -224,6 +265,7 @@ function Comparison({ selected, basePath, query, version, focus, onRoute }: {
       </form>)}
     {read.state === 'loading' && query.baseline && <p role="status">{structureCopy.loading}</p>}
     {read.state === 'failed' && <p role="alert">{structureReadMessage(read.failure)}</p>}
+    {contradicts && <p role="alert">{structureReadMessage(new ApiClientError('invalid_response'))}</p>}
     {data && <>
       <p>{copy.baseline}{structureCopy.labelSeparator}<bdi>{textMessage(copy.baselineOption, { run: data.baseline.binding.runId, revision: data.baseline.binding.revisionId })}</bdi></p>
       <p role="status"><strong>{copy.compatibility[data.compatibility.state]}</strong></p>
@@ -298,6 +340,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
     const data = bindStructure((await client.get('structureScorecard', `${revisionReadRoute(selected)}/scorecard?${values}`, { signal })).data,
       selected, query.version);
     if (data.query.sort !== query.sort || data.query.order !== query.order) throw new ApiClientError('invalid_response');
+    if (data.scorecard) admitScorecardPage(data.scorecard.modules.page, data.scorecard.modules.items.length, data.scorecard.modules.total, query.cursor);
     return data;
   });
   const attemptPath = `/jobs/${selected.jobId}/runs/${selected.runId}`;
@@ -410,7 +453,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
           </nav>
         </>}
       </>}
-      <Comparison selected={selected} basePath={basePath} query={query} version={data.structureVersion} focus={moveFocus}
+      <Comparison selected={selected} basePath={basePath} query={query} scorecard={data} focus={moveFocus}
         onRoute={route} />
     </>}
   </Frame>;

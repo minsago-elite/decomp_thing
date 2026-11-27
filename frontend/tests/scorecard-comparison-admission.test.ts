@@ -157,3 +157,51 @@ it('admits exact differences at the producer\'s scale, zero, negative and unpair
   incompatible.data.modules.total += 1;
   expect(decode(incompatible).data.compatibility.state).toBe('incompatible');
 });
+
+/** `total` module rows, `count` of them on this page; the page continues at `next` when that offset is given. */
+function modulePage(total: number, count: number, limit: number, next: number | null, version?: string): Envelope {
+  const document = load('scorecard-comparison');
+  const sample = document.data.modules.items[0]!;
+  const snapshot = version ?? document.data.structureVersion;
+  document.data.modules = { total, items: Array.from({ length: count }, (_, index) => ({ ...sample, moduleId: `module_${index}`, selector: `module_${index}` })),
+    page: { limit, snapshotVersion: document.data.structureVersion, nextCursor: next === null ? null : `${snapshot}_${next}_${'a'.repeat(32)}` } };
+  return document;
+}
+
+it('admits the producer\'s full, continued, final and empty module pages', () => {
+  for (const [total, count, limit, next] of [[2, 2, 50, null], [51, 50, 50, 50], [151, 50, 50, 100], [51, 1, 50, null], [100, 50, 50, null],
+    [4167, 17, 50, null], [3, 1, 1, 2]] as const) {
+    expect(decode(modulePage(total, count, limit, next)).data.modules.items).toHaveLength(count);
+  }
+  expect(decode(unavailable('baseline')).data.modules.total).toBe(0);
+});
+
+it.each<[string, Envelope]>([
+  // The R6 reproduction: the genuine first page's total, with no rows and no continuation.
+  ['lists no rows of a nonzero total', modulePage(4167, 0, 50, null)],
+  ['ends with fewer rows than remain after the last full page', modulePage(4167, 16, 50, null)],
+  ['ends after a full page although rows remain', modulePage(4167, 50, 50, null)],
+  ['continues after a partial page', modulePage(4167, 49, 50, 50)],
+  ['continues at the total', modulePage(100, 50, 50, 100)],
+  ['continues beyond the total', modulePage(60, 50, 50, 150)],
+  ['continues at an offset that is not a page boundary', modulePage(4167, 50, 50, 75)],
+  ['continues to its own page', modulePage(4167, 50, 50, 0)],
+  ['continues in another snapshot', modulePage(4167, 50, 50, 50, other)],
+])('refuses a comparison module page that %s', (_, document) => {
+  expect(() => decode(document)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+});
+
+it('refuses a scorecard module page whose occupancy disagrees with its total and continuation', () => {
+  const text = readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/structure-scorecard.json'), 'utf8');
+  const scorecard = () => JSON.parse(text) as { data: { scorecard: { modules: { total: number | null; items: unknown[]; page: { limit: number; nextCursor: string | null } } } } };
+  const admit = (document: object) => decodeResponse(JSON.stringify(document), 'structureScorecard');
+  expect(admit(scorecard()).kind).toBe('structureScorecard');
+  const empty = scorecard(); empty.data.scorecard.modules.items = [];
+  const short = scorecard(); short.data.scorecard.modules.page = { ...short.data.scorecard.modules.page, limit: 2, nextCursor: null };
+  const beyond = scorecard(); beyond.data.scorecard.modules.page.nextCursor = beyond.data.scorecard.modules.page.nextCursor!.replace('_1_', '_2_');
+  const unknown = scorecard(); unknown.data.scorecard.modules.total = null; unknown.data.scorecard.modules.items = [];
+  for (const document of [empty, short, beyond, unknown]) expect(() => admit(document)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+  // An unrecorded plan has no total, so only the continuation is checked.
+  const unplanned = scorecard(); unplanned.data.scorecard.modules.total = null;
+  expect(admit(unplanned).kind).toBe('structureScorecard');
+});
