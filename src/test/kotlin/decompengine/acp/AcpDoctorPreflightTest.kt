@@ -67,6 +67,15 @@ class AcpDoctorPreflightTest {
         assertEquals("ACP_DOCTOR_PROVISIONING_V1 scenarioOrdinal=9 mountOrdinal=5 admissionRecord=$admission",
             directAssertion.message)
 
+        val timing = "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=-5 " +
+            "admittedNs=NA lastCleanNs=NA firstObservedNs=-1 cleanPolls=0"
+        diagnostic.javaClass.getDeclaredField("timingContext").apply { isAccessible = true }.set(diagnostic, timing)
+        val timedAssertion = assertFailsWith<AssertionError> {
+            withProvisioningFailureContext(7, 3) { throw primary }
+        }
+        assertSame(primary, timedAssertion.cause)
+        assertEquals("${asserted.message} timingRecord=$timing", timedAssertion.message)
+
         val suppressedOnly = java.io.IOException("PRIVATE-suppressed-only").apply { addSuppressed(diagnostic) }
         val suppressedAssertion = assertFailsWith<AssertionError> {
             withProvisioningFailureContext(8, 4) { throw suppressedOnly }
@@ -106,9 +115,13 @@ class AcpDoctorPreflightTest {
             val diagnostic = admissionConstructor.newInstance(
                 phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
                 outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+            val timing = "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=-5 " +
+                "admittedNs=NA lastCleanNs=NA firstObservedNs=-1 cleanPolls=0"
+            diagnostic.javaClass.getDeclaredField("timingContext").apply { isAccessible = true }.set(diagnostic, timing)
             val bounded = doctorFailureContext(AgentExecutionException(
                 AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), diagnostic))
             assertTrue(requireNotNull(witness.message) in bounded, bounded)
+            assertTrue(timing in bounded, bounded)
             if (admission == constructing || admission == admitted) assertTrue(requireNotNull(admission) in bounded, bounded)
             else assertFalse("mount-admission-v1" in bounded, bounded)
             assertFalse("PRIVATE" in bounded || "/" in bounded, bounded)
@@ -400,8 +413,10 @@ class AcpDoctorPreflightTest {
                     ?.takeIf { it.length <= 256 && admission.matches(it) }
             } catch (_: Throwable) { null } else null
             val sites = current.stackTrace.asSequence().take(32).mapNotNull { frames[it.className to it.methodName] }.take(2).joinToString(",")
-            causes.add(if (record != null && admissionRecord != null) "$record; $admissionRecord"
-                else record ?: "${types[name] ?: "other"}[$sites]")
+            val timingRecord = if (record != null)
+                validatedAcpMountTiming((current as? AcpMountEventWitness)?.timingRecord) else null
+            causes.add(if (record != null) record + (admissionRecord?.let { "; $it" } ?: "") +
+                (timingRecord?.let { "; $it" } ?: "") else "${types[name] ?: "other"}[$sites]")
             current.cause?.let { if (pending.size < 16) pending.add(it) }
             current.suppressed.take(2).forEach { if (pending.size < 16) pending.add(it) }
         }
@@ -453,7 +468,10 @@ class AcpDoctorPreflightTest {
         return buildString {
             append("ACP_DOCTOR_PROVISIONING_V1 scenarioOrdinal=").append(scenarioOrdinal)
             append(" mountOrdinal=").append(mountOrdinal?.toString() ?: "MISSING")
-            if (diagnostic != null) append(" admissionRecord=").append(admission ?: "MISSING")
+            if (diagnostic != null) {
+                append(" admissionRecord=").append(admission ?: "MISSING")
+                validatedAcpMountTiming(diagnostic.timingRecord)?.let { append(" timingRecord=").append(it) }
+            }
         }.also { check(it.length <= 512 && it.all { character -> character.code in 32..126 }) }
     }
 
