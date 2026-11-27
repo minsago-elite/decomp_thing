@@ -2356,6 +2356,7 @@ class UploadServerTest {
             assertTrue(page.contains(pinned))
             val initial = request(server, "GET", pinned)
             assertEquals(200, initial.status)
+            assertEquals("no-store", initial.cacheControl)
             assertContentEquals(firstBytes, initial.body)
             assertEquals(first.archiveSha256, digest(initial.body))
             assertEquals("\"${first.archiveSha256}\"", initial.etag)
