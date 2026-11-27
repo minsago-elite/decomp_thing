@@ -820,3 +820,207 @@ it('does not pull focus back to Check controls when the user moved focus while t
     expect(document.activeElement).toBe(document.body);
   } finally { auth.dispose(); }
 });
+
+// Round 11 of #512 (packaged Chrome R10 replay): a queue-position read and a same-attempt metadata refresh are outstanding
+// together. The refresh, generated before an independent deletion, answers 200 with a terminal attempt and removes the queue
+// panel; the queue read then answers with the genuine 410. The route, not the removed panel, owns that tombstone.
+const terminal: Run = { ...fixture<Run>('run-completed-unaccepted'), jobId: queued.jobId, runId: queued.runId };
+const queueReference = '0f3c9a5e-7d21-4b8e-9c3a-5e7d214b8e9c';
+const queueGone = (serverCode = 'RESOURCE_GONE') => new ApiClientError('http_error', { status: 410, serverCode, requestId: queueReference });
+const signalOf = (kind: string, index = -1) => (transport.get.mock.calls.filter(([called]) => called === kind).at(index)![2] as { signal: AbortSignal }).signal;
+type Start = 'refresh' | 'queue';
+/** A queued route whose explicit Refresh and queue read are both held, started (and Chrome-blurred) in `order`. */
+async function overlappingReads(order: readonly [Start, Start]) {
+  const auth = await session();
+  const metadata = deferred<Run>(), queue = deferred<QueueSample>();
+  let runReads = 0;
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? (++runReads === 1 ? Promise.resolve({ data: queued }) : metadata.promise)
+    : kind === 'queuePosition' ? queue.promise : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${queued.jobId}/runs/${queued.runId}`);
+  render(<App basePath="/nested" session={auth} />);
+  const read = await screen.findByRole('button', { name: queuePositionCopy.read });
+  const refresh = screen.getByRole('button', { name: runCopy.refreshAttempt });
+  for (const step of order) {
+    const control = step === 'refresh' ? refresh : read;
+    control.focus(); fireEvent.click(control);
+    await waitFor(() => expect(control.matches(':disabled')).toBe(true));
+    blurIfDisabled(control);
+  }
+  expect(document.activeElement).toBe(document.body);
+  expect(reads('run')).toBe(2); expect(reads('queuePosition')).toBe(1);
+  return { auth, read, refresh, metadata, queue };
+}
+const notice = () => screen.queryByText(runCopy.thisJobWasDeleted, { exact: false });
+const queuePanel = () => screen.queryByRole('heading', { name: queuePositionCopy.title });
+const orders = [['refresh', 'queue'], ['queue', 'refresh']] as const;
+
+for (const order of orders) {
+  const label = `${order[0]} then ${order[1]}`;
+  it(`ends the attempt on a held queue tombstone that settles after a terminal refresh removed its panel (${label})`, async () => {
+    sessionStorage.setItem(slot, JSON.stringify(foreign(queued.jobId)));
+    const { auth, metadata, queue } = await overlappingReads(order);
+    try {
+      await metadata.settle({ ok: terminal });
+      expect(queuePanel()).toBeNull();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: runCopy.refreshAttempt }));
+      const abortedWithPanel = signalOf('queuePosition').aborted;
+      await queue.settle({ err: queueGone() });
+      const shown = notice();
+      expect(shown?.textContent).toContain(`Reference ID: ${queueReference}.`);
+      expect(document.activeElement).toBe(shown);
+      // Stale actions and every panel control are gone with the attempt; only the route's recovery remains.
+      expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
+      expect(screen.queryByRole('button', { name: attemptControlsCopy.read })).toBeNull();
+      expect(screen.getByRole('link', { name: 'Return to jobs' })).toBeTruthy();
+      expect(recovery().read()).toEqual({ kind: 'empty' });
+      expect(reads('run')).toBe(2); expect(reads('queuePosition')).toBe(1);
+      expect(transport.post).not.toHaveBeenCalled(); expect(transport.put).not.toHaveBeenCalled();
+      // The removed panel did not take the route's read with it.
+      expect(abortedWithPanel).toBe(false);
+    } finally { auth.dispose(); }
+  });
+
+  it(`keeps the queue tombstone when it settles before the held terminal refresh (${label})`, async () => {
+    sessionStorage.setItem(slot, JSON.stringify(foreign(queued.jobId)));
+    const { auth, metadata, queue } = await overlappingReads(order);
+    try {
+      await queue.settle({ err: queueGone() });
+      const shown = notice();
+      expect(shown?.textContent).toContain(`Reference ID: ${queueReference}.`);
+      expect(document.activeElement).toBe(shown);
+      expect(signalOf('run').aborted).toBe(true);
+      await metadata.settle({ ok: terminal });
+      expect(notice()).toBe(shown);
+      expect(document.activeElement).toBe(shown);
+      expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
+      expect(recovery().read()).toEqual({ kind: 'empty' });
+      expect(reads('run')).toBe(2); expect(reads('queuePosition')).toBe(1);
+    } finally { auth.dispose(); }
+  });
+}
+
+it('keeps a command retained for another job when the removed panel’s queue read confirms deletion', async () => {
+  const command = foreign();
+  sessionStorage.setItem(slot, JSON.stringify(command));
+  const { auth, metadata, queue } = await overlappingReads(orders[0]);
+  try {
+    await metadata.settle({ ok: terminal });
+    await queue.settle({ err: queueGone() });
+    expect(notice()).toBeTruthy();
+    expect(recovery().read()).toEqual({ kind: 'pending', command });
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus the user moved after the terminal refresh when the removed panel’s queue read confirms deletion', async () => {
+  const { auth, metadata, queue } = await overlappingReads(orders[0]);
+  try {
+    await metadata.settle({ ok: terminal });
+    const other = screen.getByRole('button', { name: 'Sign out' }); other.focus();
+    await queue.settle({ err: queueGone() });
+    expect(notice()).toBeTruthy();
+    expect(document.activeElement).toBe(other);
+  } finally { auth.dispose(); }
+});
+
+for (const [label, outcome] of [
+  ['a queue sample', { ok: sample }], ['a not-queued sample', { ok: { jobId: queued.jobId, runId: queued.runId, sampledAt: sample.sampledAt, state: 'not-queued', runState: 'completed' } as QueueSample }],
+  ['a sample for another attempt', { ok: { ...sample, runId: 'run_other_1' } }], ['503', { err: unavailable() }], ['EVENT_GAP 410', { err: queueGone('EVENT_GAP') }],
+  ['unverified 410', { err: new ApiClientError('invalid_headers', { status: 410 }) }], ['transport loss', { err: new ApiClientError('network_error') }],
+] as const) {
+  it(`drops ${label} from the queue read of a panel the terminal refresh removed, leaving the attempt, command and focus`, async () => {
+    const command = foreign(queued.jobId);
+    sessionStorage.setItem(slot, JSON.stringify(command));
+    const { auth, metadata, queue } = await overlappingReads(orders[1]);
+    try {
+      await metadata.settle({ ok: terminal });
+      const focused = document.activeElement;
+      expect(focused).toBe(screen.getByRole('button', { name: runCopy.refreshAttempt }));
+      await queue.settle(outcome);
+      expect(notice()).toBeNull(); expect(queuePanel()).toBeNull();
+      expect(screen.queryByText(queuePositionCopy.failed, { exact: false })).toBeNull();
+      expect(screen.queryAllByRole('alert')).toEqual([]);
+      expect(screen.getByRole('button', { name: attemptControlsCopy.read })).toBeTruthy();
+      expect(document.activeElement).toBe(focused);
+      expect(recovery().read()).toEqual({ kind: 'pending', command });
+      expect(reads('run')).toBe(2); expect(reads('queuePosition')).toBe(1);
+    } finally { auth.dispose(); }
+  });
+}
+
+/** A queued route whose first queue read is held while a held refresh answers a newer queued version, replacing the panel. */
+async function replacedQueuePanel() {
+  const auth = await session();
+  const metadata = deferred<Run>(), first = deferred<QueueSample>(), second = deferred<QueueSample>();
+  let runReads = 0, queueReads = 0;
+  transport.get.mockImplementation((kind: string) => kind === 'run' ? (++runReads === 1 ? Promise.resolve({ data: queued }) : metadata.promise)
+    : kind === 'queuePosition' ? (++queueReads === 1 ? first.promise : second.promise) : Promise.reject(unavailable()));
+  history.replaceState(null, '', `/nested/jobs/${queued.jobId}/runs/${queued.runId}`);
+  render(<App basePath="/nested" session={auth} />);
+  fireEvent.click(await screen.findByRole('button', { name: queuePositionCopy.read }));
+  fireEvent.click(screen.getByRole('button', { name: runCopy.refreshAttempt }));
+  await metadata.settle({ ok: { ...queued, version: 'run_version_queued_2' } });
+  const replaced = screen.getByRole('button', { name: queuePositionCopy.read });
+  expect(replaced.matches(':disabled')).toBe(false);
+  expect(signalOf('queuePosition').aborted).toBe(false);
+  return { auth, replaced, first, second };
+}
+
+for (const [label, outcome] of [['sample', { ok: sample }], ['503', { err: unavailable() }]] as const) {
+  it(`keeps an obsolete ${label} out of the queue panel that replaced the one that asked`, async () => {
+    const { auth, first } = await replacedQueuePanel();
+    try {
+      await first.settle(outcome);
+      expect(screen.queryByText(/About \d+ of \d+ queued tasks/)).toBeNull();
+      expect(screen.queryByText(queuePositionCopy.failed, { exact: false })).toBeNull();
+      expect(screen.getByText(queuePositionCopy.onRequest)).toBeTruthy();
+      expect(notice()).toBeNull();
+      expect(reads('run')).toBe(2); expect(reads('queuePosition')).toBe(1);
+    } finally { auth.dispose(); }
+  });
+}
+
+it('lets a newer queue read supersede the one the route still holds, so at most one is outstanding', async () => {
+  const { auth, replaced, first, second } = await replacedQueuePanel();
+  try {
+    fireEvent.click(replaced);
+    expect(signalOf('queuePosition', 0).aborted).toBe(true);
+    expect(signalOf('queuePosition', 1).aborted).toBe(false);
+    await first.settle({ err: gone() });
+    expect(notice()).toBeNull();
+    await second.settle({ err: queueGone() });
+    expect(notice()?.textContent).toContain(`Reference ID: ${queueReference}.`);
+    expect(reads('run')).toBe(2); expect(reads('queuePosition')).toBe(2);
+  } finally { auth.dispose(); }
+});
+
+it('ends the attempt on the tombstone of a read whose panel a newer queued version replaced', async () => {
+  const { auth, first } = await replacedQueuePanel();
+  try {
+    await first.settle({ err: queueGone() });
+    const shown = notice();
+    expect(shown?.textContent).toContain(`Reference ID: ${queueReference}.`);
+    expect(screen.queryByRole('button', { name: queuePositionCopy.read })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+for (const [label, leave] of [
+  ['the session ended', () => { fireEvent.click(screen.getByRole('button', { name: 'Sign out' })); }],
+  ['the view was left', () => navigate(`/nested/jobs/${queued.jobId}/runs/${queued.runId}/evidence`)],
+  ['the route was left', () => navigate('/nested/')],
+] as const) {
+  it(`aborts the removed panel’s queue read when ${label}, ignoring its later tombstone`, async () => {
+    const command = foreign(queued.jobId);
+    sessionStorage.setItem(slot, JSON.stringify(command));
+    const { auth, metadata, queue } = await overlappingReads(orders[0]);
+    try {
+      await metadata.settle({ ok: terminal });
+      expect(signalOf('queuePosition').aborted).toBe(false);
+      await leave();
+      expect(signalOf('queuePosition').aborted).toBe(true);
+      await queue.settle({ err: queueGone() });
+      expect(notice()).toBeNull();
+      expect(recovery().read()).toEqual({ kind: 'pending', command });
+      expect(reads('queuePosition')).toBe(1);
+    } finally { auth.dispose(); }
+  });
+}

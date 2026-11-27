@@ -26,13 +26,14 @@ import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { focusSurvivingNotice, restoreSettledFocus, useDepartingFocus } from '../shared/departingFocus';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
-import { QueuePosition } from '../jobs/QueuePosition';
+import { QueuePosition, useQueueObservation } from '../jobs/QueuePosition';
 import { jobCopy } from '../copy/job';
 
-function Details({ jobId, runId, basePath, session, view, navigation, onDeleted }: {
+function Details({ jobId, runId, basePath, session, view, navigation, onDeleted, departingFocus }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
   /** A confirmed RESOURCE_GONE tombstone from the attempt read or any panel ends the whole routed attempt (#512). */
   onDeleted: (failure: unknown) => void;
+  departingFocus: () => Element | null;
 }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
@@ -43,17 +44,23 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
   const [refresh, setRefresh] = useState(0);
   const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
+  // The queue read belongs to this authenticated attempt view, not its panel: a refresh that moves the attempt out of the
+  // queue must not discard a tombstone that read is still carrying (#512). Leaving the view or session aborts it.
+  const queueObservation = useQueueObservation(client, jobId, runId, onDeleted);
   // Refresh is disabled while its read is outstanding; a browser that blurred it gets focus back once the read settles.
   const refreshControl = useRef<HTMLButtonElement>(null);
-  const departingRefresh = useDepartingFocus(refreshControl);
+  const queueControl = useRef<HTMLButtonElement>(null);
   const settledFrom = useRef<Element | null>(null);
   useLayoutEffect(() => {
     const from = settledFrom.current; settledFrom.current = null;
-    restoreSettledFocus(from, null);
+    restoreSettledFocus(from, refreshControl.current);
   });
   useEffect(() => {
     const controller = new AbortController();
-    const settle = () => { const from = departingRefresh(); settledFrom.current = from === refreshControl.current ? from : null; };
+    const settle = () => {
+      const from = departingFocus();
+      settledFrom.current = from === refreshControl.current || from === queueControl.current ? from : null;
+    };
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
     void client.get('run', `/jobs/${jobId}/runs/${runId}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
@@ -108,7 +115,7 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted 
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
       <p>{copy.recordedHarnessBoundary}</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
-      {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} />}
+      {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} observation={queueObservation} controlRef={queueControl} />}
       <h2>{copy.recordedLimits}</h2>
       <p>{displayMessage(outcomeCopy.limitsSource, { time: <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time> })}</p>
       <dl class="job-facts">
@@ -196,7 +203,9 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
   </section>;
   const markDeleted = (failure: unknown) => {
     // Only the shared discriminator can prove deletion; any other failure leaves the attempt to its own panel.
-    if (viewKey === null || gone?.key === viewKey || !isDeletedJob(failure)) return;
+    const liveSession = session?.snapshot();
+    if (viewKey === null || gone?.key === viewKey || !isDeletedJob(failure)
+      || state?.status !== 'authenticated' || liveSession?.status !== 'authenticated' || liveSession.generation !== state.generation) return;
     departing.current = departingFocus();
     // A command retained for the deleted job can never be answered; one for any other job stays (#512).
     forgetAttemptCommandForDeletedJob(basePath, jobId);
@@ -212,7 +221,7 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
         <a href={runViewPath(basePath, jobId, runId, 'activity')} aria-current={view === 'activity' ? 'page' : undefined}>{copy.activityView}</a>
         <a href={runViewPath(basePath, jobId, runId, 'evidence')} aria-current={view === 'evidence' ? 'page' : undefined}>{copy.evidenceView}</a>
       </nav>
-      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} onDeleted={markDeleted} {...(navigation === undefined ? {} : { navigation })} />
+      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} onDeleted={markDeleted} departingFocus={departingFocus} {...(navigation === undefined ? {} : { navigation })} />
         : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}
     </> : <p role="alert">{copy.theRequestedJobOrAttemptIdentityIsInvalid}</p>}
   </section>;
