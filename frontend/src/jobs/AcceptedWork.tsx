@@ -20,19 +20,49 @@ type Lookup =
   | { status: 'unbound' }
   | { status: 'failed'; message: string };
 
+function failureMessage(failure: unknown) {
+  const kind = metadataFailureKind(failure);
+  return withApiFailureReference(kind === 'session' ? copy.lookupSession
+    : kind === 'unverified' || kind === 'unsupported' ? copy.lookupUnverified : copy.lookupFailed, failure);
+}
+
 /**
  * The latest attempt is current work; the accepted revision is the job's published reconstruction.
  * They are shown side by side so newer progress or reports never stand in for accepted evidence.
  */
-export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) {
+export function AcceptedWork({ job, basePath, onJobRead }: { job: Job; basePath: string; onJobRead?: (job: Job) => void }) {
   const { client } = usePrivateTransport(basePath);
   const { jobId, acceptedRevisionId, latestRunId, version } = job;
+  // The server versions a never-organized job by its exact attempt-history snapshot; a label or archive masks it.
+  const organized = (job.label ?? null) !== null || job.archived === true;
   // Each settled lookup names the observation it answers; a superseded one never renders as actionable.
   const key = `${jobId}\n${acceptedRevisionId ?? ''}\n${latestRunId ?? ''}\n${version}`;
   const [settled, setSettled] = useState<{ key: string; lookup: Lookup }>({ key, lookup: acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' } });
   const lookup: Lookup = settled.key === key ? settled.lookup : acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' };
   const setLookup = (next: Lookup) => { setSettled({ key, lookup: next }); };
   const [retry, setRetry] = useState(0);
+  const refreshing = useRef<AbortController | null>(null);
+  useEffect(() => () => { refreshing.current?.abort(); }, []);
+  /**
+   * Retry from an unbound history first reads the job once, then makes one history lookup for the observation it
+   * returns: a changed job is handed up and its new version starts that lookup; an unchanged one retries in place.
+   * A failed read settles as a failure, with no history read.
+   */
+  const retryUnbound = () => {
+    if (onJobRead === undefined) { setRetry(value => value + 1); return; }
+    refreshing.current?.abort();
+    const controller = new AbortController();
+    refreshing.current = controller;
+    setLookup({ status: 'loading' });
+    void client.get('job', `/jobs/${jobId}`, { signal: controller.signal }).then(({ data: fresh }) => {
+      if (controller.signal.aborted) return;
+      if (fresh.jobId !== jobId) throw new ApiClientError('invalid_response');
+      if (fresh.version === version) setRetry(value => value + 1); else onJobRead(fresh);
+    }).catch((failure: unknown) => {
+      if (controller.signal.aborted) return;
+      setLookup({ status: 'failed', message: failureMessage(failure) });
+    });
+  };
   // Set only when the person activated Retry, so focus follows their action and never jumps on refresh.
   const focusIntent = useRef<'none' | 'requested' | 'reading'>('none');
   const outcome = useRef<HTMLParagraphElement | null>(null);
@@ -64,6 +94,8 @@ export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) 
     (lookup.status === 'failed' || lookup.status === 'unbound' ? retryButton.current : outcome.current)?.focus();
   }, [settled, key]);
   useEffect(() => {
+    // A pending Retry job read belongs to the observation being replaced.
+    refreshing.current?.abort();
     if (acceptedRevisionId === null) { setLookup({ status: 'none' }); return; }
     const controller = new AbortController();
     setLookup({ status: 'loading' });
@@ -73,12 +105,30 @@ export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) 
       // History newer than this observation lists attempts before its latest one; those are skipped, and
       // a history that never shows the observed latest attempt cannot be bound to it at all.
       let reachedLatest = latestRunId === null;
+      let snapshot: string | null = null;
+      // History answers this observation only when its snapshot is the job's own: equal to the job version when
+      // unorganized, otherwise bracketed by one re-read of the job that still reports the version first observed.
+      const settle = async (result: Lookup) => {
+        if (result.status !== 'unbound' && snapshot !== null && snapshot !== version) {
+          if (!organized) { setLookup({ status: 'unbound' }); return; }
+          const { data: fresh } = await client.get('job', `/jobs/${jobId}`, { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          if (fresh.jobId !== jobId) throw new ApiClientError('invalid_response');
+          if (fresh.version !== version) { setLookup({ status: 'unbound' }); return; }
+        }
+        setLookup(result);
+      };
       for (let page = 0; page < acceptedLookupPages; page += 1) {
         const query = new URLSearchParams({ limit: String(pageLimit) });
         if (cursor !== null) query.set('cursor', cursor);
         const { data } = await client.get('runs', `/jobs/${jobId}/runs?${query}`, { signal: controller.signal });
         if (controller.signal.aborted) return;
         if (data.jobId !== jobId || data.items.some(run => run.jobId !== jobId)) throw new ApiClientError('invalid_response');
+        // The contract requires each page's snapshot; without it no history can be bound, so none is shown.
+        if (typeof data.page.snapshotVersion !== 'string' || data.page.snapshotVersion === '') throw new ApiClientError('invalid_response');
+        // Pages of one walk share a snapshot; the server expires a cursor rather than mixing two.
+        if (snapshot !== null && data.page.snapshotVersion !== snapshot) throw new ApiClientError('invalid_response');
+        snapshot = data.page.snapshotVersion;
         let items = data.items;
         if (latestRunId === null) {
           // No attempt was observed, so any listed attempt is newer than this observation.
@@ -89,20 +139,18 @@ export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) 
         }
         // Only an attempt whose own acceptance is recorded for exactly this revision identifies it.
         const found = items.find(run => run.acceptance === 'accepted' && run.resultRevisionId === acceptedRevisionId);
-        if (found) { setLookup({ status: 'found', run: found }); return; }
+        if (found) { await settle({ status: 'found', run: found }); return; }
         read += items.length;
         cursor = data.page.nextCursor;
-        if (cursor === null) { setLookup(reachedLatest ? { status: 'not-found', exhausted: true, read } : { status: 'unbound' }); return; }
+        if (cursor === null) { await settle(reachedLatest ? { status: 'not-found', exhausted: true, read } : { status: 'unbound' }); return; }
       }
-      setLookup(reachedLatest ? { status: 'not-found', exhausted: false, read } : { status: 'unbound' });
+      await settle(reachedLatest ? { status: 'not-found', exhausted: false, read } : { status: 'unbound' });
     })().catch((failure: unknown) => {
       if (controller.signal.aborted) return;
-      const kind = metadataFailureKind(failure);
-      setLookup({ status: 'failed', message: withApiFailureReference(kind === 'session' ? copy.lookupSession
-        : kind === 'unverified' || kind === 'unsupported' ? copy.lookupUnverified : copy.lookupFailed, failure) });
+      setLookup({ status: 'failed', message: failureMessage(failure) });
     });
     return () => { controller.abort(); };
-  }, [client, jobId, acceptedRevisionId, latestRunId, version, retry]);
+  }, [client, jobId, acceptedRevisionId, latestRunId, version, organized, retry]);
   return <section aria-labelledby="accepted-work-title"
     onFocusIn={event => { focused.current = event.target instanceof HTMLElement ? event.target : null; }}
     onFocusOut={event => {
@@ -121,7 +169,7 @@ export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) 
       </p>
     </>}
     <h4>{copy.acceptedTitle}</h4>
-    {lookup.status === 'none' && <p>{copy.noAccepted}</p>}
+    {lookup.status === 'none' && <p tabIndex={-1} ref={outcome}>{copy.noAccepted}</p>}
     {lookup.status === 'loading' && acceptedRevisionId !== null && <p role="status" tabIndex={-1} ref={outcome}>{displayMessage(copy.locating, { revisionId: <code>{acceptedRevisionId}</code> })}</p>}
     {lookup.status === 'found' && acceptedRevisionId !== null && <>
       <p tabIndex={-1} ref={outcome}>{displayMessage(copy.accepted, { revisionId: <code>{acceptedRevisionId}</code>, runId: <code>{lookup.run.runId}</code> })}</p>
@@ -143,7 +191,7 @@ export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) 
       <p role="status" tabIndex={-1} ref={outcome}>{displayMessage(copy.unbound, { revisionId: <code>{acceptedRevisionId}</code> })}</p>
       <p class="job-actions"><a href={`${jobPath(basePath, jobId)}/runs`}>{copy.history}</a></p>
       <button type="button" ref={retryButton}
-        onClick={() => { focusIntent.current = 'requested'; setRetry(value => value + 1); }}>{copy.retry}</button>
+        onClick={() => { focusIntent.current = 'requested'; retryUnbound(); }}>{copy.retry}</button>
     </>}
     {lookup.status === 'failed' && <>
       <p role="alert">{lookup.message}</p>

@@ -76,7 +76,8 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       <JobSummary job={job} />
       <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
       {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>{copy.openLatestRecordedAttempt}</a>}
-      <AcceptedWork key={`${job.jobId}/${job.acceptedRevisionId ?? ''}`} job={job} basePath={basePath} />
+      {/* Kept mounted across acceptances so focus on a replaced accepted link can follow to its replacement. */}
+      <AcceptedWork key={job.jobId} job={job} basePath={basePath} onJobRead={next => setStored({ binding, data: receive(next), error: '', loading: false })} />
       <h3>{copy.binaryMetadata}</h3>
       <dl class="job-facts">
         <dt>{copy.format}</dt><dd>{job.binary.format}</dd><dt>{copy.machine}</dt><dd>{job.binary.machine}</dd>

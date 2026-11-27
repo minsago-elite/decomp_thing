@@ -135,14 +135,27 @@ The job overview has a **Current and accepted work** section that keeps the two 
   to find the attempt whose own recorded acceptance is exactly the job's
   `acceptedRevisionId`. A candidate with the same revision identity but no recorded
   acceptance, or an attempt accepted for another revision, is never substituted.
-- The lookup is bound to the job observation it answers. History may be read after the
-  job, so attempts listed before the observed `latestRunId` are newer than that
-  observation and are skipped: a same-revision reacceptance by a newer attempt never
-  appears next to the observed latest attempt. Older accepted attempts behind a running
-  or failed latest attempt are still found. If the observed latest attempt is not listed
-  within the bound, or the job was observed with no attempt but history lists some, the
-  section says history changed after the job was read, shows no attempt, and offers retry
-  and attempt history.
+- The lookup is bound to the job observation it answers by durable version, not by attempt
+  ID. Every history page must carry the contract's required `page.snapshotVersion`; a
+  page without one, or two pages of one walk with different snapshots, is refused as an
+  invalid response and no attempt is shown. For a job that was never labelled or archived
+  (including records without organization fields), the job `version` is the exact history
+  snapshot version, so history binds only when `page.snapshotVersion` equals it. A label or
+  archive masks that version, so for an organized job whose version differs from the
+  snapshot the section makes at most one further read of the job after history, and binds
+  only when that read returns the same job and the version first observed; any new
+  acceptance, even by the same latest attempt for the same revision, changes it. Attempts
+  listed before the observed `latestRunId` are also skipped, and older accepted attempts
+  behind a running or failed latest attempt are still found. Otherwise, including when the
+  observed latest attempt is not listed within the bound or the job was observed with no
+  attempt but history lists some, the section says history changed after the job was
+  read, shows no attempt, and offers retry and attempt history.
+- Retry from that state reads the job once before any history read. If the job changed,
+  the overview takes the new observation and makes one lookup for it; if unchanged, the
+  lookup runs once more against the same observation and may again show no attempt; if
+  the read fails, the failure is shown with no history read. One click therefore makes one
+  job read, then at most two history pages and, for an organized job, one bracketing job
+  read. Nothing repeats without another click.
 - When found, it links that attempt, its evidence and report snapshots, and the accepted
   revision's sources. Otherwise the wording separates the two outcomes: when the **cap**
   is reached (a further page exists), the attempt is "not among the newest 100"; when
@@ -153,7 +166,8 @@ The job overview has a **Current and accepted work** section that keeps the two 
 - Focus moves only when the person causes it. Retry moves focus to the status and then
   to the outcome, unless focus has moved elsewhere in the meantime. If a background
   refresh removes the focused accepted link, focus goes to the status that replaces it,
-  but only when focus would otherwise drop to the page.
+  including when the accepted revision changes or is cleared, but only when focus would
+  otherwise drop to the page.
 
 Browser history restores the saved history page after opening an earlier attempt or one
 of its named views, and Forward returns to that view. This is covered by
