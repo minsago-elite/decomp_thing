@@ -4,18 +4,63 @@ import { promises as ownerFs } from 'node:fs';
 import { dirname as ownerDirname, join as ownerJoin, relative as ownerRelative, isAbsolute as ownerIsAbsolute } from 'node:path';
 import vm from 'node:vm';
 import { allocateSourceTreeBrowserTemp, requireSourceTreeBrowserTemp, removeSourceTreeBrowserTemp, SOURCE_TREE_BROWSER_TEMP_OWNER } from './packaged-browser-temp-owner.mjs';
-import { qualifySourceTreeColdPage, maximumFirstSearchPageMs, nearestRankPercentile, sourceSearchResponsePause, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
+import { qualifySourceTreeColdPage, maximumFirstSearchPageMs, nearestRankPercentile, sourceSearchResponsePause, sourceSearchCancellation, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
 
-test('cancelled navigation only qualifies a dispatched successful bounded search response', () => {
-  const event = { requestId: 'fetch-1', networkId: 'network-1', responseStatusCode: 200,
-    request: { url: 'http://127.0.0.1/nested/api/v1/source-search?q=Inert' },
-    responseHeaders: [{ name: 'Content-Length', value: '998' }] };
-  assert.deepEqual(sourceSearchResponsePause(event), {
-    requestId: 'fetch-1', networkId: 'network-1', responseStatus: 200, responseBytes: 998,
+const searchUrl = 'http://127.0.0.1:4567/nested/api/v1/jobs/job/runs/run/revisions/revision/source-search?q=Inert&limit=50';
+const searchUrlKey = new URL(searchUrl).pathname + new URL(searchUrl).search;
+const searchPause = { requestId: 'fetch-1', networkId: 'network-1', responseStatusCode: 200,
+  request: { url: searchUrl, method: 'GET' }, responseHeaders: [{ name: 'Content-Length', value: '998' }] };
+const abortedSearch = { requestId: 'network-1', route: 'search', method: 'GET', urlKey: searchUrlKey,
+  status: null, responseBytes: null, endedAt: 5, failure: 'net::ERR_ABORTED' };
+
+test('cancelled navigation only qualifies the exact dispatched successful bounded Fetch response', () => {
+  const pause = sourceSearchResponsePause(searchPause, searchUrl);
+  assert.deepEqual(pause, { requestId: 'fetch-1', networkId: 'network-1', urlKey: searchUrlKey,
+    responseStatus: 200, responseBytes: 998 });
+  for (const [change, message] of [
+    [{ networkId: undefined }, /dispatched Network request/u],
+    [{ responseStatusCode: undefined }, /successful response/u],
+    [{ responseStatusCode: 500 }, /successful response/u],
+    [{ request: { ...searchPause.request, method: 'POST' } }, /exact bounded search GET/u],
+    [{ request: { ...searchPause.request, url: searchUrl.replace('4567', '4568') } }, /exact bounded search GET/u],
+    [{ request: { ...searchPause.request, url: searchUrl.replace('limit=50', 'limit=49') } }, /exact bounded search GET/u],
+    [{ responseHeaders: [] }, /Content-Length/u],
+    [{ responseHeaders: [{ name: 'Content-Length', value: '00' }] }, /Content-Length/u],
+    [{ responseHeaders: [{ name: 'Content-Length', value: '0' }] }, /Content-Length/u],
+    [{ responseHeaders: [{ name: 'Content-Length', value: '1000001' }] }, /byte limit/u],
+    [{ responseHeaders: [...searchPause.responseHeaders, { name: 'content-length', value: '998' }] }, /Content-Length/u],
+  ]) assert.throws(() => sourceSearchResponsePause({ ...searchPause, ...change }, searchUrl), message);
+});
+
+test('a same-request Fetch pause supplies status when Chrome aborts before Network.responseReceived', () => {
+  const pause = sourceSearchResponsePause(searchPause, searchUrl);
+  assert.deepEqual(sourceSearchCancellation([abortedSearch], pause), {
+    request: abortedSearch, responseStatus: 200, responseStatusSource: 'Fetch.requestPaused', networkResponseStatus: null,
   });
-  assert.throws(() => sourceSearchResponsePause({ ...event, networkId: undefined }), /dispatched Network request/u);
-  assert.throws(() => sourceSearchResponsePause({ ...event, responseStatusCode: 500 }), /successful response/u);
-  assert.throws(() => sourceSearchResponsePause({ ...event, responseHeaders: [{ name: 'Content-Length', value: '1000001' }] }), /byte limit/u);
+  const corroborating = { ...abortedSearch, status: 200 };
+  assert.deepEqual(sourceSearchCancellation([corroborating], pause), {
+    request: corroborating, responseStatus: 200, responseStatusSource: 'Network.responseReceived', networkResponseStatus: 200,
+  });
+  assert.equal(abortedSearch.status, null, 'Do not overwrite the absent Network status');
+});
+
+test('cancellation receipt refuses unrelated, ambiguous, contradictory, or completed Network evidence', () => {
+  const pause = sourceSearchResponsePause(searchPause, searchUrl);
+  for (const [requests, message] of [
+    [[], /exactly one Network request/u],
+    [[abortedSearch, { ...abortedSearch }], /exactly one Network request/u],
+    [[{ ...abortedSearch, requestId: 'other' }], /exactly one Network request/u],
+    [[{ ...abortedSearch, route: 'directory' }], /same bounded search GET/u],
+    [[{ ...abortedSearch, method: 'POST' }], /same bounded search GET/u],
+    [[{ ...abortedSearch, urlKey: searchUrlKey.replace('Inert', 'Different') }], /same bounded search GET/u],
+    [[{ ...abortedSearch, status: 503 }], /contradicts/u],
+    [[{ ...abortedSearch, contentLength: 999 }], /contradicts/u],
+    [[{ ...abortedSearch, failure: 'net::ERR_FAILED' }], /terminal app-owned cancellation/u],
+    [[{ ...abortedSearch, endedAt: null }], /terminal app-owned cancellation/u],
+    [[{ ...abortedSearch, responseBytes: 998 }], /completed transfer/u],
+    [[{ ...abortedSearch, completionEvidence: 'Network.loadingFinished' }], /completed transfer/u],
+    [[{ ...abortedSearch, responseBodyBytes: 998 }], /completed transfer/u],
+  ]) assert.throws(() => sourceSearchCancellation(requests, pause), message);
 });
 
 test('resource timing fallback requires an exact aborted request, URL, clock and body binding', async () => {

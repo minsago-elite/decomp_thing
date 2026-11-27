@@ -61,23 +61,45 @@ export function sourceTreeBudgetGate(measurements, budgets = SOURCE_TREE_BUDGETS
 }
 
 /** Require a CDP Fetch pause after the application request has received a successful HTTP response. */
-export function sourceSearchResponsePause(event) {
+export function sourceSearchResponsePause(event, expectedUrl) {
   assert.ok(event && typeof event === 'object', 'source-search cancellation needs a Fetch pause event');
-  assert.ok(typeof event.request?.url === 'string' && event.request.url.includes('/source-search?'),
-    'The paused response must be the source-search request');
+  assert.ok(event.request?.method === 'GET' && event.request.url === expectedUrl,
+    'The paused response must be the exact bounded search GET');
   assert.ok(typeof event.requestId === 'string' && event.requestId.length > 0,
     'The paused response must have a Fetch request id');
   assert.ok(typeof event.networkId === 'string' && event.networkId.length > 0,
     'The paused response must bind to the dispatched Network request');
   assert.equal(event.responseStatusCode, 200, 'The source-search request must reach a successful response');
-  const headers = new Map((event.responseHeaders ?? []).map(header => [header.name.toLowerCase(), header.value]));
-  const contentLength = headers.get('content-length');
-  assert.ok(typeof contentLength === 'string' && /^(0|[1-9][0-9]{0,6})$/u.test(contentLength),
-    'The source-search response must declare a bounded decimal Content-Length');
+  const lengths = (event.responseHeaders ?? []).filter(header => header.name.toLowerCase() === 'content-length');
+  const contentLength = lengths[0]?.value;
+  assert.ok(lengths.length === 1 && typeof contentLength === 'string' && /^[1-9][0-9]{0,6}$/u.test(contentLength),
+    'The source-search response must declare one positive bounded decimal Content-Length');
   const responseBytes = Number(contentLength);
-  assert.ok(Number.isSafeInteger(responseBytes) && responseBytes <= SOURCE_TREE_BUDGETS.maximumSearchResponseBytes,
+  assert.ok(responseBytes <= SOURCE_TREE_BUDGETS.maximumSearchResponseBytes,
     'The source-search response exceeds its documented byte limit');
-  return { requestId: event.requestId, networkId: event.networkId, responseStatus: 200, responseBytes };
+  const url = new URL(expectedUrl);
+  return { requestId: event.requestId, networkId: event.networkId, urlKey: url.pathname + url.search,
+    responseStatus: 200, responseBytes };
+}
+
+/** Join the paused response to one terminal request from the same CDP session and origin. */
+export function sourceSearchCancellation(requests, pause) {
+  const candidates = requests.filter(item => item.requestId === pause.networkId);
+  assert.equal(candidates.length, 1, 'The response-stage cancellation must bind to exactly one Network request');
+  const [request] = candidates;
+  assert.ok(request.route === 'search' && request.method === 'GET' && request.urlKey === pause.urlKey,
+    'The Network request must be the same bounded search GET as the Fetch pause');
+  assert.ok(request.status === null || request.status === pause.responseStatus,
+    'The Network response status contradicts the successful Fetch pause');
+  assert.ok(request.contentLength == null || request.contentLength === pause.responseBytes,
+    'The Network response Content-Length contradicts the successful Fetch pause');
+  assert.ok(Number.isFinite(request.endedAt) && request.failure === 'net::ERR_ABORTED',
+    'The Network request must report terminal app-owned cancellation');
+  assert.ok(request.responseBytes === null && request.responseBodyBytes == null && request.completionEvidence == null,
+    'The cancelled search must not have evidence of a completed transfer');
+  return { request, responseStatus: pause.responseStatus,
+    responseStatusSource: request.status === null ? 'Fetch.requestPaused' : 'Network.responseReceived',
+    networkResponseStatus: request.status };
 }
 
 function processId(value) { return /^[1-9][0-9]{0,8}$/.test(value) ? Number(value) : null; }
@@ -682,18 +704,19 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
     // Hold a new search response after it has reached the server and returned HTTP 200.
     // Navigate through the application's own router; the unmounted search view must
     // abort its outstanding response read without rendering stale results.
+    const cancelledSearchUrl = `${browserOrigin}/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/source-search?q=Inert&limit=50`;
     let pausedRequest;
     let resolvePaused;
     const paused = new Promise(resolve => { resolvePaused = resolve; });
     cdp.on('Fetch.requestPaused', event => {
-      if (!event.request.url.includes('/source-search?')) return;
+      if (event.request.url !== cancelledSearchUrl) return;
       pausedRequest = event;
       resolvePaused(event);
     }, target.sessionId);
     await cdp.call('Fetch.enable', { patterns: [{ urlPattern: '*source-search*', requestStage: 'Response' }] }, target.sessionId);
     await evaluate(target, `(() => { const input = document.querySelector('input[name="q"]'); input.value = 'Inert'; input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('form[role="search"] button[type="submit"]').click(); })()`);
     await Promise.race([paused, new Promise((_, reject) => setTimeout(() => reject(new Error('Source-search request did not reach the cancellation gate')), 10_000))]);
-    const pausedResponse = sourceSearchResponsePause(pausedRequest);
+    const pausedResponse = sourceSearchResponsePause(pausedRequest, cancelledSearchUrl);
     assert.equal(await evaluate(target, `(() => { const link = document.querySelector('.app-nav a[href="/nested/runtime"]'); if (!link) return false; link.click(); return true; })()`), true,
       'The Runtime route must be reachable through the application navigation');
     await ready(target, `location.pathname === '/nested/runtime' && document.querySelector('h1')?.textContent === 'Runtime status'`, 'navigate in-app away from pending source search');
@@ -724,14 +747,10 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
 
     const routeMetrics = Object.fromEntries(['directory', 'search', 'file', 'chunk', 'digest', 'content', 'catalog']
       .map(route => [route, summarizeRequests(requests, route)]));
-    const pausedCandidates = requests.filter(item => item.requestId === pausedResponse.networkId);
-    assert.equal(pausedCandidates.length, 1, 'The response-stage cancellation must bind to exactly one Network request');
-    const pausedNetworkRequest = await waitForSourceRequest(requests,
-      item => item.requestId === pausedResponse.networkId && Number.isFinite(item.endedAt));
-    assert.equal(pausedNetworkRequest.route, 'search');
-    assert.equal(pausedNetworkRequest.status, 200, 'The deliberately paused search must have successful response headers');
-    assert.equal(pausedNetworkRequest.responseBytes, null, 'The deliberately aborted search must not be reported as a completed transfer');
-    assert.equal(pausedNetworkRequest.failure, 'net::ERR_ABORTED', 'The paused search must be observed as the app-owned cancellation');
+    // Both listeners are scoped to this target's CDP session. The Network collector
+    // also keeps only requests from browserOrigin, which the exact Fetch URL binds.
+    await waitForSourceRequest(requests, item => item.requestId === pausedResponse.networkId && Number.isFinite(item.endedAt));
+    const { request: pausedNetworkRequest, responseStatusSource, networkResponseStatus } = sourceSearchCancellation(requests, pausedResponse);
     const completeTransfer = item => item.status === 200
       && Number.isSafeInteger(item.responseBytes) && item.responseBytes > 0
       && Number.isFinite(item.endedAt)
@@ -803,7 +822,7 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
           resultNavigatesToFile: true },
         missing: { state: missing.state, noResults: missing.items === 0, firstPageMs: missingFirstPageMs,
           explicitDeadlineWhenPartial: missing.state === 'complete' || missing.text.toLowerCase().includes('time limit') } },
-      cancelledNavigation: { ...cancelNavigation, matchedNetworkRequest: true, requestTerminalFailure: pausedNetworkRequest.failure },
+      cancelledNavigation: { ...cancelNavigation, matchedNetworkRequest: true, responseStatusSource, networkResponseStatus, requestTerminalFailure: pausedNetworkRequest.failure },
       requests: routeMetrics,
       resources: { browserHeapBytes: sourceHeapBytes, browserHeapAfterNavigationBytes: finalHeapBytes, browserHeapPeakBytes, applicationProcessTreeRssBaselineBytes: baselineRssBytes,
         applicationProcessTreeRssPeakBytes: peakRssBytes, applicationProcessTreeRssGrowthBytes: rssGrowthBytes,
