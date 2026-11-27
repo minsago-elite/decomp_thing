@@ -957,6 +957,9 @@ jobs:
           path: |
             build/exporter-rendering-v16/native/equality-*/baseline-unoptimized/reports
             build/exporter-rendering-v16/native/equality-*/candidate-pure/reports
+            build/exporter-rendering-v16/native/typed-equality-*/fixture-provenance.txt
+            build/exporter-rendering-v16/native/typed-equality-*/baseline/reports
+            build/exporter-rendering-v16/native/typed-equality-*/candidate/reports
 
   archival-ghidra:
     needs: frontend
