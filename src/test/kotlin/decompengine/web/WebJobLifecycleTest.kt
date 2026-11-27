@@ -26,12 +26,14 @@ class WebJobLifecycleTest {
     private class Fixture(
         val root: Path = Files.createTempDirectory("web-job-lifecycle-"),
         holds: List<JobRetentionHold> = emptyList(),
+        adapters: List<DurableWebWorkflowAdapter> = emptyList(),
         configure: (WebJobService) -> Unit = {},
     ) : AutoCloseable {
         val store = JobStore(root)
         lateinit var owner: WorkflowAttemptStore
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") }, JobReconstructor { _, _ -> error("Unexpected reconstruction") },
-            attemptStoreFactory = { WorkflowAttemptStore.open(it).also { opened -> owner = opened } }, retentionHolds = holds).also(configure)
+            attemptStoreFactory = { WorkflowAttemptStore.open(it).also { opened -> owner = opened } }, retentionHolds = holds,
+            durableAdapters = adapters).also(configure)
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin))
@@ -262,6 +264,52 @@ class WebJobLifecycleTest {
             assertEquals(setOf(active.id, pinned.id), protectedIds)
             assertContentEquals(stateBytes, f.root.resolve("${pinned.id}/workflow-state.json").readBytes())
             data(f.delete(git.id, "delete_key_released_hold"), "operation", 202)
+        }
+    }
+
+    @Test fun `physically held workflow worker protects deletion until it exits`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val adapter = object : DurableWebWorkflowAdapter {
+            override val workflow = WorkflowKind.RECONSTRUCT
+            override val limits = WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u)
+            override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+                entered.countDown()
+                check(release.await(10, TimeUnit.SECONDS))
+                return DurableWebWorkflowOutcome.Failed()
+            }
+        }
+        Fixture(adapters = listOf(adapter)).start().use { f ->
+            val job = f.store.createFromUpload("inert.elf", elfFixture())
+            fun protections() = data(f.read("/jobs/${job.id}/deletion-preview"), "jobDeletionPreview")
+                .getValue("protections").jsonArray.map { it.jsonObject.getValue("code").jsonPrimitive.content }
+            val version = f.version(job.id)
+            assertIs<DurableWebWorkflowAdmission.Started>(f.service.startDurable(job.id, version,
+                DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS), "the adapter must be executing inside its latch")
+                val before = evidenceDigest(f.root.resolve(job.id))
+                assertTrue("OWNED_WORKER" in protections())
+                val heldVersion = f.version(job.id)
+                val refusal = error(f.delete(job.id, "delete_key_held_worker", heldVersion), 409, "RETENTION_PROTECTED")
+                assertTrue(refusal.getValue("details").jsonArray.any {
+                    it.jsonObject.getValue("code").jsonPrimitive.content == "OWNED_WORKER"
+                })
+                assertTrue(Files.isDirectory(f.root.resolve(job.id)))
+                assertEquals(before, evidenceDigest(f.root.resolve(job.id)), "the worker-held job metadata and evidence remain intact")
+            } finally {
+                release.countDown()
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            var reasons: List<String>
+            do {
+                reasons = protections()
+                if ("OWNED_WORKER" in reasons) Thread.sleep(10)
+            } while ("OWNED_WORKER" in reasons && System.nanoTime() < deadline)
+            assertFalse("OWNED_WORKER" in reasons, "the owned-worker guard clears after the worker exits")
+            assertTrue(reasons.isEmpty(), "all deletion protections clear after the worker exits: $reasons")
+            data(f.delete(job.id, "delete_key_worker_released", f.version(job.id)), "operation", 202)
+            assertFalse(Files.exists(f.root.resolve(job.id)))
         }
     }
 
@@ -532,6 +580,84 @@ class WebJobLifecycleTest {
             assertEquals("1", preview.getValue("affectedJobs").jsonPrimitive.content)
             assertContentEquals(journalBytes, reports.resolve(AgentProgressJournal.FILE_NAME).readBytes(), "a preview never expires history")
             assertEquals(JsonPrimitive("not-scheduled"), action["schedule"])
+        }
+    }
+
+    @Test fun `deleting a job closes its event stream and both resume transports return resource gone`() = Fixture().start().use { f ->
+        val job = f.store.createFromUpload("inert.elf", elfFixture())
+        val attempt = f.attempt(job.id)
+        val terminal = f.finish(job.id, attempt)
+        val reports = f.root.resolve("${job.id}/reports/runs/${terminal.runId}")
+        AgentProgressJournal(reports, "reconstruct").use { journal ->
+            journal.diagnostic("synthetic inert terminal observation")
+        }
+
+        val eventsPath = "/workbench/api/v1/jobs/${job.id}/runs/${terminal.runId}/events"
+        val streamRequest = HttpRequest.newBuilder(URI("${f.origin}$eventsPath"))
+            .timeout(Duration.ofSeconds(10))
+            .header("Cookie", f.cookie)
+            .header("Accept", "text/event-stream")
+            .GET()
+            .build()
+        val stream = f.client.send(streamRequest, HttpResponse.BodyHandlers.ofInputStream())
+        assertEquals(200, stream.statusCode())
+        val reader = stream.body().bufferedReader()
+        val readerExecutor = Executors.newSingleThreadExecutor()
+        try {
+            fun nextEvent(): Map<String, String> = readerExecutor.submit<Map<String, String>> {
+                val fields = linkedMapOf<String, String>()
+                for (line in generateSequence { reader.readLine() }) {
+                    if (line.isEmpty() && "data" in fields) return@submit fields
+                    if (line.startsWith("id: ")) fields["id"] = line.substringAfter("id: ")
+                    if (line.startsWith("data: ")) fields["data"] = line.substringAfter("data: ")
+                }
+                error("Stream ended before all recorded events")
+            }.get(5, TimeUnit.SECONDS)
+
+            val recorded = assertNotNull(AgentProgressJournal.read(reports))
+            assertEquals(listOf(0L, 1L), recorded.getValue("events").jsonArray.map {
+                it.jsonObject.getValue("sequence").jsonPrimitive.long
+            }, "the immutable synthetic journal has exactly the start marker and diagnostic")
+
+            fun observedCursor(sequence: String): String {
+                val frame = nextEvent()
+                val observation = Json.parseToJsonElement(frame.getValue("data")).jsonObject
+                assertEquals("workflow.observation", observation.getValue("type").jsonPrimitive.content)
+                assertEquals(sequence, observation.getValue("sequence").jsonPrimitive.content)
+                assertEquals(job.id, observation.getValue("jobId").jsonPrimitive.content)
+                assertEquals(terminal.runId, observation.getValue("runId").jsonPrimitive.content)
+                return frame.getValue("id").also { assertEquals(it, observation.getValue("cursor").jsonPrimitive.content) }
+            }
+            observedCursor("0")
+            val cursor = observedCursor("1")
+
+            assertEquals(1, f.resources.snapshot().active, "the established SSE connection must still be active before DELETE")
+            data(f.delete(job.id, "delete_key_stream_173"), "operation", 202)
+            val endedWithoutProgress = readerExecutor.submit<Boolean> {
+                var progressAfterDeletion = false
+                reader.lineSequence().forEach { line ->
+                    if (line.startsWith("data: ")) progressAfterDeletion = true
+                }
+                !progressAfterDeletion
+            }.get(5, TimeUnit.SECONDS)
+            assertTrue(endedWithoutProgress, "stream must end without progress after deletion")
+
+            val reconnect = f.client.send(HttpRequest.newBuilder(URI("${f.origin}$eventsPath"))
+                .timeout(Duration.ofSeconds(5))
+                .header("Cookie", f.cookie)
+                .header("Accept", "text/event-stream")
+                .header("Last-Event-ID", cursor)
+                .GET()
+                .build(), HttpResponse.BodyHandlers.ofString())
+            error(reconnect, 410, "RESOURCE_GONE")
+            error(f.read("/jobs/${job.id}/runs/${terminal.runId}/events?transport=poll&after=$cursor"), 410, "RESOURCE_GONE")
+            assertEquals(0, f.resources.snapshot().active)
+        } finally {
+            // Close the HTTP body first so a pending readLine releases the buffered reader lock.
+            stream.body().close()
+            readerExecutor.shutdownNow()
+            reader.close()
+            assertTrue(readerExecutor.awaitTermination(3, TimeUnit.SECONDS), "SSE reader must terminate during cleanup")
         }
     }
 }

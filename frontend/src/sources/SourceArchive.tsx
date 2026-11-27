@@ -8,6 +8,7 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import type { BrowserSession } from '../session/session';
 import { formatExactBytes } from '../jobs/metadataFormat';
 import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
+import { isDeletedJob } from '../shared/retainMetadata';
 import type { SourceReadState } from './navigation';
 import { archiveOperationRoute, archiveStatusRoute, archiveVerificationsRoute, bindArchiveOperation, bindSourceArchive } from './archive';
 
@@ -29,7 +30,11 @@ type Progress = { state: 'submitting' } | { state: 'running' | 'done'; value: Op
  * revision, recorded build, acceptance and digest before the download, and keeps the generated source archive
  * distinct from the application JAR that serves this page.
  */
-export function SourceArchive({ selected, basePath, session }: { selected: SourceSelection; basePath: string; session: Pick<BrowserSession, 'csrf'> }) {
+export function SourceArchive({ selected, basePath, session, onDeleted }: {
+  selected: SourceSelection; basePath: string; session: Pick<BrowserSession, 'csrf'>;
+  /** A confirmed RESOURCE_GONE tombstone from a status read, verification or poll ends the Sources route (#512). */
+  onDeleted?: (failure: unknown) => void;
+}) {
   const { client } = usePrivateTransport(basePath);
   const [refresh, setRefresh] = useState(0);
   const key = [selected.jobId, selected.runId, selected.revisionId, refresh].join('/');
@@ -83,20 +88,20 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   useEffect(() => () => { stop.current?.(); stop.current = null; }, []);
   // A verification belongs to the selected revision and session; changing either abandons it and its feedback.
   const binding = [selected.jobId, selected.runId, selected.revisionId].join('/');
-  const owner = useRef({ binding, session });
+  const owner = useRef({ binding, session, onDeleted });
   useEffect(() => {
-    if (owner.current.binding === binding && owner.current.session === session) return;
-    owner.current = { binding, session };
+    if (owner.current.binding === binding && owner.current.session === session && owner.current.onDeleted === onDeleted) return;
+    owner.current = { binding, session, onDeleted };
     stop.current?.(); stop.current = null; busy.current = false; awaiting.current = null; focusResult.current = null; heldLink.current = null;
     setProgress(null);
-  }, [binding, session]);
+  }, [binding, session, onDeleted]);
   useEffect(() => refresh === 0 ? undefined : beginSourceRead(key, async signal => bindSourceArchive(
     (await client.get('sourceArchive', archiveStatusRoute(selected), { signal })).data, selected, basePath), next => {
       setRead(next);
       if (next.state === 'ready' && next.value.verification.state !== 'running') {
         setProgress(previous => previous?.state === 'paused' && previous.readKey !== next.key ? null : previous);
       }
-    }), [client, key]);
+    }, onDeleted), [client, key, onDeleted]);
   const current = refresh > 0 && read ? currentSourceRead(read, key) : refresh > 0 ? { key, state: 'loading' as const } : null;
   const data = current?.state === 'ready' ? current.value : null;
   function holdLink(nextKey: string) {
@@ -172,7 +177,10 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
         if (controller.signal.aborted) return;
         busy.current = false;
         awaiting.current = null;
-        if (withdrawal(failure)) {
+        if (isDeletedJob(failure) && onDeleted) {
+          stop.current = null; setProgress(null);
+          onDeleted(failure);
+        } else if (withdrawal(failure)) {
           // The server established that the digest behind this status and download URL no longer names a retained,
           // verifiable archive. Only a new, explicit status read can restore them.
           const active = document.activeElement;

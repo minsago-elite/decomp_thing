@@ -11,10 +11,14 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import { formatExactBytes } from '../jobs/metadataFormat';
 import { beginSourceRead, currentSourceRead, sourceDownloadName, sourceReadMessage } from './navigation';
 import type { SourceReadState } from './navigation';
+
 import { bindSourceDiff, bindSourceFileDiff, jobRunsRoute, sourceDiffParent, sourceDiffPath, sourceDiffRoute, sourceDiffSelection,
   sourceFileDiffPath, sourceFileDiffSelection, sourcePatchRoute } from './diff';
 import type { SourceDiffBase, SourceFileDiffSelection } from './diff';
 import { visibleSourceText } from './viewer';
+
+/** Reports a confirmed RESOURCE_GONE tombstone to the Sources route (#512); every other failure stays in this view. */
+type OnDeleted = (failure: unknown) => void;
 
 type Identity = Pick<SourceDiffPage, 'sourceSha256' | 'metadataVersion' | 'baseSourceSha256' | 'baseMetadataVersion'>;
 
@@ -77,7 +81,7 @@ function fileFacts(file: SourceDiffFile | null): string {
 }
 
 /** Explicit base choice. The parent suggestion comes from the head attempt's recorded input or previous attempt. */
-function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelection; basePath: string; onChoose: () => void }) {
+function BaseChooser({ selected, basePath, onChoose, onDeleted }: { selected: SourceSelection; basePath: string; onChoose: () => void; onDeleted?: OnDeleted }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const key = [selected.jobId, selected.runId, selected.revisionId].join('/');
@@ -86,7 +90,7 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
   const [older, setOlder] = useState<SourceReadState<Attempts> | null>(null);
   const [choice, setChoice] = useState('');
   const stopOlder = useRef<(() => void) | null>(null);
-  useEffect(() => () => { stopOlder.current?.(); stopOlder.current = null; }, []);
+  useEffect(() => () => { stopOlder.current?.(); stopOlder.current = null; }, [onDeleted]);
   useEffect(() => beginSourceRead(key, async signal => {
     const head = (await client.get('run', `/jobs/${selected.jobId}/runs/${selected.runId}`, { signal })).data;
     const page = (await client.get('runs', jobRunsRoute(selected.jobId), { signal })).data;
@@ -99,7 +103,7 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
       runs.push(previous);
     }
     return { head, runs, nextCursor: page.page.nextCursor };
-  }, setRead), [client, key]);
+  }, setRead, onDeleted), [client, key, onDeleted]);
   const current = currentSourceRead(read, key);
   const value = current.state === 'ready' ? current.value : null;
   function loadOlder(attempts: Attempts) {
@@ -116,7 +120,7 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
       if (next.state === 'ready') {
         setRead(previous => previous.key === key ? { key, state: 'ready', value: next.value } : previous);
       }
-    });
+    }, onDeleted);
   }
   const options = value ? value.runs.filter(run => run.resultRevisionId !== null && run.runId !== selected.runId) : [];
   const parent = value ? sourceDiffParent(value.head, value.runs) : null;
@@ -150,7 +154,7 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
 }
 
 /** Changed-file list between two exact revisions. Paging is explicit; nothing is fetched in the background. */
-export function SourceDiff({ selected, basePath, search }: { selected: SourceSelection; basePath: string; search: string }) {
+export function SourceDiff({ selected, basePath, search, onDeleted }: { selected: SourceSelection; basePath: string; search: string; onDeleted?: OnDeleted }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -179,8 +183,8 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
         expected.current.delete(oldest);
       }
       return page;
-    }, setRead);
-  }, [client, key]);
+    }, setRead, onDeleted);
+  }, [client, key, onDeleted]);
   const current = base ? currentSourceRead(read, key) : null;
   const data = current?.state === 'ready' ? current.value : null;
   useEffect(() => {
@@ -188,7 +192,7 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
   }, [current?.state, key]);
   if (!selection) return <p role="alert">{copy.diffInvalid}</p>;
   // The view stays mounted across query navigation, so keyboard focus can follow the chosen comparison.
-  if (!base) return <BaseChooser selected={selected} basePath={basePath} onChoose={() => { moveFocus.current = true; }} />;
+  if (!base) return <BaseChooser selected={selected} basePath={basePath} onChoose={() => { moveFocus.current = true; }} {...(onDeleted ? { onDeleted } : {})} />;
   function go(next: string | null) {
     moveFocus.current = true;
     location.route(sourceDiffPath(basePath, selected, base, next));
@@ -265,7 +269,7 @@ function hunkEntry(): HunkEntry | null {
 function lineLabel(value: number | null): string { return value === null ? '' : String(value); }
 
 /** One bounded file comparison. Hunks are paged explicitly; omitted unchanged lines are counted, never hidden. */
-export function SourceFileDiff({ selected, basePath, search }: { selected: SourceSelection; basePath: string; search: string }) {
+export function SourceFileDiff({ selected, basePath, search, onDeleted }: { selected: SourceSelection; basePath: string; search: string; onDeleted?: OnDeleted }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -290,8 +294,8 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
       const response = await client.get('sourceFileDiff', sourceFileDiffPath('', selected, chosen), { signal });
       if (signal.aborted) throw new ApiClientError('aborted');
       return bindSourceFileDiff(response.data, selected, chosen);
-    }, setRead);
-  }, [client, key]);
+    }, setRead, onDeleted);
+  }, [client, key, onDeleted]);
   const current = selection ? currentSourceRead(read, key) : null;
   const data = current?.state === 'ready' ? current.value : null;
   useEffect(() => {

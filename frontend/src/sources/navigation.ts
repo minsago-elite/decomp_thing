@@ -153,7 +153,8 @@ export function currentSourceRead<T>(value: SourceReadState<T>, key: string): So
 }
 
 /** One callback read with latest-only publication, independent of transport cancellation cooperation. */
-export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>, publish: (state: SourceReadState<T>) => void): () => void {
+export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>, publish: (state: SourceReadState<T>) => void,
+  onDeleted?: (failure: unknown) => void): () => void {
   const controller = new AbortController();
   publish({ key, state: 'loading' });
   void Promise.resolve().then(() => {
@@ -162,7 +163,9 @@ export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => P
   }).then(value => {
     if (!controller.signal.aborted) publish({ key, state: 'ready', value });
   }).catch((failure: unknown) => {
-    if (!controller.signal.aborted) publish({ key, state: 'failed', failure });
+    if (controller.signal.aborted) return;
+    if (onDeleted && isDeletedJob(failure)) onDeleted(failure);
+    else publish({ key, state: 'failed', failure });
   });
   return () => { controller.abort(); };
 }

@@ -5,6 +5,7 @@ import { artifactCopy as copy } from '../copy/artifacts';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { formatExactBytes } from './metadataFormat';
+import { isDeletedJob } from '../shared/retainMetadata';
 
 const ARTIFACT_PAGE_LIMIT = 50;
 
@@ -36,8 +37,13 @@ function failureMessage(failure: unknown): string {
 }
 
 /** Explicit, paged catalog read. Downloads use ordinary browser attachment links, never in-page blobs. */
-export function ArtifactCatalog({ jobId, runId, revisionId, basePath }: { jobId: string; runId: string; revisionId: string | null; basePath: string }) {
+export function ArtifactCatalog({ jobId, runId, revisionId, basePath, onDeleted }: {
+  jobId: string; runId: string; revisionId: string | null; basePath: string;
+  /** A RESOURCE_GONE tombstone ends the routed attempt rather than reading as an expired cursor (#512). */
+  onDeleted?: (failure: unknown) => void;
+}) {
   const { client } = usePrivateTransport(basePath);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const heading = useRef<HTMLHeadingElement>(null);
   const [selection, setSelection] = useState<{ request: number; revisionOnly: boolean; cursor: string | null }>({ request: 0, revisionOnly: false, cursor: null });
   const [state, setState] = useState<{ key: string; loading: boolean; data: Artifacts | null; error: string }>({ key: '', loading: false, data: null, error: '' });
@@ -52,7 +58,9 @@ export function ArtifactCatalog({ jobId, runId, revisionId, basePath }: { jobId:
       setState({ key, loading: false, data: bindArtifactCatalog(response.data, jobId, runId, filter), error: '' });
       heading.current?.focus();
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setState({ key, loading: false, data: null, error: failureMessage(failure) });
+      if (controller.signal.aborted) return;
+      if (isDeletedJob(failure) && deletedHandler.current) { deletedHandler.current(failure); return; }
+      setState({ key, loading: false, data: null, error: failureMessage(failure) });
     });
     return () => { controller.abort(); };
   }, [client, key]);

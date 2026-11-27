@@ -326,7 +326,7 @@ export const explorationCasesCopy = {
 } as const;
 
 export const runCopy = {
-  thisJobWasDeleted: "This attempt’s job was deleted. Its files were removed and cannot be recovered.",
+  thisJobWasDeleted: "This attempt’s job was deleted from the library and cannot be recovered. This page has not observed whether file cleanup finished.",
   attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence', logsView: 'Build log',
   activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence', logsTitle: 'Attempt build log',
   "wallClockLimit": "{value} milliseconds",

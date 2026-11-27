@@ -6,6 +6,7 @@ import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import { apiPath } from '../app/paths';
 import { formatExactTimestamp } from './metadataFormat';
+import { isDeletedJob } from '../shared/retainMetadata';
 import { LOG_BUFFER_LINES, LOG_PAGE_LINES, lastLine, mergeLogRange, visibleWindow, type AvailableLog, type LogBuffer } from './logBuffer';
 
 /** Fixed row geometry lets the viewport render only visible rows of a large buffer. */
@@ -26,8 +27,10 @@ function Time({ value }: { value: string | null }) {
  * server, nothing is parsed as markup or terminal control. Leaving the view aborts reads, stops
  * the follow timer and drops the buffer.
  */
-export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
+export function LogViewer({ jobId, runId, basePath, onDeleted }: { jobId: string; runId: string; basePath: string; onDeleted?: (failure: unknown) => void }) {
   const { client } = usePrivateTransport(basePath);
+  // The latest route handler, so a long-lived read callback never reports a tombstone to a superseded view (#512).
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const availability = useBrowserAvailability();
   const [buffer, setBuffer] = useState<LogBuffer | null>(null);
   const [status, setStatus] = useState<Status>({ state: 'loading' });
@@ -122,6 +125,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       return data;
     } catch (failure: unknown) {
       if (!current()) return null;
+      if (isDeletedJob(failure) && deletedHandler.current) { cancelReads(); followRef.current = 'off'; setFollow('off'); deletedHandler.current(failure); return null; }
       setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 401 ? copy.session : copy.failed, failure));
       followRef.current = 'off'; setFollow('off');
       if (!bufferRef.current) setStatus({ state: 'error' });
