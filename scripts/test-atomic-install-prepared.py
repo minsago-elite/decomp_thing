@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Bounded Python-only ordering, failure diagnostics and inventory controls."""
 import importlib.util
+import io
 import json
 import os
 import pathlib
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -490,6 +492,45 @@ class PatternControls(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'depth/name'): self.mod.matches('*', 'a' * 256)
         with self.assertRaisesRegex(RuntimeError, 'depth/name'): self.mod.matches('*', 'é' * 128)
         with self.assertRaises(RuntimeError): self.mod.components('a' * 4097)
+
+
+class JdkBindingDiagnosticControls(unittest.TestCase):
+    def test_in_root_link_receipt_and_external_link_refusal(self):
+        with tempfile.TemporaryDirectory(dir=BASE) as directory:
+            work = pathlib.Path(directory)
+            home = work / 'selected-jdk'; (home / 'lib/security').mkdir(parents=True)
+            java = home / 'bin/java'; java.parent.mkdir(); java.write_bytes(b'inert launcher'); java.chmod(0o755)
+            release = home / 'release'; release.write_text('JAVA_VERSION="21.0.1"\n')
+            store = home / 'lib/security/cacerts'; store.write_bytes(b'inert trust store')
+            link = home / 'trust-store'; link.symlink_to('lib/security/cacerts')
+            binding = prep.jdk_binding(home)
+            self.assertEqual(str(home), binding['root'])
+            self.assertEqual(str(store), binding['entries']['trust-store']['target'])
+            self.assertEqual(prep.file_receipt(java), binding['entries']['bin/java'])
+            self.assertEqual(prep.file_receipt(release), binding['entries']['release'])
+            # Reproduce distro-style external trust-store edges without reading
+            # an actual system JDK or running any fixture/toolchain executable.
+            outside = work / 'private-path-must-not-leak'; outside.write_bytes(b'outside trust store')
+            store.unlink(); store.symlink_to(outside)
+            output = work / 'bindings.json'; captured = io.StringIO()
+            with mock.patch.object(prep.sys, 'argv', ['helper', 'bindings', str(home), str(work / 'gradle'), str(output), '120']), redirect_stdout(captured):
+                with self.assertRaisesRegex(RuntimeError, '^JDK symlink escape$'):
+                    prep.main()
+            self.assertEqual('atomic binding failure stage=jdk cause=RuntimeError check=jdk-symlink-escape\n', captured.getvalue())
+            self.assertNotIn(str(outside), captured.getvalue())
+            self.assertFalse(output.exists())
+
+    def test_known_checks_and_untrusted_messages(self):
+        for message in prep.BINDING_DIAGNOSTIC_CHECKS:
+            with self.subTest(message=message):
+                summary = prep.binding_failure_diagnostic('jdk', RuntimeError(message))
+                self.assertRegex(summary, r'^atomic binding failure stage=jdk cause=RuntimeError check=[a-z][a-z0-9-]{0,95}$')
+                self.assertLessEqual(len(summary), 512)
+        for detail in ('private/path\nforged output', 'JDK symlink escape\nprivate/path', ['private/path']):
+            self.assertEqual('atomic binding failure stage=jdk cause=RuntimeError',
+                             prep.binding_failure_diagnostic('jdk', RuntimeError(detail)))
+        self.assertEqual('atomic binding failure stage=gradle cause=FileNotFoundError',
+                         prep.binding_failure_diagnostic('gradle', FileNotFoundError('private/path')))
 
 
 class AcpScopeControls(unittest.TestCase):
