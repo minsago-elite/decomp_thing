@@ -428,7 +428,7 @@ it.each([
       await screen.findByText(/attempt history changed after this job was read/);
       await waitFor(() => expect(document.activeElement).toBe(section().getByRole('button', { name: acceptedWorkCopy.retry })));
     } else {
-      expect((await screen.findByRole('alert')).textContent).toContain(acceptedWorkCopy.lookupFailed);
+      expect((await section().findByRole('alert')).textContent).toContain(acceptedWorkCopy.lookupFailed);
       await waitFor(() => expect(document.activeElement).toBe(section().getByRole('button', { name: acceptedWorkCopy.retry })));
     }
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
@@ -1277,5 +1277,38 @@ it.each(['retry', 'moved'] as const)('ends the overview on a confirmed deletion 
     expect(within(screen.getByRole('alert')).getByRole('link', { name: jobCopy.returnToJobs })).toBeTruthy();
     expect(document.activeElement).toBe(focus === 'moved' ? elsewhere : notice);
     expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'runs', 'job']);
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  [200, 'foreign-job', false, jobCopy.theServerReturnedADifferentJobIdentity],
+  [404, 'NOT_FOUND', false, jobCopy.thisJobIsUnavailableItMayHaveBeenRemoved],
+  [503, 'CORRUPT_WORKFLOW_STATE', false, jobCopy.storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts],
+  [503, 'LISTING_BUSY', true, jobCopy.jobMetadataCouldNotBeLoadedCheckTheLocalSession],
+] as const)('applies the overview retention policy on a recovery job read returning %i %s', async (status, serverCode, retain, message) => {
+  const auth = await session();
+  let jobs = 0;
+  transport.get.mockImplementation(kind => {
+    if (kind === 'job') {
+      if (++jobs === 1) return Promise.resolve(acceptedJob({ latestRunId: 'run_latest', version: v('A') }));
+      if (status === 200) return Promise.resolve(acceptedJob({ jobId: 'f'.repeat(32) }));
+      return Promise.reject(new ApiClientError('http_error', { status, serverCode }));
+    }
+    return Promise.resolve(page([latestRunning], null, v('B')));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const retry = await screen.findByRole('button', { name: acceptedWorkCopy.retry });
+    retry.focus();
+    fireEvent.click(retry);
+    await settleReads();
+    expect(screen.getByText(message)).toBeTruthy();
+    expect(Boolean(screen.queryByRole('heading', { name: sampleJob.displayFilename }))).toBe(retain);
+    expect(Boolean(screen.queryByRole('link', { name: acceptedWorkCopy.latestEvidence }))).toBe(retain);
+    expect(Boolean(screen.queryByText(jobCopy.previousJobMetadataMayBeOutdated))).toBe(retain);
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
+    expect(screen.getByRole('button', { name: jobCopy.refreshJob })).toBeTruthy();
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job']);
   } finally { auth.dispose(); }
 });

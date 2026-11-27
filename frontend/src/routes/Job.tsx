@@ -45,22 +45,39 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
   const [deleted, setDeleted] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
   const departing = useRef<Element | null>(null);
-  const deletionNotice = useRef<HTMLParagraphElement>(null);
-  function confirmDeletion(ticket: number) {
+  const readNotice = useRef<HTMLParagraphElement>(null);
+  function clearObservation(ticket: number, error: string) {
     departing.current = document.activeElement;
     order.current.applied = ticket;
     order.current.current = null;
-    setStored({ binding, data: null, observed: ticket, error: '', loading: false });
+    setStored({ binding, data: null, observed: ticket, error, loading: false });
+  }
+  function confirmDeletion(ticket: number) {
+    clearObservation(ticket, '');
     setDeleted(true);
   }
   useLayoutEffect(() => {
     const previous = departing.current;
-    if (deleted && previous && !previous.isConnected && document.activeElement === document.body) deletionNotice.current?.focus();
-  }, [deleted]);
+    departing.current = null;
+    if (previous && !previous.isConnected && document.activeElement === document.body) readNotice.current?.focus();
+  }, [deleted, error, job]);
+  function applyReadFailure(ticket: number, failure: unknown) {
+    if (isDeletedJob(failure)) { confirmDeletion(ticket); return; }
+    const message = withApiFailureReference({
+      session: copy.reconnectToReadThisJob, denied: copy.jobAccessDenied,
+      missing: copy.thisJobIsUnavailableItMayHaveBeenRemoved, unsupported: copy.incompatibleJobResponse,
+      unverified: copy.storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts,
+      failed: copy.jobMetadataCouldNotBeLoadedCheckTheLocalSession,
+    }[metadataFailureKind(failure)], failure);
+    if (canRetainMetadata(failure)) {
+      setStored(previous => ({ ...previous, error: message, loading: false }));
+    } else {
+      clearObservation(ticket, message);
+    }
+  }
   /**
-   * An ordered read for accepted-work Retry and the post-save organization reread, numbered when issued. It resolves
-   * to the observation current once it settles, or null when the server named another job (nothing is applied).
-   * A failure is stale, and resolves to the current observation, when a read issued after it has already applied.
+   * Overview, Retry and organization reads share ordering, identity and retention rules. A stale result
+   * returns the newer observation. A current response naming a different job clears the old facts.
    */
   const readJob = async (signal: AbortSignal): Promise<JobData | null> => {
     const ticket = issue();
@@ -68,14 +85,17 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     try {
       ({ data } = await client.get('job', `/jobs/${jobId}`, { signal }));
     } catch (failure: unknown) {
-      if (!signal.aborted && ticket < order.current.applied) return order.current.current;
-      if (!signal.aborted && isDeletedJob(failure)) confirmDeletion(ticket);
+      if (signal.aborted || ticket < order.current.applied) return order.current.current;
+      applyReadFailure(ticket, failure);
       throw failure;
     }
-    if (ticket < order.current.applied) return order.current.current;
-    if (data.jobId !== jobId) return null;
-    if (!signal.aborted) apply(ticket, data);
-    return order.current.current ?? data;
+    if (signal.aborted || ticket < order.current.applied) return order.current.current;
+    if (data.jobId !== jobId) {
+      clearObservation(ticket, copy.theServerReturnedADifferentJobIdentity);
+      return null;
+    }
+    apply(ticket, data);
+    return data;
   };
   // Another tab deleted or reorganized a job: read this one again so a deletion shows here too.
   useEffect(() => deleted ? undefined : onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath, deleted]);
@@ -86,38 +106,17 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     if (!/^[0-9a-f]{32}$/.test(jobId)) {
       setStored(previous => ({ ...previous, binding, data: null, error: copy.thisJobIdentityIsInvalid, loading: false })); return;
     }
-    const ticket = issue();
-    void client.get('job', `/jobs/${jobId}`, { signal: controller.signal }).then(response => {
-      if (!controller.signal.aborted) {
-        if (ticket < order.current.applied) {
-          setStored(previous => ({ ...previous, loading: false })); return;
-        }
-        if (response.data.jobId !== jobId) {
-          setStored(previous => ({ ...previous, binding, data: null, error: copy.theServerReturnedADifferentJobIdentity, loading: false })); return;
-        }
-        apply(ticket, response.data);
-      }
-    }).catch((failure: unknown) => {
-      if (!controller.signal.aborted && ticket < order.current.applied) { setStored(previous => ({ ...previous, loading: false })); return; }
-      if (!controller.signal.aborted && isDeletedJob(failure)) { confirmDeletion(ticket); return; }
-      if (!controller.signal.aborted) setStored(previous => ({ ...previous, binding,
-        data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
-        error: withApiFailureReference({
-          session: copy.reconnectToReadThisJob, denied: copy.jobAccessDenied,
-          missing: copy.thisJobIsUnavailableItMayHaveBeenRemoved, unsupported: copy.incompatibleJobResponse,
-          unverified: copy.storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts,
-          failed: copy.jobMetadataCouldNotBeLoadedCheckTheLocalSession,
-        }[metadataFailureKind(failure)], failure), loading: false }));
-    });
+    // readJob already displays the failure on the overview. Only action callers need to handle its rejection.
+    void readJob(controller.signal).catch(() => undefined);
     return () => { controller.abort(); };
   }, [binding, client, jobId, refresh, deleted]);
-  if (deleted) return <div class="notice" role="alert"><p ref={deletionNotice} tabIndex={-1}>{copy.thisJobWasDeleted}</p>
+  if (deleted) return <div class="notice" role="alert"><p ref={readNotice} tabIndex={-1}>{copy.thisJobWasDeleted}</p>
     {operation && <p>{operation.message}</p>}
     {operation?.state === 'running' && <p>{jobDeletionCopy.stillRunning}</p>}
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
   return <>
     {loading && <p role="status">{job ? copy.refreshingJob : copy.loadingJob}</p>}
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert" ref={readNotice} tabIndex={-1}>{error}</p>}
     {error && job && <p>{copy.previousJobMetadataMayBeOutdated}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshJob}</button>
     {job && <>
