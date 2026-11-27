@@ -156,6 +156,16 @@ The job overview has a **Current and accepted work** section that keeps the two 
   the read fails, the failure is shown with no history read. One click therefore makes one
   job read, then at most two history pages and, for an organized job, one bracketing job
   read. Nothing repeats without another click.
+- The job page orders every job read it applies (Refresh, a peer-tab change, an
+  organization change, and accepted-work Retry) by when it was issued: a response is
+  applied only if nothing issued later has been applied, so a slow earlier Refresh never
+  rewinds a newer Retry or organization result, whichever arrives first. The organization
+  form's reread after a save is numbered when it is issued, through the same ordered read,
+  so a newer Refresh or Retry is not rewound by it either. A superseded read only ends its
+  own loading state, and a failure of a read superseded by a newer applied one settles on
+  that newer observation instead of reporting a failure. The order resets with the page on session change
+  or unmount. If the Retry job read fails, the next Retry repeats that job read before
+  any history read.
 - When found, it links that attempt, its evidence and report snapshots, and the accepted
   revision's sources. Otherwise the wording separates the two outcomes: when the **cap**
   is reached (a further page exists), the attempt is "not among the newest 100"; when

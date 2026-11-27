@@ -18,7 +18,8 @@ type Lookup =
   | { status: 'not-found'; exhausted: boolean; read: number }
   /** History does not contain this observation's latest attempt where it must be, so no attempt can be bound to it. */
   | { status: 'unbound' }
-  | { status: 'failed'; message: string };
+  /** `recovery` marks a failed Retry job read, which the next Retry repeats before any history read. */
+  | { status: 'failed'; message: string; recovery?: true };
 
 function failureMessage(failure: unknown) {
   const kind = metadataFailureKind(failure);
@@ -30,7 +31,7 @@ function failureMessage(failure: unknown) {
  * The latest attempt is current work; the accepted revision is the job's published reconstruction.
  * They are shown side by side so newer progress or reports never stand in for accepted evidence.
  */
-export function AcceptedWork({ job, basePath, onJobRead }: { job: Job; basePath: string; onJobRead?: (job: Job) => void }) {
+export function AcceptedWork({ job, basePath, readJob }: { job: Job; basePath: string; readJob?: (signal: AbortSignal) => Promise<Job | null> }) {
   const { client } = usePrivateTransport(basePath);
   const { jobId, acceptedRevisionId, latestRunId, version } = job;
   // The server versions a never-organized job by its exact attempt-history snapshot; a label or archive masks it.
@@ -41,26 +42,31 @@ export function AcceptedWork({ job, basePath, onJobRead }: { job: Job; basePath:
   const lookup: Lookup = settled.key === key ? settled.lookup : acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' };
   const setLookup = (next: Lookup) => { setSettled({ key, lookup: next }); };
   const [retry, setRetry] = useState(0);
+  // A Retry job read outlives an observation change so the parent can still order it; only unmount cancels it.
   const refreshing = useRef<AbortController | null>(null);
+  const currentVersion = useRef(version);
+  currentVersion.current = version;
   useEffect(() => () => { refreshing.current?.abort(); }, []);
   /**
    * Retry from an unbound history first reads the job once, then makes one history lookup for the observation it
    * returns: a changed job is handed up and its new version starts that lookup; an unchanged one retries in place.
-   * A failed read settles as a failure, with no history read.
+   * A failed read settles as a failure, with no history read, and the next Retry repeats this job read. The parent
+   * orders the read against every other job read, so a later observation always wins.
    */
   const retryUnbound = () => {
-    if (onJobRead === undefined) { setRetry(value => value + 1); return; }
+    if (readJob === undefined) { setRetry(value => value + 1); return; }
     refreshing.current?.abort();
     const controller = new AbortController();
     refreshing.current = controller;
     setLookup({ status: 'loading' });
-    void client.get('job', `/jobs/${jobId}`, { signal: controller.signal }).then(({ data: fresh }) => {
+    void readJob(controller.signal).then(current => {
       if (controller.signal.aborted) return;
-      if (fresh.jobId !== jobId) throw new ApiClientError('invalid_response');
-      if (fresh.version === version) setRetry(value => value + 1); else onJobRead(fresh);
+      if (current === null) throw new ApiClientError('invalid_response');
+      // A changed observation re-keys this lookup through the parent; an unchanged one retries in place.
+      if (current.version === version && currentVersion.current === version) setRetry(value => value + 1);
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
-      setLookup({ status: 'failed', message: failureMessage(failure) });
+      setLookup({ status: 'failed', message: failureMessage(failure), recovery: true });
     });
   };
   // Set only when the person activated Retry, so focus follows their action and never jumps on refresh.
@@ -94,8 +100,6 @@ export function AcceptedWork({ job, basePath, onJobRead }: { job: Job; basePath:
     (lookup.status === 'failed' || lookup.status === 'unbound' ? retryButton.current : outcome.current)?.focus();
   }, [settled, key]);
   useEffect(() => {
-    // A pending Retry job read belongs to the observation being replaced.
-    refreshing.current?.abort();
     if (acceptedRevisionId === null) { setLookup({ status: 'none' }); return; }
     const controller = new AbortController();
     setLookup({ status: 'loading' });
@@ -196,7 +200,7 @@ export function AcceptedWork({ job, basePath, onJobRead }: { job: Job; basePath:
     {lookup.status === 'failed' && <>
       <p role="alert">{lookup.message}</p>
       <button type="button" ref={retryButton}
-        onClick={() => { focusIntent.current = 'requested'; setRetry(value => value + 1); }}>{copy.retry}</button>
+        onClick={() => { focusIntent.current = 'requested'; if (lookup.recovery) retryUnbound(); else setRetry(value => value + 1); }}>{copy.retry}</button>
     </>}
   </section>;
 }

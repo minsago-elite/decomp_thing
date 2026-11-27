@@ -9,11 +9,11 @@ import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
 import { runPath, runViewPath, sourceDirectoryPath } from '../src/app/paths';
 import { acceptedWorkCopy } from '../src/copy/acceptedWork';
-import { jobCopy } from '../src/copy/job';
+import { jobCopy, jobOrganizationCopy } from '../src/copy/job';
 import { runHistoryCopy } from '../src/copy/history';
 import { createBrowserSession } from '../src/session/session';
 
-const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
+const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>(), put: vi.fn<(...args: unknown[]) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
 // Inert leaf panels: these controls test selection and navigation, never activity or evidence reads.
@@ -31,7 +31,7 @@ const bootstrap = fixture('bootstrap.json') as Bootstrap;
 const jobId = sampleJob.jobId;
 const run = (runId: string, extra: Partial<Run> = {}): Run => ({ ...sampleRun, jobId, runId, resultRevisionId: `revision_of_${runId}`, ...extra });
 const page = (items: Run[], nextCursor: string | null = null, snapshotVersion = snapshotOne) => ({ data: { jobId, items, page: { limit: 50, snapshotVersion, nextCursor } } });
-beforeEach(() => { transport.get.mockReset(); });
+beforeEach(() => { transport.get.mockReset(); transport.put.mockReset(); });
 
 async function session() {
   const value = createBrowserSession({
@@ -477,23 +477,27 @@ it.each([
   } finally { auth.dispose(); }
 });
 
-it('fails honestly when the bracketing job read fails or names another job', async () => {
+it.each([
+  ['fails', () => Promise.reject(new ApiClientError('http_error', { status: 500 }))],
+  ['names another job', () => Promise.resolve(acceptedJob({ archived: true, version: v('archived'), jobId: 'f'.repeat(32) }))],
+] as const)('fails honestly when the bracketing job read %s', async (_name, bracket) => {
   const auth = await session();
   let reads = 0;
   transport.get.mockImplementation((kind) => {
     if (kind === 'job') {
       reads += 1;
-      if (reads === 1) return Promise.resolve(acceptedJob({ archived: true, version: v('archived') }));
-      if (reads === 2) return Promise.reject(new ApiClientError('http_error', { status: 500 }));
-      return Promise.resolve(acceptedJob({ archived: true, version: v('archived'), jobId: 'f'.repeat(32) }));
+      // The archived job masks its storage version, so its history is checked by exactly one bracketing read.
+      return reads === 1 ? Promise.resolve(acceptedJob({ archived: true, version: v('archived') })) : bracket();
     }
     return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
   });
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   try {
     render(<App basePath="/nested" session={auth} />);
-    expect((await screen.findByRole('alert')).textContent).toContain(acceptedWorkCopy.lookupFailed);
+    await waitFor(() => expect(section().getByRole('alert')).toBeTruthy());
     expect(section().queryByRole('link', { name: /run_accepted/ })).toBeNull();
+    expect(reads).toBe(2);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'runs')).toHaveLength(1);
   } finally { auth.dispose(); }
 });
 
@@ -647,4 +651,242 @@ it('leaves focus where the person moved it before a background refresh removed t
     await screen.findByText(/Locating the attempt/);
     expect(document.activeElement).toBe(elsewhere);
   } finally { channel.close(); auth.dispose(); }
+});
+
+it.each([
+  ['unorganized', 'retry first', undefined],
+  ['unorganized', 'refresh first', undefined],
+  ['labelled', 'retry first', 'Organized job'],
+  ['labelled', 'refresh first', 'Organized job'],
+] as const)('a Refresh issued before an accepted-work Retry never rewinds it (%s, %s)', async (_kind, arrival, label) => {
+  const auth = await session();
+  const jobVersion = (name: string) => label ? v('organized-' + name) : v(name);
+  const older = acceptedJob({ latestRunId: 'run_b', version: jobVersion('B'), label: label ?? null });
+  const newer = acceptedJob({ latestRunId: 'run_c', version: jobVersion('C'), label: label ?? null });
+  let reads = 0;
+  let phase: 'initial' | 'refresh' | 'retry' | 'settled' = 'initial';
+  const held: Record<string, (value: unknown) => void> = {};
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') {
+      reads += 1;
+      // Bracketing reads of a labelled job see the state of their phase.
+      // The first read observes A; a labelled job's bracketing read then sees B, so that history is unbound.
+      if (phase === 'initial') return Promise.resolve(reads === 1 ? acceptedJob({ latestRunId: 'run_b', version: jobVersion('A'), label: label ?? null }) : older);
+      if (phase === 'refresh') return new Promise(resolve => { held.refresh = resolve; });
+      if (phase === 'retry') { phase = 'settled'; return new Promise(resolve => { held.retry = resolve; }); }
+      return Promise.resolve(newer);
+    }
+    return Promise.resolve(phase === 'initial' || phase === 'refresh' ? page([accepted('run_b')], null, v('B'))
+      : page([accepted('run_c'), accepted('run_b')], null, v('C')));
+  });
+  const runs = () => transport.get.mock.calls.filter(([kind]) => kind === 'runs').length;
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(/attempt history changed after this job was read/);
+    const initialReads = reads;
+    expect(initialReads).toBe(label ? 2 : 1);
+    phase = 'refresh';
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await waitFor(() => expect(held.refresh).toBeDefined());
+    phase = 'retry';
+    const retry = section().getByRole('button', { name: acceptedWorkCopy.retry });
+    retry.focus();
+    fireEvent.click(retry);
+    await waitFor(() => expect(held.retry).toBeDefined());
+    expect(runs()).toBe(1);
+    if (arrival === 'retry first') {
+      await act(async () => { held.retry!(newer); await Promise.resolve(); });
+      await section().findByRole('link', { name: 'Open the accepted attempt run_c' });
+      await act(async () => { held.refresh!(older); await Promise.resolve(); });
+    } else {
+      await act(async () => { held.refresh!(older); await Promise.resolve(); });
+      await act(async () => { held.retry!(newer); await Promise.resolve(); });
+    }
+    const result = await section().findByText(/was recorded by attempt/);
+    expect(result.textContent).toContain('run_c');
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(section().getByRole('link', { name: 'Open the accepted attempt run_c' })).toBeTruthy();
+    expect(section().getByText(/Latest recorded attempt/).textContent).toContain('run_c');
+    await waitFor(() => expect(document.activeElement).toBe(section().getByText(/was recorded by attempt/)));
+    // Refresh and Retry each read the job once. A labelled job adds one bracketing read per lookup: the Retry's,
+    // and when the Refresh arrives first, also the lookup for the observation it applied in between.
+    expect(reads).toBe(initialReads + 2 + (label ? (arrival === 'refresh first' ? 2 : 1) : 0));
+    expect(screen.queryByText(jobCopy.refreshingJob)).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('an organization change applied after a pending Refresh is not rewound by it', async () => {
+  const auth = await session();
+  let reads = 0;
+  let releaseRefresh: ((value: unknown) => void) | undefined;
+  transport.put.mockResolvedValue({ data: {} });
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(acceptedJob());
+      if (reads === 2) return new Promise(resolve => { releaseRefresh = resolve; });
+      return Promise.resolve(acceptedJob({ label: 'Router firmware', version: v('labelled') }));
+    }
+    return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'Open the accepted attempt run_accepted' });
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+    fireEvent.input(screen.getByRole('textbox', { name: /label/i }), { target: { value: 'Router firmware' } });
+    fireEvent.submit(screen.getByRole('textbox', { name: /label/i }).closest('form')!);
+    await screen.findByRole('heading', { name: 'Router firmware' });
+    await act(async () => { releaseRefresh!(acceptedJob()); await Promise.resolve(); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(screen.getByRole('heading', { name: 'Router firmware' })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText(jobCopy.refreshingJob)).toBeNull());
+    expect(screen.getByRole('heading', { name: 'Router firmware' })).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it('repeats a failed recovery job read on the next Retry before any history read and recovers', async () => {
+  const auth = await session();
+  let reads = 0;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(acceptedJob({ latestRunId: 'run_b', version: v('A') }));
+      if (reads === 2) return Promise.reject(new ApiClientError('http_error', { status: 500 }));
+      return Promise.resolve(acceptedJob({ latestRunId: 'run_b', version: v('B') }));
+    }
+    return Promise.resolve(page([accepted('run_b')], null, v('B')));
+  });
+  const runs = () => transport.get.mock.calls.filter(([kind]) => kind === 'runs').length;
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(/attempt history changed after this job was read/);
+    let retry = section().getByRole('button', { name: acceptedWorkCopy.retry });
+    retry.focus();
+    fireEvent.click(retry);
+    expect((await section().findByRole('alert')).textContent).toContain(acceptedWorkCopy.lookupFailed);
+    retry = section().getByRole('button', { name: acceptedWorkCopy.retry });
+    await waitFor(() => expect(document.activeElement).toBe(retry));
+    expect([reads, runs()]).toEqual([2, 1]);
+    fireEvent.click(retry);
+    const result = await section().findByText(/was recorded by attempt/);
+    expect(result.textContent).toContain('run_b');
+    await waitFor(() => expect(document.activeElement).toBe(result));
+    expect([reads, runs()]).toEqual([3, 2]);
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  ['a newer Refresh', 'resolves', 'refresh'],
+  ['a newer Refresh', 'fails', 'refresh'],
+  ['a newer accepted-work Retry', 'resolves', 'retry'],
+] as const)('an organization reread issued before %s never rewinds it when it %s late', async (_name, outcome, newer) => {
+  const auth = await session();
+  // The save's reread is issued first and held; a later read then applies the newest state.
+  const saved = acceptedJob({ label: 'Router firmware', latestRunId: 'run_b', version: v('labelled-old') });
+  const newest = acceptedJob({ label: 'Router firmware', latestRunId: 'run_c', version: v('labelled-new') });
+  let server = acceptedJob({ latestRunId: 'run_b', version: v('A') });
+  let historyNewest = false;
+  let held: { resolve: (value: unknown) => void; reject: (reason: unknown) => void } | undefined;
+  let holdNext = false;
+  transport.put.mockImplementation(() => { server = saved; holdNext = true; return Promise.resolve({ data: {} }); });
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') {
+      if (holdNext) { holdNext = false; return new Promise((resolve, reject) => { held = { resolve, reject }; }); }
+      return Promise.resolve(server);
+    }
+    return Promise.resolve(historyNewest ? page([accepted('run_c'), accepted('run_b')], null, v('C')) : page([accepted('run_b')], null, v('B')));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(/attempt history changed after this job was read/);
+    const field = screen.getByRole('textbox', { name: /label/i });
+    fireEvent.input(field, { target: { value: 'Router firmware' } });
+    const save = screen.getByRole('button', { name: jobOrganizationCopy.save });
+    save.focus();
+    fireEvent.submit(field.closest('form')!);
+    await waitFor(() => expect(held).toBeDefined());
+    server = newest;
+    historyNewest = true;
+    if (newer === 'refresh') fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    else fireEvent.click(section().getByRole('button', { name: acceptedWorkCopy.retry }));
+    const link = await section().findByRole('link', { name: 'Open the accepted attempt run_c' });
+    const reads = transport.get.mock.calls.length;
+    if (outcome === 'resolves') await act(async () => { held!.resolve(saved); await Promise.resolve(); });
+    else await act(async () => { held!.reject(new ApiClientError('http_error', { status: 500 })); await Promise.resolve(); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    // The late reread neither rewinds the newer metadata nor replaces its accepted links.
+    expect(link.isConnected).toBe(true);
+    expect(section().getByText(/Latest recorded attempt/).textContent).toContain('run_c');
+    expect(screen.getByRole('heading', { name: 'Router firmware' })).toBeTruthy();
+    // A stale failure is superseded by the newer applied observation, so the save is still confirmed.
+    expect(screen.getByText(jobOrganizationCopy.saved)).toBeTruthy();
+    expect(transport.get.mock.calls.length).toBe(reads);
+    expect(transport.put).toHaveBeenCalledTimes(1);
+    // Neither the late reread nor its stale failure moves focus off the control the person used.
+    if (newer === 'refresh') expect(document.activeElement).toBe(save);
+  } finally { auth.dispose(); }
+});
+
+it('applies an unopposed organization reread and still reports a current failure', async () => {
+  const auth = await session();
+  let fail = false;
+  transport.put.mockResolvedValue({ data: {} });
+  let reads = 0;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(acceptedJob());
+      if (fail) return Promise.reject(new ApiClientError('http_error', { status: 500 }));
+      return Promise.resolve(acceptedJob({ label: 'Router firmware', version: v('labelled') }));
+    }
+    return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'Open the accepted attempt run_accepted' });
+    const field = screen.getByRole('textbox', { name: /label/i });
+    fireEvent.input(field, { target: { value: 'Router firmware' } });
+    fireEvent.submit(field.closest('form')!);
+    await screen.findByRole('heading', { name: 'Router firmware' });
+    await screen.findByText(jobOrganizationCopy.saved);
+    fail = true;
+    fireEvent.input(field, { target: { value: 'Other' } });
+    fireEvent.submit(field.closest('form')!);
+    expect((await screen.findByText(/could not be confirmed/)).textContent).toContain(jobOrganizationCopy.failed);
+    expect(screen.getByRole('heading', { name: 'Router firmware' })).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it('drops a held accepted-work Retry read when the job page unmounts', async () => {
+  const auth = await session();
+  let release: ((value: unknown) => void) | undefined;
+  let reads = 0;
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(acceptedJob({ latestRunId: 'run_b', version: v('A') }));
+      return new Promise(resolve => { release = resolve; });
+    }
+    return Promise.resolve(page([accepted('run_b')], null, v('B')));
+  });
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    const { unmount } = render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(/attempt history changed after this job was read/);
+    fireEvent.click(section().getByRole('button', { name: acceptedWorkCopy.retry }));
+    await waitFor(() => expect(release).toBeDefined());
+    const signal = transport.get.mock.calls.at(-1)![2].signal;
+    unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => { release!(acceptedJob({ latestRunId: 'run_b', version: v('B') })); await Promise.resolve(); });
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'runs')).toHaveLength(1);
+    expect(errors).not.toHaveBeenCalled();
+  } finally { errors.mockRestore(); auth.dispose(); }
 });
