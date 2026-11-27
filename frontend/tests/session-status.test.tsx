@@ -180,7 +180,10 @@ it('keeps the connected session in header chrome and every other state in the pa
   expect(connectedGroup.tagName).toBe('DIV');
   expect(screen.queryByRole('complementary', { name: 'Local session' })).toBeNull();
   expect(connectedGroup.closest('header')).toBe(screen.getByTestId('header'));
-  expect(connectedGroup.querySelector('[role="status"]')).toBeNull();
+  // The quiet header keeps an empty, visually hidden live region ready for a later instance change.
+  const headerStatus = connectedGroup.querySelector('[role="status"]');
+  expect(headerStatus?.textContent).toBe('');
+  expect(headerStatus?.classList.contains('sr-only')).toBe(true);
   expect(connectedGroup.querySelector('button')?.textContent).toBe('Sign out');
   const connectedAxe = await axeSummary(connectedGroup);
   expect(connectedAxe.violations).toEqual([]);
@@ -207,17 +210,22 @@ async function axeViolations(root: Element) {
   return (await axeSummary(root)).violations;
 }
 
+/** Returns the non-empty live regions; idle placements keep an empty region in the tree. */
 function expectStatusOnlyText() {
-  const statuses = screen.getAllByRole('status');
-  for (const status of statuses) {
+  const all = screen.getAllByRole('status');
+  for (const status of all) {
     expect(status.tagName).toBe('P');
     expect(status.querySelector('button, a, input, [tabindex]')).toBeNull();
   }
   for (const aside of document.querySelectorAll('aside')) {
-    expect(aside.hasAttribute('role')).toBe(false);
-    expect(aside.getAttribute('aria-label')).toBe('Local session');
+    if (aside.getAttribute('role') === 'none') expect(aside.hasAttribute('aria-label')).toBe(false);
+    else {
+      expect(aside.hasAttribute('role')).toBe(false);
+      expect(aside.getAttribute('aria-label')).toBe('Local session');
+    }
   }
-  return statuses;
+  expect(document.querySelectorAll('[id]').length).toBe(0);
+  return all.filter(status => status.textContent !== '');
 }
 
 it('keeps live status semantics on text-only regions through every session transition', async () => {
@@ -243,7 +251,7 @@ it('keeps live status semantics on text-only regions through every session trans
 
   const signOut = screen.getByRole('button', { name: 'Sign out' });
   expect(signOut.closest('[role="status"]')).toBeNull();
-  expect(screen.queryByRole('status')).toBeNull();
+  expect(expectStatusOnlyText()).toEqual([]);
   expect(gateway.logout).not.toHaveBeenCalled();
   expect(await axeViolations(document.body)).toEqual([]);
   signOut.focus();
@@ -332,4 +340,100 @@ it('negative control: rejects a complementary session landmark nested inside the
   try {
     expect(await axeViolations(host)).toContain('landmark-complementary-is-top-level');
   } finally { host.remove(); }
+});
+
+function shell() {
+  const data = { ...structuredClone(sample.data), sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = {
+    exchange: vi.fn(() => Promise.resolve({ csrfToken: data.csrfToken, expiresAt: data.sessionExpiresAt })),
+    bootstrap: vi.fn(() => Promise.resolve(data)),
+    logout: vi.fn(() => Promise.resolve()),
+  };
+  const session = createBrowserSession(gateway, '/');
+  sessions.push(session);
+  const view = render(<>
+    <header data-testid="header"><SessionStatus session={session} placement="header" /></header>
+    <button type="button">Elsewhere</button>
+    <div data-testid="page"><SessionStatus session={session} placement="page" /></div>
+  </>);
+  const region = (id: string) => screen.getByTestId(id).querySelector<HTMLElement>(`[role="status"][data-session-announcement="${id}"]`);
+  return { session, gateway, data, view, region };
+}
+
+it('keeps the same live node in each placement across every transition, with text in exactly one', async () => {
+  let releaseLogout!: () => void;
+  const { session, gateway, data, region } = shell();
+  const header = region('header'); const page = region('page');
+  expect(header).not.toBeNull(); expect(page).not.toBeNull();
+  const spoken = () => [header, page].filter(node => node?.textContent !== '').map(node => node?.textContent);
+  expect(spoken()).toEqual([]);
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  expect(spoken()).toEqual([]);
+  gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: `${data.serverInstanceId ?? 'instance'}-changed` });
+  await act(async () => { await session.refresh(); });
+  expect(spoken()).toEqual([expect.stringMatching(/^Application instance changed\./)]);
+  expect(region('header')).toBe(header);
+  expect(header?.classList.contains('sr-only')).toBe(false);
+  gateway.logout.mockImplementationOnce(() => new Promise(resolve => { releaseLogout = () => resolve(); }));
+  let pending!: Promise<void>;
+  void act(() => { pending = session.logout(); });
+  expect(spoken()).toEqual(['Signing out…']);
+  expect(region('page')).toBe(page); expect(region('header')).toBe(header);
+  expect([...document.querySelectorAll('.session-notice')]).toEqual([page?.parentElement]);
+  expect(header?.parentElement?.className).toBe('sr-only');
+  await act(async () => { releaseLogout(); await pending; });
+  expect(spoken()).toEqual([expect.stringMatching(/^You signed out of this browser/)]);
+  expect(region('page')).toBe(page); expect(region('header')).toBe(header);
+  expect(page?.querySelector('button')).toBeNull();
+  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Elsewhere', 'Check session']);
+  fireEvent.click(screen.getByRole('button', { name: 'Check session' }));
+  await screen.findByRole('button', { name: 'Sign out' });
+  expect(spoken()).toEqual([expect.stringMatching(/^Application instance changed\./)]); // fixture id reverted, so header alone speaks
+  expect(region('page')).toBe(page); expect(region('header')).toBe(header);
+  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Sign out', 'Elsewhere']);
+  expect(document.querySelectorAll('[id]').length).toBe(0);
+  expect(screen.queryAllByRole('complementary')).toEqual([]);
+  expect([...document.querySelectorAll('.session-notice')].map(node => node.className)).toEqual(['session-notice is-connected']);
+  expect(page?.parentElement?.className).toBe('sr-only');
+  expect([...document.querySelectorAll('[data-session-announcement]')]).toEqual([header, page]);
+  expect(await axeViolations(document.body)).toEqual([]);
+});
+
+it('moves focus from an activated Sign out button to the page notice', async () => {
+  const { session, gateway } = shell();
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  const signOut = screen.getByRole('button', { name: 'Sign out' });
+  signOut.focus();
+  fireEvent.click(signOut);
+  const notice = screen.getByRole('complementary', { name: 'Local session' });
+  expect(document.activeElement).toBe(notice);
+  expect(notice.textContent).toBe('Signing out…');
+  await screen.findByText(/You signed out of this browser/);
+  expect(document.activeElement).toBe(screen.getByRole('complementary', { name: 'Local session' }));
+  expect(gateway.logout).toHaveBeenCalledOnce();
+  expect(await axeViolations(document.body)).toEqual([]);
+});
+
+it('preserves focus placed elsewhere and does not move focus on passive transitions', async () => {
+  const { session } = shell();
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+  elsewhere.focus();
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out' })); // pointer activation without focus
+  await screen.findByText(/You signed out of this browser/);
+  expect(document.activeElement).toBe(elsewhere);
+  fireEvent.click(screen.getByRole('button', { name: 'Check session' }));
+  await screen.findByRole('button', { name: 'Sign out' });
+  (document.activeElement as HTMLElement | null)?.blur();
+  await act(async () => { await session.logout(); }); // programmatic/other-tab style transition
+  expect(document.activeElement).toBe(document.body);
+});
+
+it('negative control: a conditionally mounted status replaces the live node, which the identity check detects', () => {
+  function Former({ text }: { text: string }) { return text ? <aside aria-label="Local session"><p role="status">{text}</p></aside> : null; }
+  const view = render(<div data-testid="former"><Former text="" /></div>);
+  expect(screen.getByTestId('former').querySelector('[role="status"]')).toBeNull();
+  view.rerender(<div data-testid="former"><Former text="Signing out…" /></div>);
+  const born = screen.getByTestId('former').querySelector('[role="status"]');
+  expect(born?.textContent).toBe('Signing out…'); // region was born populated
 });

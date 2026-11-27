@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { REQUIRED_AXE_PASSES, assertActivation, assertAxeResult, assertSessionFacts, assertStatusObservations, sessionSemanticsGate, statusRecorderSource, sessionFactsExpression } from './packaged-browser-session-semantics.mjs';
+import vm from 'node:vm';
+import { REQUIRED_AXE_PASSES, assertActivation, assertAxeResult, assertSessionFacts, assertStatusObservations, sessionSemanticsGate, statusRecorderSource, sessionFactsExpression, prepareAnnouncementExpression, announcementFactsExpression, assertAnnouncementBefore, assertAnnouncementTransition } from './packaged-browser-session-semantics.mjs';
 
 const aside = (overrides = {}) => ({ role: null, label: 'Local session', session: true, ...overrides });
 const pageContainer = (overrides = {}) => ({ tag: 'aside', role: null, label: 'Local session', inBanner: false, ...overrides });
@@ -136,12 +137,16 @@ test('every recorded transient rendering must be a text-only, non-focusable para
 test('held trusted DELETE checkpoints signing-out and always resumes the real request', async () => {
   let fetchPaused;
   let focusExpression = '';
+  let announcementPrepared = false;
   const calls = [];
   const target = { sessionId: 'sid', requests: [] };
   const cdp = {
     on(method, listener) { assert.equal(method, 'Fetch.requestPaused'); fetchPaused = listener; },
     async call(method, params) {
       calls.push(method);
+      if (method === 'Input.dispatchKeyEvent' && params.type === 'keyDown' && params.key === 'Enter') {
+        assert.equal(announcementPrepared, true, 'DOM pre-state must be read before activating Sign out');
+      }
       if (method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter') {
         const request = { requestId: 'request-1', request: { method: 'DELETE', url: 'https://example.test/nested/api/v1/session' } };
         target.requests.push({ requestId: 'request-1', type: 'XHR', method: 'DELETE', url: request.request.url });
@@ -150,7 +155,10 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
     },
   };
   const facts = { asides: [aside()], sessionCount: 1, sessionContainers: [pageContainer()], statuses: [status({ text: 'Signing out…' })], buttons: [] };
+  let announcementChecks = 0;
   const evaluate = async (_target, expression) => {
+    if (expression === prepareAnnouncementExpression) { announcementPrepared = true; return announcementBefore(); }
+    if (expression === announcementFactsExpression) return announcementAfter({ text: announcementChecks++ === 0 ? 'Signing out…' : 'You signed out of this browser.' });
     if (expression === 'window.__sessionActivationEvents.length') return 0;
     if (expression === 'window.__sessionActivationEvents') return trusted('Sign out');
     if (expression.includes('document.activeElement?.blur()')) return true;
@@ -173,6 +181,7 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
     holdRequest: { method: 'DELETE', pathSuffix: '/nested/api/v1/session', checkpointName: 'signing-out',
       expected: { statusText: 'Signing out…', buttons: [] } }, settled: 'signed out' });
   assert.match(focusExpression, /closest\('\.session-notice'\)/);
+  assert.equal(announcementChecks, 2, 'Both transient and settled messages must retain their pre-action live node');
   assert.equal(activation.during.name, 'signing-out');
   assert.equal(activation.during.sessionStatuses, 1);
   assert.equal(activation.during.controls.length, 0);
@@ -201,5 +210,52 @@ test('activation requires trusted keyboard input, correct focus and exact reques
 
 test('gate fails closed without axe and browser sources parse', () => {
   assert.throws(() => sessionSemanticsGate({ axeSource: '' }), /axe-core source is required/);
-  for (const source of [statusRecorderSource, sessionFactsExpression]) assert.doesNotThrow(() => new Function(source));
+  for (const source of [statusRecorderSource, sessionFactsExpression, prepareAnnouncementExpression, announcementFactsExpression]) assert.doesNotThrow(() => new Function(source));
+});
+
+const announcementBefore = () => ['header', 'page'].map(place => ({ place, count: 1, connected: true, tag: 'p', role: 'status', text: '' }));
+const announcementAfter = ({ place = 'page', text = 'Signing out…' } = {}) => ({ sameDocument: true,
+  nodes: announcementBefore().map(node => ({ ...node, sameNode: true, active: node.place === place,
+    focusedNotice: node.place === place, controls: 0, ownTabIndex: false, text: node.place === place ? text : '' })) });
+
+test('announcement pre-state rejects already populated, absent, duplicate and non-live regions', () => {
+  assert.deepEqual(assertAnnouncementBefore(announcementBefore()), { preExistingEmptyNodes: ['header', 'page'] });
+  for (const override of [{ text: 'Signing out…' }, { count: 0 }, { count: 2 }, { role: null }, { connected: false }]) {
+    const nodes = announcementBefore(); Object.assign(nodes[1], override);
+    assert.throws(() => assertAnnouncementBefore(nodes));
+  }
+});
+
+test('announcement transition requires retained nodes, single active text and notice focus handoff', () => {
+  const expected = { place: 'page', text: 'Signing out…', focus: true };
+  assert.equal(assertAnnouncementTransition(announcementAfter(), expected).focusHandoff, true);
+  for (const override of [{ sameNode: false }, { connected: false }, { active: false }, { focusedNotice: false },
+    { controls: 1 }, { ownTabIndex: true }, { count: 2 }, { role: null }, { text: '' }]) {
+    const facts = announcementAfter(); Object.assign(facts.nodes[1], override);
+    assert.throws(() => assertAnnouncementTransition(facts, expected));
+  }
+  const duplicate = announcementAfter(); duplicate.nodes[0].text = 'Signing out…';
+  assert.throws(() => assertAnnouncementTransition(duplicate, expected), /duplicates live text/);
+  assert.throws(() => assertAnnouncementTransition({ ...announcementAfter(), sameDocument: false }, expected), /document was replaced/);
+  assert.doesNotThrow(() => assertAnnouncementTransition(announcementAfter({ place: 'header', text: 'Application instance changed.' }),
+    { place: 'header', text: 'Application instance changed.' }));
+});
+
+test('browser expressions compare actual object identity and refuse replacement despite identical markup', () => {
+  const notice = {};
+  const makeNode = () => ({ isConnected: true, tagName: 'P', textContent: '',
+    getAttribute: name => name === 'role' ? 'status' : null, hasAttribute: () => false,
+    querySelectorAll: () => [], closest: () => notice });
+  const nodes = { header: makeNode(), page: makeNode() };
+  const document = { activeElement: notice, querySelectorAll: selector => [nodes[selector.includes('"header"') ? 'header' : 'page']] };
+  const context = vm.createContext({ document, window: {} });
+  assertAnnouncementBefore(JSON.parse(JSON.stringify(vm.runInContext(prepareAnnouncementExpression, context))));
+  nodes.page.textContent = 'Signing out…';
+  const read = () => JSON.parse(JSON.stringify(vm.runInContext(announcementFactsExpression, context)));
+  const expected = { place: 'page', text: 'Signing out…', focus: true };
+  assert.doesNotThrow(() => assertAnnouncementTransition(read(), expected));
+  nodes.page = { ...makeNode(), textContent: 'Signing out…' };
+  assert.throws(() => assertAnnouncementTransition(read(), expected), /node was replaced/);
+  delete context.window.__sessionAnnouncementBefore;
+  assert.throws(() => assertAnnouncementTransition(read(), expected), /document was replaced/);
 });

@@ -106,6 +106,66 @@ export function assertSessionFacts(facts, expected) {
     unrelatedStatuses: facts.statuses.length - sessionStatuses.length - connectionStatuses.length, controls: labels };
 }
 
+/** Harness-owned references only: no attributes, focus, app state or requests are changed. */
+export const prepareAnnouncementExpression = `(() => {
+  const nodes = ['header', 'page'].map(place => [...document.querySelectorAll('[data-session-announcement="' + place + '"]')]);
+  const facts = nodes.map((matches, index) => ({ place: ['header', 'page'][index], count: matches.length,
+    connected: matches[0]?.isConnected === true, tag: matches[0]?.tagName.toLowerCase() ?? null,
+    role: matches[0]?.getAttribute('role') ?? null, text: matches[0]?.textContent.trim() ?? null }));
+  window.__sessionAnnouncementBefore = { document, nodes: nodes.map(matches => matches[0]) };
+  return facts;
+})()`;
+
+export const announcementFactsExpression = `(() => {
+  const before = window.__sessionAnnouncementBefore;
+  return { sameDocument: before?.document === document,
+    nodes: ['header', 'page'].map((place, index) => {
+      const matches = [...document.querySelectorAll('[data-session-announcement="' + place + '"]')];
+      const node = matches[0]; const container = node?.closest('.session-notice');
+      return { place, count: matches.length, sameNode: Boolean(node && node === before?.nodes[index]),
+        connected: node?.isConnected === true, tag: node?.tagName.toLowerCase() ?? null,
+        role: node?.getAttribute('role') ?? null, text: node?.textContent.trim() ?? null,
+        active: Boolean(container), focusedNotice: Boolean(container && document.activeElement === container),
+        controls: node?.querySelectorAll(${JSON.stringify(CONTROL_SELECTOR)}).length ?? null,
+        ownTabIndex: node?.hasAttribute('tabindex') ?? null };
+    }) };
+})()`;
+
+export function assertAnnouncementBefore(nodes) {
+  assert.ok(Array.isArray(nodes) && nodes.length === 2, 'Both pre-existing session announcement nodes are required');
+  for (const [index, node] of nodes.entries()) {
+    assert.equal(node.place, ['header', 'page'][index]);
+    assert.equal(node.count, 1, 'Each session announcement node must be unique before the action');
+    assert.equal(node.connected, true, 'Session announcement must be connected before the action');
+    assert.equal(node.tag, 'p');
+    assert.equal(node.role, 'status', 'Live role must exist before the message');
+    assert.equal(node.text, '', 'Session announcement must be empty before the action');
+  }
+  return { preExistingEmptyNodes: ['header', 'page'] };
+}
+
+export function assertAnnouncementTransition(facts, { place, text, focus = false }) {
+  assert.equal(facts?.sameDocument, true, 'Announcement document was replaced or pre-state is missing');
+  assert.ok(Array.isArray(facts.nodes) && facts.nodes.length === 2, 'Announcement node facts are missing');
+  assert.ok(['header', 'page'].includes(place), 'Unknown announcement placement');
+  for (const [index, node] of facts.nodes.entries()) {
+    assert.equal(node.place, ['header', 'page'][index]);
+    assert.equal(node.count, 1, 'Duplicate session announcement nodes');
+    assert.equal(node.sameNode, true, 'Live announcement node was replaced after the action');
+    assert.equal(node.connected, true, 'Live announcement node was disconnected');
+    assert.equal(node.tag, 'p');
+    assert.equal(node.role, 'status');
+    assert.equal(node.controls, 0, 'Live announcement contains controls');
+    assert.equal(node.ownTabIndex, false, 'Live announcement must not receive focus');
+    if (node.place === place) {
+      assert.equal(node.active, true, 'Announcement must belong to the active session notice');
+      assert.ok(node.text.includes(text), 'Expected announcement text is missing');
+      if (focus) assert.equal(node.focusedNotice, true, 'Sign out focus did not hand off to the active notice');
+    } else assert.equal(node.text, '', 'Inactive session announcement duplicates live text');
+  }
+  return { place, sameDocument: true, sameNodes: true, preExistingLiveRegion: true, focusHandoff: focus };
+}
+
 /** Axe must have actually evaluated the required rules against the session region. */
 export function assertAxeResult(result, requiredRules = REQUIRED_AXE_PASSES, expectedInapplicable = []) {
   assert.ok(result && Array.isArray(result.violations) && Array.isArray(result.passes), 'Axe result is missing');
@@ -149,7 +209,15 @@ export function assertActivation({ label, events, focused, requests, allowed }) 
 /** Browser-driven checkpoints, sharing the harness's CDP helpers. */
 export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource, origin, basePath = '/nested/' }) {
   assert.ok(typeof axeSource === 'string' && axeSource.includes('axe'), 'axe-core source is required');
-  const results = { checkpoints: [], activations: [] };
+  const results = { checkpoints: [], activations: [], announcementTransitions: [] };
+  async function prepareAnnouncement(target) {
+    return assertAnnouncementBefore(await evaluate(target, prepareAnnouncementExpression));
+  }
+  async function verifyAnnouncement(target, expected) {
+    const result = assertAnnouncementTransition(await evaluate(target, announcementFactsExpression), expected);
+    results.announcementTransitions.push({ text: expected.text, ...result });
+    return result;
+  }
   async function checkpoint(target, name, expected) {
     const facts = await evaluate(target, sessionFactsExpression);
     const verdict = assertSessionFacts(facts, expected);
@@ -216,15 +284,18 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
     }
     focusVisible = await evaluate(target, `document.activeElement.matches(':focus-visible')`);
     assert.equal(focusVisible, true, `"${label}" keyboard focus is not :focus-visible`);
+    if (label === 'Sign out') await prepareAnnouncement(target);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, target.sessionId);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, target.sessionId);
     if (holdRequest) {
       pauseTimer = setTimeout(() => rejectPaused(new Error(`Timed out holding ${holdRequest.method} ${holdRequest.pathSuffix}`)), 10000);
       await paused;
+      if (label === 'Sign out') await verifyAnnouncement(target, { place: 'page', text: holdRequest.expected.statusText, focus: true });
       during = await checkpoint(target, holdRequest.checkpointName, holdRequest.expected);
       await finishHold();
     }
     await ready(target, settled, `${label} keyboard activation settled`);
+    if (label === 'Sign out') await verifyAnnouncement(target, { place: 'page', text: 'You signed out of this browser.', focus: true });
     const events = (await evaluate(target, 'window.__sessionActivationEvents')).slice(eventsBefore);
     const prefix = new URL(basePath, origin).pathname;
     const requests = target.requests.slice(before).filter((request) => ['Fetch', 'XHR', 'Document', 'EventSource'].includes(request.type))
@@ -243,5 +314,5 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
     assert.ok(requests.every((request) => request.path.startsWith(prefix)), 'Late session request reached outside the application');
     return assertActivation({ label: activation.label, events, focused: activation.label, requests, allowed: activation.allowed });
   }
-  return { checkpoint, activate, verifyActivationQuiet, results };
+  return { checkpoint, activate, verifyActivationQuiet, prepareAnnouncement, verifyAnnouncement, results };
 }

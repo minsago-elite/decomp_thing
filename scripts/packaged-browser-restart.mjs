@@ -195,6 +195,8 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const mutationsBeforeRestart = old.requests.filter(r => !['GET', 'HEAD'].includes(r.method)).length;
   assert.equal(mutationsBeforeRestart, automaticMutationsBaseline,
     'Unexpected mutation occurred before the restart');
+  // Both live paragraphs must already exist empty in this retained document before instance mutation.
+  if (sessionSemantics) await sessionSemantics.prepareAnnouncement(old);
   const restarted = await restartApplication();
   assert.equal(restarted.origin, origin, 'Restart did not preserve the origin');
   evidence.shutdown = restarted.exit;
@@ -254,6 +256,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   evidence.serverRestartNoticeShown = true;
   // #1895: the real restart is the only packaged path to the application-instance-changed status.
   if (sessionSemantics) {
+    await sessionSemantics.verifyAnnouncement(old, { place: 'header', text: 'Application instance changed.' });
     await sessionSemantics.checkpoint(old, 'connected-instance-changed', { container: 'connected',
       statusText: 'Application instance changed.', buttons: ['Sign out'] });
     evidence.sessionSemantics = sessionSemantics.results;
