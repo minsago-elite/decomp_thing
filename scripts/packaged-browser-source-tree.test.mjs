@@ -101,6 +101,7 @@ test('source browser temp allocation and cleanup preserve a concurrent launch', 
   assert.notEqual(first.directory, second.directory);
   assert.notEqual(first.token, second.token);
   await ownerFs.writeFile(ownerJoin(second.directory, 'other-run-sentinel'), 'other launch');
+  await ownerFs.symlink(second.directory, ownerJoin(first.directory, 'other-run-link'));
   assert.equal(await requireSourceTreeBrowserTemp(repo, buildRoot, first, first.directory), first.directory);
   await removeSourceTreeBrowserTemp(repo, buildRoot, first, first.directory);
   await assert.rejects(ownerFs.lstat(first.directory), { code: 'ENOENT' });
