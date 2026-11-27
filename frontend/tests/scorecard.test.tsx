@@ -77,6 +77,31 @@ it('states every measure with its state, recorded value, fraction and source, an
   } finally { auth.dispose(); }
 });
 
+it.each(['not-evaluated', 'unavailable', 'wrong job'] as const)('updates attempt acceptance on explicit Refresh after %s', async initial => {
+  const auth = await session();
+  let attemptReads = 0;
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'run') {
+      expect(path).toBe(`/jobs/${selected.jobId}/runs/${selected.runId}`);
+      attemptReads++;
+      if (attemptReads === 1 && initial === 'unavailable') return Promise.reject(new ApiClientError('timeout'));
+      if (attemptReads === 1 && initial === 'wrong job') return Promise.resolve({ data: { ...run, jobId: 'f'.repeat(32) } });
+      return Promise.resolve({ data: { ...run, acceptance: attemptReads === 1 ? 'not-evaluated' : 'accepted' } });
+    }
+    return Promise.resolve({ data: kind === 'structureScorecard' ? card : runs });
+  });
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.measuresTitle });
+    await screen.findByText(initial === 'not-evaluated' ? copy.acceptanceStates['not-evaluated'] : copy.acceptanceUnavailable);
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await screen.findByText(copy.acceptanceStates.accepted);
+    expect(attemptReads).toBe(2);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(2);
+  } finally { auth.dispose(); }
+});
+
 it('compares only compatible attempts with exact deltas and withholds deltas for an incompatible baseline', async () => {
   const auth = await session();
   serve();

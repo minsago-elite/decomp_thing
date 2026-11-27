@@ -65,6 +65,19 @@ internal class WebStructureTable(
     },
 ) {
     val size: Int get() = ids.size
+
+    /** Model admission enforces unique IDs within each kind, so equal size and membership are exact. */
+    fun samePopulation(other: WebStructureTable): Boolean {
+        if (this === other) return true
+        if (kind != other.kind || size != other.size) return false
+        val thread = Thread.currentThread()
+        for (id in ids) {
+            if (thread.isInterrupted) throw CancellationException("Population comparison was cancelled.")
+            if (id !in other.index) return false
+        }
+        return true
+    }
+
     // Unsigned 64-bit order; entities without a recorded address (types only) follow all addresses.
     private fun compareAddress(a: Int, b: Int): Int {
         val recorded = hasAddress[b].compareTo(hasAddress[a])

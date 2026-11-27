@@ -143,6 +143,23 @@ class WebProgramStructureTest {
         BooleanArray(names.size), BooleanArray(names.size), Array(names.size) { emptyArray<String>() },
         Array(names.size) { emptyArray<String>() }, IntArray(names.size))
 
+    @Test fun `100000 reordered function identities compare exactly and observe cancellation`() {
+        val ids = Array(100_000) { "function_$it" }
+        val names = List<String?>(ids.size) { null }
+        val current = columnTable(WebStructureKind.FUNCTION, names, ids)
+        val baseline = columnTable(WebStructureKind.FUNCTION, names, ids.reversedArray())
+        assertTrue(current.samePopulation(baseline))
+        Thread.currentThread().interrupt()
+        try {
+            assertFailsWith<java.util.concurrent.CancellationException> { current.samePopulation(baseline) }
+        } finally {
+            Thread.interrupted()
+        }
+        val global = columnTable(WebStructureKind.GLOBAL, listOf(null), arrayOf(ids[0]))
+        val function = columnTable(WebStructureKind.FUNCTION, listOf(null), arrayOf(ids[0]))
+        assertFalse(function.samePopulation(global))
+    }
+
     private fun collisionIndex(functionNames: List<String?>, globalNames: List<String?>, typeNames: List<String?>) =
         WebProgramStructureIndex(WebRevisionSourceReference(jobId, runId, revisionId, inputSha, "version_1"),
             inputSha, inputSha, inputSha, "metadata", WebStructureOutcome.AVAILABLE, null, null,

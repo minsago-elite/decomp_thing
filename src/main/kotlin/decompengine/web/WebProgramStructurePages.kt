@@ -487,8 +487,9 @@ internal class WebProgramStructurePages(
         }
     }
 
-    private class Check(val id: String, val blocking: Boolean, val current: String?, val baseline: String?) {
-        val state: String get() = if (current == null || baseline == null) "not-recorded" else if (current == baseline) "match" else "differs"
+    private class Check(val id: String, val blocking: Boolean, val current: String?, val baseline: String?,
+        private val matches: Boolean = current == baseline) {
+        val state: String get() = if (current == null || baseline == null) "not-recorded" else if (matches) "match" else "differs"
     }
 
     private fun compatibility(index: WebProgramStructureIndex, card: WebStructureScorecard,
@@ -504,7 +505,8 @@ internal class WebProgramStructurePages(
             Check("score-formula", true, card.confidence?.let { decompengine.project.StructuralRecoveryScore.FORMULA },
                 baseCard.confidence?.let { decompengine.project.StructuralRecoveryScore.FORMULA }),
             Check("model-schema", true, index.modelSchemaVersion?.toString(), baseIndex.modelSchemaVersion?.toString()),
-            Check("entity-population", false, population(index), population(baseIndex)),
+            Check("entity-population", false, population(index), population(baseIndex),
+                index.available && baseIndex.available && index.tables.all { it.samePopulation(baseIndex.table(it.kind)) }),
             Check("module-plan", false, plan(index), plan(baseIndex)),
         )
     }

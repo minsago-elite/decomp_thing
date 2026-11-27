@@ -158,6 +158,53 @@ class WebStructureScorecardTest {
         fixture.pages.comparison("owner", fixture.jobId, run, revision, "baselineRunId=$baselineRun&baselineRevisionId=$baselineRevision$extra")
             .also { fixture.assertContract("scorecardComparison", it) }
 
+    private fun JsonObject.populationCheck() = getValue("compatibility").jsonObject.getValue("checks").jsonArray
+        .single { it.jsonObject.text("id") == "entity-population" }.jsonObject
+
+    @Test fun `replacing an entity with the same kind and count flags a nonblocking population change`() {
+        val original = model()
+        fixture.revision("run_1", "revision_1", original, plan())
+        fixture.revision("run_2", "revision_2", original.copy(functions = original.functions.dropLast(1) + function(9)), plan())
+        val comparison = compare("run_1", "revision_1")
+        val population = comparison.populationCheck()
+        assertEquals("differs", population.text("state"))
+        assertEquals(false, population.getValue("blocking").jsonPrimitive.boolean)
+        assertEquals("6 functions/1 globals/0 types", population.text("current"))
+        assertEquals(population.text("current"), population.text("baseline"))
+        assertEquals("compatible", comparison.getValue("compatibility").jsonObject.text("state"))
+        val score = comparison.getValue("metrics").jsonArray.single { it.jsonObject.text("id") == "structural-recovery-score" }
+        assertEquals("computed", score.jsonObject.getValue("delta").jsonObject.text("state"))
+    }
+
+    @Test fun `reordering committed function records preserves the population match`() {
+        val original = model()
+        fixture.revision("run_1", "revision_1", original, plan())
+        val record = Json.parseToJsonElement(original.toJson()).jsonObject
+        val reordered = JsonObject(record + ("functions" to JsonArray(record.getValue("functions").jsonArray.reversed())))
+            .toString().toByteArray()
+        val confidence = fixture.confidence(original, plan(), emptySet()).decodeToString()
+            .replace(fixture.sha(original.toJson().toByteArray()), fixture.sha(reordered))
+        fixture.revision("run_2", "revision_2", original, plan(), confidence = confidence.toByteArray(), modelBytes = reordered)
+        val comparison = compare("run_1", "revision_1")
+        assertEquals("compatible", comparison.getValue("compatibility").jsonObject.text("state"))
+        assertEquals("match", comparison.populationCheck().text("state"))
+    }
+
+    @Test fun `missing model and duplicate identities leave population unrecorded`() {
+        val original = model()
+        fixture.revision("run_2", "revision_2", original, plan())
+        fixture.revision("run_1", "revision_1", null, plan())
+        val duplicate = original.toJson().replace(id(5), id(4)).toByteArray()
+        fixture.revision("run_3", "revision_3", original, plan(), modelBytes = duplicate)
+        for (run in listOf(1, 3)) {
+            val check = compare("run_$run", "revision_$run").populationCheck()
+            assertEquals("not-recorded", check.text("state"))
+            assertEquals(false, check.getValue("blocking").jsonPrimitive.boolean)
+            assertEquals("6 functions/1 globals/0 types", check.text("current"))
+            assertEquals(JsonNull, check.getValue("baseline"))
+        }
+    }
+
     @Test fun `compatible attempts compare with exact deltas and module presence`() {
         fixture.revision("run_1", "revision_1", model(), plan())
         val improved = model(statuses.map { RecoveryStatus.RECOVERED })

@@ -249,14 +249,13 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
     return bindStructure((await client.get('structureScorecard', `${revisionReadRoute(selected)}/scorecard?${values}`, { signal })).data,
       selected, query.version);
   });
-  const [acceptance, setAcceptance] = useState<Acceptance | null>(null);
-  useEffect(() => {
-    const controller = new AbortController();
-    void client.get('run', `/jobs/${selected.jobId}/runs/${selected.runId}`, { signal: controller.signal })
-      .then(response => { if (!controller.signal.aborted && response.data.runId === selected.runId) setAcceptance(response.data.acceptance); })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [selected.jobId, selected.runId]);
+  const attemptPath = `/jobs/${selected.jobId}/runs/${selected.runId}`;
+  const [attempt, refreshAttempt] = useStructureRead<Acceptance>(attemptPath, async signal => {
+    const { data } = await client.get('run', attemptPath, { signal });
+    if (data.jobId !== selected.jobId || data.runId !== selected.runId) throw new ApiClientError('invalid_response');
+    return data.acceptance;
+  });
+  const acceptance = attempt.state === 'ready' ? attempt.value : null;
   useEffect(() => { if (read.state !== 'loading' && moveFocus.current) { moveFocus.current = false; results.current?.focus(); } }, [read]);
   const route = (next: ScorecardQuery, focus = false) => {
     moveFocus.current = focus;
@@ -269,6 +268,7 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
   // Inventory links stay outside the read gate; refresh reads current first pages for the card and comparison.
   return <Frame selected={selected} data={data} read={read} pinned={query.version !== undefined} boundary={copy.boundary}
     onRefresh={() => {
+      refreshAttempt();
       if (!query.version && !query.cursor && !query.compareCursor) { refresh(); return; }
       const next = { ...query }; delete next.version; delete next.cursor; delete next.compareCursor; route(next);
       // Clearing only compareCursor does not change the scorecard's read key, but it must also be reread.
