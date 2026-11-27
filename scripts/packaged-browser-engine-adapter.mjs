@@ -35,14 +35,14 @@ export async function openEngineAuditPage(target, { origin, page, fulfilled, con
   await target.waitForFunction(enginePageReady, { rendered: page.rendered }, { timeout: 30000 });
   const interactions = [];
   if (!prepare) return interactions; // Initial-route metadata timing is not explicit-read coverage.
-  for (const step of page.preparation ?? []) {
+  for (const [stepIndex, step] of (page.preparation ?? []).entries()) {
     const before = fulfilled.length;
     const started = Date.now();
     await target.getByRole('button', { name: step.action, exact: true }).click();
     await target.waitForFunction(engineContentReady, step.content, { timeout: 30000 });
     for (const path of step.reads) assert.ok(fulfilled.slice(before).some(entry =>
       entry.method === 'GET' && entry.path === path && entry.status === 200), `${page.name}: ${step.action} did not read ${path}`);
-    interactions.push({ page: page.name, action: step.action, elapsedMs: Date.now() - started, reads: step.reads, context });
+    interactions.push({ page: page.name, action: step.action, stepIndex, elapsedMs: Date.now() - started, reads: step.reads, context });
   }
   await target.waitForFunction(enginePageReady, { rendered: page.rendered,
     checks: (page.preparation ?? []).flatMap(step => step.content) }, { timeout: 30000 });

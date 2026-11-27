@@ -170,7 +170,7 @@ class WorkflowAttemptStore private constructor(
     private val poisoned = AtomicBoolean()
     private var closed = false
 
-    fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId, invalidateListing = false) { directory -> inspectLocked(jobId, directory) }
+    fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId, readOnly = true) { directory -> inspectLocked(jobId, directory) }
 
     /** Optimistic display-only read: neither lifetime nor stripe locks span physical listing I/O.
      * Validate after presentation too, so a command crossing either metadata read refuses the row.
@@ -198,7 +198,7 @@ class WorkflowAttemptStore private constructor(
     /** Read-side transaction: callers may read bounded local evidence, never wait on network delivery.
      * Lifecycle publication and close cannot interleave until the callback has returned.
      */
-    internal fun <T> withAttemptSnapshot(jobId: String, runId: String, read: (WorkflowAttempt) -> T): T = withJob(jobId, invalidateListing = false) { directory ->
+    internal fun <T> withAttemptSnapshot(jobId: String, runId: String, read: (WorkflowAttempt) -> T): T = withJob(jobId, readOnly = true) { directory ->
         val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
             ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
         read(attempt)
@@ -299,7 +299,7 @@ class WorkflowAttemptStore private constructor(
 
     /** Read-only replay lookup for a future authenticated service admission, before queue/CAS checks. */
     internal fun replayStart(jobId: String, request: NewWorkflowAttempt, requestKey: String,
-        expectedRequestVersion: String): WorkflowStartResult? = withJob(jobId, invalidateListing = false) { directory ->
+        expectedRequestVersion: String): WorkflowStartResult? = withJob(jobId, readOnly = true) { directory ->
         val key = workflowStartKeyDigest(jobId, requestKey)
         val intent = workflowStartIntentSha256(expectedRequestVersion, request)
         val current = available(jobId, directory).snapshot
@@ -309,7 +309,7 @@ class WorkflowAttemptStore private constructor(
 
     /** Read-only recovery replay lookup; it precedes predecessor, capability and CAS checks. */
     internal fun replayRecovery(jobId: String, previousRunId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
-        inputRevisionId: String?, requestKey: String): WorkflowStartResult? = withJob(jobId, invalidateListing = false) { directory ->
+        inputRevisionId: String?, requestKey: String): WorkflowStartResult? = withJob(jobId, readOnly = true) { directory ->
         val key = workflowStartKeyDigest(jobId, requestKey)
         val intent = workflowRecoveryIntentSha256(expectedRunVersion, previousRunId, mode, inputRevisionId)
         val current = available(jobId, directory).snapshot
@@ -671,8 +671,7 @@ class WorkflowAttemptStore private constructor(
         throw WorkflowStoreException("CORRUPT_WORKFLOW_STATE", "The workflow state is invalid; preserve workflow-state.json and restore a verified backup before retrying.", cause = failure)
     }
 
-    private fun <T> withJob(jobId: String, invalidateListing: Boolean = true,
-        invalidateOnSuccess: () -> Boolean = { true }, operation: (Path) -> T): T = lifetime.read {
+    private fun <T> withJob(jobId: String, readOnly: Boolean = false, invalidateOnSuccess: () -> Boolean = { true }, operation: (Path) -> T): T = lifetime.read {
         ensureOpen()
         requireJobId(jobId)
         val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
@@ -680,14 +679,15 @@ class WorkflowAttemptStore private constructor(
             ensureOpen()
             val directory = root.resolve(jobId)
             if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
-            var invalidate = invalidateListing
+            var invalidate = !readOnly
             try {
                 val result = operation(directory)
-                if (invalidateListing) invalidate = invalidateOnSuccess()
+                if (!readOnly) invalidate = invalidateOnSuccess()
                 result
             } finally {
                 // Invalidate even a failed/uncertain command, and conservatively include colliding
-                // jobs. Successful no-op operations may prove that no filesystem work began.
+                // jobs. Read-only calls and proven successful no-ops preserve the current epoch;
+                // never restore an earlier token after a nested mutation changed it.
                 if (invalidate) listingEpochs[stripe] = Any()
             }
         }

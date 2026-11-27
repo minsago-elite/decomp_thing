@@ -149,6 +149,158 @@ class WebBoundedReadsHttpTest {
     }
 
     @Test
+    fun `upload request quota does not block unrelated HTTP status reads`() {
+        val server = server()
+        val uploadPeers = mutableListOf<PendingRawUpload>()
+        val statusExecutor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            WebTestBrowser(server).use { browser ->
+                val accepted = browser.upload("status-target.elf", elfFixture(), "upload-status-target-0001")
+                assertEquals(201, accepted.statusCode(), accepted.text())
+                val jobId = accepted.data().getValue("jobId").jsonPrimitive.content
+                val beforeNames = entries()
+                val beforeBytes = digest()
+
+                val held = (1..2).map { index ->
+                    startPartialUpload(server, browser, index).also { uploadPeers += it }
+                }
+                awaitCondition("two admitted uploads never reached streaming staging") {
+                    Files.list(root).use { paths ->
+                        paths.filter { it.fileName.toString().startsWith(".upload-stream-v1-") }
+                            .filter { stage -> Files.isRegularFile(stage.resolve("input.elf")) && Files.size(stage.resolve("input.elf")) > 0 }
+                            .count() == 2L
+                    }
+                }
+
+                val statusFutures = (1..4).map {
+                    statusExecutor.submit<Long> {
+                        val started = System.nanoTime()
+                        val response = browser.get("/w/api/v1/jobs/$jobId")
+                        val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                        assertEquals(200, response.statusCode(), response.text())
+                        assertEquals(jobId, response.data().getValue("jobId").jsonPrimitive.content)
+                        elapsedMs
+                    }
+                }
+
+                val rejected = rejectThirdUploadBeforeBody(server, browser)
+                assertTrue(rejected.startsWith("HTTP/1.1 503 "), "expected upload-capacity refusal, got $rejected")
+                assertTrue(rejected.contains("UPLOAD_CAPACITY"), rejected)
+                val statusLatencies = statusFutures.map { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+                assertEquals(4, statusLatencies.size)
+                assertTrue(statusLatencies.all { it < 2_000 }, "status requests blocked behind upload reservations: $statusLatencies")
+                val heldAdmission = server.admissionSnapshot()
+                assertTrue(heldAdmission.workers >= 2,
+                    "the held upload requests must remain admitted while status responses complete")
+                println("issue-162-upload-quota-status-v1 held_upload_workers=${heldAdmission.workers} " +
+                    "third_upload=503/UPLOAD_CAPACITY request_body_bytes_sent=0 " +
+                    "status_responses=${statusLatencies.size} status_max_ms=${statusLatencies.maxOrNull()} " +
+                    "status_latencies_ms=${statusLatencies.joinToString(",")}")
+
+                held.forEach { peer ->
+                    peer.socket.getOutputStream().write(peer.finishBody)
+                    peer.socket.getOutputStream().flush()
+                    peer.socket.shutdownOutput()
+                }
+                uploadPeers.forEach { it.socket.close() }
+                uploadPeers.clear()
+                awaitHandlers(server)
+                assertStorageRestored(beforeNames, beforeBytes)
+
+                val retry = browser.upload("after-pressure.elf", elfFixture(), "upload-status-target-0002")
+                assertEquals(201, retry.statusCode(), retry.text())
+                awaitHandlers(server)
+                assertEquals(2, JobStore(root).jobIds().size, "released upload reservations must admit a later valid upload")
+                assertEquals(0, server.admissionSnapshot().workers)
+                assertEquals(0, server.admissionSnapshot().queued)
+                assertEquals(0, server.admissionSnapshot().responders)
+                println("issue-162-upload-quota-status-v1 cleanup=verified subsequent_upload=201 admission=empty")
+            }
+        } finally {
+            uploadPeers.forEach { runCatching { it.socket.close() } }
+            statusExecutor.shutdownNow()
+            assertTrue(statusExecutor.awaitTermination(5, TimeUnit.SECONDS))
+            server.stop()
+        }
+    }
+
+    private data class PendingRawUpload(val socket: Socket, val finishBody: ByteArray)
+
+    private fun startPartialUpload(server: UploadServer, browser: WebTestBrowser, index: Int): PendingRawUpload {
+        val boundary = "upload-pressure-$index"
+        val prefix = ("--$boundary\r\n" +
+            "Content-Disposition: form-data; name=\"binary\"; filename=\"held-$index.elf\"\r\n" +
+            "Content-Type: application/x-elf\r\n\r\n").toByteArray()
+        val payload = ByteArray(96 * 1024).also {
+            "partial-invalid-elf-$index".toByteArray().copyInto(it)
+        }
+        val suffix = "\r\n--$boundary--\r\n".toByteArray()
+        val length = prefix.size + payload.size + suffix.size
+        val socket = Socket("127.0.0.1", server.serverPort).apply { soTimeout = 10_000 }
+        val headers = ("POST /w/api/v1/jobs HTTP/1.1\r\n" +
+            "Host: 127.0.0.1:${server.serverPort}\r\n" +
+            "Origin: ${browser.origin}\r\n" +
+            "Cookie: ${browser.cookie}\r\n" +
+            "X-CSRF-Token: ${browser.csrf}\r\n" +
+            "Accept: application/json\r\n" +
+            "Idempotency-Key: upload-pressure-held-$index\r\n" +
+            "Content-Type: multipart/form-data; boundary=$boundary\r\n" +
+            "Content-Length: $length\r\n" +
+            "Connection: keep-alive\r\n\r\n").toByteArray()
+        socket.getOutputStream().write(headers + prefix + payload)
+        socket.getOutputStream().flush()
+        return PendingRawUpload(socket, suffix)
+    }
+
+    /** Sends only request headers: a capacity refusal must arrive without waiting for multipart bytes. */
+    private fun rejectThirdUploadBeforeBody(server: UploadServer, browser: WebTestBrowser): String {
+        val boundary = "upload-pressure-third"
+        val socket = Socket("127.0.0.1", server.serverPort).apply { soTimeout = 5_000 }
+        socket.use {
+            val headers = ("POST /w/api/v1/jobs HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:${server.serverPort}\r\n" +
+                "Origin: ${browser.origin}\r\n" +
+                "Cookie: ${browser.cookie}\r\n" +
+                "X-CSRF-Token: ${browser.csrf}\r\n" +
+                "Accept: application/json\r\n" +
+                "Idempotency-Key: upload-pressure-third\r\n" +
+                "Content-Type: multipart/form-data; boundary=$boundary\r\n" +
+                "Content-Length: 1048576\r\n" +
+                "Connection: keep-alive\r\n\r\n").toByteArray()
+            socket.getOutputStream().write(headers)
+            socket.getOutputStream().flush()
+            return readRawResponse(socket)
+        }
+    }
+
+    /** Reads one bounded local HTTP response without consuming a request body from the peer. */
+    private fun readRawResponse(socket: Socket): String {
+        val input = socket.getInputStream().buffered()
+        fun line(): String {
+            val bytes = java.io.ByteArrayOutputStream()
+            while (true) {
+                val next = input.read()
+                if (next < 0) throw java.io.EOFException("HTTP response ended before its headers")
+                if (next == '\n'.code) break
+                if (next != '\r'.code) bytes.write(next)
+            }
+            return bytes.toString(Charsets.ISO_8859_1)
+        }
+        val status = line()
+        val headers = mutableMapOf<String, String>()
+        while (true) {
+            val header = line()
+            if (header.isEmpty()) break
+            val colon = header.indexOf(':')
+            if (colon > 0) headers[header.substring(0, colon).lowercase()] = header.substring(colon + 1).trim()
+        }
+        val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
+        val body = input.readNBytes(contentLength)
+        assertEquals(contentLength, body.size, "truncated HTTP response body")
+        return "$status\n${body.decodeToString()}"
+    }
+
+    @Test
     fun `job attempt and event continuations stay inside their snapshot session and selection`() {
         val store = JobStore(root)
         val ids = List(3) { store.createFromUpload("fixture-$it.elf", elfFixture()).id }

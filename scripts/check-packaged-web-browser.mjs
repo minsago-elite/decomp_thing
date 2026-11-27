@@ -2,18 +2,19 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { promises as fs, readFileSync, createReadStream } from 'node:fs';
-import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
+import { join, basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
+import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { seedSoak, qualifySoak } from './packaged-browser-soak.mjs';
 import { evaluate as evaluateSoak } from './soak626/evaluate.mjs';
@@ -26,6 +27,7 @@ const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
+  profile: { type: 'string', default: 'reference' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
@@ -37,15 +39,16 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|soak|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|soak|proxy|upgrade|legacy|audit] [--profile reference|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('soak accepts --soak-duration-ms for short diagnostic runs only; the evaluator still requires the full twenty-minute profile.');
   console.log('soak accepts --experiment-jvm-profile default|xms64|xms64-xmx384 for diagnostics; only the default packaged JVM profile can qualify.');
-  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
+  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP, navigation timing budgets, 50 job-filter submissions, and 50 alternating source-file metadata/preview actions (100ms local feedback / 500ms first data).');
+  console.log('profile reference preserves browser defaults and enforces the documented navigation budgets; profile constrained applies 4x CPU throttling and symmetric 10 Mbit/s network throughput to audit targets, records timings without applying those budgets, and does not establish a new threshold.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
-  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
+  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh; then labels, archives and deliberately deletes one inert job with peer-tab, deep-link and focus recovery (#173).');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -67,6 +70,8 @@ assert.ok(values['experiment-jvm-profile'] === 'default' || values['experiment-j
 assert.ok(values['experiment-jvm-profile'] === 'default' || values.mode === 'soak', '--experiment-jvm-profile is only supported with --mode soak');
 const experimentJvmOptions = values['experiment-jvm-profile'] === 'xms64' ? ['-Xms64m']
   : values['experiment-jvm-profile'] === 'xms64-xmx384' ? ['-Xms64m', '-Xmx384m'] : [];
+assert.ok(['reference', 'constrained'].includes(values.profile), '--profile must be reference or constrained');
+assert.ok(values.mode === 'audit' || values.profile === 'reference', '--profile constrained is only supported with --mode audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -456,9 +461,13 @@ async function ready(target, expression, label) {
   }, label);
 }
 
-async function capture(target, name) {
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
-  await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
+async function capture(target, name, clip) {
+  // Clipped (chart) captures stay inside the rendered viewport: beyond-viewport capture can resize
+  // the layout viewport (dropping the scrollbar) and reflow the figure after it was measured.
+  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport: false } : {}) }, target.sessionId);
+  const bytes = Buffer.from(data, 'base64');
+  await fs.writeFile(join(root, name), bytes);
+  return bytes;
 }
 
 async function prepareArchive(archivePath) {
@@ -574,13 +583,13 @@ try {
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
   browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  const browserTmpForProcess = relative(repo, browserTmp);
+  assert(!isAbsolute(browserTmpForProcess) && browserTmpForProcess !== '..' && !browserTmpForProcess.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`),
+    'Browser temporary directory must remain inside the repository');
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
-    // Keep the Unix-domain socket path short even when the checkout itself is
-    // nested deeply. The directory still lives inside this repository; Chrome
-    // resolves the relative TMPDIR from the inherited repository cwd.
-    cwd: repo, env: { ...process.env, TMPDIR: basename(browserTmp) }, stdio: ['ignore', 'ignore', 'pipe'],
+    cwd: repo, env: { ...process.env, TMPDIR: browserTmpForProcess }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
@@ -759,9 +768,14 @@ try {
     report.jobDataCreated = true;
   }
   if (values.mode === 'audit') {
-    report.audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay });
+    const audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay,
+      profile: values.profile });
     await delay(100); // Drain resource events from the last measured target.
-    report.auditVerdict = assertAudit(report.audit, manifest, targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin);
+    const interactionPages = auditFixtures(repo, manifest.buildId).pages;
+    report.auditVerdict = assertAudit(audit, manifest,
+      targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin, undefined,
+      { interactionPages, extraInteractionContexts: chromiumSupplementalInteractionContexts(interactionPages), profile: values.profile });
+    report.audit = compactJobFilterAuditEvidence(audit);
     assert.deepEqual(report.auditVerdict.failures, [], `Packaged audit failures:\n${report.auditVerdict.failures.join('\n')}`);
     assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
@@ -1080,6 +1094,7 @@ try {
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
+      report.jobLifecycle = await qualifyLifecycle({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
     }
     if (historyFixture) {
@@ -1277,8 +1292,10 @@ try {
       process.exitCode = 1;
     }
   }
-  const retained = scrubTokens(boundReport(report), sensitiveValues);
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained, null, 2) + '\n');
+  const retained = boundReport(scrubTokens(report, sensitiveValues));
+  // boundReport enforces the compact JSON byte ceiling. Pretty printing here would expand the
+  // retained artifact beyond that same ceiling even though the bounded object passed validation.
+  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained));
   console.log(JSON.stringify(retained, null, 2));
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }
