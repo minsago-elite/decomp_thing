@@ -22,7 +22,7 @@ function page(t, { operation = null, cleanup = reviewedCopy.unknown, headline = 
     const p = dom.window.document.createElement('p'); p.textContent = text; alert.append(p);
   }
   const link = dom.window.document.createElement('a'); link.href = '/nested/'; link.textContent = 'Return to jobs'; alert.append(link);
-  return { dom, alert, check: operation => dom.window.eval(deletionVerdict(operation)), eval: text => dom.window.eval(text) };
+  return { dom, alert, check: (operation, reference) => dom.window.eval(deletionVerdict(operation, reference)), eval: text => dom.window.eval(text) };
 }
 const running = { state: 'running', recoveryRequired: false, message: 'The recorded deletion acknowledgement is still running.' };
 const completed = { state: 'completed', recoveryRequired: false, message: 'The recorded deletion acknowledgement completed.' };
@@ -36,6 +36,17 @@ test('job driver predicates match the reviewed headline and cleanup copy', t => 
     assert.equal(fixture.check(operation), false, 'Cleanup copy must remain exact');
   }
   assert.equal(page(t, { headline: reviewedCopy.headline + ' Unreviewed claim.' }).eval(deletedNotice), false);
+});
+
+test('a tombstone matches exactly the reference from its own job GET', t => {
+  const reference = '9ea205a7-2652-4da6-9a84-47bef7611978';
+  const other = 'de106c03-ec46-404f-aa8c-64fd7508c227';
+  const correct = page(t, { headline: reviewedCopy.headline + ' Reference ID: ' + reference + '.' });
+  assert.equal(correct.check(null, reference), true);
+  assert.equal(correct.check(null, other), false);
+  assert.equal(correct.check(), false);
+  assert.equal(page(t).check(null, reference), false);
+  assert.equal(page(t, { headline: reviewedCopy.headline + ' Reference ID: ' + reference + '. More.' }).check(null, reference), false);
 });
 
 test('recorded running and completed acknowledgements and tombstones have distinct verdicts', t => {
