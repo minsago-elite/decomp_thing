@@ -100,3 +100,92 @@ it('keeps long linear Previous traversal and a deep link fallback alongside entr
   click('Previous change groups'); await window_(/Showing change groups 3–3 of 7/);
   click('Previous change groups'); await window_(/Showing change groups 1–2 of 7/);
 });
+
+
+it('review: repeated Previous after returning to an older branch keeps that branch', async () => {
+  const pages = new Map([[0, 3], [1, 2], [3, 1], [4, 2]]);
+  transport.get.mockImplementation((_kind: string, path: string) => {
+    const offset = Number(new URL(path, 'https://x.invalid').searchParams.get('hunk') ?? 0);
+    const size = pages.get(offset) ?? 1;
+    return Promise.resolve({ data: { ...diff, hunkOffset: offset, totalHunks: 6,
+      nextHunk: offset + size < 6 ? offset + size : null,
+      hunks: Array.from({ length: size }, () => diff.hunks[0]!) } });
+  });
+  mount(start);
+  await window_(/Showing change groups 1–3 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 4–4 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 5–6 of 6/);
+  const earlier = window.location.href;
+  route(sourceFileDiffPath('', selected, { ...file, hunk: 1 }));
+  await window_(/Showing change groups 2–3 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 4–4 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 5–6 of 6/);
+  const returned = new Promise(resolve => window.addEventListener('popstate', resolve, { once: true }));
+  history.go(-3);
+  await returned;
+  expect(window.location.href).toBe(earlier);
+  click('Previous change groups'); await window_(/Showing change groups 4–4 of 6/);
+  click('Previous change groups'); await window_(/Showing change groups [12]–3 of 6/);
+  expect(Number(new URL(transport.get.mock.calls.at(-1)![1] as string, 'https://x.invalid').searchParams.get('hunk') ?? 0)).toBe(0);
+});
+
+const popped = () => new Promise(resolve => window.addEventListener('popstate', resolve, { once: true }));
+const lastHunk = () => Number(new URL(transport.get.mock.calls.at(-1)![1] as string, 'https://x.invalid').searchParams.get('hunk') ?? 0);
+function branching() {
+  const pages = new Map([[0, 3], [1, 2], [3, 1], [4, 2]]);
+  transport.get.mockImplementation((_kind: string, path: string) => {
+    const query = new URL(path, 'https://x.invalid').searchParams;
+    const offset = Number(query.get('hunk') ?? 0);
+    const size = pages.get(offset) ?? 1;
+    return Promise.resolve({ data: { ...diff, headFile: query.get('headFileId') === otherFile ? { ...diff.headFile!, fileId: otherFile } : diff.headFile,
+      hunkOffset: offset, totalHunks: 6, nextHunk: offset + size < 6 ? offset + size : null, hunks: Array.from({ length: size }, () => diff.hunks[0]!) } });
+  });
+}
+
+it('Forward onto a later branch keeps that branch through repeated Previous, without extra reads', async () => {
+  branching();
+  mount(start);
+  await window_(/Showing change groups 1–3 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 4–4 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 5–6 of 6/);
+  route(sourceFileDiffPath('', selected, { ...file, hunk: 1 }));
+  await window_(/Showing change groups 2–3 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 4–4 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 5–6 of 6/);
+  const later = window.location.href;
+  let back = popped(); history.go(-3); await back;
+  // Intervening repeated navigation within history before returning Forward to the later branch.
+  back = popped(); history.go(-1); await back;
+  await window_(/Showing change groups 4–4 of 6/);
+  back = popped(); history.go(4); await back;
+  expect(window.location.href).toBe(later);
+  await window_(/Showing change groups 5–6 of 6/);
+  const reads = transport.get.mock.calls.length;
+  click('Previous change groups'); await window_(/Showing change groups 4–4 of 6/);
+  click('Previous change groups'); await window_(/Showing change groups 2–3 of 6/);
+  expect(lastHunk()).toBe(1);
+  expect(transport.get.mock.calls.length).toBe(reads + 2);
+});
+
+it('a different file does not inherit the lineage of an entry it shares an offset with', async () => {
+  branching();
+  mount(start);
+  await window_(/Showing change groups 1–3 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 4–4 of 6/);
+  click('Next change groups'); await window_(/Showing change groups 5–6 of 6/);
+  route(sourceFileDiffPath('', selected, { ...file, headFileId: otherFile, hunk: 4 }));
+  await waitFor(() => expect(lastHunk()).toBe(4));
+  await window_(/Showing change groups 5–6 of 6/);
+  click('Previous change groups');
+  await waitFor(() => expect(lastHunk()).toBe(0));
+});
+
+it('a long branching walk retraces its own path and degrades to the fallback past the bound', async () => {
+  serve(Array.from({ length: 60 }, () => 1));
+  mount(sourceFileDiffPath('', selected, { ...file, hunk: 30 }).replace(/^[^?]*/, ''));
+  await window_(/Showing change groups 31–31 of 60/);
+  for (let page = 32; page <= 45; page += 1) { click('Next change groups'); await window_(new RegExp(`Showing change groups ${page}–${page} of 60`)); }
+  for (let page = 44; page >= 31; page -= 1) { click('Previous change groups'); await window_(new RegExp(`Showing change groups ${page}–${page} of 60`)); }
+  // The deep-linked first page has no recorded predecessor and falls back one maximum page.
+  click('Previous change groups'); await window_(/Showing change groups 11–11 of 60/);
+});
