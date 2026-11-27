@@ -349,7 +349,7 @@ internal class WebRedactionPolicy private constructor(
         private const val CREDENTIAL_KEYS = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
             "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token|(?:proxy-)?authorization"
         private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|cookie|set-cookie)")
-        private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}(?::[^/\\s@\"'<>]{0,512})?@")
+        private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]*+(?::[^/\\s@\"'<>]*+)?@")
         private val CREDENTIAL_PATTERNS = listOf(
             // Recorded HTTP cookie headers may carry session secrets unknown to the listener's environment.
             // Keep the header name but withhold the entire value (including cookie attributes).

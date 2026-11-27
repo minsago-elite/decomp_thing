@@ -177,15 +177,19 @@ class WebRunLogsTest {
             "BuildSetCookieCanary0123456789",
             "BuildJsonCookieCanary0123456789",
             "BuildUrlCanary0123456789",
+            "BuildEmptyPasswordCanary0123456789",
+            "BuildEmptyUsernameCanary0123456789",
         )
         val input = listOf(
             "Cookie: session=${secrets[0]}",
             "Set-Cookie: session=${secrets[1]}; Path=/; HttpOnly; SameSite=Strict",
             "{\"Cookie\": \"session=${secrets[2]}\"}",
             "Fetching https://${secrets[3]}@example.com/repo.git",
+            "Fetching https://${secrets[4]}:@example.com/repo.git",
+            "Fetching https://:${secrets[5]}@example.com/repo.git",
         ).joinToString("\n")
         val capture = assertNotNull(logs.capture(input.toByteArray(), sha))
-        assertEquals(4, capture.redactedLines)
+        assertEquals(6, capture.redactedLines)
         val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
         val range = logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 10, null), Instant.EPOCH)
         for (secret in secrets) {
@@ -199,6 +203,25 @@ class WebRunLogsTest {
         assertTrue(download.contains("Cookie: [redacted]"))
         assertTrue(download.contains("Set-Cookie: [redacted]"))
         assertTrue(download.contains("{\"Cookie\": [redacted]"))
+    }
+
+    @Test fun `long URL usernames and passwords are fully redacted`() {
+        val (jobId, run) = attempt()
+        val username = "long-user-" + "u".repeat(300)
+        val password = "long-password-" + "p".repeat(600)
+        val input = "clone https://$username@example.com/a https://oauth2:$password@example.com/b"
+        val capture = assertNotNull(logs.capture(input.toByteArray(), sha))
+        assertEquals(1, capture.redactedLines)
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        assertFalse(download.contains(username))
+        assertFalse(download.contains(password))
+        assertTrue(download.contains("https://[redacted]@example.com/a"))
+        assertTrue(download.contains("https://[redacted]@example.com/b"))
+        for (secret in listOf(username, password)) {
+            val search = logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content
+            assertEquals("0", search)
+        }
     }
 
     @Test fun `multiline configured credentials are redacted without losing source line numbering`() {
