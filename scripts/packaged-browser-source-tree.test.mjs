@@ -4,7 +4,7 @@ import { promises as ownerFs } from 'node:fs';
 import { dirname as ownerDirname, join as ownerJoin, relative as ownerRelative, isAbsolute as ownerIsAbsolute } from 'node:path';
 import vm from 'node:vm';
 import { allocateSourceTreeBrowserTemp, requireSourceTreeBrowserTemp, removeSourceTreeBrowserTemp, SOURCE_TREE_BROWSER_TEMP_OWNER } from './packaged-browser-temp-owner.mjs';
-import { maximumFirstSearchPageMs, nearestRankPercentile, sourceSearchResponsePause, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
+import { qualifySourceTreeColdPage, maximumFirstSearchPageMs, nearestRankPercentile, sourceSearchResponsePause, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
 
 test('cancelled navigation only qualifies a dispatched successful bounded search response', () => {
   const event = { requestId: 'fetch-1', networkId: 'network-1', responseStatusCode: 200,
@@ -19,7 +19,7 @@ test('cancelled navigation only qualifies a dispatched successful bounded search
 });
 
 test('resource timing fallback requires an exact aborted request, URL, clock and body binding', async () => {
-  const observed = { requestId: 'network-1', documentSequence: 1, route: 'chunk', pathname: '/assets/chunk.js',
+  const observed = { requestId: 'network-1', documentSequence: 1, method: 'GET', route: 'chunk', pathname: '/assets/chunk.js',
     urlKey: '/assets/chunk.js', wallStartedAt: 1_000, contentLength: 1_000,
     status: 200, responseBytes: null, failure: 'net::ERR_ABORTED' };
   const result = await waitForCompletedRequest([observed], 'chunk', 100, async () => [{
@@ -195,4 +195,84 @@ test('actual driver claims its source lease with a short relative TMPDIR and pre
   }
   const missing = { assert, repo, buildRoot, values: { mode: 'source-tree', 'keep-workdir': true }, process: { env: {} }, SOURCE_TREE_BROWSER_TEMP_OWNER, requireSourceTreeBrowserTemp };
   await assert.rejects(vm.runInNewContext('(async()=>{' + block + '})()', missing), /Missing browser temp allocation/u);
+});
+
+const directoryKey = '/nested/api/v1/jobs/job/runs/run/revisions/rev/source-directories/dir?limit=50';
+const directoryRequest = (overrides = {}) => ({ requestId: 'directory-1', documentSequence: 1, route: 'directory',
+  method: 'GET', pathname: directoryKey.split('?')[0], urlKey: directoryKey, wallStartedAt: 1000,
+  contentLength: 1000, status: 200, responseBytes: null, failure: 'net::ERR_ABORTED', ...overrides });
+const directoryTiming = (overrides = {}) => ({ route: 'directory', documentSequence: 1, pathname: directoryKey.split('?')[0],
+  urlKey: directoryKey, responseEnd: 10, transferSize: 1234, encodedBodySize: 1000, startTime: 1000,
+  timeOrigin: 0, responseStatus: 200, ...overrides });
+const expectedDirectory = { urlKey: directoryKey, documentSequence: 1 };
+
+test('bounded first directory page accepts exact limit=50 EOF evidence', async () => {
+  const request = directoryRequest();
+  assert.equal(await waitForCompletedRequest([request], 'directory', 100, async () => [directoryTiming()], expectedDirectory), request);
+  assert.equal(request.responseBodyBytes, 1000);
+  assert.equal(request.resourceTimingBinding.urlKey, directoryKey);
+});
+
+for (const [name, requestOverride, timingOverride] of [
+  ['bare API path', {}, { urlKey: directoryKey.split('?')[0] }],
+  ['other page size', {}, { urlKey: directoryKey.replace('50', '100') }],
+  ['neighbor directory', {}, { urlKey: directoryKey.replace('/dir?', '/other?') }],
+  ['additional query', {}, { urlKey: directoryKey + '&cursor=next' }],
+  ['other request query', { urlKey: directoryKey + '&cursor=next' }, {}],
+  ['previous document request', { documentSequence: 0 }, {}],
+  ['previous document timing', {}, { documentSequence: 0 }],
+  ['non-GET request', { method: 'POST' }, {}],
+  ['unsuccessful response', { status: 500 }, {}],
+  ['partial body', {}, { encodedBodySize: 999 }],
+  ['missing completion', {}, { responseEnd: 0 }],
+  ['missing transfer bytes', {}, { transferSize: 0 }],
+  ['wrong response status', {}, { responseStatus: 500 }],
+  ['neighbor clock', {}, { timeOrigin: 1001 }],
+]) test(`bounded directory EOF refuses ${name}`, async () => {
+  const request = directoryRequest(requestOverride);
+  await assert.rejects(waitForCompletedRequest([request], 'directory', 1, async () => [directoryTiming(timingOverride)], expectedDirectory),
+    /No measured successful directory response/);
+  assert.equal(request.responseBytes, null);
+});
+
+test('a completed neighboring request cannot satisfy the selected directory gate', async () => {
+  await assert.rejects(waitForCompletedRequest([directoryRequest({ urlKey: directoryKey + '&cursor=next', responseBytes: 1234,
+    failure: null, completionEvidence: 'Network.loadingFinished' })], 'directory', 1, null, expectedDirectory));
+});
+
+test('cold driver selects the actual limit=50 API resource rather than the bare document query', async () => {
+  const fixture = { fileCount: 25000, modulesDirectoryId: 'dir_1_2_' + 'a'.repeat(64), jobId: 'job', runId: 'run', revisionId: 'rev' };
+  const origin = 'http://127.0.0.1:4321';
+  const pathname = `/nested/api/v1/jobs/job/runs/run/revisions/rev/source-directories/${fixture.modulesDirectoryId}`;
+  const page = `/nested/jobs/job/runs/run/revisions/rev/sources/${fixture.modulesDirectoryId}`;
+  const target = { sessionId: 'test', documentRequests: [], requests: [], exceptions: [] };
+  const handlers = new Map();
+  const cdp = { on(name, listener) { handlers.set(name, listener); }, async call(name) {
+    assert.equal(name, 'Page.navigate');
+    target.documentRequests.push({ status: 200, failure: null, route: 'sources' });
+    const request = { method: 'GET', url: origin + pathname + '?limit=50', headers: {} };
+    target.requests.push(request);
+    handlers.get('Network.requestWillBeSent')({ requestId: 'actual-directory', request, timestamp: 1, wallTime: 1 });
+    handlers.get('Network.responseReceived')({ requestId: 'actual-directory', timestamp: 1.001,
+      response: { status: 200, headers: { 'Content-Length': '1000' } } });
+    handlers.get('Network.loadingFailed')({ requestId: 'actual-directory', timestamp: 1.01, errorText: 'net::ERR_ABORTED' });
+    return {};
+  } };
+  const resource = { name: origin + pathname + '?limit=50', responseEnd: 10, transferSize: 1234,
+    encodedBodySize: 1000, responseStatus: 200, startTime: 1000 };
+  const evaluate = async (_target, expression) => {
+    if (expression.includes("performance.getEntriesByType('resource')")) {
+      const rows = vm.runInNewContext(expression, { URL, location: { origin }, performance: { timeOrigin: 0,
+        getEntriesByType: () => [{ ...resource, name: 'http://foreign.test' + pathname + '?limit=50' },
+          { ...resource, name: origin + pathname }, resource] } });
+      assert.equal(rows.length, 1, 'Only the exact same-origin bounded GET resource may be selected');
+      return rows;
+    }
+    return { pathname: page, heading: 'modules', rows: 50, routeNotice: null,
+      names: Array.from({ length: 50 }, (_, index) => `m_${String(index).padStart(5, '0')}.c`) };
+  };
+  const result = await qualifySourceTreeColdPage({ fixture, target, cdp, evaluate, ready: async () => {}, browserOrigin: origin });
+  assert.equal(result.response.urlKey, pathname + '?limit=50');
+  assert.equal(result.response.responseBodyBytes, 1000);
+  assert.equal(result.response.failure, 'net::ERR_ABORTED');
 });

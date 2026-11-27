@@ -198,21 +198,23 @@ function summarizeRequests(requests, route) {
   }));
 }
 
-export async function waitForCompletedRequest(requests, route, timeoutMs = 10_000, readResourceTiming = null) {
+export async function waitForCompletedRequest(requests, route, timeoutMs = 10_000, readResourceTiming = null, expected = null) {
+  const isExpected = item => expected === null || (item.urlKey === expected.urlKey && item.documentSequence === expected.documentSequence && item.method === 'GET');
   const deadline = Date.now() + timeoutMs;
   let resourceTimings = readResourceTiming ? await readResourceTiming() : [];
   while (Date.now() < deadline) {
-    const completed = requests.find(item => item.route === route && item.status === 200 && item.responseBytes !== null);
+    const completed = requests.find(item => item.route === route && isExpected(item) && item.status === 200 && item.responseBytes !== null);
     if (completed) return completed;
     // Chrome can emit loadingFailed(net::ERR_ABORTED) after the page has already
     // consumed a same-origin response (for example during navigation cleanup).
     // In that case the rendered data plus Resource Timing's completed transfer
     // remains direct browser evidence of the response and its transferred size.
     const timing = resourceTimings.find(item => item.route === route && typeof item.urlKey === 'string'
+      && (expected === null || (item.urlKey === expected.urlKey && item.documentSequence === expected.documentSequence))
       && item.responseEnd > 0 && item.transferSize > 0 && Number.isSafeInteger(item.transferSize));
     if (timing) {
-      const observed = requests.find(item => item.route === route && item.urlKey === timing.urlKey && item.status === 200);
-      if (observed?.failure === 'net::ERR_ABORTED'
+      const observed = requests.find(item => item.route === route && isExpected(item) && item.urlKey === timing.urlKey && item.status === 200);
+      if (observed?.method === 'GET' && observed.failure === 'net::ERR_ABORTED'
         && resourceTimingMatchesRequest(observed, timing)
         && Number.isSafeInteger(observed.contentLength) && observed.contentLength > 0
         && Number.isSafeInteger(timing.encodedBodySize) && timing.encodedBodySize === observed.contentLength
@@ -384,17 +386,22 @@ export async function qualifySourceTreeColdPage({ fixture, target, cdp, evaluate
   assert.equal(rendered.rows, 50);
   assert.equal(rendered.routeNotice, null);
   assert.deepEqual(rendered.names, expectedNames, 'Cold first page did not render the exact ordered D0 filenames');
-  const directoryUrlKey = `${directoryApiPath}${new URL(directoryUrl).search}`;
+  // directoryReadRoute always requests the first bounded API page with limit=50;
+  // the document route's query is not the API request query.
+  const directoryUrlKey = `${directoryApiPath}?limit=50`;
+  const directoryDocumentSequence = target.documentRequests.length;
   const readDirectoryResourceTiming = () => evaluate(target, `performance.getEntriesByType('resource')
-    .filter(entry => new URL(entry.name).pathname + new URL(entry.name).search === ${JSON.stringify(directoryUrlKey)})
-    .map(entry => ({ route: 'directory', pathname: new URL(entry.name).pathname,
+    .filter(entry => new URL(entry.name).origin === location.origin && new URL(entry.name).pathname + new URL(entry.name).search === ${JSON.stringify(directoryUrlKey)})
+    .map(entry => ({ route: 'directory', documentSequence: ${directoryDocumentSequence}, pathname: new URL(entry.name).pathname,
       urlKey: new URL(entry.name).pathname + new URL(entry.name).search, responseEnd: entry.responseEnd,
       transferSize: entry.transferSize, encodedBodySize: entry.encodedBodySize,
       responseStatus: Number.isSafeInteger(entry.responseStatus) ? entry.responseStatus : null,
       startTime: entry.startTime, timeOrigin: performance.timeOrigin }))`);
-  const request = await waitForCompletedRequest(requests, 'directory', 10_000, readDirectoryResourceTiming);
+  const request = await waitForCompletedRequest(requests, 'directory', 10_000, readDirectoryResourceTiming,
+    { urlKey: directoryUrlKey, documentSequence: directoryDocumentSequence });
   const durationMs = Math.round((performance.now() - startedAt) * 100) / 100;
   assert.equal(request.method, 'GET');
+  assert.equal(request.urlKey, directoryUrlKey, 'The cold directory GET must request the exact bounded first API page');
   assert.equal(request.pathname, directoryApiPath, 'The API response must be bound to the selected job, run, revision, and directory');
   assert.equal(request.status, 200);
   const completedNormally = request.failure === null && request.completionEvidence === 'Network.loadingFinished';
