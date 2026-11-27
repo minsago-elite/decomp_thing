@@ -153,15 +153,27 @@ class WebProgramGraphTest {
         assertEquals("not-recorded", unplanned.text("graphState")); assertEquals("PLAN_NOT_RECORDED", unplanned.text("graphReason"))
     }
 
-    @Test fun `limits focus and pins are validated`() {
+    @Test fun `graph query validation is reported on a cold fixture`() {
         standard()
         for (query in listOf("view=calls", "view=calls&focus=${id(0)}&depth=4", "view=calls&focus=${id(0)}&nodeLimit=201",
             "view=calls&focus=${id(0)}&edgeLimit=0", "view=modules&focus=core&unresolved=omit", "view=other&focus=${id(0)}",
             "view=calls&focus=${id(0)}&direction=sideways", "view=calls&focus=${id(0)}&limit=5")) {
             assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied>(query) { read(query) }.code, query)
         }
+    }
+
+    @Test fun `missing function focus is reported on a cold fixture`() {
+        standard()
         assertEquals("ENTITY_NOT_FOUND", assertFailsWith<WebAccessDenied> { read("view=calls&focus=fn_unknown") }.code)
+    }
+
+    @Test fun `missing module focus is reported on a cold fixture`() {
+        standard()
         assertEquals("MODULE_NOT_FOUND", assertFailsWith<WebAccessDenied> { read("view=modules&focus=missing") }.code)
+    }
+
+    @Test fun `stale structure pin is reported on a cold fixture`() {
+        standard()
         assertEquals("STRUCTURE_CHANGED", assertFailsWith<WebAccessDenied> {
             read("view=calls&focus=${id(0)}&structureVersion=${"0".repeat(64)}")
         }.code)
