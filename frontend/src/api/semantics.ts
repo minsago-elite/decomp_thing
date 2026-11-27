@@ -170,6 +170,10 @@ function checkRun(run: Run): void {
   requireValue(reasons[run.state].includes(run.terminalReason));
   if (run.state === 'queued') requireValue(run.startedAt === null);
   if (run.state === 'running' || run.state === 'completed') requireValue(run.startedAt !== null);
+  const { usage } = run;
+  if (usage?.localMeasurement) {
+    for (const field of usage.localMeasurement.fields) requireValue(usage[field] !== null);
+  }
   const recovery = run.recovery;
   if (recovery) {
     requireValue(run.previousRunId !== null && (recovery.restores === null) === (recovery.checkpointSha256 === null));

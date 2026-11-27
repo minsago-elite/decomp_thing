@@ -345,6 +345,20 @@ describe('generated v1 contract pipeline', () => {
     expect(() => decodeResponse(JSON.stringify({ ...original, data: { ...original.data,
       item: { ...original.data.item, declaredUtf8Text: false }, recordedModule: recorded } }), 'revisionFile')).toThrow(ApiClientError);
   });
+  it('attributes a local sample only to counters present in the response', () => {
+    const run = decodeResponse(fixture('run-completed-unaccepted'), 'run');
+    for (const field of ['wallClockMs', 'toolCalls'] as const) {
+      const usage = { ...run.data.usage!, localMeasurement: {
+        source: 'workflow-execution-meter', sampledAt: '2026-01-02T03:04:05Z', fields: [field],
+      } };
+      const wire = (value: string | null) => JSON.stringify({ ...run, data: {
+        ...run.data, usage: { ...usage, [field]: value },
+      } });
+      expect(decodeResponse(wire('0'), 'run').data.usage?.[field]).toBe('0');
+      expect(() => decodeResponse(wire(null), 'run')).toThrow(ApiClientError);
+    }
+  });
+
   it('rejects contradictory lifecycle reasons in single runs, history and snapshots', () => {
     const single = decodeResponse(fixture('run-completed-unaccepted'), 'run');
     const page = decodeResponse(fixture('runs-page'), 'runs');

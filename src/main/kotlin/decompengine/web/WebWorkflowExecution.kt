@@ -210,7 +210,7 @@ internal class BoundedWorkflowExecutor(
         }
         if (exhausted != null) stop(child)
         val finishedAt = nanoTime()
-        val wall = TimeUnit.NANOSECONDS.toMillis(finishedAt - started)
+        val usage = meter.usage(TimeUnit.NANOSECONDS.toMillis(finishedAt - started))
         // A body that finished between samples is still held to every declared bound.
         val finished = exhausted?.let { BoundedWorkflowResult.Exhausted(it) } ?: checkNotNull(result)
         val final = if (finished is BoundedWorkflowResult.Exhausted) finished else {
@@ -227,7 +227,7 @@ internal class BoundedWorkflowExecutor(
             }
             limit ?: finished
         }
-        return final to meter.usage(wall)
+        return final to usage
     }
 
     /** Interrupt repeatedly until the child exits; preserve a caller interrupt observed meanwhile. */
