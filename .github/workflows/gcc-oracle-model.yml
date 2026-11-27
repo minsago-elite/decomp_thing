@@ -146,6 +146,7 @@ jobs:
             slirp4netns=1.2.1-1build2 uidmap
       - name: Test bounded GCC reproduction inspect controls
         run: |
+          python3 -IB tests/oracle/test_gcc_final_layer_diagnostic.py -v
           mkdir -p build/gcc-reproduction-adapter/tmp
           TMPDIR="$GITHUB_WORKSPACE/build/gcc-reproduction-adapter/tmp" \
             python3 -B -m unittest tests.oracle.test_gcc_reproduction_inspect \
@@ -232,6 +233,16 @@ jobs:
             --file oracle/gcc/16.2.0/build-toolchain.Dockerfile \
             --progress=plain \
             oracle/gcc/16.2.0 2>&1 | tee "$diagnostics/build.log"
+          # Diagnostic only. The strict adapter below independently inspects the image.
+          if timeout --kill-after=5s 300s bash -o pipefail -c '
+            docker --host "$DOCKER_HOST" image save decomp-gcc-oracle-toolchain:16.2.0 2>/dev/null |
+              (ulimit -v 524288 && exec python3 -IB scripts/diagnose-gcc-final-layer.py)
+          ' > "$diagnostics/final-layer.json"; then
+            echo 'Captured GCC final-layer inventory'
+          else
+            rm -f "$diagnostics/final-layer.json"
+            echo '::warning::GCC final-layer diagnostic unavailable'
+          fi
           python3 -B scripts/capture-gcc-reproduction-inspect.py \
             --endpoint "$DOCKER_HOST" \
             --executed-commit "$(git rev-parse HEAD)" \
