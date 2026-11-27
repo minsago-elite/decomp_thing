@@ -1106,6 +1106,7 @@ it.each([
 it.each([
   ['resolves', 'resolve'],
   ['fails', 'fail'],
+  ['reports deletion', 'deleted'],
 ] as const)('a same-version Refresh applied during a held Retry starts its own lookup, and the Retry %s as a no-op', async (_name, outcome) => {
   const auth = await session();
   let jobs = 0;
@@ -1136,6 +1137,7 @@ it.each([
     expect(reads()).toEqual(['job', 'runs', 'job', 'job', 'runs']);
     await act(async () => {
       if (outcome === 'fail') held!.reject(new ApiClientError('http_error', { status: 500 }));
+      else if (outcome === 'deleted') held!.reject(new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' }));
       else held!.resolve(a);
       await Promise.resolve();
     });
@@ -1238,5 +1240,42 @@ it('recovers an expired history cursor with one Retry that reads the job before 
     expect(transport.get.mock.calls[3]?.[0]).toBe('job');
     await section().findByRole('link', { name: 'Open the accepted attempt run_accepted' });
     expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'runs', 'job', 'runs']);
+  } finally { auth.dispose(); }
+});
+
+it.each(['retry', 'moved'] as const)('ends the overview on a confirmed deletion during accepted-work Retry (%s focus)', async focus => {
+  const auth = await session();
+  const gone = new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' });
+  let rejectRead: ((error: ApiClientError) => void) | undefined;
+  let jobReads = 0;
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'job') {
+      if (++jobReads === 1) return Promise.resolve(acceptedJob({ latestRunId: 'run_latest', version: v('A') }));
+      return new Promise((_resolve, reject) => { rejectRead = reject; });
+    }
+    if (path.includes('cursor=')) return Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }));
+    return Promise.resolve(page([latestRunning], 'cursor_2', v('A')));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const retry = await screen.findByRole('button', { name: acceptedWorkCopy.retry });
+    expect(screen.getByRole('link', { name: acceptedWorkCopy.latestEvidence })).toBeTruthy();
+    const elsewhere = screen.getByRole('link', { name: jobCopy.returnToJobs });
+    retry.focus();
+    fireEvent.click(retry);
+    await waitFor(() => expect(rejectRead).toBeDefined());
+    await waitFor(() => expect(section().getByRole('status')).toBe(document.activeElement));
+    if (focus === 'moved') elsewhere.focus();
+    await act(async () => { rejectRead!(gone); await Promise.resolve(); });
+    await settleReads();
+    const notice = screen.getByText(jobCopy.thisJobWasDeleted);
+    expect(screen.queryByRole('heading', { name: sampleJob.displayFilename })).toBeNull();
+    expect(screen.queryByRole('link', { name: acceptedWorkCopy.latestEvidence })).toBeNull();
+    expect(screen.queryByRole('button', { name: acceptedWorkCopy.retry })).toBeNull();
+    expect(screen.queryByRole('button', { name: jobCopy.refreshJob })).toBeNull();
+    expect(within(screen.getByRole('alert')).getByRole('link', { name: jobCopy.returnToJobs })).toBeTruthy();
+    expect(document.activeElement).toBe(focus === 'moved' ? elsewhere : notice);
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'runs', 'job']);
   } finally { auth.dispose(); }
 });
