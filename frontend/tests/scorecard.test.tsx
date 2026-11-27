@@ -626,7 +626,14 @@ function servePagedComparison(failSecond = false) {
     return { ...sample, moduleId: id, selector: id };
   });
   const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8')) as object;
-  const page = (second: boolean) => decodeResponse(JSON.stringify({ ...envelope, data: { ...comparison, modules: {
+  const sides = structuredClone(comparison);
+  sides.current.scope!.modules = items.length;
+  sides.baseline.scope!.modules = items.length;
+  const currentCard = structuredClone(card);
+  currentCard.scorecard!.scope.modules = items.length;
+  currentCard.structureVersion = sides.structureVersion;
+  const currentRows = items.map(item => moduleScore(item.moduleId, item.current!));
+  const page = (second: boolean) => decodeResponse(JSON.stringify({ ...envelope, data: { ...sides, modules: {
     total: 51, items: second ? items.slice(50) : items.slice(0, 50),
     page: { ...comparison.modules.page, nextCursor: second ? null : comparisonCursor },
   } } }), 'scorecardComparison');
@@ -639,7 +646,7 @@ function servePagedComparison(failSecond = false) {
       if (second && failSecond) throw new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' });
       return second ? secondPage : firstPage;
     }
-    return { data: kind === 'structureScorecard' ? ordered(path, { ...card, structureVersion: comparison.structureVersion })
+    return { data: kind === 'structureScorecard' ? ordered(path, currentCard, currentRows)
       : kind === 'run' ? run : runs };
   });
   return held;
@@ -675,7 +682,7 @@ it('returns keyboard focus to the module comparison heading of the requested com
     const first = comparisonPages().getByRole('button', { name: copy.first });
     first.focus();
     fireEvent.click(first);
-    await screen.findByRole('link', { name: 'module_01' });
+    await within(screen.getByRole('region', { name: copy.compareTitle })).findByRole('link', { name: 'module_01' });
     await afterPaint();
     expect({ search: location.search, focused: document.activeElement?.textContent,
       breakdownFocused: focus.events.includes(copy.modulesTitle) })
@@ -712,7 +719,7 @@ it('abandons a comparison focus request when Back interrupts its read, even when
     await moveComparisonPage(held, copy.next);
     history.back();
     await waitFor(() => expect(location.search).not.toContain('compareCursor'));
-    await screen.findByRole('link', { name: 'module_01' });
+    await within(screen.getByRole('region', { name: copy.compareTitle })).findByRole('link', { name: 'module_01' });
     await act(() => Promise.resolve().then(held[0]));
     await afterPaint();
     history.forward();
@@ -1133,6 +1140,7 @@ it.each<[string, string, (data: ScorecardComparison, path: string) => void]>([
 it('admits the final comparison page at the requested offset', async () => {
   const sample = comparison.modules.items[0]!;
   serveDecoded(data => {
+    data.baseline.scope!.modules = 51;
     data.modules.total = 51;
     data.modules.items = [{ ...sample, moduleId: 'module_50', selector: 'module_50' }];
   });
@@ -1141,9 +1149,17 @@ it('admits the final comparison page at the requested offset', async () => {
   expect(screen.getByText('Showing 51–51 of 51 modules in either plan.')).toBeTruthy();
 });
 
-it('admits an empty first page when both plans have zero modules', async () => {
-  serveDecoded(data => { data.modules.items = []; data.modules.total = 0; }, card, []);
-  expect(await comparisonOutcome()).toEqual({ refused: false, shown: true, modules: false });
+it.each([0, 4167])('checks an empty comparison page against a baseline with %i modules', async baselineModules => {
+  const emptyCard = structuredClone(card);
+  emptyCard.scorecard!.scope.modules = 0;
+  serveDecoded(data => {
+    data.current.scope!.modules = 0;
+    data.baseline.scope!.modules = baselineModules;
+    data.modules.items = [];
+    data.modules.total = 0;
+  }, emptyCard, []);
+  const bothEmpty = baselineModules === 0;
+  expect(await comparisonOutcome()).toEqual({ refused: !bothEmpty, shown: bothEmpty, modules: false });
   expect(screen.queryByText(/modules in either plan/)).toBeNull();
 });
 

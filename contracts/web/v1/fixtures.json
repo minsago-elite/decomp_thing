@@ -1329,6 +1329,10 @@
     {
       "file": "fixtures/invalid-scorecard-comparison-incompatible-unwithheld-delta.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-concealed-baseline-modules.json",
+      "valid": false
     }
   ]
 }

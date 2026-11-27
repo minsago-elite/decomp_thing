@@ -163,10 +163,23 @@ function modulePage(total: number, count: number, limit: number, next: number | 
   const document = load('scorecard-comparison');
   const sample = document.data.modules.items[0]!;
   const snapshot = version ?? document.data.structureVersion;
+  document.data.current.scope!.modules = total;
+  document.data.baseline.scope!.modules = total;
   document.data.modules = { total, items: Array.from({ length: count }, (_, index) => ({ ...sample, moduleId: `module_${index}`, selector: `module_${index}` })),
     page: { limit, snapshotVersion: document.data.structureVersion, nextCursor: next === null ? null : `${snapshot}_${next}_${'a'.repeat(32)}` } };
   return document;
 }
+
+it.each([
+  [0, 2, 0],
+  [2, 0, 0],
+  [1, 1, 3],
+])('refuses plan counts %i and %i with an impossible union total of %i', (current, baseline, total) => {
+  const document = modulePage(total, total, 50, null);
+  document.data.current.scope!.modules = current;
+  document.data.baseline.scope!.modules = baseline;
+  expect(() => decode(document)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+});
 
 it('admits the producer\'s full, continued, final and empty module pages', () => {
   for (const [total, count, limit, next] of [[2, 2, 50, null], [51, 50, 50, 50], [151, 50, 50, 100], [51, 1, 50, null], [100, 50, 50, null],

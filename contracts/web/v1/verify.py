@@ -572,8 +572,14 @@ def check_comparison(data: dict) -> None:
     if len(items) > page["limit"] or len(items) > modules["total"] or (page["nextCursor"] is not None and not items):
         raise ValueError("a comparison module page exceeds its bound or continues without rows")
     check_offset_page(page, len(items), modules["total"])
-    if state == "unavailable" and (data["metrics"] or modules["total"] or page["nextCursor"] is not None):
-        raise ValueError("an unavailable scorecard cannot be compared")
+    if state == "unavailable":
+        if data["metrics"] or modules["total"] or page["nextCursor"] is not None:
+            raise ValueError("an unavailable scorecard cannot be compared")
+    else:
+        counts = [data[side]["scope"]["modules"] for side in ("current", "baseline")]
+        known = [count for count in counts if count is not None]
+        if modules["total"] < max(known, default=0) or (len(known) == 2 and modules["total"] > sum(known)):
+            raise ValueError("comparison module total is outside the union bounds of the recorded plans")
     if len({item["id"] for item in data["metrics"]}) != len(data["metrics"]) or len({item["moduleId"] for item in items}) != len(items):
         raise ValueError("a comparison lists each measure and module once")
     for item in items:

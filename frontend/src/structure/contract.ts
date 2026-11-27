@@ -206,7 +206,14 @@ function checkStructureDocument(document: ContractDocument): void {
       requireValue(modules.items.length <= modules.total && (modules.page.nextCursor === null || modules.items.length > 0));
       checkOffsetPage(modules.page, modules.items.length, modules.total);
       // Nothing is paired when either scorecard is unavailable.
-      if (compatibility.state === 'unavailable') requireValue(metrics.length === 0 && modules.total === 0 && modules.page.nextCursor === null);
+      if (compatibility.state === 'unavailable') {
+        requireValue(metrics.length === 0 && modules.total === 0 && modules.page.nextCursor === null);
+      } else {
+        // Rows are the union of the two plans' distinct module IDs.
+        const currentCount = current.scope?.modules, baselineCount = document.data.baseline.scope?.modules;
+        requireValue(modules.total >= Math.max(currentCount ?? 0, baselineCount ?? 0));
+        if (currentCount != null && baselineCount != null) requireValue(modules.total <= currentCount + baselineCount);
+      }
       requireValue(new Set(metrics.map(item => item.id)).size === metrics.length && new Set(modules.items.map(item => item.moduleId)).size === modules.items.length);
       for (const item of modules.items) {
         requireValue(item.selector === null || item.selector === item.moduleId);
