@@ -73,8 +73,10 @@ jobs:
           node scripts/test-browser-engine-input.mjs
           node scripts/test-packaged-browser-engine-adapter.mjs
           node --check scripts/packaged-browser-engines.mjs
-      - name: Verify packaged upload route readiness controls
-        run: node scripts/test-packaged-browser-upload.mjs
+      - name: Verify packaged upload readiness and deletion verdict controls
+        run: |
+          node scripts/test-packaged-browser-upload.mjs
+          node --test scripts/packaged-browser-lifecycle.test.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
