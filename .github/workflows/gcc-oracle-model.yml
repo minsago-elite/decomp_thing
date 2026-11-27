@@ -194,8 +194,21 @@ jobs:
         run: |
           set -euo pipefail
           diagnostics=build/87-vfs-probe
-          docker --host "$DOCKER_HOST" image inspect decomp-gcc-oracle-toolchain:16.2.0 | \
-            { head -c 262144; cat >/dev/null; } > "$diagnostics/image-inspect.json"
+          inspect_api() {
+            DOCKER_API_VERSION=1.49 docker --host "$DOCKER_HOST" "$@" | \
+              { head -c 262144; test "$(wc -c)" -eq 0; }
+          }
+          inspect_api version --format '{{json .}}' > "$diagnostics/inspect-api-version.json"
+          python3 -IB - "$diagnostics/inspect-api-version.json" <<'PYVERSION'
+          from pathlib import Path
+          import runpy
+          import sys
+
+          adapter = runpy.run_path("scripts/capture-gcc-reproduction-inspect.py")
+          version = adapter["strict_json"](Path(sys.argv[1]).read_bytes())
+          adapter["admit_version"](version, scoped=True)
+          PYVERSION
+          inspect_api image inspect decomp-gcc-oracle-toolchain:16.2.0 > "$diagnostics/image-inspect.json"
           docker --host "$DOCKER_HOST" history --no-trunc --format '{{json .}}' decomp-gcc-oracle-toolchain:16.2.0 | \
             { head -c 262144; cat >/dev/null; } > "$diagnostics/image-history.jsonl"
           if timeout --kill-after=5s 300s bash -o pipefail -c '
@@ -223,6 +236,7 @@ jobs:
             build/87-vfs-probe/docker-info.json
             build/87-vfs-probe/identity.txt
             build/87-vfs-probe/build.log
+            build/87-vfs-probe/inspect-api-version.json
             build/87-vfs-probe/image-inspect.json
             build/87-vfs-probe/image-history.jsonl
             build/87-vfs-probe/final-layer.json
