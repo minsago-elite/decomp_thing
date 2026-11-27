@@ -96,12 +96,12 @@ def binding_diagnostic_gradle_control():
            'TMPDIR': str(WORK / 'tmp'), 'GRADLE_USER_HOME': str(ROOT / 'build/.gradle-user-home')}
     (WORK / 'tmp').mkdir(exist_ok=True)
 
-    def run_control(name, script, gradle_root, path):
+    def run_control(name, script, gradle_root, path, jdk=control_jdk):
         project = WORK / name
         project.mkdir()
         (project / 'settings.gradle').write_text(f"rootProject.name = '{name}'\n")
         (project / 'build.gradle').write_text("tasks.register('control')\n")
-        block = driver.binding_exec_groovy(script, driver.groovy_path(control_jdk),
+        block = driver.binding_exec_groovy(script, driver.groovy_path(jdk),
             gradle_root, driver.groovy_path(path))
         init = WORK / f'{name}.init.gradle'
         init.write_text("allprojects { p -> if (p == p.rootProject) {\n    def remainingBindingSeconds = 120.0d\n" + block + "} }\n")
@@ -116,6 +116,15 @@ def binding_diagnostic_gradle_control():
     assert code != 0 and 'non-zero exit value 1' in output, output[-2048:]
     assert output.count('atomic binding failure stage=gradle cause=FileNotFoundError') == 1, output[-2048:]
     assert not refused.exists()
+
+    external_jdk = WORK / 'external-edge-jdk'
+    (external_jdk / 'lib/security').mkdir(parents=True)
+    (external_jdk / 'lib/security/cacerts').symlink_to(control_jdk / 'release')
+    jdk_refused = WORK / 'jdk-refused-bindings.json'
+    code, output = run_control('binding-jdk-refusal-gradle', helper, current_gradle, jdk_refused, external_jdk)
+    assert code != 0 and 'non-zero exit value 1' in output, output[-2048:]
+    assert output.count('atomic binding failure stage=jdk cause=RuntimeError check=jdk-symlink-escape') == 1, output[-2048:]
+    assert not jdk_refused.exists()
 
     failed_path = WORK / 'unreachable-bindings.json'
     code, output = run_control('binding-fallback-gradle', WORK / 'missing-helper.py', current_gradle, failed_path)

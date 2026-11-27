@@ -199,7 +199,7 @@ try {{
 }} catch (Throwable bindingFailure) {{
     def summary = bindingDiagnostic.trim()
     if (summary.length() > 512) summary = ''
-    if (!(summary ==~ /atomic binding failure stage=(budget|jdk|gradle|validate|write) cause=[A-Za-z][A-Za-z0-9_]{{0,95}}/))
+    if (!(summary ==~ /atomic binding failure stage=(budget|jdk|gradle|validate|write) cause=[A-Za-z][A-Za-z0-9_]{{0,95}}( check=[a-z][a-z0-9-]{{0,95}})?/))
         summary = 'atomic binding failure stage=unknown cause=diagnostic-unavailable'
     logger.lifecycle(summary)
     throw bindingFailure

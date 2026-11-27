@@ -675,6 +675,30 @@ def validate_declared_properties(properties, gradle_binding, budget=None, deadli
     require(properties['javaLauncher'][3]['metadata'] == properties['javaLauncher.metadata'][3], 'launcher metadata consistency')
     require(len(declared_canonical(properties, deadline)) * 2 <= MAX_JSON, 'declared plan/scratch bound')
 
+BINDING_DIAGNOSTIC_CHECKS = frozenset({
+    'binding time bound', 'binding entry bound', 'binding wire/scratch bound',
+    'binding total byte bound', 'binding file grew', 'binding file size changed',
+    'JDK root must be canonical', 'JDK symlink escape', 'JDK symlink cycle/hop bound',
+    'JDK link changed', 'JDK edge changed', 'JDK absolute link escape',
+    'JDK non-directory edge', 'JDK special target', 'JDK directory changed',
+    'JDK hardlink identity changed', 'JDK alias changed', 'JDK special entry',
+    'JDK directory changed after walk', 'JDK file changed after walk',
+    'JDK edge changed after walk', 'JDK target not inventoried', 'JDK plan byte bound',
+})
+
+
+def binding_failure_diagnostic(stage, failure):
+    # Only fixed invariant names may cross the Gradle diagnostic boundary. An
+    # exception message can contain paths/tool output and must never be echoed.
+    cause = type(failure).__name__[:96]
+    summary = f'atomic binding failure stage={stage} cause={cause}'
+    if (type(failure) is RuntimeError and len(failure.args) == 1 and type(failure.args[0]) is str and
+            failure.args[0] in BINDING_DIAGNOSTIC_CHECKS):
+        check = re.sub('[^a-z0-9]+', '-', failure.args[0].lower()).strip('-')
+        summary += f' check={check}'
+    return summary
+
+
 class BindingBudget:
     """Shared JDK/distribution work; opaque Gradle getters remain outer-process bounded."""
     def __init__(self, seconds=120):
@@ -1552,8 +1576,7 @@ def main():
         except Exception as failure:
             # The message can contain paths or tool output. Emit only a bounded,
             # stable classification; bare raise preserves the original failure.
-            cause = type(failure).__name__[:96]
-            sys.stdout.write(f"atomic binding failure stage={stage} cause={cause}\n")
+            sys.stdout.write(binding_failure_diagnostic(stage, failure) + '\n')
             sys.stdout.flush()
             raise
         return
