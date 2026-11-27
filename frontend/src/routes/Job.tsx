@@ -40,6 +40,8 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
   const departingFocus = useDepartingFocus(route);
   /** Called only for a confirmed tombstone or this view's own accepted deletion of this job. */
   function markDeleted(failure?: unknown) {
+    const live = session.snapshot();
+    if (live.status !== 'authenticated' || live.generation !== generation) return;
     departing.current = departingFocus();
     forgetAttemptCommandForDeletedJob(basePath, jobId);
     const message = withApiFailureReference(copy.thisJobWasDeleted, failure);
@@ -133,7 +135,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
         <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       </PanelBoundary>
-      <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} />
+      <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} onDeleted={markDeleted} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
         onDeleted={markDeleted}

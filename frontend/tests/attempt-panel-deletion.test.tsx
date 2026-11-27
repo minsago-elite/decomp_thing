@@ -4,11 +4,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
-import type { AttemptControls as Controls, Bootstrap, QueuePosition as QueueSample, Report, Run, ValidationHistory } from '../src/api/generated';
+import type { AttemptControls as Controls, Bootstrap, Job, QueuePosition as QueueSample, Report, Run, ValidationHistory } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { attemptControlsCopy, explorationEvidenceCopy, recordedValidationCopy, runCopy } from '../src/copy/attempt';
 import { runHistoryCopy } from '../src/copy/history';
-import { jobCopy } from '../src/copy/job';
+import { gitRepositoryCopy, jobCopy, jobOrganizationCopy } from '../src/copy/job';
 import { queuePositionCopy } from '../src/copy/attemptOutcome';
 import { createBrowserSession } from '../src/session/session';
 import { createAttemptCommandRecovery, forgetAttemptCommandForDeletedJob, type AttemptCommand } from '../src/jobs/attemptCommandRecovery';
@@ -29,9 +29,9 @@ function deferred<T>() {
   const promise = new Promise<{ data: T }>((ok, fail) => { settle = o => ('ok' in o ? ok({ data: o.ok }) : fail(o.err)); });
   return { promise, settle: (o: { ok: T } | { err: unknown }) => act(async () => { settle(o); await Promise.resolve(); await Promise.resolve(); }) };
 }
-async function session() {
+async function session(capabilities = bootstrap.capabilities) {
   const value = createBrowserSession({
-    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    bootstrap: () => Promise.resolve({ ...bootstrap, capabilities, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
     exchange: vi.fn(), logout: () => Promise.resolve(),
   }, '/nested');
   await value.initialize({ kind: 'absent' });
@@ -534,6 +534,52 @@ for (const [route, path, kind, text] of [
     } finally { auth.dispose(); }
   });
 }
+
+it.each(['focused', 'moved', 'other job', 'ordinary 410', 'signed out'] as const)(
+  'reconciles a repository read in the job overview (%s)', async scenario => {
+    const auth = await session(bootstrap.capabilities.map(cap => cap.id === 'git' ? { ...cap, state: 'supported' } : cap));
+    const job = { ...fixture<Job>('job-lossless'), jobId: run.jobId, latestRunId: null };
+    const command = foreign(scenario === 'other job' ? 'c'.repeat(32) : job.jobId);
+    sessionStorage.setItem(slot, JSON.stringify(command));
+    const reply = deferred<unknown>();
+    let reads = 0;
+    transport.get.mockImplementation((kind: string) => {
+      if (kind === 'job') return Promise.resolve({ data: job });
+      if (kind === 'gitRepositories') return ++reads === 1
+        ? Promise.resolve({ data: { jobId: job.jobId, repositories: [], operations: [] } }) : reply.promise;
+      return Promise.reject(new Error(`Unexpected read: ${kind}`));
+    });
+    history.replaceState(null, '', `/nested/jobs/${job.jobId}`);
+    try {
+      render(<App basePath="/nested" session={auth} />);
+      await screen.findByText(gitRepositoryCopy.noCandidate);
+      const refresh = screen.getByRole('button', { name: gitRepositoryCopy.refresh });
+      refresh.focus();
+      fireEvent.click(refresh);
+      await waitFor(() => expect(reads).toBe(2));
+      chromeBlurIfDisabled(refresh);
+      const signOut = screen.getByRole('button', { name: 'Sign out' });
+      if (scenario === 'moved') signOut.focus();
+      if (scenario === 'signed out') await act(async () => { await auth.logout(); });
+      await reply.settle({ err: gone(scenario === 'ordinary 410' ? 'EVENT_GAP' : 'RESOURCE_GONE') });
+      if (scenario === 'signed out') {
+        expect(screen.queryByText(jobCopy.thisJobWasDeleted, { exact: false })).toBeNull();
+      } else if (scenario === 'ordinary 410') {
+        await screen.findByText(gitRepositoryCopy.readFailed, { exact: false });
+        expect(screen.getByRole('button', { name: jobOrganizationCopy.save })).toBeTruthy();
+      } else {
+        const notice = screen.getByText(jobCopy.thisJobWasDeleted, { exact: false });
+        expect(notice.textContent).toContain(reference);
+        expect(document.activeElement).toBe(scenario === 'moved' ? signOut : notice);
+        expect(screen.queryByRole('button', { name: gitRepositoryCopy.refresh })).toBeNull();
+        expect(screen.queryByRole('button', { name: jobOrganizationCopy.save })).toBeNull();
+        expect(screen.queryByRole('button', { name: 'Review what would be deleted' })).toBeNull();
+      }
+      expect(recovery().read()).toEqual(['other job', 'ordinary 410', 'signed out'].includes(scenario)
+        ? { kind: 'pending', command } : { kind: 'empty' });
+      expect(reads).toBe(2);
+    } finally { auth.dispose(); }
+  });
 
 it('never forgets a command whose slot storage is unavailable', () => {
   const storage = () => { throw new Error('blocked'); };
