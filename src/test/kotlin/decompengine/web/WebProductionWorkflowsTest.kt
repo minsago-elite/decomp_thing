@@ -313,6 +313,7 @@ class WebProductionWorkflowsTest {
     fun `agent reconstruction meters distinct tool calls and records only a canonical candidate`() = withRoot { root ->
         val engines = FakeEngines()
         val modes = mutableListOf<WebReconstructionMode>()
+        engines.modelBytes = "{}".toByteArray()
         engines.reconstructBody = { reports, mode, progress ->
             modes += mode
             val task = progress.beginTask("module", request(root))
@@ -326,13 +327,47 @@ class WebProductionWorkflowsTest {
         assertLimitExhausted(exhausted)
         assertEquals(baseCandidate(), (exhausted as DurableWebWorkflowOutcome.Failed).candidate, "candidate output is retained, not accepted")
         val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("agent"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
+        assertNull(completed.evidenceModel)
         assertEquals(baseCandidate(), completed.candidate); assertEquals(3uL, completed.usage?.toolCalls)
         val evidence = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
         assertFalse(checkNotNull(evidence.launch).contactsAgent); assertTrue(checkNotNull(agent.launch).contactsAgent)
         engines.reconstructBody = { reports, mode, _ -> modes += mode; Files.createDirectories(reports) }
+        engines.modelBytes = ByteArray(VerifiedWebCheckpoint.MAX_BYTES + 1)
         val missing = assertIs<DurableWebWorkflowOutcome.Completed>(evidence.execute(context(root, root.resolve("evidence"), WebWorkflowDefaults.RECONSTRUCT_EVIDENCE)))
+        assertNull(missing.evidenceModel)
         assertNull(missing.candidate, "no build contract, no candidate identity")
         assertEquals(listOf(WebReconstructionMode.AGENT, WebReconstructionMode.AGENT, WebReconstructionMode.EVIDENCE_ONLY), modes)
+    }
+
+    @Test
+    fun `model commitment checks the selected upload independently and survives a later output limit`() = withRoot { root ->
+        val bytes = elfFixture()
+        val job = JobStore(root).createFromUpload("model-input.elf", bytes)
+        val model = "{}".toByteArray()
+        val engines = FakeEngines().apply {
+            reconstructBody = { reports, _, _ -> Files.write(reports.resolve("output"), ByteArray(65_536)) }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        fun execute(name: String, limits: WorkflowExecutionLimits): DurableWebWorkflowOutcome {
+            val fixture = context(root, root.resolve(name), limits)
+            return adapter.execute(fixture.copy(job = job, attempt = fixture.attempt.copy(
+                jobId = job.id, workflow = WorkflowKind.RECONSTRUCT, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY)))
+        }
+        val limited = adapter.limits.copy(maxOutputBytes = 32_768uL)
+        val before = assertIs<DurableWebWorkflowOutcome.Failed>(execute("no-model", limited))
+        assertLimitExhausted(before)
+        assertNull(before.evidenceModel)
+
+        engines.modelBytes = model
+        val after = assertIs<DurableWebWorkflowOutcome.Failed>(execute("published-model", limited))
+        assertLimitExhausted(after)
+        val retained = assertNotNull(after.evidenceModel)
+        assertEquals(sha256(bytes), retained.inputSha256)
+        assertEquals(sha256(model), retained.modelSha256)
+
+        engines.modelInputDigest = sha256("another input".toByteArray())
+        val foreign = assertIs<DurableWebWorkflowOutcome.Completed>(execute("different-input", adapter.limits))
+        assertNull(foreign.evidenceModel)
     }
 
     @Test
@@ -357,7 +392,7 @@ class WebProductionWorkflowsTest {
     @Test
     fun `admission requires an explicit ready option, server-approved bounds and the declared input`() = withRoot { root ->
         val store = JobStore(root); val job = store.createFromUpload("admission.elf", elfFixture())
-        val engines = FakeEngines()
+        val engines = FakeEngines().apply { modelBytes = "{}".toByteArray() }
         service(store, adapters(engines)).use { service ->
             service.initializeExistingStorage()
             val agentMissing = WebWorkflowPrerequisites(WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."),
@@ -385,6 +420,8 @@ class WebProductionWorkflowsTest {
                 "evidence_only_reconstruction", agentMissing)
             assertEquals(WorkflowRunState.COMPLETED, evidence.attempt.state); assertEquals(lowered, evidence.attempt.limits)
             assertEquals(EVIDENCE_ONLY_CAPABILITY, evidence.attempt.harnessCapabilityId)
+            assertEquals(decompengine.jobs.WorkflowEvidenceModel(evidence.attempt.jobId, evidence.attempt.runId,
+                sha256(elfFixture()), sha256("{}".toByteArray()), 2, "f".repeat(64)), evidence.attempt.evidenceModel)
             assertEquals(listOf(WebReconstructionMode.EVIDENCE_ONLY), engines.modes)
             assertEquals(baseCandidate(), evidence.attempt.candidate); assertNull(evidence.attempt.acceptedRevision)
         }
@@ -804,11 +841,15 @@ class WebProductionWorkflowsTest {
             modes += mode; writeSourceTree(reports.resolve("source-tree"), "base")
         }
         var repairBody: (Path) -> Unit = { project -> acceptRepairGraph(project) }
+        var modelBytes: ByteArray? = null
+        var modelInputDigest = sha256(elfFixture())
         var activity: () -> Unit = {}
         override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) {
             calls.incrementAndGet(); this.activity = activity; exploreBody(reportsDirectory)
         }
-        override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
+        override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+            published: (String, ByteArray, String) -> Unit) {
+            modelBytes?.let { published(modelInputDigest, it, "f".repeat(64)) }
             calls.incrementAndGet(); reconstructBody(reportsDirectory, mode, progress)
         }
         override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {

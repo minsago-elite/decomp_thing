@@ -4,6 +4,7 @@ import decompengine.jobs.Job
 import decompengine.jobs.WorkflowAcceptanceReference
 import decompengine.jobs.WorkflowAttempt
 import decompengine.jobs.WorkflowCandidate
+import decompengine.jobs.WorkflowEvidenceModel
 import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowJobSnapshot
 import decompengine.jobs.WorkflowKind
@@ -42,7 +43,7 @@ class VerifiedWebCheckpoint(bytes: ByteArray, val restores: WorkflowResumeRestor
     fun bytes(): ByteArray = content.copyOf()
 
     companion object {
-        const val MAX_BYTES = 1_048_576
+        const val MAX_BYTES = WorkflowEvidenceModel.MAX_BYTES
     }
 }
 
@@ -137,11 +138,11 @@ data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt,
 
 sealed interface DurableWebWorkflowOutcome {
     data class Completed(val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null,
-        val reason: WorkflowTerminalReason = WorkflowTerminalReason.COMPLETED) : DurableWebWorkflowOutcome {
+        val reason: WorkflowTerminalReason = WorkflowTerminalReason.COMPLETED, val evidenceModel: WorkflowEvidenceModel? = null) : DurableWebWorkflowOutcome {
         init { require(reason in setOf(WorkflowTerminalReason.COMPLETED, WorkflowTerminalReason.NO_CHANGES)) }
     }
     data class Failed(val reason: WorkflowTerminalReason = WorkflowTerminalReason.FAILED,
-        val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome {
+        val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null, val evidenceModel: WorkflowEvidenceModel? = null) : DurableWebWorkflowOutcome {
         init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED, WorkflowTerminalReason.TIMED_OUT)) }
     }
 }

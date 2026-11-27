@@ -182,6 +182,10 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
         analyzeInternal(binaryPath, workDir, false, null).first
 
+    /** Receives the bytes the exporter validated, only after publication of the model. */
+    internal fun analyzeWithPublishedModel(binaryPath: Path, workDir: Path, published: (String, ByteArray) -> Unit): RecoveredProgramModel =
+        analyzeInternal(binaryPath, workDir, false, null, published).first
+
     internal fun analyzeWithDeadline(binaryPath: Path, workDir: Path, deadline: AnalysisDeadline): RecoveredProgramModel =
         analyzeInternal(binaryPath, workDir, false, deadline).first
 
@@ -195,6 +199,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         workDir: Path,
         includeCallSites: Boolean,
         parentDeadline: AnalysisDeadline?,
+        published: ((String, ByteArray) -> Unit)? = null,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
         val deadline = AnalysisDeadline.start(
             limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
@@ -282,6 +287,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 deadline.checkpoint("before publishing validated call-site evidence")
                 moveExportCandidate(callCandidate, callOutput)
             }
+            published?.invoke(model.inputSha256, modelBytes)
             model to calls?.copy(path = callOutput.toAbsolutePath().normalize())
         }
     }

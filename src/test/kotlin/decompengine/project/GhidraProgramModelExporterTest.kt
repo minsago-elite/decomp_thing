@@ -101,8 +101,14 @@ class GhidraProgramModelExporterTest {
         }
         val work = temp.resolve("analysis")
 
-        val model = GhidraHeadlessProgramModelAnalyzer(home).analyze(binary, work)
+        var observations = 0
+        val model = GhidraHeadlessProgramModelAnalyzer(home).analyzeWithPublishedModel(binary, work) { inputDigest, bytes ->
+            assertEquals("fake-input", inputDigest)
+            kotlin.test.assertContentEquals(work.resolve("reports/program_model.json").readBytes(), bytes)
+            observations++
+        }
 
+        assertEquals(1, observations)
         assertEquals("fake-input", model.inputSha256)
         assertEquals(listOf("fn_0000000000001000"), model.functions.map { it.id })
         val invocation = work.resolve("invocation.txt").readText()

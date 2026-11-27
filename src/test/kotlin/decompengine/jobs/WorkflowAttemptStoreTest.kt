@@ -680,6 +680,36 @@ class WorkflowAttemptStoreTest {
         }
     }
 
+    @Test fun `evidence model binding survives reopen and missing legacy binding stays absent`() = withRoot { root ->
+        val job = upload(root)
+        val model = WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS, harnessCapabilityId = "evidence-only")).attempt
+            val run = store.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val binding = WorkflowEvidenceModel(job, run.runId, SHA, "b".repeat(64), 13, "c".repeat(64))
+            store.transition(job, run.runId, run.version, WorkflowTransition.Finish(
+                WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED, evidenceModel = binding))
+            binding
+        }
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            assertEquals(model, store.withAttemptSnapshot(job, model.runId) { it.evidenceModel })
+            val path = stateJson(root, job)
+            val state = Json.parseToJsonElement(path.readText()).jsonObject
+            val attempt = (state.getValue("attempts") as kotlinx.serialization.json.JsonArray).single().jsonObject
+            fun replaceAttempt(fields: Map<String, kotlinx.serialization.json.JsonElement>) {
+                path.writeText(JsonObject(state + ("attempts" to kotlinx.serialization.json.JsonArray(listOf(JsonObject(fields))))).toString())
+            }
+            val binding = attempt.getValue("evidenceModel").jsonObject
+            for ((key, value) in listOf("runId" to "run_other", "jobId" to "0".repeat(32),
+                "modelBytes" to "1048577", "modelSha256" to "bad", "inputSha256" to "bad", "profileSha256" to "bad")) {
+                replaceAttempt(attempt + ("evidenceModel" to JsonObject(binding + (key to JsonPrimitive(value)))))
+                assertEquals("CORRUPT_WORKFLOW_STATE", (store.inspect(job) as WorkflowJobInspection.Unavailable).diagnostic.code)
+            }
+            replaceAttempt(attempt - "evidenceModel")
+            assertNull(store.withAttemptSnapshot(job, model.runId) { it.evidenceModel })
+        }
+    }
+
     @Test fun `malformed optional progress pins never become an unpinned default`() = withRoot { root ->
         val job = upload(root)
         WorkflowAttemptStore.open(root, CLOCK).use { store ->

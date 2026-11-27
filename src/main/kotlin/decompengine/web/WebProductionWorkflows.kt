@@ -7,14 +7,18 @@ import decompengine.exploration.AutomaticExplorer
 import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
 import decompengine.jobs.BestEffortProgressJournal
+import decompengine.jobs.Job
+import decompengine.jobs.MAX_JOB_INPUT_BYTES
 import decompengine.jobs.WorkflowAcceptanceReference
 import decompengine.jobs.WorkflowCandidate
+import decompengine.jobs.WorkflowEvidenceModel
 import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowKind
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.ArchivalReconstructionService
+import decompengine.project.ProgramModelAnalyzer
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.repair.ModuleRevisionStatus
 import decompengine.repair.RepairPublicationMode
@@ -24,6 +28,7 @@ import decompengine.repair.RepairHistorySnapshot
 import decompengine.repair.RepairRunStatus
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
+import decompengine.repair.hashStableRegularFile
 import decompengine.repair.readProjectRecordedRepairHistory
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.JsonObject
@@ -44,7 +49,8 @@ import java.nio.file.attribute.BasicFileAttributes
 internal interface WebWorkflowEngines {
     /** [activity] is called after each completed exploration sample. */
     fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
-    fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress)
+    fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+        published: (String, ByteArray, String) -> Unit)
     fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus
 
     companion object {
@@ -54,13 +60,23 @@ internal interface WebWorkflowEngines {
                     .explore(binary, listOf(CandidateInput("seed_default", CandidateSource.SEED)), reportsDirectory)
             }
 
-            override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
+            override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+                published: (String, ByteArray, String) -> Unit) {
                 // The explicit request mode replaces the legacy WEB_RECONSTRUCTION_MODE environment choice.
                 val selected = environment + (WEB_RECONSTRUCTION_MODE_KEY to mode.configurationValue)
                 val strategy = selectWebReconstructionStrategy(selected, progress)
                 Files.createDirectories(reportsDirectory)
                 Files.writeString(reportsDirectory.resolve("reconstruction_harness_selection.json"), renderWebReconstructionHarnessSelection(strategy))
-                ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
+                val bundled = GhidraHeadlessProgramModelAnalyzer.bundled()
+                val analyzer = if (mode == WebReconstructionMode.EVIDENCE_ONLY) {
+                    val bounded = bundled.withExportBudgets(strategy.profile.budgets)
+                    ProgramModelAnalyzer { input, directory ->
+                        bounded.analyzeWithPublishedModel(input, directory) { digest, bytes ->
+                            published(digest, bytes, strategy.profile.sha256)
+                        }
+                    }
+                } else bundled
+                ArchivalReconstructionService(analyzer, strategy.reconstructor,
                     profile = strategy.profile, progress = progress).reconstruct(binary, reportsDirectory)
             }
 
@@ -188,11 +204,18 @@ internal class ReconstructWorkflowAdapter(
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
         if (agent && !allowTestOnlyExecution) return DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = true)
+        var evidenceModel: WorkflowEvidenceModel? = null
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->
                 val progress = MeteredWorkflowProgress(journal, meter)
+                val uploadedDigest = if (agent) null else selectedUploadDigest(context.job)
                 try {
-                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress)
+                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress) { digest, bytes, profile ->
+                        if (digest == uploadedDigest && bytes.size in 1..WorkflowEvidenceModel.MAX_BYTES) {
+                            evidenceModel = WorkflowEvidenceModel(context.job.id, context.attempt.runId, digest,
+                                decompengine.project.sha256(bytes), bytes.size, profile)
+                        }
+                    }
                 } catch (failure: Exception) {
                     progress.phase(AgentWorkflowPhase.FAILED)
                     throw failure
@@ -202,10 +225,30 @@ internal class ReconstructWorkflowAdapter(
         // Candidate output is recorded whenever a canonical source revision exists; it is never acceptance.
         val candidate = reconstructionCandidate(context.reportsDirectory.resolve("source-tree"))
         return when (unwrap(result)) {
-            is BoundedWorkflowResult.Returned -> DurableWebWorkflowOutcome.Completed(candidate, usage)
-            is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
-            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
+            is BoundedWorkflowResult.Returned -> DurableWebWorkflowOutcome.Completed(candidate, usage, evidenceModel = evidenceModel)
+            is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage, evidenceModel = evidenceModel)
+            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage, evidenceModel = evidenceModel)
         }
+    }
+}
+
+/** Bind a published model to a separate, bounded observation of this attempt's selected input. */
+private fun selectedUploadDigest(job: Job): String? {
+    val directory = job.binaryPath.parent ?: return null
+    if (directory.fileName.toString() != job.id || job.binaryPath.fileName.toString() != "input.elf" ||
+        job.sizeBytes !in 1..MAX_JOB_INPUT_BYTES) return null
+    val storageRoot = directory.parent ?: return null
+    return try {
+        hashStableRegularFile(storageRoot, "${job.id}/input.elf",
+            declaredSize = { require(it == job.sizeBytes.toLong()) },
+            readBytes = { _, total -> require(total <= job.sizeBytes.toLong()) },
+            cancellationCheck = { if (Thread.currentThread().isInterrupted) throw InterruptedException() },
+        ).sha256
+    } catch (interrupted: InterruptedException) {
+        throw interrupted
+    } catch (_: Exception) {
+        // The optional checkpoint needs an independently verified upload.
+        null
     }
 }
 
