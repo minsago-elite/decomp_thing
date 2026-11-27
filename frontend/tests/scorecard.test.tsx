@@ -102,6 +102,33 @@ it.each(['not-evaluated', 'unavailable', 'wrong job'] as const)('updates attempt
   } finally { auth.dispose(); }
 });
 
+it('keeps focused Refresh available to the keyboard and ignores activation while a read is pending', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.measuresTitle });
+    const refresh = screen.getByRole<HTMLButtonElement>('button', { name: structureCopy.refresh });
+    let finish!: (result: { data: StructureScorecard }) => void;
+    const pending = new Promise<{ data: StructureScorecard }>(resolve => { finish = resolve; });
+    transport.get.mockImplementation(kind => kind === 'structureScorecard'
+      ? pending : Promise.resolve({ data: kind === 'run' ? run : runs }));
+    refresh.focus();
+    refresh.click();
+    await screen.findByText(structureCopy.loading);
+    expect(refresh.disabled).toBe(false);
+    expect(refresh.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(refresh);
+    refresh.click();
+    finish({ data: card });
+    await screen.findByRole('table', { name: copy.measuresTitle });
+    expect(document.activeElement).toBe(refresh);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(2);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'run')).toHaveLength(2);
+  } finally { auth.dispose(); }
+});
+
 it('compares only compatible attempts with exact deltas and withholds deltas for an incompatible baseline', async () => {
   const auth = await session();
   serve();

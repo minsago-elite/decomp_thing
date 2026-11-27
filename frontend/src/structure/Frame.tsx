@@ -63,7 +63,9 @@ export function Frame({ selected, data, read, onRefresh, pinned, boundary = copy
     <p>{boundary}</p>
     {navigation}
     {pinned && <p>{copy.pinnedNotice}</p>}
-    <button type="button" disabled={read.state === 'loading'} onClick={onRefresh}>{copy.refresh}</button>
+    <button type="button" aria-disabled={read.state === 'loading'} onClick={() => {
+      if (read.state !== 'loading') onRefresh();
+    }}>{copy.refresh}</button>
     {read.state === 'loading' && <p role="status">{copy.loading}</p>}
     {read.state === 'failed' && <p role="alert">{structureReadMessage(read.failure)}</p>}
     {data && <States data={data} />}
