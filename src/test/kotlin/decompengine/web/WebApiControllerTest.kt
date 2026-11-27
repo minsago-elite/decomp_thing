@@ -401,6 +401,7 @@ class WebApiControllerTest {
             assertError(request(server, href), 401, "SESSION_REQUIRED")
             val download = request(server, href, headers = downloadHeaders)
             assertEquals(200, download.statusCode()); assertEquals(raw, download.body())
+            assertEquals("no-store", download.headers().firstValue("Cache-Control").orElseThrow())
             assertEquals(raw, request(server, href, headers = downloadHeaders + ("Accept" to "*/*")).body())
             assertEquals("application/octet-stream", download.headers().firstValue("Content-Type").orElseThrow())
             assertTrue(download.headers().firstValue("Content-Disposition").orElseThrow().startsWith("attachment;"))
