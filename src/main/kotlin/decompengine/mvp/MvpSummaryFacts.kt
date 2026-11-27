@@ -69,6 +69,7 @@ internal enum class MvpSummaryPhase(val label: String) {
 internal enum class MvpSummaryCheck(val label: String) {
     ORIGINAL("original behavior observation"), RECONSTRUCTION("meaningful standalone reconstruction"),
     RECONSTRUCTED_BUILD("reconstructed sanitizer build"), REPRODUCTION("CWE-787 reproduction"),
+    CASE_REPRODUCTION("case-specific reproduction"),
     APPROVAL("source patch approval"), PATCHED_BUILD("patched sanitizer build"),
     SECURITY("sanitizer security validation"), RELEASE_BUILD("hardened release build"),
     HARDENING("binary hardening inspection"), BEHAVIOR("behavior validation"), WITHHELD("withheld check label");
@@ -127,6 +128,7 @@ internal data class MvpSummarySourceFact(val line: Int, val column: Int?) {
 internal class MvpSummaryFacts private constructor(
     val result: MvpSummaryResult,
     val profile: MvpSummaryProfile?,
+    val vulnerabilityCase: MvpVulnerabilityCase,
     val approval: MvpSummaryApproval,
     val failureRecorded: Boolean,
     val diffProduced: Boolean,
@@ -179,7 +181,7 @@ internal class MvpSummaryFacts private constructor(
             artifacts.forEach { fact ->
                 append("| ").append(fact.artifact.label).append(" | ")
                 if (fact.sha256 == null) append("unavailable | unavailable |\n") else {
-                    if (fact.publicPath) append("`").append(requireNotNull(fact.artifact.publicRelativePath)).append("`") else append("withheld")
+                    if (fact.publicPath) append("`").append(if (fact.artifact == MvpSummaryArtifact.FINDING) vulnerabilityCase.findingRelativePath else requireNotNull(fact.artifact.publicRelativePath)).append("`") else append("withheld")
                     append(" | `").appendSha256(fact.sha256).append("` |\n")
                 }
             }
@@ -187,13 +189,14 @@ internal class MvpSummaryFacts private constructor(
                 append("| Redacted report details | `").append(MVP_SUMMARY_DETAILS_PATH)
                     .append("` | `").appendSha256(details.sha256).append("` |\n")
             }
-            append("\n## CWE-787 Evidence and Source Mapping\n\n")
+            append("\n## ").append(vulnerabilityCase.cwe).append(" Evidence and Source Mapping\n\n")
+            append("Selected case: ").append(vulnerabilityCase.id).append("; evidence: ").append(vulnerabilityCase.evidenceKind).append(". ")
             if (source == null) append("Source mapping withheld or unavailable.") else {
                 append("Observed source mapping: `decompile/decompiled.c:").append(source.line.toString())
                 source.column?.let { append(":").append(it.toString()) }
                 append("`.")
             }
-            append(" Sanitizer evidence availability and its safe retained link are in the artifact table. Reproduction and security outcomes are recorded separately below.")
+            append(" Case-specific evidence availability and its safe retained link are in the artifact table. Reproduction and security outcomes are recorded separately below.")
             append("\n\n## Approved Source Change\n\nProposed diff: ").append(if (diffProduced) "produced; body withheld" else "not recorded")
             append(if (details == null) ". Explanation and private change detail withheld."
                 else ". Explanation is retained in the redacted report details; the diff body is retained in the patch artifact when available.")
@@ -224,7 +227,7 @@ internal class MvpSummaryFacts private constructor(
             val phaseCopy = snapshot(evidence.phases.values, 32).map { MvpSummaryPhaseFact(MvpSummaryPhase.recognize(it.name), it.status) }
             val checkCopy = snapshot(evidence.verification, 32).map { MvpSummaryCheckFact(MvpSummaryCheck.recognize(it.name), it.status) }
             val publicResult = MvpSummaryResult.entries.firstOrNull { it != MvpSummaryResult.UNAVAILABLE && it.name == result } ?: MvpSummaryResult.UNAVAILABLE
-            return MvpSummaryFacts(publicResult, MvpSummaryProfile.recognize(evidence.profileId, evidence.profileSha256),
+            return MvpSummaryFacts(publicResult, MvpSummaryProfile.recognize(evidence.profileId, evidence.profileSha256), evidence.vulnerabilityCase,
                 MvpSummaryApproval.recognize(evidence.approvalDecision), failureRecorded, !evidence.patchDiff.isNullOrEmpty(),
                 finalBinaryPresent && artifactCopy.any { it.artifact == MvpSummaryArtifact.BINARY && it.sha256 != null },
                 evidence.findingSourceLocation.takeIf { artifactCopy.any { it.artifact == MvpSummaryArtifact.FINDING && it.sha256 != null } }
