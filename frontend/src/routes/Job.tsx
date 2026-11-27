@@ -3,6 +3,7 @@ import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { withApiFailureReference } from '../api/client';
+import type { RefObject } from 'preact';
 import type { Job as JobData, Operation } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
@@ -17,11 +18,14 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
+import { pendingDeletion } from '../jobs/deletionAcknowledgement';
+import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
+import { focusSurvivingNotice, useDepartingFocus } from '../shared/departingFocus';
 
-function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession }) {
+function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generation, route }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession; generation: number; route: RefObject<HTMLElement> }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
   // `observed` is the issue number of the applied observation, so a recurring version still reads as a new one.
@@ -47,29 +51,73 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     order.current.current = next;
     setStored({ binding, data: receive(next), observed: ticket, error: '', loading: false });
   };
-  const [deleted, setDeleted] = useState(false);
+  const [deletionMessage, setDeletionMessage] = useState<string | null>(null);
+  const deleted = deletionMessage !== null;
   const [operation, setOperation] = useState<Operation | null>(null);
-  const departing = useRef<Element | null>(null);
+  // `departingRead` serves a read failure that clears the overview; `departing` serves the deletion notice (#512).
+  const departingRead = useRef<Element | null>(null);
   const readNotice = useRef<HTMLParagraphElement>(null);
+  const notice = useRef<HTMLParagraphElement>(null);
+  const departing = useRef<Element | null>(null);
+  const departingFocus = useDepartingFocus(route);
+  /** Called only for a confirmed tombstone or this view's own accepted deletion of this job. */
+  function markDeleted(failure?: unknown) {
+    const live = session.snapshot();
+    if (live.status !== 'authenticated' || live.generation !== generation) return;
+    departing.current = departingFocus();
+    forgetAttemptCommandForDeletedJob(basePath, jobId);
+    const message = withApiFailureReference(copy.thisJobWasDeleted, failure);
+    // A later acknowledgement supplies cleanup details but carries no tombstone reference.
+    setDeletionMessage(previous => message === copy.thisJobWasDeleted ? previous ?? message : message);
+  }
   function clearObservation(ticket: number, error: string) {
-    departing.current = document.activeElement;
+    departingRead.current = document.activeElement;
     // A deletion that only retained failures overtook still ends the overview; it never reopens their order.
     order.current.applied = Math.max(order.current.applied, ticket);
     order.current.observed = Math.max(order.current.observed, ticket);
     order.current.current = null;
     setStored({ binding, data: null, observed: ticket, error, loading: false });
   }
-  function confirmDeletion(ticket: number) {
+  /** A confirmed tombstone ends the overview in issue order and, for the live session only, shows the deletion. */
+  function confirmDeletion(ticket: number, failure?: unknown) {
+    // Capture the departing control before clearing the overview re-renders anything.
+    markDeleted(failure);
     clearObservation(ticket, '');
-    setDeleted(true);
   }
   useLayoutEffect(() => {
-    const previous = departing.current;
-    departing.current = null;
+    const previous = departingRead.current;
+    departingRead.current = null;
+    if (deleted) return;
     if (previous && !previous.isConnected && document.activeElement === document.body) readNotice.current?.focus();
   }, [deleted, error, job]);
+  // This authenticated view's own DELETE may still be unacknowledged when the page mounts, including before
+  // its first job read settles or after a tombstone read lands first: observe that one request from mount (#512).
+  useLayoutEffect(() => {
+    if (operation) return;
+    const inFlight = pendingDeletion({ session, generation, basePath, jobId });
+    if (!inFlight) return;
+    let current = true;
+    inFlight.then(result => {
+      if (!current || result.jobId !== jobId) return;
+      setOperation(result); markDeleted();
+    }, (failure: unknown) => {
+      // The request's own confirmed tombstone proves the deletion even while this view's first read is held;
+      // a later failed read cannot replace it. Any other rejection leaves the page to its own reads.
+      if (!current || !isDeletedJob(failure)) return;
+      markDeleted(failure);
+    });
+    return () => { current = false; };
+    // Re-subscribe on a tombstone, so an acknowledgement settling after it still arrives.
+  }, [session, generation, basePath, jobId, deleted, operation]);
+  // When the transition removed the focused control, or the control the page disabled under it, land on the
+  // surviving notice; leave surviving focus alone.
+  useLayoutEffect(() => {
+    if (!deleted) return;
+    const from = departing.current; departing.current = null;
+    focusSurvivingNotice(from, notice.current);
+  }, [deleted]);
   function applyReadFailure(ticket: number, failure: unknown) {
-    if (isDeletedJob(failure)) { confirmDeletion(ticket); return; }
+    if (isDeletedJob(failure)) { confirmDeletion(ticket, failure); return; }
     const message = withApiFailureReference({
       session: copy.reconnectToReadThisJob, denied: copy.jobAccessDenied,
       missing: copy.thisJobIsUnavailableItMayHaveBeenRemoved, unsupported: copy.incompatibleJobResponse,
@@ -107,7 +155,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       if (signal.aborted) throw failure;
       if (ticket >= order.current.applied) applyReadFailure(ticket, failure);
       else if (replaced()) return order.current.current;
-      else if (isDeletedJob(failure)) confirmDeletion(ticket);
+      else if (isDeletedJob(failure)) confirmDeletion(ticket, failure);
       throw failure;
     }
     if (signal.aborted) throw signal.reason;
@@ -139,7 +187,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     try {
       return await read();
     } catch (failure: unknown) {
-      if (!signal.aborted && ticket >= order.current.observed && isDeletedJob(failure)) confirmDeletion(ticket);
+      if (!signal.aborted && ticket >= order.current.observed && isDeletedJob(failure)) confirmDeletion(ticket, failure);
       throw failure;
     }
   };
@@ -156,9 +204,9 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     void readJob(controller.signal).catch(() => undefined);
     return () => { controller.abort(); };
   }, [binding, client, jobId, refresh, deleted]);
-  if (deleted) return <div class="notice" role="alert"><p ref={readNotice} tabIndex={-1}>{copy.thisJobWasDeleted}</p>
+  if (deleted) return <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{deletionMessage}</p>
     {operation && <p>{operation.message}</p>}
-    {operation?.state === 'running' && <p>{jobDeletionCopy.stillRunning}</p>}
+    <p>{cleanupNotice(operation)}</p>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
   return <>
     {loading && <p role="status">{job ? copy.refreshingJob : copy.loadingJob}</p>}
@@ -188,22 +236,31 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
         <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       </PanelBoundary>
-      <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} />
+      <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} onDeleted={markDeleted} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
-        readJob={readJob} />
-      <JobDeletion job={job} client={client} basePath={basePath} session={session}
-        onDeleted={result => { setOperation(result); confirmDeletion(issue()); }} />
+        readJob={readJob} onDeleted={markDeleted} />
+      <JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
+        onDeleted={(result, failure) => { if (result) setOperation(result); confirmDeletion(issue(), failure); }} />
     </>}
   </>;
 }
 
+/** File cleanup is reported only from the accepted operation this view observed; never inferred from a tombstone. */
+function cleanupNotice(operation: Operation | null) {
+  if (!operation) return jobDeletionCopy.cleanupUnknown;
+  if (['queued', 'running', 'cancelling'].includes(operation.state)) return jobDeletionCopy.stillRunning;
+  if (operation.state === 'completed' && !operation.recoveryRequired) return jobDeletionCopy.cleanupFinished;
+  return displayMessage(jobDeletionCopy.cleanupIncomplete, { state: operation.state });
+}
+
 export default function Job({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession | null }) {
   const state = useSession(session);
-  return <section aria-labelledby="job-title">
+  const route = useRef<HTMLElement>(null);
+  return <section aria-labelledby="job-title" ref={route}>
     <h1 id="job-title">{copy.jobOverview}</h1>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
-    {state?.status === 'authenticated' && session ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} session={session} />
+    {state?.status === 'authenticated' && session ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} session={session} generation={state.generation} route={route} />
       : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }
