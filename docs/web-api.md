@@ -651,8 +651,8 @@ The default legacy `GET /jobs/{J}` page uses the same exploration-state classifi
 capture of the selected report. It distinguishes unknown, partial, unsupported and invalid data;
 only `available` data shows summary metrics and candidate rows. A legacy page's `available` label
 has the same limited meaning as the adapter state above: structure was checked, not acceptance or
-behavioral equivalence. Captured bytes remain downloadable even when their classification is not
-available.
+behavioral equivalence. Downloading the report performs a fresh bounded artifact read, separate
+from the capture used for classification.
 
 `available` means the adapter verified the report's structure and bindings, not that the
 reconstruction was accepted: `acceptance` stays `not-evaluated` unless an acceptance artifact

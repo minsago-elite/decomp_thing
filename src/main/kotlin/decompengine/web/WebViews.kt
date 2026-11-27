@@ -575,7 +575,7 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
     val observations = (classification.root?.get("observations") as? JsonArray).orEmpty()
     val observationGroups = observations.mapNotNull { element ->
         val observation = element as? JsonObject ?: return@mapNotNull null
-        val id = observation["candidateId"].stringContentOrNull() ?: return@mapNotNull null
+        val id = observation["candidateId"].stringContentOrNull()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
         id to observation
     }.groupBy({ it.first }, { it.second })
     val rows = candidates.take(50).joinToString("") { element ->
@@ -587,7 +587,7 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
             "angr", "mutation", "static_hint", "seed" -> source.lowercase()
             else -> "unknown"
         }
-        val observation = rawId?.takeIf { candidateIds[it] == 1 }?.let { observationGroups[it]?.singleOrNull() }
+        val observation = rawId?.takeIf { it.isNotEmpty() && candidateIds[it] == 1 }?.let { observationGroups[it]?.singleOrNull() }
         val exitCode = (observation?.get("exitCode") as? JsonPrimitive)?.let { value ->
             value.takeUnless { it.isString }?.intOrNull?.toString()
         } ?: "Not reported"
