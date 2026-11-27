@@ -19,6 +19,44 @@ for path in (WORK / "tmp", WORK / "home", WORK / "barriers", driver.install_root
 passed = []
 
 
+def injected_failure_receipt_controls():
+    from unittest import TestCase
+
+    command_id = 3
+    target = driver.install_root() / "lib/application.jar"
+    path = WORK / "command-03-events.json"
+    task = {"path": ":installDist", "executed": True, "failure": True}
+    event = {"phase": "before-rename", "path": str(target)}
+    receipt = {"commandId": command_id, "runRoot": str(WORK), "tasks": [task], "events": [event],
+               "actionsStarted": True, "publisherCompleted": False}
+    config = {"generation": "B", "commandId": command_id, "runRoot": str(WORK), "failBeforeRename": True, "replay": False}
+    command = {"commandId": command_id, "initConfig": config, "exitCode": 1, "status": "failed", "taskReceipt": str(path)}
+    output = (f"> installDist atomic publication failed during rename {target}; "
+              "completed renames=0, prunes=0, rename attempts=0, prune attempts=0; protected targets unchanged")
+    def check(*, evidence=None, fields=None, code=1, log=output):
+        path.write_text(json.dumps(evidence if evidence is not None else receipt))
+        invocation = {**command, "taskReceiptSha256": driver.digest(path), **(fields or {})}
+        driver.require_failed_update(invocation, command_id, target, code, log)
+
+    check()  # Ordinary Gradle output omits the injected exception's nested cause.
+    controls = TestCase()
+    for field, value in (("commandId", 2), ("runRoot", "another-run"), ("publisherCompleted", True),
+                         ("actionsStarted", False), ("tasks", []), ("events", []),
+                         ("events", [{**event, "path": str(target.with_name("other.jar"))}]),
+                         ("events", [event, event]), ("events", [event, {"phase": "published", "path": str(target)}])):
+        with controls.subTest(field=field, value=value), controls.assertRaises(RuntimeError):
+            check(evidence={**receipt, field: value})
+    for fields in ({"taskReceiptSha256": "0" * 64}, {"taskReceipt": None}, {"commandId": 4},
+                   {"initConfig": {**config, "failBeforeRename": False}}):
+        with controls.subTest(fields=fields), controls.assertRaises(RuntimeError):
+            check(fields=fields)
+    with controls.assertRaises(RuntimeError):
+        check(code=0, fields={"exitCode": 0, "status": "passed"})
+    with controls.assertRaises(RuntimeError):
+        check(log=output.replace("rename attempts=0", "rename attempts=1"))
+    passed.append("command-bound-pre-rename-failure-and-refusal-controls")
+
+
 def check_failure(name, action, expected):
     original = driver.Child.close
     observed = []
@@ -1211,6 +1249,7 @@ m.Supervisor.census=failed
     (WORK/'ownership-receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
 
 try:
+    injected_failure_receipt_controls()
     # Explicit and PATH-derived real executable homes; launcher option JSON/path roundtrip.
     jdk = WORK / "jdk with spaces"; (jdk / "bin").mkdir(parents=True)
     java = jdk / "bin/java"; java.write_text("#!/bin/sh\nexit 0\n"); java.chmod(0o755)
