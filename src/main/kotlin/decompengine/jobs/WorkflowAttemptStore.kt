@@ -3,6 +3,7 @@ package decompengine.jobs
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -53,7 +54,38 @@ enum class WorkflowTerminalReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, L
 data class WorkflowExecutionLimits(val wallClockMs: ULong, val idleMs: ULong, val maxOutputBytes: ULong, val maxToolCalls: ULong) {
     init { require(wallClockMs > 0uL && idleMs > 0uL && idleMs <= wallClockMs && maxOutputBytes > 0uL) { "invalid workflow execution limits" } }
 }
-data class WorkflowUsage(val inputTokens: ULong? = null, val outputTokens: ULong? = null, val cachedInputTokens: ULong? = null, val toolCalls: ULong? = null, val wallClockMs: ULong? = null)
+data class WorkflowLocalMeasurement(val sampledAt: Instant, val fields: List<String>) {
+    init {
+        require(fields.size in 1..2 && fields.distinct() == fields)
+        require(fields.all { it == "wallClockMs" || it == "toolCalls" })
+    }
+}
+
+internal fun localMeasurementJson(value: WorkflowLocalMeasurement): JsonObject = buildJsonObject {
+    put("source", "workflow-execution-meter")
+    put("sampledAt", value.sampledAt.toString())
+    put("fields", JsonArray(value.fields.map(::JsonPrimitive)))
+}
+
+private fun parseLocalMeasurement(value: JsonElement?): WorkflowLocalMeasurement? = value?.asObject()?.let {
+    it.keysExactly("source", "sampledAt", "fields")
+    require(it.getValue("source").stringValue() == "workflow-execution-meter")
+    val fields = it.getValue("fields").jsonArray
+    require(fields.size in 1..2)
+    WorkflowLocalMeasurement(Instant.parse(it.getValue("sampledAt").stringValue()), fields.map { field -> field.stringValue() })
+}
+
+data class WorkflowUsage(
+    val inputTokens: ULong? = null, val outputTokens: ULong? = null, val cachedInputTokens: ULong? = null,
+    val toolCalls: ULong? = null, val wallClockMs: ULong? = null, val localMeasurement: WorkflowLocalMeasurement? = null,
+) {
+    init {
+        localMeasurement?.let {
+            require("wallClockMs" !in it.fields || wallClockMs != null)
+            require("toolCalls" !in it.fields || toolCalls != null)
+        }
+    }
+}
 data class WorkflowCandidate(val revisionId: String, val sourceSha256: String) {
     init { requireId(revisionId); requireSha(sourceSha256) }
 }
@@ -809,7 +841,7 @@ class WorkflowAttemptStore private constructor(
             put("previousRunId", a.previousRunId); put("inputRevisionId", a.inputRevisionId); put("harnessCapabilityId", a.harnessCapabilityId)
             put("limits", buildJsonObject { put("wallClockMs", a.limits.wallClockMs.toString()); put("idleMs", a.limits.idleMs.toString()); put("maxOutputBytes", a.limits.maxOutputBytes.toString()); put("maxToolCalls", a.limits.maxToolCalls.toString()) })
             put("terminalReason", a.terminalReason?.name)
-            put("usage", a.usage?.let { u -> buildJsonObject { put("inputTokens", u.inputTokens?.toString()); put("outputTokens", u.outputTokens?.toString()); put("cachedInputTokens", u.cachedInputTokens?.toString()); put("toolCalls", u.toolCalls?.toString()); put("wallClockMs", u.wallClockMs?.toString()) } } ?: JsonNull)
+            put("usage", a.usage?.let { u -> buildJsonObject { put("inputTokens", u.inputTokens?.toString()); put("outputTokens", u.outputTokens?.toString()); put("cachedInputTokens", u.cachedInputTokens?.toString()); put("toolCalls", u.toolCalls?.toString()); put("wallClockMs", u.wallClockMs?.toString()); u.localMeasurement?.let { put("localMeasurement", localMeasurementJson(it)) } } } ?: JsonNull)
             put("candidate", a.candidate?.let { c -> buildJsonObject { put("revisionId", c.revisionId); put("sourceSha256", c.sourceSha256) } } ?: JsonNull)
             put("acceptedRevision", a.acceptedRevision?.let(::encodeAcceptance) ?: JsonNull)
             if (a.progressRetentionPinned) put("progressRetentionPinned", true)
@@ -823,12 +855,14 @@ class WorkflowAttemptStore private constructor(
         private fun parseAttempt(value: JsonElement): WorkflowAttempt {
             val a = value.asObject().also { JsonObject(it - "progressRetentionPinned" - "startReceipt" - "recovery").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
             val limits = a.getValue("limits").asObject().also { it.keysExactly("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls") }
-            val usage = a.optional("usage")?.asObject()?.also { it.keysExactly("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMs") }
+            val usage = a.optional("usage")?.asObject()?.also {
+                JsonObject(it - "localMeasurement").keysExactly("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMs")
+            }
             val candidate = a.optional("candidate")?.asObject()?.also { it.keysExactly("revisionId", "sourceSha256") }
             return WorkflowAttempt(a.string("runId"), a.string("jobId"), WorkflowKind.entries.single { it.wireName == a.string("workflow") }, WorkflowRunState.entries.single { it.wireName == a.string("state") }, a.string("version"),
                 Instant.parse(a.string("createdAt")), a.optionalString("startedAt")?.let(Instant::parse), a.optionalString("endedAt")?.let(Instant::parse), a.optionalString("previousRunId"), a.optionalString("inputRevisionId"), a.optionalString("harnessCapabilityId"),
                 WorkflowExecutionLimits(limits.uint("wallClockMs"), limits.uint("idleMs"), limits.uint("maxOutputBytes"), limits.uint("maxToolCalls")), a.optionalString("terminalReason")?.let(WorkflowTerminalReason::valueOf),
-                usage?.let { WorkflowUsage(it.optionalUInt("inputTokens"), it.optionalUInt("outputTokens"), it.optionalUInt("cachedInputTokens"), it.optionalUInt("toolCalls"), it.optionalUInt("wallClockMs")) },
+                usage?.let { WorkflowUsage(it.optionalUInt("inputTokens"), it.optionalUInt("outputTokens"), it.optionalUInt("cachedInputTokens"), it.optionalUInt("toolCalls"), it.optionalUInt("wallClockMs"), parseLocalMeasurement(it["localMeasurement"])) },
                 candidate?.let { WorkflowCandidate(it.string("revisionId"), it.string("sourceSha256")) }, a.optional("acceptedRevision")?.let(::parseAcceptance),
                 if ("progressRetentionPinned" in a) a.boolean("progressRetentionPinned") else false,
                 if ("startReceipt" in a) WorkflowStartReceipt.decode(a.getValue("startReceipt").asObject()) else null,

@@ -1130,9 +1130,12 @@ could not produce any outcome, and `PROCESS_INTERRUPTED` a service stop or resta
 report `FAILED`, `REFUSED`, `LIMIT_EXHAUSTED` or `TIMED_OUT`; only the service records
 cancellation, infrastructure failure and interruption.
 
-Reported attempt usage comes from the terminal receipt. The view gives its units, its source and
-the receipt time (`endedAt`); the provider's own measurement time is not reported and stays
-"Not reported", as does every missing counter. Limits name the configuration persisted at
+The terminal receipt supplies attempt usage and its recording time (`endedAt`).
+When the local execution meter takes its final sample, `usage.localMeasurement` identifies
+the source (`workflow-execution-meter`), the UTC sample time (`sampledAt`), and the
+`fields` measured at that time. Those fields are `wallClockMs` and, when metered, `toolCalls`.
+Older receipts can omit this object. The provider token counters have an unknown measurement
+time, and missing counter values display as "Not reported". Limits name the configuration persisted at
 `createdAt`. Live context-usage observations are coalesced for display only (one pending snapshot
 per 100 ms window) and never change the acknowledged cursor or persisted evidence.
 

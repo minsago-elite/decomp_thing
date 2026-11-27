@@ -10,6 +10,9 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
 import java.nio.file.Files
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 import java.nio.file.Path
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -81,6 +84,26 @@ class WebWorkflowExecutionTest {
         ) { throw failure }
 
         assertSame(failure, assertIs<BoundedWorkflowResult.Threw>(result).failure)
+    }
+
+    @Test
+    fun `final usage samples the stopped child before the last output inventory`() {
+        val sampleTime = Instant.parse("2026-01-02T03:04:05Z")
+        val clock = object : Clock() {
+            override fun getZone() = ZoneOffset.UTC
+            override fun withZone(zone: java.time.ZoneId) = Clock.fixed(sampleTime, zone)
+            override fun instant(): Instant {
+                // Expose the order through the real final inventory, without relying on elapsed time.
+                Files.write(root.resolve("at-sample"), ByteArray(2))
+                return sampleTime
+            }
+        }
+        val meter = WorkflowExecutionMeter(root, toolCallsMetered = false, clock = clock)
+        val (outcome, usage) = BoundedWorkflowExecutor().run(
+            WorkflowExecutionLimits(60_000uL, 60_000uL, 1uL, 1uL), meter,
+        ) { }
+        assertEquals(sampleTime, usage.localMeasurement!!.sampledAt)
+        assertEquals(WorkflowLimitExhaustion.OUTPUT_BYTES, assertIs<BoundedWorkflowResult.Exhausted>(outcome).limit)
     }
 
     private fun meter(path: Path, toolCallsMetered: Boolean = false) =
