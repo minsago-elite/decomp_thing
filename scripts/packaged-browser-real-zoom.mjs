@@ -298,7 +298,12 @@ async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spa
       record.version = { product: cap(version?.product ?? ''), revision: cap(version?.revision ?? ''), protocolVersion: cap(version?.protocolVersion ?? ''), userAgent: cap(version?.userAgent ?? '') };
       if (geometryProbe) {
         // Same process/argv/seed, own target, own shorter cap inside the original deadline; rejected once cleanup starts.
-        const hookCdp = { call: (method, params, sessionId) => (finishing ? Promise.reject(new Error('geometry probe rejected: cleanup started')) : cdp.call(method, params, sessionId)) };
+        methods.geometryProbeScreenshotCalls = 0;
+        const hookCdp = { call(method, params, sessionId) {
+          if (finishing) return Promise.reject(new Error('geometry probe rejected: cleanup started'));
+          if (method === 'Page.captureScreenshot') methods.geometryProbeScreenshotCalls++;
+          return cdp.call(method, params, sessionId);
+        } };
         await hookSafe(() => geometryProbe.run({ key: spec.key, factor: spec.factor, cdp: hookCdp, delay, pid: record.pid, remainingMs: () => sectionMs - (Date.now() - started) }));
         if (finishing) throw cancel.error();
       }
@@ -423,7 +428,9 @@ async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlin
     const afterGeometry = zoomViewport(await evaluate(current, ZOOM_PAGE));
     const open = openExpr ? await evaluate(current, openExpr) : undefined;
     if (typeof data !== 'string' || data.length > 4 * Math.ceil(MAX_PROBE_PNG_BYTES / 3)) throw new Error(`viewport PNG encoded size exceeds ${MAX_PROBE_PNG_BYTES} bytes`);
-    const bytes = Buffer.from(data, 'base64'); const view = decodePng(bytes);
+    const bytes = Buffer.from(data, 'base64');
+    if (bytes.length < 1 || bytes.length > MAX_PROBE_PNG_BYTES) throw new Error(`viewport PNG is ${bytes.length} bytes, not 1..${MAX_PROBE_PNG_BYTES}`);
+    const view = decodePng(bytes);
     const ox = c.x - m.scrollX * f; const oy = c.y - m.scrollY * f;
     const rgb = cropRgb(view, ox, oy, c.width, c.height);
     const result = regionEqual(decodePng(encodeRgbPng(c.width, c.height, rgb)), view, ox, oy);
@@ -436,6 +443,14 @@ async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlin
   const settleScroll = (y) => evaluate(current, `(scrollTo(scrollX, ${y}), new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(scrollY)))))`);
   const strip = ({ rgb, ...rest }) => rest;
   const captureShot = async ({ o, name, clipExpr, viewport, rect, full }) => {
+    const checkPanelBounds = (clip) => {
+      const maxHeight = MAX_SEGMENTS * calibration.innerHeight;
+      if (![clip.x, clip.y, clip.width, clip.height].every(Number.isSafeInteger) ||
+          clip.width < 1 || clip.width > REAL_ZOOM_WINDOW.width || clip.height < 1 || clip.height > maxHeight)
+        throw new Error(`real-zoom ${spec.key}: ${name}: panel ${cap(clip.width)}x${cap(clip.height)} DIP outside 1..${REAL_ZOOM_WINDOW.width}x1..${maxHeight}`);
+      return clip;
+    };
+    let clip;
     const segments = [];
     const openExpr = full ? DISCLOSURE_OPEN[o?.kind] : null;
     if (full && !openExpr) throw new Error(`real-zoom ${spec.key}: ${name}: no open-state check for disclosure ${cap(o?.kind ?? null)}`);
@@ -448,19 +463,28 @@ async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlin
         if (segments.length >= MAX_SEGMENTS) throw new Error(`real-zoom ${spec.key}: ${name}: more than ${MAX_SEGMENTS} segments`);
         const seg = await segment(rect, clipExpr, openExpr); segments.push(seg);
         const end = seg.clip.y + seg.clip.height; const whole = wholeDipRect(seg.rectRaw, seg.zoomViewport, f);
+        if (!clip) clip = checkPanelBounds(whole);
         if (end >= whole.y + whole.height) break;
         const moved = await settleScroll(end / f);
         if (!(moved * f > seg.zoomViewport.scrollY * f && moved * f <= end)) throw new Error(`real-zoom ${spec.key}: ${name}: document did not scroll to the next segment (${cap(moved)})`);
       }
       await settleScroll(viewport.scrollY);
-    } else segments.push(await segment(rect, clipExpr));
+    } else {
+      const seg = await segment(rect, clipExpr);
+      clip = checkPanelBounds(seg.clip);
+      segments.push(seg);
+    }
     const first = segments[0];
-    const clip = full ? wholeDipRect(first.rectRaw, first.zoomViewport, f) : first.clip;
+    for (const seg of segments) {
+      const sc = seg.clip;
+      if (![sc.x, sc.y, sc.width, sc.height].every(Number.isInteger) || sc.x !== clip.x || sc.width !== clip.width || sc.height < 1 || sc.y < clip.y || sc.y + sc.height > clip.y + clip.height)
+        throw new Error(`real-zoom ${spec.key}: ${name}: segment clip outside the whole panel`);
+      if (seg.rgb.length !== sc.width * sc.height * 3) throw new Error(`real-zoom ${spec.key}: ${name}: segment crop size differs from its clip`);
+    }
     const rgb = Buffer.alloc(clip.width * clip.height * 3); const written = new Uint8Array(clip.height);
     for (const seg of segments) {
-      if (seg.clip.x !== clip.x || seg.clip.width !== clip.width) throw new Error(`real-zoom ${spec.key}: ${name}: segment columns differ from the whole panel`);
       for (let j = 0; j < seg.clip.height; j++) {
-        const row = seg.clip.y + j - clip.y; if (row < 0 || row >= clip.height) throw new Error(`real-zoom ${spec.key}: ${name}: segment row outside the whole panel`);
+        const row = seg.clip.y + j - clip.y;
         const src = seg.rgb.subarray(j * clip.width * 3, (j + 1) * clip.width * 3);
         if (written[row] && !src.equals(rgb.subarray(row * clip.width * 3, (row + 1) * clip.width * 3))) throw new Error(`real-zoom ${spec.key}: ${name}: overlapping segment rows differ`);
         src.copy(rgb, row * clip.width * 3); written[row] = 1;
@@ -468,7 +492,7 @@ async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlin
     }
     if (!written.every(Boolean)) throw new Error(`real-zoom ${spec.key}: ${name}: segments do not cover the whole panel`);
     const png = encodeRgbPng(clip.width, clip.height, rgb);
-    await fs.writeFile(join(root, name), png);
+    await writeZoomPng(join(root, name), png);
     return { ...strip(first), ...(full ? { segments: segments.map(strip) } : {}), name, bytes: png.length, sha256: sha256(png), width: clip.width, height: clip.height,
       clip: { ...clip }, elementRect: first.elementRect, viewport: first.viewport };
   };
@@ -489,6 +513,12 @@ const argvShape = (argv) => argv?.values?.map((a) => (a.startsWith('--user-data-
 const ZOOM_ONLY = [`--window-size=${REAL_ZOOM_WINDOW.width},${REAL_ZOOM_WINDOW.height}`, '--force-device-scale-factor=1'];
 /** Zoom argv minus its zoom-only suffix: [...base, window-size, force-dsf, user-data-dir, about:blank] -> [...base, user-data-dir, about:blank]. */
 const withoutZoomSuffix = (shape) => (shape.length >= 4 && isDeepStrictEqual(shape.slice(-4, -2), ZOOM_ONLY) ? [...shape.slice(0, -4), ...shape.slice(-2)] : shape);
+
+export async function writeZoomPng(path, png) {
+  if (png.length > MAX_RESPONSIVE_PNG_BYTES)
+    throw new Error(`real-zoom PNG ${png.length} bytes exceeds ${MAX_RESPONSIVE_PNG_BYTES}`);
+  await fs.writeFile(path, png);
+}
 
 function calibrationFailures(record) {
   const p = record.probes?.[0]; const out = [];
@@ -603,6 +633,9 @@ function segmentedFailure(s, r, m, f, crop) {
     if (!seg || typeof seg !== 'object' || !seg.clip) return `segment ${i} missing`;
     const sr = seg.rectRaw; const sm = seg.zoomViewport;
     if (!sr || !sm || !finite(sr.left, sr.top, sr.width, sr.height, sm.scrollY)) return `segment ${i}: geometry missing`;
+    const se = seg.elementRect;
+    if (!se || ['left', 'top', 'width', 'height'].some((k) => !finite(sr[k], se[k]) || Math.abs(sr[k] - se[k]) > RECT_DRIFT)) return `segment ${i}: raw rect drifted from its recorded elementRect beyond ${RECT_DRIFT}`;
+    if (seg.clipUnit !== 'document-dip' || seg.factor !== f) return `segment ${i}: clip unit ${cap(seg.clipUnit ?? null)}@${cap(seg.factor ?? null)} is not document-dip@${f}`;
     if (['left', 'width', 'height'].some((k) => Math.abs(sr[k] - r[k]) > RECT_DRIFT) || Math.abs(sr.top + sm.scrollY - docTop) > RECT_DRIFT) return `segment ${i}: panel moved in the document between segments`;
     const c = seg.clip;
     const problem = crop({ ...seg, width: c.width, height: c.height }, c, sr, sm);
@@ -639,7 +672,9 @@ function cropFailure(factor, calibration, gutterDip) {
     if (s.width !== c.width || s.height !== c.height) return `PNG ${s.width}x${s.height} ≠ clip ${c.width}x${c.height}`;
     const q = s.viewportEquality;
     if (!q || typeof q !== 'object') return 'viewport equality record missing';
-    if (!HEX64.test(q.sha256 ?? '') || q.width !== REAL_ZOOM_WINDOW.width || q.height !== d.height) return `viewport PNG ${cap(q.width)}x${cap(q.height)} is not ${REAL_ZOOM_WINDOW.width}x${d.height}`;
+    if (!HEX64.test(q.sha256 ?? '')) return 'viewport PNG SHA-256 invalid';
+    if (q.width !== REAL_ZOOM_WINDOW.width || q.height !== d.height) return `viewport PNG ${cap(q.width)}x${cap(q.height)} is not ${REAL_ZOOM_WINDOW.width}x${d.height}`;
+    if (!(Number.isInteger(q.bytes) && q.bytes >= 1 && q.bytes <= MAX_PROBE_PNG_BYTES)) return `viewport PNG bytes ${cap(q.bytes ?? null)} not 1..${MAX_PROBE_PNG_BYTES}`;
     if (q.method !== CROP_COMPARISON) return `viewport comparison ${cap(q.method ?? null)} is not ${CROP_COMPARISON}`;
     if (q.equal !== true || q.compared !== c.width * c.height) return `crop differs from the viewport capture (${cap(q.compared)}/${c.width * c.height} compared, equal ${cap(q.equal)})`;
     if (!isDeepStrictEqual(s.afterGeometry, m)) return 'geometry moved between clip and capture (afterGeometry differs)';
@@ -657,6 +692,36 @@ function methodFailures(m, key) {
     else if (!ALLOWED_METHODS.includes(method)) out.push(`${key}: method ${cap(method)} outside the real-zoom allowlist`);
   }
   return out;
+}
+
+/** Each retained segment or unsegmented region consumes one viewport capture. */
+export function requiredCaptures(observations) {
+  let total = 0;
+  for (const observation of observations) {
+    const shot = observation?.screenshot;
+    if (!shot || typeof shot !== 'object') return null;
+    total += Array.isArray(shot.segments) ? shot.segments.length : 1;
+  }
+  return total;
+}
+
+function captureCountFailures(r, observations, k, geometryProbe) {
+  const required = requiredCaptures(observations);
+  if (required === null) return [`${k}: screenshot record missing; capture count unverifiable`];
+  const sent = r.methods?.counts?.['Page.captureScreenshot'] ?? 0;
+  const probe = Array.isArray(geometryProbe?.processes) ? geometryProbe.processes.find(p => p?.key === k) : null;
+  // Older completed probes retain both candidate attempts and the viewport-edge receipt.
+  const candidates = Array.isArray(probe?.candidates) ? probe.candidates.filter(c => c?.params).length : 0;
+  const edgeAttempted = Boolean(probe?.viewportCapture) || (Array.isArray(probe?.failures) &&
+    probe.failures.some(failure => typeof failure === 'string' && failure.startsWith('viewport edge capture:')));
+  const retainedProbeCalls = candidates + Number(edgeAttempted);
+  const probeCalls = r.methods?.geometryProbeScreenshotCalls ?? retainedProbeCalls;
+  if (!Number.isInteger(probeCalls) || probeCalls < retainedProbeCalls || probeCalls > (probe ? 3 : 0) ||
+      (probe?.viewportCapture && probeCalls !== retainedProbeCalls))
+    return [`${k}: diagnostic screenshot count disagrees with the retained probe`];
+  if (sent !== required + probeCalls)
+    return [`${k}: Page.captureScreenshot sent ${cap(sent)} time(s), required ${required}${probeCalls ? ` plus ${probeCalls} diagnostic captures` : ''}`];
+  return [];
 }
 
 function cleanupFailures(r) {
@@ -705,6 +770,7 @@ export function assessRealZoomReport(section, { chromeSha256, browser, browserAr
     if (r.probesDropped !== 0) failures.push(`${k}: geometry probes dropped`);
     failures.push(...methodFailures(r.methods, k));
   }
+  if (Object.hasOwn(processes[0].methods?.counts ?? {}, 'Page.captureScreenshot')) failures.push('calibration: Page.captureScreenshot sent by the 1x calibration');
   const calibrationProblems = calibrationFailures(processes[0]);
   failures.push(...calibrationProblems);
   // The flag-on diagnostic probe may only add a mismatch failure; it never stands in for the flag-off 1x measurement.
@@ -739,6 +805,7 @@ export function assessRealZoomReport(section, { chromeSha256, browser, browserAr
       if (matches.length !== 1) failures.push(`${k}/${expected.kind}/${expected.subject}: expected one observation, found ${matches.length}`);
       else failures.push(...assessResponsiveObservation(matches[0], expected, f, RESPONSIVE_REGIONS, options));
     }
+    failures.push(...captureCountFailures(r, observations, k, geometryProbe));
     const names = observations.map((o) => o?.screenshot?.name);
     if (new Set(names).size !== names.length || names.some((name) => !REAL_ZOOM_NAMES.has(name))) failures.push(`${k}: screenshot names are not the distinct fixed zoom names`);
     failures.push(...digestFailures(s.digestControl ?? {}, f).map((problem) => `${k}: ${problem}`));
