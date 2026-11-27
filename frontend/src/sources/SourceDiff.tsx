@@ -45,6 +45,29 @@ function ComparisonRefresh({ readKey, loading, heading, onRefresh }: {
     }}>{copy.diffRefresh}</button>;
 }
 
+/**
+ * A pending heading handoff after an entry or a chosen page. The reader's own focus choice while the read is
+ * outstanding (moving to another control, or blurring one that stays on the page) withdraws the handoff;
+ * a control removed by the transition does not.
+ */
+function useHeadingHandoff(heading: { current: HTMLHeadingElement | null }, initial: boolean) {
+  const armed = useRef(initial);
+  useEffect(() => {
+    const moved = (event: FocusEvent) => { if (armed.current && event.target !== heading.current) armed.current = false; };
+    const left = (event: FocusEvent) => {
+      const target = event.target;
+      if (!armed.current || event.relatedTarget !== null || !(target instanceof Node)) return;
+      queueMicrotask(() => {
+        if (target.isConnected && (document.activeElement === null || document.activeElement === document.body)) armed.current = false;
+      });
+    };
+    document.addEventListener('focusin', moved, true);
+    document.addEventListener('focusout', left, true);
+    return () => { document.removeEventListener('focusin', moved, true); document.removeEventListener('focusout', left, true); };
+  }, [heading]);
+  return armed;
+}
+
 function Revisions({ selected, base, data }: { selected: SourceSelection; base: SourceDiffBase; data: Identity | null }) {
   return <dl class="job-facts" aria-label={copy.diffRevisions}>
     <dt>{copy.diffBase}</dt><dd><code>{base.runId}</code> · <code>{base.revisionId}</code>
@@ -153,7 +176,7 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
-  const moveFocus = useRef(false);
+  const moveFocus = useHeadingHandoff(heading, false);
   const expected = useRef(new Map<string, Identity>());
   const [refresh, setRefresh] = useState(0);
   let selection: ReturnType<typeof sourceDiffSelection> | null;
@@ -268,7 +291,7 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
-  const moveFocus = useRef(true);
+  const moveFocus = useHeadingHandoff(heading, true);
   const [refresh, setRefresh] = useState(0);
   const hunkHistory = useRef<HunkHistory>({ scope: '', versions: '', previous: new Map(), visits: new Map() });
   // Two entries can share one URL; the router does not re-render between them, so the entry's own predecessor must.
