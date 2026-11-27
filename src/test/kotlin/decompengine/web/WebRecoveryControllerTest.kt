@@ -14,6 +14,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executor
@@ -202,6 +203,98 @@ class WebRecoveryControllerTest {
             assertContentEquals(CONTINUATION_BYTES, f.restored.single())
             assertTrue(inspected.all { it.predecessor.runId == failed && it.job.id == f.job.id })
             assertEquals(CAPABILITY, resumed.getValue("harnessCapabilityId").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `a duplicate published during inspection is replayed before predecessor checks`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val inspections = java.util.concurrent.atomic.AtomicInteger()
+        Fixture(checkpoints = {
+            if (inspections.getAndIncrement() == 0) {
+                entered.countDown()
+                check(release.await(10, TimeUnit.SECONDS))
+            }
+            DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE)
+        }).use { f ->
+            val failed = f.attempt(f.start())
+            f.deferred = true
+            val executor = Executors.newSingleThreadExecutor()
+            fun request() = f.service.requestDurableRecovery(f.job.id, failed.runId, failed.version, WorkflowRecoveryMode.RESUME, null, KEY)
+            try {
+                val first = executor.submit<DurableWebWorkflowStartResult> { request() }
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                val published = request()
+                assertFalse(published.replayed)
+                release.countDown()
+                val replay = first.get(3, TimeUnit.SECONDS)
+                assertTrue(replay.replayed)
+                assertEquals(published.attempt, replay.attempt)
+                assertEquals(1, f.pending.size)
+                assertEquals(2, inspections.get())
+            } finally {
+                release.countDown()
+                executor.shutdownNow()
+                assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS))
+            }
+        }
+    }
+
+    @Test
+    fun `controls expose a closed refusal when the inspected version changes`() {
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { request ->
+            fixture.service.setProgressRetentionPinned(request.job.id, request.predecessor.runId, request.predecessor.version, true)
+            DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE)
+        }).use { f ->
+            fixture = f
+            val id = f.start()
+            val data = f.controls(id).second
+            assertEquals(control(false, "CHECKPOINT_UNVERIFIED"), data.getValue("resume"))
+            assertEquals(f.attempt(id).version, data.getValue("runVersion").jsonPrimitive.content)
+            assertNull(data["resumeRestores"]?.takeUnless { it == JsonNull })
+        }
+    }
+
+    @Test
+    fun `blocked eligibility and admission inspections permit unrelated status and recheck a racing retry`() {
+        val entered = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        Fixture(checkpoints = {
+            entered.countDown()
+            check(release.await(10, TimeUnit.SECONDS))
+            DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE)
+        }).use { f ->
+            val failed = f.attempt(f.start())
+            val other = f.store.createFromUpload("other.elf", elfFixture())
+            val workers = Executors.newFixedThreadPool(3)
+            try {
+                val controls = workers.submit<WebAttemptControls> { f.service.attemptControls(f.job.id, failed.runId) }
+                val resume = workers.submit<String> {
+                    assertFailsWith<WebJobServiceException> {
+                        f.service.requestDurableRecovery(f.job.id, failed.runId, failed.version,
+                            WorkflowRecoveryMode.RESUME, null, "blocked_resume_key")
+                    }.code
+                }
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                val retry = workers.submit<WorkflowAttempt> {
+                    assertEquals("CAPACITY_UNAVAILABLE", f.service.attemptControls(f.job.id, failed.runId).resumeReason)
+                    assertEquals(other.id, f.service.presentation(other.id).job.id)
+                    f.service.requestDurableRecovery(f.job.id, failed.runId, failed.version,
+                        WorkflowRecoveryMode.RETRY, null, "racing_retry_key_01").attempt
+                }.get(3, TimeUnit.SECONDS)
+                release.countDown()
+                assertEquals("ATTEMPT_SUPERSEDED", controls.get(3, TimeUnit.SECONDS).resumeReason)
+                assertEquals("ATTEMPT_SUPERSEDED", resume.get(3, TimeUnit.SECONDS))
+                assertEquals(retry.runId, f.snapshot().latestRun?.runId)
+                assertEquals(2, f.snapshot().attempts.size)
+                assertTrue(f.restored.isEmpty())
+            } finally {
+                release.countDown()
+                workers.shutdownNow()
+                assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS))
+            }
         }
     }
 
