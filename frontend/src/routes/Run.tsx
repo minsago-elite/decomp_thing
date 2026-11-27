@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import type { Run as RunData } from '../api/generated';
 import { withApiFailureReference } from '../api/client';
-import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
+import { appPath, jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
@@ -25,6 +25,7 @@ import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
+import { jobCopy } from '../copy/job';
 
 function Details({ jobId, runId, basePath, session, view, navigation }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
@@ -36,6 +37,8 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
   const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const run = observation?.value;
   const [refresh, setRefresh] = useState(0);
+  // A confirmed deletion tombstone from any panel ends this routed attempt, including its stale controls (#512).
+  const [gone, setGone] = useState<typeof binding | null>(null);
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
     const controller = new AbortController();
@@ -58,6 +61,8 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
     });
     return () => { controller.abort(); };
   }, [binding, client, jobId, runId, refresh]);
+  if (gone === binding) return <div class="notice" role="alert"><p>{copy.thisJobWasDeleted}</p>
+    <a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></div>;
   return <>
     {loading && <p role="status">{run ? copy.refreshingAttempt : copy.loadingAttempt}</p>}
     {error && <p role="alert">{error}</p>}
@@ -120,7 +125,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
           <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.activity}>
-          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={() => setGone(binding)} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
         </PanelBoundary>
       </>}
       {view !== 'activity' && <>

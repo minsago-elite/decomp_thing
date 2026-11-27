@@ -25,8 +25,10 @@ type ActivityPosition = { initialized: boolean; cursor: string | null; rows: Web
 type ActivityDisplay = { position: ActivityPosition; receipt: ActivityReceiptTime };
 
 /** Retained journal observations are display evidence, never acceptance receipts. */
-export function Activity({ jobId, runId, basePath, navigation }: {
+export function Activity({ jobId, runId, basePath, navigation, onDeleted }: {
   jobId: string; runId: string; basePath: string; navigation?: ActivityNavigation;
+  /** A confirmed RESOURCE_GONE tombstone (never an ordinary EVENT_GAP) ends the whole routed attempt. */
+  onDeleted?: () => void;
 }) {
   let window: ReturnType<typeof activityWindowLocation>;
   try { window = activityWindowLocation(navigation?.search ?? ''); }
@@ -37,11 +39,12 @@ export function Activity({ jobId, runId, basePath, navigation }: {
       <a href={runViewPath(basePath, jobId, runId, 'activity')}>{activityHistoryCopy.fresh}</a>
     </section>;
   }
-  return window && navigation ? <ActivityHistory jobId={jobId} runId={runId} basePath={basePath} navigation={navigation} window={window} />
-    : <LiveActivity jobId={jobId} runId={runId} basePath={basePath} windowLinks={navigation !== undefined} />;
+  return window && navigation ? <ActivityHistory jobId={jobId} runId={runId} basePath={basePath} navigation={navigation} window={window} {...(onDeleted ? { onDeleted } : {})} />
+    : <LiveActivity jobId={jobId} runId={runId} basePath={basePath} windowLinks={navigation !== undefined} {...(onDeleted ? { onDeleted } : {})} />;
 }
 
-function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; runId: string; basePath: string; windowLinks: boolean }) {
+function LiveActivity({ jobId, runId, basePath, windowLinks, onDeleted }: { jobId: string; runId: string; basePath: string; windowLinks: boolean; onDeleted?: () => void }) {
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const session = useContext(PrivateSessionContext);
   const { client, stream } = usePrivateTransport(basePath);
   // Without a readable fetch body the live stream cannot work; poll from the start (#631).
@@ -180,6 +183,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
         if (isDeletedJob(failure)) {
           position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
           setDeleted(true); setError(withApiFailureReference(runCopy.thisJobWasDeleted, failure)); setFollowing(false);
+          deletedHandler.current?.();
           return;
         }
         if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {

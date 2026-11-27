@@ -1,7 +1,7 @@
 import { jobCopy as copy, jobDeletionCopy } from '../copy/job';
 import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { withApiFailureReference } from '../api/client';
 import type { Job as JobData, Operation } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
@@ -15,12 +15,13 @@ import type { ReceiptTime } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
-import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
+import { JobDeletion, JobOrganization, focusFollowsForm } from '../jobs/JobLifecycle';
+import { pendingDeletion } from '../jobs/deletionAcknowledgement';
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
 
-function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession }) {
+function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generation }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession; generation: number }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
   const [stored, setStored] = useState<{ binding: typeof binding; data: Received<JobData> | null; error: string; loading: boolean }>(
@@ -30,6 +31,20 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
   const [refresh, setRefresh] = useState(0);
   const [deleted, setDeleted] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
+  const [restoreFocus, setRestoreFocus] = useState(false);
+  const notice = useRef<HTMLParagraphElement>(null);
+  const deletionForm = useRef<HTMLDivElement>(null);
+  // A tombstone read can land before this page's own DELETE acknowledgement; keep observing that one request.
+  useLayoutEffect(() => {
+    if (!deleted || operation) return;
+    const inFlight = pendingDeletion({ session, generation, basePath, jobId });
+    if (!inFlight) return;
+    let current = true;
+    inFlight.then(result => { if (current && result.jobId === jobId) setOperation(result); }, () => undefined);
+    return () => { current = false; };
+  }, [deleted, operation, session, generation, basePath, jobId]);
+  // The focused Delete control departed with the form: land on the surviving notice instead of the document.
+  useLayoutEffect(() => { if (deleted && restoreFocus) { notice.current?.focus(); setRestoreFocus(false); } }, [deleted, restoreFocus]);
   // Another tab deleted or reorganized a job: read this one again so a deletion shows here too.
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
@@ -58,7 +73,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     });
     return () => { controller.abort(); };
   }, [binding, client, jobId, refresh]);
-  if (deleted) return <div class="notice" role="alert"><p>{copy.thisJobWasDeleted}</p>
+  if (deleted) return <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{copy.thisJobWasDeleted}</p>
     {operation && <p>{operation.message}</p>}
     {operation?.state === 'running' && <p>{jobDeletionCopy.stillRunning}</p>}
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
@@ -92,8 +107,8 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
         onChanged={next => setStored({ binding, data: receive(next), error: '', loading: false })} />
-      <JobDeletion job={job} client={client} basePath={basePath} session={session}
-        onDeleted={result => { setOperation(result); setDeleted(true); }} />
+      <div ref={deletionForm}><JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
+        onDeleted={result => { if (result) setOperation(result); setRestoreFocus(focusFollowsForm(deletionForm.current)); setDeleted(true); }} /></div>
     </>}
   </>;
 }
@@ -103,7 +118,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">{copy.jobOverview}</h1>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
-    {state?.status === 'authenticated' && session ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} session={session} />
+    {state?.status === 'authenticated' && session ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} session={session} generation={state.generation} />
       : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }
