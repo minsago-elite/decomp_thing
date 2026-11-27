@@ -34,6 +34,8 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   const { client } = usePrivateTransport(basePath);
   const availability = useBrowserAvailability();
   const available = availability.online && availability.visible;
+  const section = useRef<HTMLElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   const recovery = useMemo(() => createAttemptCommandRecovery(basePath), [basePath]);
   const active = useRef<AbortController | null>(null);
   const [controls, setControls] = useState<Controls | null>(null);
@@ -51,6 +53,14 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
 
   const runVersion = useRef(run.version);
   runVersion.current = run.version;
+
+  /** Keep keyboard focus in this panel when an explicit action replaces its controls. */
+  function keepPanelFocus() {
+    const focused = document.activeElement;
+    if (focused && focused !== document.body && section.current?.contains(focused)) {
+      heading.current?.focus({ preventScroll: true });
+    }
+  }
 
   /** A read that observes a newer attempt version asks the parent to re-read the run, so the two converge. */
   async function readControls(controller: AbortController, reconcile = true): Promise<void> {
@@ -88,6 +98,7 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
     if (!replay) {
       try { recovery.save(command); } catch { setRetained(recovery.read()); setStatus(copy.storageBlocked); return; }
     }
+    keepPanelFocus();
     setRetained({ kind: 'pending', command });
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setControls(null); setCreated(null); setStatus(copy.sending);
@@ -134,8 +145,8 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   const canSend = available && !busy && !blocked && !pending && controls !== null && !stale;
   const input = (controls?.inputRevisionId ?? run.inputRevisionId) ?? copy.originalInput;
   const describedBy = `attempt-controls-scope-${runId}`;
-  return <section aria-labelledby={`attempt-controls-title-${runId}`}>
-    <h2 id={`attempt-controls-title-${runId}`}>{copy.title}</h2>
+  return <section ref={section} aria-labelledby={`attempt-controls-title-${runId}`}>
+    <h2 id={`attempt-controls-title-${runId}`} ref={heading} tabIndex={-1}>{copy.title}</h2>
     <p id={describedBy}>{textMessage(copy.scope, { runId, version: controls?.runVersion ?? run.version })}</p>
     {run.state === 'cancelling' && <p class="notice">{copy.cancelling}</p>}
     {run.recovery && run.previousRunId && <p>{displayMessage(run.recovery.mode === 'retry' ? copy.retriedFrom
@@ -147,13 +158,13 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
       <p>{textMessage(copy.unknown, { action: actionName[pending.action], runId: pending.runId })}</p>
       <div class="job-actions">
         <button type="button" disabled={busy || !available} aria-describedby={describedBy} onClick={() => { void send(pending, true); }}>{copy.replay}</button>
-        <button type="button" disabled={busy} onClick={() => { forget(); setStatus(copy.discarded); }}>{copy.discard}</button>
+        <button type="button" disabled={busy} onClick={() => { keepPanelFocus(); forget(); setStatus(copy.discarded); }}>{copy.discard}</button>
       </div>
     </div>}
     {pending && !pendingHere && <p class="notice">{copy.otherPending} <a href={runPath(basePath, pending.jobId, pending.runId)}>{copy.openPending}</a></p>}
     {retained.kind === 'blocked' && <div class="notice">
       <p>{copy.storageBlocked}</p>
-      {retained.reason !== 'unavailable' && <button type="button" onClick={() => { forget(); setStatus(copy.discarded); }}>{copy.discard}</button>}
+      {retained.reason !== 'unavailable' && <button type="button" onClick={() => { keepPanelFocus(); forget(); setStatus(copy.discarded); }}>{copy.discard}</button>}
     </div>}
     <div class="job-actions">
       <button type="button" disabled={busy || !available} onClick={() => { void read(); }}>{copy.read}</button>
