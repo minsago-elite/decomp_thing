@@ -890,3 +890,68 @@ it('drops a held accepted-work Retry read when the job page unmounts', async () 
     expect(errors).not.toHaveBeenCalled();
   } finally { errors.mockRestore(); auth.dispose(); }
 });
+
+it('keeps newly settled accepted links when the earlier observation’s Retry fails', async () => {
+  const auth = await session();
+  const a = acceptedJob({ latestRunId: 'run_b', version: v('a') });
+  const b = acceptedJob({ latestRunId: 'run_b', version: v('b') });
+  let reads = 0;
+  let finishRefresh: (value: typeof b) => void;
+  let failRetry: (failure: unknown) => void;
+  transport.get.mockImplementation(kind => {
+    if (kind !== 'job') return Promise.resolve(page([accepted('run_b')], null, v('b')));
+    if (++reads === 1) return Promise.resolve(a);
+    if (reads === 2) return new Promise(resolve => { finishRefresh = resolve; });
+    return new Promise((_resolve, reject) => { failRetry = reject; });
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const retry = await screen.findByRole('button', { name: acceptedWorkCopy.retry });
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await waitFor(() => expect(finishRefresh).toBeDefined());
+    retry.focus();
+    fireEvent.click(retry);
+    await waitFor(() => expect(failRetry).toBeDefined());
+    await act(async () => { finishRefresh(b); await Promise.resolve(); });
+    const acceptedLink = await section().findByRole('link', { name: 'Open the accepted attempt run_b' });
+    const outcome = section().getByText(/was recorded by attempt/);
+    await waitFor(() => expect(document.activeElement).toBe(outcome));
+    await act(async () => {
+      failRetry(new ApiClientError('http_error', { status: 500 }));
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    });
+    expect(transport.get.mock.calls.map(([kind]) => kind)).toEqual(['job', 'runs', 'job', 'job', 'runs']);
+    expect(section().queryByText(/Locating the attempt/)).toBeNull();
+    expect(section().queryByRole('alert')).toBeNull();
+    expect(document.activeElement).toBe(outcome);
+    expect(acceptedLink.isConnected).toBe(true);
+  } finally { auth.dispose(); }
+});
+
+it('ignores a superseded Refresh that returns a different job identity', async () => {
+  const auth = await session();
+  const old = acceptedJob({ latestRunId: 'run_b', version: v('a') });
+  const current = acceptedJob({ latestRunId: 'run_b', version: v('b') });
+  let reads = 0;
+  let finishRefresh: (value: typeof old) => void;
+  transport.get.mockImplementation(kind => {
+    if (kind !== 'job') return Promise.resolve(page([accepted('run_b')], null, v('b')));
+    if (++reads === 1) return Promise.resolve(old);
+    if (reads === 2) return new Promise(resolve => { finishRefresh = resolve; });
+    return Promise.resolve(current);
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const retry = await screen.findByRole('button', { name: acceptedWorkCopy.retry });
+    fireEvent.click(screen.getByRole('button', { name: jobCopy.refreshJob }));
+    await waitFor(() => expect(finishRefresh).toBeDefined());
+    retry.focus();
+    fireEvent.click(retry);
+    const acceptedLink = await section().findByRole('link', { name: 'Open the accepted attempt run_b' });
+    await act(async () => { finishRefresh(acceptedJob({ ...old.data, jobId: 'f'.repeat(32) })); await Promise.resolve(); });
+    expect(screen.queryByText(jobCopy.theServerReturnedADifferentJobIdentity)).toBeNull();
+    expect(acceptedLink.isConnected).toBe(true);
+  } finally { auth.dispose(); }
+});

@@ -40,12 +40,14 @@ export function AcceptedWork({ job, basePath, readJob }: { job: Job; basePath: s
   const key = `${jobId}\n${acceptedRevisionId ?? ''}\n${latestRunId ?? ''}\n${version}`;
   const [settled, setSettled] = useState<{ key: string; lookup: Lookup }>({ key, lookup: acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' } });
   const lookup: Lookup = settled.key === key ? settled.lookup : acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' };
-  const setLookup = (next: Lookup) => { setSettled({ key, lookup: next }); };
+  const currentKey = useRef(key);
+  currentKey.current = key;
+  const setLookup = (next: Lookup) => {
+    if (currentKey.current === key) setSettled({ key, lookup: next });
+  };
   const [retry, setRetry] = useState(0);
   // A Retry job read outlives an observation change so the parent can still order it; only unmount cancels it.
   const refreshing = useRef<AbortController | null>(null);
-  const currentVersion = useRef(version);
-  currentVersion.current = version;
   useEffect(() => () => { refreshing.current?.abort(); }, []);
   /**
    * Retry from an unbound history first reads the job once, then makes one history lookup for the observation it
@@ -63,7 +65,7 @@ export function AcceptedWork({ job, basePath, readJob }: { job: Job; basePath: s
       if (controller.signal.aborted) return;
       if (current === null) throw new ApiClientError('invalid_response');
       // A changed observation re-keys this lookup through the parent; an unchanged one retries in place.
-      if (current.version === version && currentVersion.current === version) setRetry(value => value + 1);
+      if (current.version === version && currentKey.current === key) setRetry(value => value + 1);
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       setLookup({ status: 'failed', message: failureMessage(failure), recovery: true });

@@ -37,11 +37,9 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
   const order = useRef({ issued: 0, applied: 0, current: null as JobData | null });
   const issue = () => ++order.current.issued;
   const apply = (ticket: number, next: JobData) => {
-    if (ticket <= order.current.applied) return false;
     order.current.applied = ticket;
     order.current.current = next;
     setStored({ binding, data: receive(next), error: '', loading: false });
-    return true;
   };
   /**
    * An ordered read for accepted-work Retry and the post-save organization reread, numbered when issued. It resolves
@@ -57,6 +55,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       if (!signal.aborted && ticket < order.current.applied && order.current.current) return order.current.current;
       throw failure;
     }
+    if (ticket < order.current.applied) return order.current.current;
     if (data.jobId !== jobId) return null;
     if (!signal.aborted) apply(ticket, data);
     return order.current.current ?? data;
@@ -74,11 +73,13 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
     const ticket = issue();
     void client.get('job', `/jobs/${jobId}`, { signal: controller.signal }).then(response => {
       if (!controller.signal.aborted) {
+        if (ticket < order.current.applied) {
+          setStored(previous => ({ ...previous, loading: false })); return;
+        }
         if (response.data.jobId !== jobId) {
           setStored({ binding, data: null, error: copy.theServerReturnedADifferentJobIdentity, loading: false }); return;
         }
-        // Superseded by a newer applied observation: this read only ends its own loading state.
-        if (!apply(ticket, response.data)) setStored(previous => ({ ...previous, loading: false }));
+        apply(ticket, response.data);
       }
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted && ticket < order.current.applied) { setStored(previous => ({ ...previous, loading: false })); return; }
