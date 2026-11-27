@@ -14,6 +14,7 @@ import decompengine.agent.AgentWorkspacePath
 import decompengine.project.AcpExecutionOutcomeIssue
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
+import decompengine.project.DeclaredRoleMutationPolicy
 import decompengine.project.MvpPatchCompilerPolicy
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionProfile
@@ -48,7 +49,10 @@ import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
-data class MvpPatchOptions(val inputElf: Path, val outputDir: Path, val assumeYes: Boolean = false)
+data class MvpPatchOptions(
+    val inputElf: Path, val outputDir: Path, val assumeYes: Boolean = false,
+    val vulnerabilityCase: MvpVulnerabilityCase = MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE,
+)
 class MvpPatchException(message: String) : RuntimeException(message)
 enum class MvpPublicationMode { REQUIRE_ACP_RELEASE, TEST_ONLY_NON_RELEASE }
 
@@ -72,6 +76,7 @@ class MvpPatchWorkflow(
         require(ReconstructionProfiles.builtIn.any { it.id == profile.id && it.sha256 == profile.sha256 }) {
             "MVP patch profile is not admitted by this application"
         }
+        val vulnerabilityCase = options.vulnerabilityCase
         requireMvpSummaryCapacity(resourceBudget.maximumProjectionBytes)
         val compilerPolicy = ReconstructionAdapters.resolve(profile).mvpPatchCompiler
         val input = options.inputElf.toAbsolutePath().normalize()
@@ -79,7 +84,7 @@ class MvpPatchWorkflow(
         require(input.isRegularFile()) { "input ELF does not exist: $input" }
         val evidence = MvpRunEvidence(
             environment, harnessProvenance ?: fallbackHarnessIdentity(), profile.id, profile.sha256,
-            resourceBudget.maximumProjectionBytes,
+            resourceBudget.maximumProjectionBytes, vulnerabilityCase,
         )
         cleanOutputDirectory(output, input)
         val logs = output.resolve("logs").createDirectories()
@@ -104,10 +109,10 @@ class MvpPatchWorkflow(
                 it.phase(phase)
                 requireElf64(input)
                 it.command(listOf("readelf", "-h", "-s", input.pathString), work, "ELF metadata")
-                val original = it.binary(binaryExecution, input, input.parent, "observe original")
+                val original = it.binary(binaryExecution, input, input.parent, "observe original", arguments = vulnerabilityCase.arguments)
                 evidence.isolation = original.isolation.requireSecure().toString()
-                if (original.stdout.isBlank()) throw MvpPatchException("original produced no observable stdout")
-                evidence.check("original behavior observation", original.exitCode == 0, "exit=${original.exitCode}, stdoutBytes=${original.stdout.toByteArray().size}")
+                if (vulnerabilityCase == MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE && original.stdout.isBlank()) throw MvpPatchException("original produced no observable stdout")
+                evidence.check("original behavior observation", vulnerabilityCase != MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE || original.exitCode == 0, "exit=${original.exitCode}, stdoutBytes=${original.stdout.toByteArray().size}")
                 evidence.passPhase(phase, "ELF metadata inspected and default behavior retained")
 
                 phase = "reconstruct"
@@ -118,7 +123,7 @@ class MvpPatchWorkflow(
                 val reconstructed = decompiled.resolve("decompiled.c")
                 val reconstructionRequest = capturedRequest(
                     failureKind = "binary-reconstruction",
-                    prompt = reconstructionPrompt(original.stdout),
+                    prompt = reconstructionPrompt(original.stdout, vulnerabilityCase),
                     projectFiles = mapOf(
                         "ghidra_decompiled.c" to raw.readText(),
                         "decompiled.c" to RECONSTRUCTION_TARGET_PLACEHOLDER,
@@ -126,7 +131,7 @@ class MvpPatchWorkflow(
                 )
                 val reconstructionInput = retainMvpCapturedRequest(
                     evidenceDir.resolve("reconstruction-request.md"), reconstructionRequest,
-                    "decompiled.c", resourceBudget, evidence,
+                    "decompiled.c", resourceBudget, evidence, profile,
                 )
                 val reconstruction = requestCapturedReplacement(
                     reconstructionInput,
@@ -152,27 +157,36 @@ class MvpPatchWorkflow(
                 evidence.startPhase(phase)
                 it.phase(phase)
                 val vulnerable = work.resolve("reconstructed_asan")
-                compile(it, compilerPolicy, profile, reconstructed, vulnerable, sanitizer = true, warningsAsErrors = false)
-                evidence.check("reconstructed sanitizer build", true, "compiled with AddressSanitizer and UBSan")
+                compile(it, compilerPolicy, profile, reconstructed, vulnerable, sanitizer = true, warningsAsErrors = false, vulnerabilityCase = vulnerabilityCase)
+                evidence.check("reconstructed sanitizer build", true, "compiled with case-specific instrumentation; ${vulnerabilityCase.evidenceKind}")
                 evidence.passPhase(phase, "reconstructed source compiled with sanitizers")
 
                 phase = "reproduce"
                 evidence.startPhase(phase)
                 it.phase(phase)
-                val finding = it.binary(
-                    binaryExecution, vulnerable, work, "sanitizer reproducer",
-                    environment = mapOf("ASAN_OPTIONS" to "detect_leaks=0:halt_on_error=1"),
-                )
-                if (finding.exitCode == 0 || !finding.combined.contains("Sanitizer")) {
-                    throw MvpPatchException("reconstructed program did not reproduce a sanitizer finding")
+                val finding = if (vulnerabilityCase.isCompilerDiagnostic) {
+                    val diagnostic = it.command(compilerPolicy.diagnosticCommand(reconstructed, vulnerabilityCase), work,
+                        "compiler weakness diagnostic", false)
+                    BinaryExecutionResult(diagnostic.exitCode, diagnostic.stdout, diagnostic.stderr, original.isolation)
+                } else {
+                    it.binary(binaryExecution, vulnerable, work, "sanitizer reproducer",
+                        environment = vulnerabilityCase.isolatedEnvironment(), arguments = vulnerabilityCase.arguments)
                 }
-                val findingPath = evidenceDir.resolve("cwe-787-sanitizer.txt")
+                finding.isolation.requireSecure()
+                if (!vulnerabilityCase.matchesFinding(finding.exitCode, finding.combined) ||
+                    (vulnerabilityCase == MvpVulnerabilityCase.COMMAND_INJECTION && finding.stderr.isNotEmpty())) {
+                    throw MvpPatchException("reconstructed program did not reproduce ${vulnerabilityCase.cwe}: ${vulnerabilityCase.evidenceKind}")
+                }
+                val findingPath = output.resolve(vulnerabilityCase.findingRelativePath)
                 findingPath.writeText(evidence.redact(finding.combined))
                 evidence.findingPath = findingPath
                 evidence.findingSourceLocation = findSourceLocation(finding.combined)
-                    ?: throw MvpPatchException("sanitizer finding did not map to decompile/decompiled.c")
-                evidence.check("CWE-787 reproduction", true, "out-of-bounds write retained at ${evidence.findingSourceLocation}; exit=${finding.exitCode}")
-                evidence.passPhase(phase, "CWE-787 sanitizer failure reproduced and mapped to reconstructed C")
+                if (vulnerabilityCase != MvpVulnerabilityCase.COMMAND_INJECTION && evidence.findingSourceLocation == null) {
+                    throw MvpPatchException("weakness evidence did not map to decompile/decompiled.c")
+                }
+                evidence.check(if (vulnerabilityCase == MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE) "CWE-787 reproduction" else "case-specific reproduction",
+                    true, "${vulnerabilityCase.cwe}: ${vulnerabilityCase.evidenceKind}; exit=${finding.exitCode}")
+                evidence.passPhase(phase, "${vulnerabilityCase.cwe} reproduced using ${vulnerabilityCase.evidenceKind}")
                 retainAgentExecutionEvidence(
                     evidenceDir.resolve(RECONSTRUCTION_AGENT_ASSESSMENT),
                     RECONSTRUCTION_AGENT_EVIDENCE,
@@ -186,15 +200,16 @@ class MvpPatchWorkflow(
                 evidence.startPhase(phase)
                 it.phase(phase)
                 val patchRequest = capturedRequest(
-                    failureKind = "memory-safety",
-                    prompt = patchPrompt(original.stdout, finding.combined),
+                    // The legacy CWE-787 request keeps its published failure kind (Docker MVP provider contract).
+                    failureKind = if (vulnerabilityCase == MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE) "memory-safety" else "vulnerability-remediation",
+                    prompt = patchPrompt(original.stdout, finding.combined, vulnerabilityCase),
                     projectFiles = mapOf(
                         "decompile/decompiled.c" to reconstructed.readText(),
                         "patched.c" to reconstructed.readText(),
                     ),
                 )
                 val patchInput = retainMvpCapturedRequest(
-                    evidenceDir.resolve("patch-request.md"), patchRequest, "patched.c", resourceBudget, evidence,
+                    evidenceDir.resolve("patch-request.md"), patchRequest, "patched.c", resourceBudget, evidence, profile,
                 )
                 val proposal = requestCapturedReplacement(
                     patchInput,
@@ -235,17 +250,20 @@ class MvpPatchWorkflow(
                 evidence.startPhase(phase)
                 it.phase(phase)
                 val patchedAsan = work.resolve("patched_asan")
-                compile(it, compilerPolicy, profile, proposedSource, patchedAsan, sanitizer = true, warningsAsErrors = true)
-                evidence.check("patched sanitizer build", true, "compiled with -Werror, AddressSanitizer, and UBSan")
-                verify(it, patchedAsan, original, "sanitizer security validation")
-                evidence.check("sanitizer security validation", true, "CWE-787 reproducer no longer reports a sanitizer failure")
+                compile(it, compilerPolicy, profile, proposedSource, patchedAsan, sanitizer = true, warningsAsErrors = true, vulnerabilityCase = vulnerabilityCase)
+                evidence.check("patched sanitizer build", true, "compiled with -Werror and case-specific instrumentation")
+                if (vulnerabilityCase.isCompilerDiagnostic) {
+                    it.command(compilerPolicy.diagnosticCommand(proposedSource, vulnerabilityCase), work, "corrected compiler weakness diagnostic")
+                }
+                verify(it, patchedAsan, original, "sanitizer security validation", vulnerabilityCase)
+                evidence.check("sanitizer security validation", true, "${vulnerabilityCase.cwe} repaired contract and case-specific security regression passed")
                 val release = work.resolve("patched_release")
                 compile(it, compilerPolicy, profile, proposedSource, release, sanitizer = false, warningsAsErrors = true)
                 evidence.check("hardened release build", true, "compiled with FORTIFY_SOURCE=2, stack protector, PIE, RELRO, and immediate binding")
                 verifyHardening(it, release)
                 evidence.check("binary hardening inspection", true, "ELF is PIE with GNU_RELRO and immediate binding")
-                verify(it, release, original, "release verification")
-                evidence.check("behavior validation", true, "exit code and stdout match the observed original default execution")
+                verify(it, release, original, "release verification", vulnerabilityCase)
+                evidence.check("behavior validation", true, "exit code and stdout satisfy the selected repaired behavior contract")
                 evidence.passPhase(phase, "all sanitizer, hardening, security, and behavior checks passed")
                 retainAgentExecutionEvidence(
                     evidenceDir.resolve(PATCH_AGENT_ASSESSMENT),
@@ -321,18 +339,33 @@ class MvpPatchWorkflow(
         target: Path,
         sanitizer: Boolean,
         warningsAsErrors: Boolean,
+        vulnerabilityCase: MvpVulnerabilityCase = MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE,
     ) {
         logger.command(
-            compilerPolicy.command(profile, source, target, sanitizer, warningsAsErrors),
+            compilerPolicy.command(profile, source, target, sanitizer, warningsAsErrors, vulnerabilityCase),
             target.parent,
             "compile ${target.fileName}",
         )
     }
 
-    private fun verify(logger: StreamingLogger, binary: Path, expected: BinaryExecutionResult, label: String) {
-        val result = logger.binary(binaryExecution, binary, binary.parent, label)
-        if (result.exitCode != 0 || result.stdout != expected.stdout || result.combined.contains("Sanitizer")) {
-            throw MvpPatchException("$label did not preserve observed behavior")
+    private fun verify(logger: StreamingLogger, binary: Path, expected: BinaryExecutionResult, label: String,
+        vulnerabilityCase: MvpVulnerabilityCase) {
+        val result = logger.binary(binaryExecution, binary, binary.parent, label,
+            environment = vulnerabilityCase.isolatedEnvironment(), arguments = vulnerabilityCase.arguments)
+        result.isolation.requireSecure()
+        val expectedOutput = if (vulnerabilityCase == MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE) expected.stdout else vulnerabilityCase.safeStdout
+        if (result.exitCode != 0 || result.stdout != expectedOutput || result.stderr.isNotEmpty() || result.combined.contains("Sanitizer")) {
+            throw MvpPatchException(if (vulnerabilityCase == MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE) "$label did not preserve observed behavior"
+                else "$label did not satisfy the selected repaired behavior contract")
+        }
+        if (vulnerabilityCase == MvpVulnerabilityCase.FORMAT_STRING || vulnerabilityCase == MvpVulnerabilityCase.COMMAND_INJECTION) {
+            val benign = logger.binary(binaryExecution, binary, binary.parent, "$label benign input",
+                environment = vulnerabilityCase.isolatedEnvironment(), arguments = listOf("hello"))
+            benign.isolation.requireSecure()
+            val stdout = if (vulnerabilityCase == MvpVulnerabilityCase.FORMAT_STRING) "[info] hello\n" else "hello\n"
+            if (benign.exitCode != 0 || benign.stdout != stdout || benign.stderr.isNotEmpty()) {
+                throw MvpPatchException("$label did not preserve benign literal input behavior")
+            }
         }
     }
 
@@ -398,7 +431,16 @@ class MvpPatchWorkflow(
                     contextInputs = listOf(
                         AgentContextInput(RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID, request.failureKind),
                     ),
-                    accessPolicy = AgentAccessPolicy(rules),
+                    accessPolicy = AgentAccessPolicy(
+                        rules,
+                        mutationAuthority = DeclaredRoleMutationPolicy.forMvpStagedTarget(
+                            input.profile,
+                            ownerId = "mvp:${taskId}:${input.target}",
+                            stagedPath = target,
+                            maximumBytes = resourceBudget.maximumSourceFileBytes,
+                            policyId = "declared-role-mvp-staging-v1",
+                        ),
+                    ),
                     limits = agentLimits,
                 ).also { agentRequest = it }
             },
@@ -697,9 +739,10 @@ class StreamingLogger private constructor(
         directory: Path,
         label: String,
         environment: Map<String, String> = emptyMap(),
+        arguments: List<String> = emptyList(),
     ): BinaryExecutionResult {
         info("$ $label: isolated-exec ${executable.toAbsolutePath().normalize()}")
-        val result = boundary.execute(executable, directory, environment)
+        val result = boundary.execute(executable, directory, environment, arguments)
         // Admit both complete streams before output. The boundary does not retain cross-pipe order,
         // so any earlier peer introducer prefix makes every local record ambiguous during replay.
         val stdoutLines = privacy.linesWithUnorderedPeer(result.stderr)
@@ -767,21 +810,44 @@ private fun requireElf64(path: Path) {
     }
 }
 
-private fun reconstructionPrompt(stdout: String) = """
+private const val PATCH_COMPILE_REQUIREMENT = "The result must compile as C11 with -Wall -Wextra -Werror."
+
+// CWE-787 keeps its published prompts verbatim: ACP and Docker MVP fixture contracts match this text.
+private fun reconstructionPrompt(stdout: String, vulnerabilityCase: MvpVulnerabilityCase) =
+    if (vulnerabilityCase == MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE) """
     Convert the Ghidra decompiler output into one standalone, readable C11 source file with main.
     Preserve the observed default execution exactly. Observed combined output:\n$stdout
     Preserve suspicious memory operations as reconstructed; do not fix vulnerabilities yet.
     Resolve Ghidra types, labels, wrappers, and string references into normal C. Do not invent extra behavior.
     Edit decompiled.c in place with the complete reconstructed source. Do not change ghidra_decompiled.c.
+""".trimIndent() else """
+    Convert the Ghidra decompiler output into one standalone, readable C11 source file with main.
+    Reconstruct the supplied binary faithfully, including its suspicious behavior; do not insert a fix.
+    Selected bounded corpus case: ${vulnerabilityCase.id}, ${vulnerabilityCase.cwe}.
+    Observed execution output (may be undefined or incomplete):\n$stdout
+    Preserve suspicious memory operations as reconstructed; do not fix vulnerabilities yet.
+    Resolve Ghidra types, labels, wrappers, and string references into normal C. Do not invent extra behavior.
+    Edit decompiled.c in place with the complete reconstructed source. Do not change ghidra_decompiled.c.
 """.trimIndent()
 
-private fun patchPrompt(stdout: String, sanitizer: String) = """
+private fun patchPrompt(stdout: String, sanitizer: String, vulnerabilityCase: MvpVulnerabilityCase) =
+    if (vulnerabilityCase == MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE) """
     Apply the smallest clear memory-safety fix to the supplied reconstructed C.
     Preserve observed output exactly:\n$stdout
     Sanitizer evidence:\n$sanitizer
     Edit patched.c in place with the complete fixed source. Do not change decompile/decompiled.c.
-    The result must compile as C11 with -Wall -Wextra -Werror. In the final summary, explain the
+    $PATCH_COMPILE_REQUIREMENT In the final summary, explain the
     vulnerability root cause, the exact code change, and why the change preserves observed behavior.
+""".trimIndent() else """
+    Apply the smallest clear ${vulnerabilityCase.cwe} fix to the supplied reconstructed C.
+    Required safe behavior: ${vulnerabilityCase.repairContract}
+    Fixed test arguments: ${vulnerabilityCase.arguments}
+    Required safe stdout: ${vulnerabilityCase.safeStdout}
+    Original observed output is context only where behavior was undefined:\n$stdout
+    Sanitizer evidence / case-specific ${vulnerabilityCase.evidenceKind}:\n$sanitizer
+    Edit patched.c in place with the complete fixed source. Do not change decompile/decompiled.c.
+    $PATCH_COMPILE_REQUIREMENT In the final summary, explain the
+    vulnerability root cause, the exact code change, and why the change satisfies the explicit safe behavior contract without stubs or hardcoded outputs.
 """.trimIndent()
 
 private fun validateMeaningfulReconstruction(source: String) {
@@ -798,6 +864,7 @@ internal class MvpCapturedRequest(
     val target: String,
     val objective: String,
     val initialFiles: Map<String, ByteArray>,
+    val profile: ReconstructionProfile,
 )
 
 /** Admit the complete retained fields before encoding files or rendering their Markdown. */
@@ -805,6 +872,7 @@ internal fun prepareMvpCapturedRequest(
     request: RepairRequest,
     target: String,
     budget: RepairResourceBudget,
+    profile: ReconstructionProfile = ReconstructionProfiles.default,
 ): MvpCapturedRequest {
     if (request.projectFiles.size > budget.maximumContextFiles ||
         request.regressionInputs.size > budget.maximumRegressionInputs
@@ -845,6 +913,7 @@ internal fun prepareMvpCapturedRequest(
     return MvpCapturedRequest(
         frozen, target, objective,
         frozen.projectFiles.mapValues { (_, text) -> text.toByteArray(StandardCharsets.UTF_8) },
+        profile,
     )
 }
 
@@ -881,8 +950,9 @@ internal fun retainMvpCapturedRequest(
     target: String,
     budget: RepairResourceBudget,
     evidence: MvpRunEvidence,
+    profile: ReconstructionProfile = ReconstructionProfiles.default,
 ): MvpCapturedRequest {
-    val admitted = prepareMvpCapturedRequest(request, target, budget)
+    val admitted = prepareMvpCapturedRequest(request, target, budget, profile)
     retainRequest(path, admitted.request, evidence)
     return admitted
 }
