@@ -1,10 +1,10 @@
 import { acceptedWorkCopy as copy } from '../copy/acceptedWork';
-import { message as displayMessage } from '../shared/messages';
+import { message as displayMessage, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Job, Run } from '../api/generated';
-import { runPath, runViewPath, sourceDirectoryPath } from '../app/paths';
+import { jobPath, runPath, runViewPath, sourceDirectoryPath } from '../app/paths';
 import { metadataFailureKind } from '../shared/retainMetadata';
 
 /** Newest-first history pages read to locate the accepted attempt; older attempts stay in history. */
@@ -15,7 +15,7 @@ type Lookup =
   | { status: 'none' }
   | { status: 'loading' }
   | { status: 'found'; run: Run }
-  | { status: 'not-found' }
+  | { status: 'not-found'; exhausted: boolean; read: number }
   | { status: 'failed'; message: string };
 
 /**
@@ -24,15 +24,38 @@ type Lookup =
  */
 export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) {
   const { client } = usePrivateTransport(basePath);
-  const { jobId, acceptedRevisionId, latestRunId } = job;
-  const [lookup, setLookup] = useState<Lookup>(acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' });
+  const { jobId, acceptedRevisionId, latestRunId, version } = job;
+  // Each settled lookup names the observation it answers; a superseded one never renders as actionable.
+  const key = `${jobId}\n${acceptedRevisionId ?? ''}\n${version}`;
+  const [settled, setSettled] = useState<{ key: string; lookup: Lookup }>({ key, lookup: acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' } });
+  const lookup: Lookup = settled.key === key ? settled.lookup : acceptedRevisionId === null ? { status: 'none' } : { status: 'loading' };
+  const setLookup = (next: Lookup) => { setSettled({ key, lookup: next }); };
   const [retry, setRetry] = useState(0);
+  // Set only when the person activated Retry, so focus follows their action and never jumps on refresh.
+  const focusIntent = useRef<'none' | 'requested' | 'reading'>('none');
+  const outcome = useRef<HTMLParagraphElement | null>(null);
+  const retryButton = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (focusIntent.current === 'none') return;
+    if (lookup.status === 'loading') {
+      if (focusIntent.current === 'requested') { outcome.current?.focus(); focusIntent.current = 'reading'; }
+      return;
+    }
+    // The failure that Retry was activated from is not the retried read's outcome.
+    if (focusIntent.current !== 'reading') return;
+    focusIntent.current = 'none';
+    // Focus follows only while it is still on the removed status; a person who moved it elsewhere keeps their place.
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    (lookup.status === 'failed' ? retryButton.current : outcome.current)?.focus();
+  }, [settled, key]);
   useEffect(() => {
     if (acceptedRevisionId === null) { setLookup({ status: 'none' }); return; }
     const controller = new AbortController();
     setLookup({ status: 'loading' });
     void (async () => {
       let cursor: string | null = null;
+      let read = 0;
       for (let page = 0; page < acceptedLookupPages; page += 1) {
         const query = new URLSearchParams({ limit: String(pageLimit) });
         if (cursor !== null) query.set('cursor', cursor);
@@ -42,10 +65,11 @@ export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) 
         // Only an attempt whose own acceptance is recorded for exactly this revision identifies it.
         const found = data.items.find(run => run.acceptance === 'accepted' && run.resultRevisionId === acceptedRevisionId);
         if (found) { setLookup({ status: 'found', run: found }); return; }
+        read += data.items.length;
         cursor = data.page.nextCursor;
-        if (cursor === null) break;
+        if (cursor === null) { setLookup({ status: 'not-found', exhausted: true, read }); return; }
       }
-      setLookup({ status: 'not-found' });
+      setLookup({ status: 'not-found', exhausted: false, read });
     })().catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       const kind = metadataFailureKind(failure);
@@ -53,7 +77,7 @@ export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) 
         : kind === 'unverified' || kind === 'unsupported' ? copy.lookupUnverified : copy.lookupFailed, failure) });
     });
     return () => { controller.abort(); };
-  }, [client, jobId, acceptedRevisionId, retry]);
+  }, [client, jobId, acceptedRevisionId, version, retry]);
   return <section aria-labelledby="accepted-work-title">
     <h3 id="accepted-work-title">{copy.title}</h3>
     <h4>{copy.latestTitle}</h4>
@@ -66,20 +90,27 @@ export function AcceptedWork({ job, basePath }: { job: Job; basePath: string }) 
     </>}
     <h4>{copy.acceptedTitle}</h4>
     {lookup.status === 'none' && <p>{copy.noAccepted}</p>}
-    {lookup.status === 'loading' && acceptedRevisionId !== null && <p role="status">{displayMessage(copy.locating, { revisionId: <code>{acceptedRevisionId}</code> })}</p>}
+    {lookup.status === 'loading' && acceptedRevisionId !== null && <p role="status" tabIndex={-1} ref={outcome}>{displayMessage(copy.locating, { revisionId: <code>{acceptedRevisionId}</code> })}</p>}
     {lookup.status === 'found' && acceptedRevisionId !== null && <>
-      <p>{displayMessage(copy.accepted, { revisionId: <code>{acceptedRevisionId}</code>, runId: <code>{lookup.run.runId}</code> })}</p>
+      <p tabIndex={-1} ref={outcome}>{displayMessage(copy.accepted, { revisionId: <code>{acceptedRevisionId}</code>, runId: <code>{lookup.run.runId}</code> })}</p>
       <p class="job-actions">
-        <a href={runPath(basePath, jobId, lookup.run.runId)}>{copy.acceptedAttempt}</a>
-        <a href={runViewPath(basePath, jobId, lookup.run.runId, 'evidence')}>{copy.acceptedEvidence}</a>
-        <a href={sourceDirectoryPath(basePath, { jobId, runId: lookup.run.runId, revisionId: acceptedRevisionId })}>{copy.acceptedSources}</a>
+        <a href={runPath(basePath, jobId, lookup.run.runId)} aria-label={textMessage(copy.acceptedAttemptFor, { runId: lookup.run.runId })}>{copy.acceptedAttempt}</a>
+        <a href={runViewPath(basePath, jobId, lookup.run.runId, 'evidence')} aria-label={textMessage(copy.acceptedEvidenceFor, { runId: lookup.run.runId })}>{copy.acceptedEvidence}</a>
+        <a href={sourceDirectoryPath(basePath, { jobId, runId: lookup.run.runId, revisionId: acceptedRevisionId })}
+          aria-label={textMessage(copy.acceptedSourcesFor, { revisionId: acceptedRevisionId, runId: lookup.run.runId })}>{copy.acceptedSources}</a>
       </p>
     </>}
-    {lookup.status === 'not-found' && acceptedRevisionId !== null && <p>{displayMessage(copy.notFound, {
-      revisionId: <code>{acceptedRevisionId}</code>, count: String(acceptedLookupPages * pageLimit) })}</p>}
+    {lookup.status === 'not-found' && acceptedRevisionId !== null && <>
+      <p tabIndex={-1} ref={outcome}>{lookup.exhausted
+        ? displayMessage(lookup.read === 0 ? copy.exhaustedEmpty : lookup.read === 1 ? copy.exhaustedOne : copy.exhausted,
+          { revisionId: <code>{acceptedRevisionId}</code>, count: String(lookup.read) })
+        : displayMessage(copy.notFound, { revisionId: <code>{acceptedRevisionId}</code>, count: String(acceptedLookupPages * pageLimit) })}</p>
+      <p class="job-actions"><a href={`${jobPath(basePath, jobId)}/runs`}>{copy.history}</a></p>
+    </>}
     {lookup.status === 'failed' && <>
       <p role="alert">{lookup.message}</p>
-      <button type="button" onClick={() => setRetry(value => value + 1)}>{copy.retry}</button>
+      <button type="button" ref={retryButton}
+        onClick={() => { focusIntent.current = 'requested'; setRetry(value => value + 1); }}>{copy.retry}</button>
     </>}
   </section>;
 }

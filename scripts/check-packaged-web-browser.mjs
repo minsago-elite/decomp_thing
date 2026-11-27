@@ -515,7 +515,7 @@ try {
   recordInstallation(installation);
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
-  const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
+  const historyFixture = values.mode === 'history' ? await seedHistory(data, { includeAccepted: true }) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
@@ -964,7 +964,7 @@ try {
       assert.equal(Date.parse(row.facts.Created), Date.parse(JSON.parse(historyFixture.retained['job.json']).created_at));
       assert.equal(row.facts['Workflow state'], 'Completed');
       assert.equal(row.facts['Latest attempt'], 'run_fixture_54');
-      assert.equal(row.facts['Accepted revision'], 'No accepted revision recorded');
+      assert.equal(row.facts['Accepted revision'], historyFixture.acceptedRevision.revisionId);
       assert.ok(row.facts.Updated);
       report.dashboard.exactRowMetadata = true;
       report.dashboard.jobAndRunIdentityDistinct = true;

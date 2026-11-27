@@ -15,7 +15,7 @@ export const runHistoryCopy = {
   "evidence": "Evidence and report snapshots",
   "evidenceFor": "Evidence and report snapshots for attempt {runId}",
   "sources": "Result revision sources",
-  "sourcesFor": "Sources of revision {revisionId} from attempt {runId}",
+  "sourcesFor": "Result revision sources of revision {revisionId} from attempt {runId}",
   "noResultRevision": "No result revision recorded",
   "attemptHistory": "Attempt history",
   "returnToJobOverview": "Return to job overview",
