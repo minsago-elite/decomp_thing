@@ -10,6 +10,7 @@ import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './p
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedStructure, qualifyStructure, structureFailureEvidence } from './packaged-browser-structure.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
+import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedSources, qualifySources } from './packaged-browser-sources.mjs';
 import { seedLogs, qualifyLogs, logsFailureEvidence } from './packaged-browser-logs.mjs';
@@ -42,7 +43,7 @@ if (values.help) {
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP, navigation timing budgets, 50 job-filter submissions, and 50 alternating source-file metadata/preview actions (100ms local feedback / 500ms first data).');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
-  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
+  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh; then labels, archives and deliberately deletes one inert job with peer-tab, deep-link and focus recovery (#173).');
   console.log('logs: session plus real bounded hostile recordings, deep-scroll filtering, whole-log search/download redaction, atomic replacement and SPA teardown heap/DOM budgets. Inert terminal attempts; does not claim live-worker follow qualification.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
@@ -1027,6 +1028,7 @@ try {
     if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
+      report.jobLifecycle = await qualifyLifecycle({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
     }
     if (historyFixture) {
