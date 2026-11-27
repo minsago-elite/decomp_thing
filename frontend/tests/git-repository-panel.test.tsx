@@ -84,3 +84,45 @@ it('offers no initialization without a recorded candidate and ignores foreign li
   await waitFor(() => expect(screen.getByText(/could not be read/)).toBeTruthy());
   expect(screen.queryByRole('button', { name: 'Initialize repository from the latest candidate' })).toBeNull();
 });
+
+const busyAncestor = (node: Element) => node.parentElement?.closest('[aria-busy="true"]') ?? null;
+
+it('#628: marks only the data region busy during the initial read, never the polite status', async () => {
+  let refuse!: (error: unknown) => void;
+  transport.get.mockImplementation(() => new Promise((_, reject) => { refuse = reject; }));
+  const { container } = mount();
+  const data = () => container.querySelector('.git-repository-data')!;
+  expect(container.querySelector('section.git-repository')!.hasAttribute('aria-busy')).toBe(false);
+  expect(data().getAttribute('aria-busy')).toBe('true');
+  await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(1));
+  const status = screen.getByRole('status');
+  expect(status.textContent).toBe('Reading the repository…');
+  expect(busyAncestor(status)).toBeNull();
+  expect(data().contains(status)).toBe(false);
+  refuse(new ApiClientError('http_error', { status: 503, serverCode: 'CAPABILITY_UNAVAILABLE', requestId: 'request_example_2' }));
+  await waitFor(() => expect(data().getAttribute('aria-busy')).toBe('false'));
+  expect(screen.getByRole('status').textContent).toContain('Repository state is temporarily unavailable. Wait a moment, then refresh the repository.');
+});
+
+it('#628: keeps the status outside any busy ancestor while an initialization poll runs', async () => {
+  let finish!: (value: unknown) => void;
+  transport.get.mockResolvedValueOnce(empty).mockResolvedValueOnce(run)
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+    .mockResolvedValueOnce(listed).mockResolvedValueOnce(workspace);
+  transport.post.mockResolvedValueOnce(operation('queued'));
+  const { container } = mount();
+  const data = () => container.querySelector('.git-repository-data')!;
+  fireEvent.click(await screen.findByRole('button', { name: 'Initialize repository from the latest candidate' }));
+  await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
+  expect(data().getAttribute('aria-busy')).toBe('true');
+  expect(busyAncestor(screen.getByRole('status'))).toBeNull();
+  finish(operation('completed'));
+  expect(await screen.findByText('Branch trunk (no commits yet)')).toBeTruthy();
+  await waitFor(() => expect(data().getAttribute('aria-busy')).toBe('false'));
+  expect(busyAncestor(screen.getByRole('status'))).toBeNull();
+});
+
+it('#628: an unsupported capability is never marked busy', () => {
+  const { container } = mount('unavailable');
+  expect(container.querySelector('[aria-busy]')).toBeNull();
+});

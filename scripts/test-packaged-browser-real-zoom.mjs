@@ -422,6 +422,8 @@ function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null
       if (expr.startsWith(`({ ready: ${RealZoom.LAYOUT_READY}`)) {
         // Observed layout readiness: by default the measured geometry; `layout` scripts a delayed or permanently 0x0 target.
         const l = layout ? await layout(launch.key, layoutPolls.set(launch.key, (layoutPolls.get(launch.key) ?? 0) + 1).get(launch.key)) : g;
+        if (l?.cdpError) throw new Error(l.cdpError);
+        if (l?.exceptionDetails) return { result: { type: 'object', subtype: 'error' }, exceptionDetails: l.exceptionDetails };
         value = { ready: l.innerWidth > 0 && l.innerHeight > 0, innerWidth: l.innerWidth, innerHeight: l.innerHeight };
       }
       else if (expr.includes('__gutterCalibration')) value = gutterCal ? { __gutterCalibration: true, ready: 'complete', innerWidth: gutterCal.innerWidth, clientWidth: gutterCal.clientWidth,
@@ -1382,8 +1384,9 @@ test('R3 rejects panels beyond the calibrated limit and refuses oversized PNGs b
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-// #619 Chrome 149 calibration repair: a fresh headless target reported 0x0 until its first resize (retained
-// build/1982-calibration-repair/repro logs: 19/25 launches, positive at Page.frameResized within ~1.9 s).
+// #619 Chrome 149 calibration repair: a fresh headless target can report 0x0 until its first resize reaches the
+// renderer (seen in retained calibration-repair logs). How often and how long varies with host load; these
+// controls script the sequence and assert behaviour only, never a particular frequency or duration.
 test('layout readiness: a delayed valid 1x layout is waited for, then measured once and exactly', async () => {
   const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
   try {
@@ -1441,7 +1444,7 @@ test('a layout reply arriving after readiness expires cannot start the calibrati
     await qualifyRealZoom({ ...h.args, section, root,
       deadlines: { ...REAL_ZOOM_DEADLINES, readyMs: 60, calibrationMs: 3000 } });
     const calibration = proc(section, 'calibration');
-    assert.match(calibration.failure, /never reported a positive layout viewport within 60 ms/);
+    assert.match(calibration.failure, /calibration target gave no layout reading within 60 ms$/);
     assert.equal(calibration.layoutWaits[0].ready, false);
     assert.equal(calibration.layoutWaits[0].polls, 1);
     read.resolve({ innerWidth: 1280, innerHeight: CAL.innerHeight });
@@ -1453,4 +1456,83 @@ test('a layout reply arriving after readiness expires cannot start the calibrati
     read.resolve({ innerWidth: 1280, innerHeight: CAL.innerHeight });
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+const CONTEXT_GONE = 'Cannot find default execution context';
+test('layout readiness: transient missing/destroyed context replies keep polling and the wait still succeeds', async () => {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  try {
+    const good = { innerWidth: 1280, innerHeight: CAL.innerHeight };
+    const h = harness({ layout: (key, n) => (key === 'calibration' && n === 1 ? { cdpError: CONTEXT_GONE } : key === 'calibration' && n === 2 ? { cdpError: 'Execution context was destroyed.' } : good) });
+    const section = createRealZoomSection();
+    await qualifyRealZoom({ ...h.args, section, root });
+    const c = proc(section, 'calibration');
+    assert.equal(c.failure, undefined);
+    assert.deepEqual(c.layoutWaits.map((w) => [w.label, w.ready, w.polls, w.last]), [['calibration', true, 3, good]]);
+    assert.equal(c.probes.length, 1);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('layout readiness: an expression exception fails at once and surfaces exceptionDetails', async () => {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  try {
+    const h = harness({ layout: (key) => (key === 'calibration' ? { exceptionDetails: { text: 'Uncaught', exception: { description: 'ReferenceError: innerWidth is not defined' } } } : { innerWidth: 1280, innerHeight: CAL.innerHeight }) });
+    const section = createRealZoomSection();
+    const started = Date.now();
+    await qualifyRealZoom({ ...h.args, section, root });
+    assert.ok(Date.now() - started < REAL_ZOOM_DEADLINES.readyMs, 'not retried until the deadline');
+    const c = proc(section, 'calibration');
+    assert.match(c.failure, /calibration layout readiness expression failed: Uncaught: ReferenceError: innerWidth is not defined/);
+    assert.deepEqual(c.probes, []);
+    assert.equal(proc(section, 'zoom200').failure, 'skipped: no valid 1x calibration');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('layout readiness: a non-context CDP error is not treated as transient', async () => {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  try {
+    const h = harness({ layout: (key) => (key === 'calibration' ? { cdpError: 'Session with given id not found' } : { innerWidth: 1280, innerHeight: CAL.innerHeight }) });
+    const section = createRealZoomSection();
+    await qualifyRealZoom({ ...h.args, section, root });
+    assert.match(proc(section, 'calibration').failure, /calibration layout readiness failed: Session with given id not found/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('layout readiness: a deadline with only transient replies says no reading was obtained', async () => {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-run-'));
+  try {
+    const h = harness({ layout: (key) => (key === 'calibration' ? { cdpError: CONTEXT_GONE } : { innerWidth: 1280, innerHeight: CAL.innerHeight }) });
+    const section = createRealZoomSection();
+    await qualifyRealZoom({ ...h.args, section, root, deadlines: { ...REAL_ZOOM_DEADLINES, readyMs: 300 } });
+    const c = proc(section, 'calibration');
+    assert.match(c.failure, /calibration target gave no layout reading within 300 ms; \d+ transient context error/);
+    assert.doesNotMatch(c.failure, /last /);
+    assert.deepEqual([c.layoutWaits[0].ready, c.layoutWaits[0].last], [false, null]);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('assessment: reports without layoutWaits stay valid; recorded waits must be one valid wait per process', () => {
+  const { section, main } = cleanZoom();
+  assert.deepEqual(assessRealZoomReport(section, main), [], 'legacy report without layoutWaits');
+  const good = (key) => [{ label: key, ready: true, polls: 1, elapsedMs: 0, initial: { innerWidth: 1280, innerHeight: CAL.innerHeight }, last: { innerWidth: 1280, innerHeight: CAL.innerHeight } }];
+  const withWaits = () => { const s = structuredClone(section); for (const p of s.processes) p.layoutWaits = good(p.key); return s; };
+  assert.deepEqual(assessRealZoomReport(withWaits(), main), [], 'valid recorded waits');
+  const bad = (mutate, pattern) => { const s = withWaits(); mutate(proc(s, 'zoom200')); zoomFails(s, main, pattern); };
+  bad((p) => { p.layoutWaits = []; }, /zoom200: expected exactly one layout wait, found 0/);
+  bad((p) => { p.layoutWaits.push(p.layoutWaits[0]); }, /zoom200: expected exactly one layout wait, found 2/);
+  bad((p) => { p.layoutWaits = null; }, /zoom200: expected exactly one layout wait/);
+  bad((p) => { p.layoutWaits[0].label = 'calibration'; }, /zoom200: layout wait identity calibration is not zoom200/);
+  bad((p) => { p.layoutWaits[0].polls = 0; }, /poll count 0 is not a positive integer/);
+  bad((p) => { p.layoutWaits[0].polls = 1.5; }, /poll count 1.5/);
+  bad((p) => { p.layoutWaits[0].elapsedMs = -1; }, /layout wait elapsed -1 ms/);
+  bad((p) => { p.layoutWaits[0].elapsedMs = REAL_ZOOM_DEADLINES.readyMs + 1; }, /layout wait elapsed/);
+  bad((p) => { p.layoutWaits[0].elapsedMs = 'x'; }, /layout wait elapsed/);
+  bad((p) => { p.layoutWaits[0].ready = false; }, /zoom200: layout wait did not reach readiness/);
+  bad((p) => { p.layoutWaits[0].last = { innerWidth: 0, innerHeight: 657 }; }, /ready layout wait lacks positive last dimensions/);
+  bad((p) => { p.layoutWaits[0].last = null; }, /ready layout wait lacks positive last dimensions/);
+  const cal = withWaits(); proc(cal, 'calibration').layoutWaits[0].label = 'zoom200';
+  zoomFails(cal, main, /calibration: layout wait identity zoom200 is not calibration/);
+  // A valid wait never excuses the exact geometry: the independent calibration probe is still checked.
+  const geo = withWaits(); proc(geo, 'calibration').probes[0].innerWidth = 1265;
+  zoomFails(geo, main, /calibration/);
 });

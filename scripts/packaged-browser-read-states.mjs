@@ -295,6 +295,8 @@ export function createWaveGate({ delay, quietMs = LIMITS.quietMs, waveMs = LIMIT
  * In-page DOM probe (Chrome and JSDOM). Returns normalized, reference-masked text projections only; Node hashes them.
  * `forbid`: opaque request IDs that must never be rendered. Selectors are exported for the JSDOM control.
  */
+/** Case readiness: a heading and no region still loading (every reading panel declares aria-busy). */
+export const READY_EXPRESSION = `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null`;
 export const SELECTORS = Object.freeze({ main: 'main', heading: 'main h1', roleNodes: '[role="alert"], [role="status"]',
   jobDetails: 'main section[aria-labelledby="job-title"] h2', button: 'main button' });
 export function readStatesDomProbe({ forbid = [], selectors = SELECTORS } = {}) {
@@ -600,8 +602,14 @@ export async function qualifyReadStates({ cdp, makeTarget, evaluate, ready, dela
         binding.current = { caseId: c.id, gen: ++generation, gate };
         const gen = binding.current.gen;
         await ctx.call('Page.navigate', { url: origin + c.route });
-        await ctx.ready(`document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null`, `${c.id} ready`);
-        await withDeadline(waitQuiet(gate, delay, ctx), remaining(ctx), `${c.id} waves`);
+        await ctx.ready(READY_EXPRESSION, `${c.id} ready`);
+        // S10: the Git panel mounts late and issues its own read; quiet only counts once that read was taken in
+        // (bounded by the case deadline), so an unmounted panel can never be observed as settled.
+        const intake = c.id === 'S10' ? (sequences?.cases?.S10?.waves ?? []).flat() : [];
+        await withDeadline(waitQuiet(gate, delay, ctx, () => intake.every((k) => ledger.some((e) => `${e.method} ${e.path}` === k))), remaining(ctx), `${c.id} waves`);
+        // The last wave's fulfilment and its render follow the quiet windows: re-check readiness (same predicate,
+        // same case deadline) so a panel still reading is never observed as its final state.
+        await ctx.ready(READY_EXPRESSION, `${c.id} settled`);
         const observation = await withDeadline(observe(ctx, c.id), remaining(ctx), `${c.id} observation`);
         gate.close();
         return { id: c.id, status: 'observed', gen, cookie: cookieBound, waves: gate.waves.map((w) => [...w]), ledger: [...ledger], ...observation };
@@ -672,10 +680,11 @@ export async function qualifyReadStates({ cdp, makeTarget, evaluate, ready, dela
   return freezeDeep(section);
 }
 
-async function waitQuiet(gate, delay, ctx = null) {
+async function waitQuiet(gate, delay, ctx = null, intakeComplete = () => true) {
   // Two consecutive empty quiet windows after the last released wave; stops as soon as the case is stopped.
   let idle = 0;
-  while (idle < 2) { if (ctx?.stopped) throw new Error(`${ctx.label}: wave wait after case cutoff`); await delay(LIMITS.quietMs); idle = gate.pending === 0 ? idle + 1 : 0; }
+  // In-flight Fetch.fulfillRequest calls (ctx.pending) count as activity: a released wave is not yet delivered.
+  while (idle < 2) { if (ctx?.stopped) throw new Error(`${ctx.label}: wave wait after case cutoff`); await delay(LIMITS.quietMs); idle = gate.pending === 0 && (ctx?.pending?.size ?? 0) === 0 && intakeComplete() ? idle + 1 : 0; }
 }
 
 /** Ledger -> waves: the per-case browser ledger (request order) partitioned by the expected wave sizes. */

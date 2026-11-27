@@ -363,21 +363,39 @@ async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spa
 export const LAYOUT_READY = '(innerWidth > 0 && innerHeight > 0)';
 const MAX_LAYOUT_WAITS = 16;
 
+/** CDP replies a freshly attached session can give before its default context exists; anything else is a real failure. */
+const TRANSIENT_CONTEXT = /Cannot find default execution context|Execution context was destroyed|Cannot find context with specified id/i;
+
+/** A readiness reply's own script error, with Chrome's exception text and description, never a silent "not ready". */
+const exceptionText = (details) => cap([details.text, details.exception?.description ?? details.exception?.value].filter((v) => v !== undefined && v !== null && v !== '').join(': '));
+
 /**
  * A fresh headless target can report innerWidth/innerHeight 0 until its first view resize reaches the renderer
- * (observed on pinned Chrome 149 under load: 0x0 at creation, 1280x657 after Page.frameResized).
+ * (seen with pinned Chrome 149 in retained calibration-repair logs; timing varies with load and is not relied on).
  * Waits for a positive layout within the existing readyMs budget; it never sets or infers a size, and the single
- * calibration probe that follows is still checked exactly. A viewport that stays unusable fails here.
+ * calibration probe that follows is still checked exactly. Transient missing/destroyed-context replies keep polling;
+ * an expression exception or any other CDP error fails at once. A viewport that stays unusable fails here.
  */
 async function makeZoomTarget(cdp, { record, delay, deadlines, label }) {
   const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
   await cdp.call('Page.enable', {}, sessionId);
   await cdp.call('Runtime.enable', {}, sessionId);
+  let transient = 0;
+  let readings = 0;
   const layout = await pollZoomLayout(async () => {
-    const response = await cdp.call('Runtime.evaluate', {
-      expression: `({ ready: ${LAYOUT_READY}, innerWidth, innerHeight })`, returnByValue: true,
-    }, sessionId);
+    let response;
+    try {
+      response = await cdp.call('Runtime.evaluate', {
+        expression: `({ ready: ${LAYOUT_READY}, innerWidth, innerHeight })`, returnByValue: true,
+      }, sessionId);
+    } catch (error) {
+      if (!TRANSIENT_CONTEXT.test(String(error?.message ?? error))) throw new Error(`real-zoom: ${label} layout readiness failed: ${cap(error?.message ?? error)}`);
+      transient++;
+      return null;
+    }
+    if (response?.exceptionDetails) throw new Error(`real-zoom: ${label} layout readiness expression failed: ${exceptionText(response.exceptionDetails)}`);
+    readings++;
     return response?.result?.value ?? null;
   }, value => value?.ready === true, deadlines.readyMs, delay);
   const size = value => value && ({ innerWidth: value.innerWidth, innerHeight: value.innerHeight });
@@ -386,8 +404,28 @@ async function makeZoomTarget(cdp, { record, delay, deadlines, label }) {
     record.layoutWaits.push({ label: cap(label), ready: layout.ready, polls: layout.polls,
       elapsedMs: layout.elapsedMs, initial: size(layout.first), last: size(layout.last) });
   }
-  if (!layout.ready) throw new Error(`real-zoom: ${label} target never reported a positive layout viewport within ${deadlines.readyMs} ms (last ${cap(layout.last?.innerWidth)}x${cap(layout.last?.innerHeight)})`);
+  if (!layout.ready) {
+    const seen = transient ? `; ${transient} transient context error(s)` : '';
+    if (!readings) throw new Error(`real-zoom: ${label} target gave no layout reading within ${deadlines.readyMs} ms${seen}`);
+    throw new Error(`real-zoom: ${label} target never reported a positive layout viewport within ${deadlines.readyMs} ms (last ${cap(layout.last?.innerWidth)}x${cap(layout.last?.innerHeight)})${seen}`);
+  }
   return { targetId, sessionId };
+}
+
+/** Recorded waits are optional (older valid reports predate them); a recorded wait must be this process's single valid one. */
+function layoutWaitFailures(r, spec) {
+  if (!Object.hasOwn(r, 'layoutWaits')) return [];
+  const k = spec.key; const waits = r.layoutWaits;
+  if (!Array.isArray(waits) || waits.length !== 1) return [`${k}: expected exactly one layout wait, found ${cap(Array.isArray(waits) ? waits.length : typeof waits)}`];
+  const w = waits[0]; const failures = [];
+  const label = spec.seed ? spec.key : 'calibration';
+  if (!w || typeof w !== 'object' || w.label !== label) return [`${k}: layout wait identity ${cap(w?.label ?? null)} is not ${label}`];
+  if (!Number.isSafeInteger(w.polls) || w.polls < 1) failures.push(`${k}: layout wait poll count ${cap(w.polls)} is not a positive integer`);
+  if (!Number.isFinite(w.elapsedMs) || w.elapsedMs < 0 || w.elapsedMs > REAL_ZOOM_DEADLINES.readyMs) failures.push(`${k}: layout wait elapsed ${cap(w.elapsedMs)} ms outside 0..${REAL_ZOOM_DEADLINES.readyMs}`);
+  const pos = (n) => Number.isFinite(n) && n > 0;
+  if (w.ready !== true) failures.push(`${k}: layout wait did not reach readiness`);
+  else if (!pos(w.last?.innerWidth) || !pos(w.last?.innerHeight)) failures.push(`${k}: ready layout wait lacks positive last dimensions`);
+  return failures;
 }
 
 async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlines, calibration }) {
@@ -791,6 +829,7 @@ export function assessRealZoomReport(section, { chromeSha256, browser, browserAr
     if (spec.seed ? !isDeepStrictEqual(r.seed, zoomPreferences(spec.factor)) : r.seed !== null) failures.push(`${k}: preference seed differs`);
     if (!r.preferencesReadback || typeof r.preferencesReadback.read !== 'boolean') failures.push(`${k}: post-exit preference read-back missing`);
     if (r.probesDropped !== 0) failures.push(`${k}: geometry probes dropped`);
+    failures.push(...layoutWaitFailures(r, spec));
     failures.push(...methodFailures(r.methods, k));
   }
   if (Object.hasOwn(processes[0].methods?.counts ?? {}, 'Page.captureScreenshot')) failures.push('calibration: Page.captureScreenshot sent by the 1x calibration');

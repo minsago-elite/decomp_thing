@@ -89,6 +89,8 @@ function fakeBrowser(options = {}) {
           emitWaves(t, wavesFor(t.shown)); return {};
         }
         case 'Fetch.fulfillRequest': {
+          // #628 S10: the 503 fulfilment stays genuinely in flight (call unresolved, request outstanding) for a while.
+          if (o.s10Render?.fulfilDelayMs && t.label === 'S10' && params.responseCode === 503) await new Promise((done) => setTimeout(done, o.s10Render.fulfilDelayMs));
           const p = t.outstanding.get(params.requestId);
           if (!p) { if (t.cancelled.has(params.requestId)) throw new Error('Invalid InterceptionId.'); throw new Error('unknown request'); }
           t.outstanding.delete(params.requestId);
@@ -145,7 +147,9 @@ function fakeBrowser(options = {}) {
   function next(t) {
     if (t.outstanding.size || !t.queue.length || t.closed) return;
     const wave = t.queue.shift();
-    setImmediate(() => { for (const key of wave) {
+    // #628 S10 late mount: the Git panel mounts (and issues its repository read) well after the job read settled.
+    const late = o.s10Render?.mode === 'lateMount' && t.label === 'S10' && wave.some((k) => k.endsWith('/repositories'));
+    (late ? (fn) => setTimeout(fn, 40) : setImmediate)(() => { for (const key of wave) {
       const [method, path] = key.split(' '); const requestId = `r${++req}`;
       t.outstanding.set(requestId, { path });
       for (const h of handlers.get(t.sessionId) ?? []) h({ requestId, request: { url: ORIGIN + path, method, headers: {} } });
@@ -166,10 +170,14 @@ function fakeBrowser(options = {}) {
     const id = t.shown; const s = stateOf(id); const shown = !t.unverified;
     const roles = [];
     if (shown && s.role === 'alert') roles.push({ role: o.wrongRole && id === 'S6' ? 'note' : 'alert', text: s.text, heading: HEADINGS[id], inMain: true, tag: 'p' });
-    if (shown && s.role === 'status') roles.push({ role: 'status', text: s.text, heading: HEADINGS[id], inMain: s.inMain ?? true, tag: 'p' });
+    // #628 S10: the repository panel shows its in-flight status until its read settles ('wrong' never settles correctly).
+    const s10 = o.s10Render && id === 'S10' && t.label === 'S10' ? (o.s10Render.mode === 'wrong' ? 'Repository state could not be read. Refresh the repository to try again.' : t.s10Settled || o.s10Render.mode === 'lateMount' ? null : 'Reading the repository…') : null;
+    // Late mount: before the repository read was delivered the panel is absent (no status, nothing busy).
+    const unmounted = o.s10Render?.mode === 'lateMount' && id === 'S10' && t.label === 'S10' && !t.fulfilled.some((f) => f.status === 503);
+    if (shown && s.role === 'status' && !unmounted) roles.push({ role: 'status', text: s10 ?? s.text, heading: HEADINGS[id], inMain: s.inMain ?? true, tag: 'p' });
     return { main: true, path: M.READ_STATE_CASES.find((c) => c.id === id).route, h1: H1[id], jobDetails: !!t.data, roles,
       buttons: s.role === 'button' && shown ? [{ text: s.text, disabled: false }] : [], paragraphs: [s.role === 'text' ? s.text : null, s.mainText ?? null].filter(Boolean),
-      text: 'masked page text', forbidden: [], references: s.reference ? [s.reference] : [], busy: false };
+      text: 'masked page text', forbidden: [], references: s.reference ? [s.reference] : [], busy: s10 !== null && o.s10Render.mode !== 'wrong' && !unmounted };
   };
   const evaluate = async (target, expr) => {
     const t = targets.get(target.sessionId);
@@ -228,6 +236,14 @@ function fakeBrowser(options = {}) {
   const ready = async (target, expr, label) => {
     const t = targets.get(target.sessionId);
     log.push({ method: 'ready', sessionId: target.sessionId, afterClose: !!t.closed, afterDisable: !!t.fetchDisabled });
+    if (o.s10Render && t.label === 'S10' && expr === M.READY_EXPRESSION && label === 'S10 settled') {
+      // Readiness polls the real predicate: the panel settles only after every fulfilment for the case was delivered.
+      o.s10Render.settledCalls = (o.s10Render.settledCalls ?? 0) + 1;
+      o.s10Render.outstandingAtSettle = t.outstanding.size;
+      o.s10Render.repositoryFulfilledAtSettle = t.fulfilled.some((f) => f.status === 503);
+      if (o.s10Render.mode === 'delayed') { await new Promise((done) => setTimeout(done, 30)); t.s10Settled = true; }
+      if (o.s10Render.mode === 'stuck') { o.s10Render.stuck?.(); await new Promise((done) => setTimeout(done, 120)); throw new Error(`${label}: readiness not reached`); }
+    }
     if (o.slowReady?.label === t.label) { await new Promise((done) => setTimeout(done, o.slowReady.ms)); o.slowReady.after?.(); }
     return true;
   };
@@ -739,6 +755,8 @@ const MUTANTS = [
   ['focus expression accepts missing main', 'focused: !!m && a === m', 'focused: true', 'missing or unfocusable'],
   ['held request continued at deadline', "cdp.call('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, target.sessionId), LIMITS.callMs, 'Fetch.failRequest'); record.heldFailed++", "cdp.call('Fetch.continueRequest', { requestId }, target.sessionId), LIMITS.callMs, 'Fetch.failRequest'); record.heldFailed++", 'adversarial cleanup fails the exact held S15'],
   ['stopped-phase request continued after cutoff', "const work = withDeadline(cdp.call('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, target.sessionId), LIMITS.callMs, 'Fetch.failRequest').then", "const work = withDeadline(cdp.call('Fetch.continueRequest', { requestId }, target.sessionId), LIMITS.callMs, 'Fetch.failRequest').then", 'adversarial cleanup refuses a stopped-phase request'],
+  ['S10 in-flight fulfilments ignored', ' && (ctx?.pending?.size ?? 0) === 0 && intakeComplete()', ' && intakeComplete()', '#628 S10: a 503 fulfilment still in flight'],
+  ['S10 expected intake ignored', ' && (ctx?.pending?.size ?? 0) === 0 && intakeComplete()', ' && (ctx?.pending?.size ?? 0) === 0', '#628 S10: a late first Git panel mount'],
   ['cookie root path', "url, path: `${BASE}/`, httpOnly: true", "url, path: '/', httpOnly: true", 'cookie: binds'],
 ];
 test('copied-source mutants of the module fail these controls', { skip: process.env.READ_STATES_MODULE !== undefined }, () => {
@@ -766,4 +784,58 @@ test('copied-source mutants of the module fail these controls', { skip: process.
     const pattern = MUTANTS.find((row) => row[0] === name)?.[3];
     assert.ok(failed.some((testName) => testName.includes(pattern)), `mutant ${name} did not fail its named control (${pattern}); failed: ${failed.join(', ')}`);
   }
+});
+
+test('#628 S10: a delayed repository status is observed only after fulfilments drain and the panel settles', async () => {
+  const s10Render = { mode: 'delayed' };
+  const { section } = await drive({ s10Render });
+  assert.deepEqual(assess(section), []);
+  assert.equal(s10Render.settledCalls, 1);
+  assert.equal(s10Render.outstandingAtSettle, 0, 'settle readiness runs after the 503 repository read was fulfilled');
+  const s10 = section.cases.find((c) => c.id === 'S10');
+  assert.equal(s10.projection.ok, true);
+  assert.deepEqual(s10.ledger.map((e) => e.status), [200, 200, 503]);
+});
+
+test('#628 S10: a permanent incorrect repository status still fails the exact text, role and AX gates', async () => {
+  const { section } = await drive({ s10Render: { mode: 'wrong' } });
+  fails(section, /S10: positive state assertion failed/);
+  fails(section, /S10: no pinned state projection/);
+  fails(section, /S10: AX node for the DOM role\/text missing/);
+  const s10 = section.cases.find((c) => c.id === 'S10');
+  assert.equal(s10.projection.checks.node, false); assert.equal(s10.projection.checks.ax, false);
+});
+
+test('#628 S10: a 503 fulfilment still in flight holds the quiet wait until Fetch.fulfillRequest resolves', async () => {
+  const s10Render = { mode: 'delayed', fulfilDelayMs: 60 };
+  const { section } = await drive({ s10Render });
+  assert.equal(s10Render.outstandingAtSettle, 0, 'settle readiness never runs while the 503 fulfilment is in flight');
+  assert.equal(s10Render.repositoryFulfilledAtSettle, true);
+  assert.deepEqual(assess(section), []);
+});
+
+test('#628 S10: a late first Git panel mount is not observed before its repository read is taken in', async () => {
+  const s10Render = { mode: 'lateMount' };
+  const { section } = await drive({ s10Render });
+  assert.equal(s10Render.repositoryFulfilledAtSettle, true, 'settle readiness waited for the panel read');
+  assert.deepEqual(assess(section), []);
+  const s10 = section.cases.find((c) => c.id === 'S10');
+  assert.equal(s10.projection.ok, true);
+  assert.deepEqual(s10.ledger.map((e) => e.status), [200, 200, 503]);
+});
+
+test('#628 S10: a never-settling status fails with a bounded readiness error, case deadline unchanged', async () => {
+  let offset = 0; const now = () => Date.now() + offset;
+  const started = Date.now();
+  const { section } = await drive({ s10Render: { mode: 'stuck', stuck: () => { offset += M.LIMITS.caseMs; } } }, { now });
+  const s10 = section.cases.find((c) => c.id === 'S10');
+  assert.equal(s10.status, 'failed');
+  assert.match(s10.reason, /S10 (case exceeded|settled)/);
+  fails(section, /S10/);
+  assert.equal(M.LIMITS.caseMs, 20_000, 'case deadline unchanged');
+  assert.ok(Date.now() - started < M.LIMITS.caseMs, 'failed without waiting out a real extended timeout');
+});
+
+test('#628 readiness expression is the unchanged heading-and-no-busy-region predicate', () => {
+  assert.equal(M.READY_EXPRESSION, `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null`);
 });

@@ -819,7 +819,9 @@ jobs:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
-      GRADLE_USER_HOME: ${{ github.workspace }}/build/gradle-user-home
+      # Keep Gradle's daemon/distribution outside build/: the initial clean below
+      # deletes the entire project build tree before the offline qualification.
+      GRADLE_USER_HOME: ${{ github.workspace }}/.gradle-ci-user-home
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
