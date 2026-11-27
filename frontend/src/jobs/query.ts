@@ -1,7 +1,7 @@
 import { queryCopy as copy } from '../copy/workspace';
 export const JOB_STATUSES = ['uploaded', 'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'] as const;
-export type JobFilters = { search: string; status: string; createdAfter: string; createdBefore: string; limit: string; sort: string };
-export const DEFAULT_FILTERS: JobFilters = { search: '', status: '', createdAfter: '', createdBefore: '', limit: '50', sort: 'newest' };
+export type JobFilters = { search: string; status: string; createdAfter: string; createdBefore: string; limit: string; sort: string; archived: string };
+export const DEFAULT_FILTERS: JobFilters = { search: '', status: '', createdAfter: '', createdBefore: '', limit: '50', sort: 'newest', archived: '' };
 
 export class JobFilterError extends Error {
   constructor(public readonly field: keyof JobFilters, message: string) { super(message); }
@@ -35,6 +35,7 @@ export function jobFilters(search: string): JobFilters {
     throw new JobFilterError('search', copy.search);
   if (!['50', '100', '200'].includes(values.limit)) throw new JobFilterError('limit', copy.limit);
   if (!['newest', 'oldest'].includes(values.sort)) throw new JobFilterError('sort', copy.sort);
+  if (!['', 'all', 'only'].includes(values.archived)) throw new JobFilterError('archived', copy.archived);
   if (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status)) throw new JobFilterError('status', copy.status);
   function date(field: 'createdAfter' | 'createdBefore') {
     try { return filterInstant(values[field]); }

@@ -70,10 +70,42 @@ const typesText = header + '// String bounds and cross-field/conditional constra
   `export type ResponseOf<K extends ResponseKind> = Extract<ContractDocument, { kind: K }>;\n` +
   `export type RequestData<K extends RequestKind> = Extract<ContractDocument, { kind: K }>['data'];\n`;
 const runtimeSchema = structuredClone(schema);
-delete runtimeSchema.$schema; delete runtimeSchema.title; delete runtimeSchema.description;
+delete runtimeSchema.$schema; delete runtimeSchema.title;
+// Annotations never affect validation; keep them out of the initial browser bundle.
+function stripAnnotations(node) {
+  if (typeof node.description === 'string') delete node.description;
+  for (const key of ['definitions', 'properties']) for (const child of Object.values(node[key] ?? {})) stripAnnotations(child);
+  for (const key of ['anyOf', 'oneOf', 'allOf']) for (const child of node[key] ?? []) stripAnnotations(child);
+  for (const key of ['items', 'if', 'then', 'else']) if (node[key]) stripAnnotations(node[key]);
+}
+stripAnnotations(runtimeSchema);
+// Kinds decoded only by lazily loaded routes. Definitions reachable from them alone are emitted to a
+// separate module those routes register at load, so the initial bundle carries only core contracts.
+const lazyKinds = new Set(['jobDeletionPreview', 'storageSummary', 'maintenancePreview', 'jobOrganizationRequest', 'jobDeletionRequest']);
+const isLazy = (variant) => lazyKinds.has(variant.properties?.kind?.const);
+function closure(nodes) {
+  const result = new Set();
+  const pending = nodes.flatMap((node) => [...references(node)]);
+  while (pending.length) {
+    const key = pending.pop();
+    if (result.has(key)) continue;
+    result.add(key);
+    pending.push(...references(runtimeSchema.definitions[key]));
+  }
+  return result;
+}
+const coreVariants = runtimeSchema.oneOf.filter((variant) => !isLazy(variant));
+const lazyVariants = runtimeSchema.oneOf.filter(isLazy);
+if (lazyVariants.length !== lazyKinds.size) throw Error('Every lazy contract kind must exist in the schema');
+const lazyOnly = [...closure(lazyVariants)].filter((key) => !closure(coreVariants).has(key));
+const coreSchema = { ...runtimeSchema, definitions: Object.fromEntries(Object.entries(runtimeSchema.definitions)
+  .filter(([key]) => !lazyOnly.includes(key))), oneOf: coreVariants };
+const lazySchema = { definitions: Object.fromEntries(lazyOnly.sort().map((key) => [key, runtimeSchema.definitions[key]])), oneOf: lazyVariants };
 const files = {
   'frontend/src/api/generated.ts': typesText,
-  'frontend/src/api/generated-schema.ts': header + `import type { Schema } from './schema-types';\n\nexport const contractSchema: Schema = ${JSON.stringify(runtimeSchema, null, 2)};\n`,
+  'frontend/src/api/generated-schema.ts': header + `import type { Schema } from './schema-types';\n\nexport const contractSchema: Schema = ${JSON.stringify(coreSchema, null, 2)};\n`,
+  'frontend/src/api/generated-schema-lazy.ts': header + `import type { Schema } from './schema-types';\n\n` +
+    `/** Register with registerContractExtension before decoding these kinds. */\nexport const lazyContractSchema: Schema = ${JSON.stringify(lazySchema, null, 2)};\n`,
 };
 if (process.argv.slice(2).some((arg) => arg !== '--check')) throw Error('Usage: generate-web-api.mjs [--check]');
 for (const [path, contents] of Object.entries(files)) {

@@ -1,0 +1,46 @@
+{
+  "decompengine.oracle.gcc.GccSignedSourceQualificationTest": [
+    "actual signed release is deterministic source only and retains every descriptor binding()"
+  ],
+  "decompengine.oracle.gcc.GccSignedSourceTest": [
+    "archive selection rejects short empty missing aliased and nonregular inputs()",
+    "compiled API has no public result constructor or unchecked issuer accessors()",
+    "detached archive signature requires its exact bytes and safe descriptor()",
+    "empty guard constructor clones refuse fabricated evidence before caller checkpoint()",
+    "exact vendored metadata verifies before any source archive is selected()",
+    "key payload and armored tag signature mutations refuse before metadata admission()",
+    "lock digest refuses altered revision signer paths unknown fields and trailing bytes()",
+    "lock requires an absolute canonical single link regular input()",
+    "metadata checkpoint refuses byte identical key inode replacement and releases descriptors()",
+    "observer failure and cancellation propagate without manufacturing a held source()",
+    "resolved metadata inputs reject missing directories symlinks hardlinks and unsafe permissions()",
+    "wall bounds and lowered compressed limit refuse without an actual archive()"
+  ],
+  "decompengine.oracle.gcc.GccSourceArchiveTest": [
+    "PAX lengths ascii timestamps and member modification time must agree()",
+    "PAX unknown duplicate absent and reordered fields refuse()",
+    "XZ corruption concatenation padding trailing garbage and alternate checksum refuse()",
+    "index selected content work expanded compressed and entry limits retain exact boundaries()",
+    "local PAX archive scans deterministically and retains immutable selected bytes()",
+    "long PAX paths bind the exact hundred byte USTAR name and envelope()",
+    "only reviewed regular directory and local PAX types and ownership metadata are accepted()",
+    "only the three exact UTF8 filenames retain PAX binding and byte counted bounds()",
+    "path component selected population and decoder memory bounds fail closed()",
+    "resident aggregate PAX and logical raw header counts enforce exact and one over bounds()",
+    "short positional reads remain valid while nonprogress and checkpoint cancellation refuse()",
+    "tar framing checksum numeric fields padding and terminator are strict()",
+    "unsafe duplicate missing parent and nonroot first members refuse()"
+  ],
+  "decompengine.oracle.gcc.GccSourceOpenPgpTest": [
+    "actual vendored key verifies all retained certifications and distinct signing subkey()",
+    "archive exact one over short nonprogress and interruption controls are bounded()",
+    "archive streams retain byte digest and signature checks without closing owner input()",
+    "armor framing headers CRC nonASCII and byte limits are closed()",
+    "key and document critical metadata and extra packet material refuse()",
+    "key packet census refuses omitted repeated and substituted subkey bindings()",
+    "primary signing and encryption fingerprints cannot be interchanged or replaced()",
+    "retained active and revoked identity certifications are mandatory and cryptographically checked()",
+    "tag payload signature issuer and creation mutations refuse()",
+    "unhashed embedded signing cross certification must independently verify the exact key pair()"
+  ]
+}

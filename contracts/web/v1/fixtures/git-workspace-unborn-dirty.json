@@ -1,0 +1,22 @@
+{
+  "apiVersion": 1,
+  "kind": "gitWorkspace",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "repositoryVersion": "repo_version_1",
+    "worktreeVersion": "worktree_version_1",
+    "objectFormat": "sha1",
+    "origin": "initialized",
+    "trackingPolicy": "source-only-v1",
+    "headObjectId": null,
+    "headRefId": null,
+    "headState": "unborn",
+    "headRefName": "refs/heads/trunk",
+    "candidateRevisionId": "revision_example_1",
+    "dirty": true,
+    "refs": [],
+    "mapping": null
+  }
+}

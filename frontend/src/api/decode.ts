@@ -13,6 +13,15 @@ for (const schema of contractSchema.oneOf ?? []) {
 }
 variants.set('event', { $ref: '#/definitions/event' });
 
+/** Lazily loaded routes add their generated contract extension once, before decoding those kinds. */
+export function registerContractExtension(extension: Schema) {
+  Object.assign(contractSchema.definitions ??= {}, extension.definitions);
+  for (const schema of extension.oneOf ?? []) {
+    const kind = schema.properties?.kind?.const;
+    if (typeof kind === 'string') variants.set(kind, schema);
+  }
+}
+
 /** Producer mode checks shared closed fixtures; response mode projects additive v1 fields. */
 export function decodeContract(text: string, options: { mode?: 'producer' | 'response'; maxBytes?: number; basePath?: string } = {}): ContractDocument {
   const value = parseBoundedJson(text, options.maxBytes ?? MAX_JSON_BYTES);

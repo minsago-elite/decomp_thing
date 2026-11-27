@@ -76,7 +76,7 @@ function CaseDetail({ value, artifact, jobId, runId, partial }: { value: Retaine
 }
 
 /** Explicit read only; navigation and filters never submit a workflow or persist report bytes. */
-type CasesProps = { artifact: Artifact; jobId: string; runId: string; basePath: string; producerSchemaVersion?: 1 | null };
+type CasesProps = { artifact: Artifact; jobId: string; runId: string; basePath: string; producerSchemaVersion?: 1 | 2 | null };
 
 export function ExplorationCases(props: CasesProps) {
   const scope = JSON.stringify([props.jobId, props.runId, props.basePath, props.artifact, props.producerSchemaVersion ?? null]);
@@ -101,7 +101,8 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
     const controller = new AbortController();
     setLoading(true); setError(''); setData(null); setSelected(null); setPage(0); setSource('');
     void client.readArtifactText(artifact, { jobId, runId }, { signal: controller.signal }).then(text => {
-      if (!controller.signal.aborted) setData(receive(producerSchemaVersion === 1 ? parsePartialCases(text) : parseRetainedCases(text)));
+      if (!controller.signal.aborted) setData(receive(producerSchemaVersion === 1 ? parsePartialCases(text)
+        : parseRetainedCases(text, producerSchemaVersion === 2 ? 2 : null)));
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setError(withApiFailureReference(copy.unavailable, failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -115,7 +116,7 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
   return <section aria-labelledby="retained-cases-title" class="retained-cases">
     <h3 id="retained-cases-title">{copy.title}</h3>
     <p>{copy.scope}</p>
-    <p>{producerSchemaVersion === 1 ? copy.partialFormat : copy.outcomesUnreported}</p>
+    {producerSchemaVersion === 1 ? <p>{copy.partialFormat}</p> : producerSchemaVersion === 2 ? <p>{copy.versionedOutcomes}</p> : <p>{copy.outcomesUnreported}</p>}
     <button type="button" disabled={active && loading} onClick={() => setIntent({ client })}>{active ? copy.refresh : copy.read}</button>
     {active && loading && <p role="status">{copy.loading}</p>}
     {active && error && <p role="alert">{error}</p>}
@@ -136,6 +137,10 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
           <tbody>{(['seeds', 'angr', 'staticHints', 'expanded'] as const).map(group => <tr key={group}>
             <th scope="row">{copy.preparationGroups[group]}</th><td>{preparation.preparation.available[group] ?? copy.unknownCount}</td></tr>)}</tbody></table>
       </>}
+      {producerSchemaVersion === 2 && data && 'retainedInputsOmitted' in data && data.cases.some(value => value.source === 'RETAINED_REGRESSION') &&
+        <p role="status">{message(copy.retainedDisplayOnly, { count: data.cases.filter(value => value.source === 'RETAINED_REGRESSION').length })}</p>}
+      {producerSchemaVersion === 2 && data && 'retainedInputsOmitted' in data && (data.retainedInputsOmitted ?? 0) > 0 &&
+        <p role="status">{message(copy.retainedInputsOmitted, { count: data.retainedInputsOmitted })}</p>}
       {partial?.detailsOmitted || preparation?.detailsOmitted ? <>
         <p role="status">{preparation ? copy.preparationDetailsOmitted : copy.detailsOmitted}</p>
         <a href={artifact.contentHref} download="exploration.json">{preparation ? copy.downloadPreparation : copy.downloadPartial}</a>

@@ -1,4 +1,5 @@
 import { textMessage } from '../shared/messages';
+import { pluralForm } from './format';
 
 export const activityReceiptAgeCopy = {
   "received": "Last activity received: {time} ({age} in this tab). This is receipt age, not the age of the source observations.",
@@ -14,9 +15,14 @@ export const activityReceiptAgeCopy = {
 
 /** Relative receipt age is display copy; the monotonic clock remains in the component. */
 export function receiptAge(seconds: number): string {
-  if (seconds < 10) return activityReceiptAgeCopy.lessThan10SecondsAgo;
-  if (seconds < 60) return textMessage(activityReceiptAgeCopy.secondsAgo, { count: Math.floor(seconds / 10) * 10 });
-  if (seconds < 3600) return textMessage(seconds < 120 ? activityReceiptAgeCopy.minuteAgo : activityReceiptAgeCopy.minutesAgo, { count: Math.floor(seconds / 60) });
-  if (seconds < 86400) return textMessage(seconds < 7200 ? activityReceiptAgeCopy.hourAgo : activityReceiptAgeCopy.hoursAgo, { count: Math.floor(seconds / 3600) });
-  return textMessage(seconds < 172800 ? activityReceiptAgeCopy.dayAgo : activityReceiptAgeCopy.daysAgo, { count: Math.floor(seconds / 86400) });
+  const copy = activityReceiptAgeCopy;
+  if (seconds < 10) return copy.lessThan10SecondsAgo;
+  if (seconds < 60) return textMessage(copy.secondsAgo, { count: Math.floor(seconds / 10) * 10 });
+  const unit = (size: number, forms: { one: string; other: string }) => {
+    const count = Math.floor(seconds / size);
+    return textMessage(pluralForm(count, forms), { count });
+  };
+  if (seconds < 3600) return unit(60, { one: copy.minuteAgo, other: copy.minutesAgo });
+  if (seconds < 86400) return unit(3600, { one: copy.hourAgo, other: copy.hoursAgo });
+  return unit(86400, { one: copy.dayAgo, other: copy.daysAgo });
 }

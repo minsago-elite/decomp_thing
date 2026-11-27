@@ -1240,8 +1240,10 @@ class UploadServerTest {
             val event = item.jsonObject
             assertEquals(index.toString(), event.getValue("sequence").toString())
             assertEquals("true", event.getValue("textOmitted").toString())
-            assertEquals(if (index == 3) "3" else "2", event.getValue("presentationOmittedFields").toString())
-            assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
+            // Provider reasoning also withholds its content commitment (#517).
+            assertEquals(if (index == 0 || index == 3) "3" else "2", event.getValue("presentationOmittedFields").toString())
+            if (index == 0) assertFalse("contentSha256" in event)
+            else assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
         }
         assertEquals("1", rows[4].jsonObject.getValue("entryCount").toString())
         assertEquals("9223372036854775807", rows[5].jsonObject.getValue("inputTokens").toString())

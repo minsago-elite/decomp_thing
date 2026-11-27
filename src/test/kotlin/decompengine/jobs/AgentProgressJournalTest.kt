@@ -227,7 +227,7 @@ class AgentProgressJournalTest {
             // Incomplete chunks publish only a commitment, never an invalid raw preview.
             identities.forEachIndexed { index, text ->
                 task.event(AgentMessageEvent((2 * identities.size + index).toLong(), "content-$index",
-                    AgentMessageRole.THOUGHT, text))
+                    AgentMessageRole.SYSTEM, text))
             }
         }
         val messages = assertNotNull(AgentProgressJournal.read(root)).getValue("events").jsonArray
@@ -546,6 +546,87 @@ class AgentProgressJournalTest {
             ownedThread.get()?.join(5000)
             journal.close()
             // Keep the repository-local fixture; never delete under an unretired writer.
+        }
+    }
+
+    @Test
+    fun `timed out snapshot close retains ownership until full history finalizes`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-full-run-finalization")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val journal = AgentProgressJournal.withFullRunWriterHooks(
+            root,
+            "reconstruction",
+            FullRunJournalWriterHooks(maximumQueuedEvents = 1, beforeAppend = {
+                entered.countDown()
+                release.await()
+                error("private append failure")
+            }),
+        )
+        try {
+            assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val firstClose = assertFailsWith<IllegalStateException> { journal.close() }
+            assertEquals("progress writer did not stop within five seconds", firstClose.message)
+
+            val blocked = runCatching { AgentProgressJournal(root, "reconstruction") }
+            blocked.getOrNull()?.close()
+            assertEquals("another workflow owns the progress journal",
+                assertIs<IllegalArgumentException>(blocked.exceptionOrNull()).message)
+
+            release.countDown()
+            val finalizationAttempt = runCatching { journal.close() }
+            assertNotNull(journal.persistenceFailure, "full history failure was not retained")
+            val finalization = assertIs<IllegalStateException>(finalizationAttempt.exceptionOrNull())
+            assertEquals("progress journal persistence failed", finalization.message)
+            val history = root.resolve(FullRunJournal.DIRECTORY).toFile().listFiles().orEmpty().single()
+            val metadata = FullRunJournal.metadata(history.toPath())
+            assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
+
+        } finally {
+            release.countDown()
+            runCatching { journal.close() }
+        }
+    }
+
+    @Test
+    fun `snapshot publication failure marks the retained full history incomplete`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-snapshot-history-failure")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        val snapshotEntered = java.util.concurrent.CountDownLatch(1)
+        val releaseSnapshot = java.util.concurrent.CountDownLatch(1)
+        val journal = AgentProgressJournal.withFullRunWriterHooks(
+            root,
+            "reconstruction",
+            FullRunJournalWriterHooks(),
+            afterSnapshotWrite = {
+                snapshotEntered.countDown()
+                releaseSnapshot.await()
+                error("injected snapshot publication failure")
+            },
+        )
+        try {
+            assertTrue(snapshotEntered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            journal.phase(AgentWorkflowPhase.AGENT_RUNNING)
+        } finally {
+            releaseSnapshot.countDown()
+        }
+
+        val closeFailure = assertFailsWith<IllegalStateException> { journal.close() }
+        assertEquals("progress journal persistence failed", closeFailure.message)
+        assertEquals("injected snapshot publication failure", journal.persistenceFailure?.message)
+        val history = assertNotNull(journal.fullRunDirectory)
+        val metadata = FullRunJournal.metadata(history)
+        assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
+        FullRunEventReader(history).use { reader ->
+            val events = mutableListOf<JsonObject>()
+            while (true) events += reader.next() ?: break
+            assertTrue(events.any { it.getValue("sequence").jsonPrimitive.long == 1L })
+            assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
         }
     }
 
@@ -1053,7 +1134,7 @@ class AgentProgressJournalTest {
         AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
             val task = journal.beginTask("streamed-hash-task", request(root))
             cases.forEachIndexed { index, text ->
-                task.event(AgentMessageEvent(index.toLong(), "case-$index", AgentMessageRole.THOUGHT, text))
+                task.event(AgentMessageEvent(index.toLong(), "case-$index", AgentMessageRole.SYSTEM, text))
             }
         }
         val messages = assertNotNull(AgentProgressJournal.read(root)).getValue("events").jsonArray
@@ -1064,6 +1145,40 @@ class AgentProgressJournalTest {
             assertEquals(cases[index].length, record.getValue("chunkCharacters").jsonPrimitive.int)
             assertFalse("text" in record)
         }
+    }
+
+    @Test
+    fun `private reasoning is neither retained measured nor committed`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-reasoning").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("reasoning-task", request(root))
+            task.event(AgentMessageEvent(0, "reasoning", AgentMessageRole.THOUGHT, "PRIVATE_REASONING_PREFIX "))
+            task.event(AgentMessageEvent(1, "reasoning", AgentMessageRole.THOUGHT, "PRIVATE_REASONING_TAIL", completed = true))
+            task.event(AgentMessageEvent(2, "answer", AgentMessageRole.ASSISTANT, "public answer", completed = true))
+        }
+        val journal = assertNotNull(AgentProgressJournal.read(root))
+        assertFalse(journal.toString().contains("PRIVATE_REASONING"))
+        val messages = journal.getValue("events").jsonArray.map { it.jsonObject }
+            .filter { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals(3, messages.size)
+        messages.take(2).forEach { record ->
+            assertEquals("thought", record.getValue("role").jsonPrimitive.content)
+            assertTrue(record.getValue("textOmitted").jsonPrimitive.boolean)
+            listOf("text", "contentSha256", "chunkCharacters", "messageIdSha256").forEach { assertFalse(it in record, it) }
+        }
+        assertTrue(messages[1].getValue("completed").jsonPrimitive.boolean)
+        assertEquals("public answer", messages[2].getValue("text").jsonPrimitive.content)
+        assertEquals(AgentProgressJournal.displayCommitment("public answer"), messages[2].getValue("contentSha256").jsonPrimitive.content)
+        // Records written before this policy keep their sequence, but public replay withholds the measurements.
+        val legacy = buildJsonObject {
+            put("sequence", 4); put("kind", "message"); put("role", "thought"); put("text", "PRIVATE_REASONING")
+            put("contentSha256", "a".repeat(64)); put("chunkCharacters", 17); put("completed", true)
+        }
+        val public = publicProgressRecord(legacy)
+        assertEquals(setOf("role", "completed", "textOmitted"), public.fields.keys)
+        assertEquals(3, public.omittedFieldCount)
+        assertTrue(public.fields.getValue("textOmitted").jsonPrimitive.boolean)
     }
 
     private fun request(root: java.nio.file.Path) = AgentExecutionRequest(

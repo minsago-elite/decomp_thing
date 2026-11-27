@@ -24,6 +24,11 @@ internal fun canonicalWebJobStoreRoot(
     return canonical.normalize()
 }
 
+/** Fixed-code refusal shared by local and cross-process web ownership checks. */
+internal class WebJobStoreOwnershipException : IllegalStateException("Job store already has a live web server owner") {
+    val code: String = "OWNERSHIP_CONFLICT"
+}
+
 /** Cooperative web-server ownership; the lock file must never be unlinked while in use. */
 internal class WebJobStoreOwnership private constructor(
     private val root: Path,
@@ -49,7 +54,7 @@ internal class WebJobStoreOwnership private constructor(
             val opened = FileChannel.open(root.resolve(".web-owner.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
             try {
                 val lock = try { opened.tryLock() } catch (_: OverlappingFileLockException) { null }
-                check(lock != null) { "Job store already has a live web server owner" }
+                if (lock == null) throw WebJobStoreOwnershipException()
                 channel = opened
             } catch (failure: Exception) {
                 try { opened.close() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
@@ -67,12 +72,12 @@ internal class WebJobStoreOwnership private constructor(
             return synchronized(owners) {
                 // Some platforms release process locks when any channel to that file closes.
                 // Reject local contenders before opening a second channel.
-                check(canonicalRoot !in owners) { "Job store already has a live web server owner" }
+                if (canonicalRoot in owners) throw WebJobStoreOwnershipException()
                 if (Files.isDirectory(canonicalRoot, NOFOLLOW_LINKS)) {
                     val channel = FileChannel.open(canonicalRoot.resolve(".web-owner.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
                     try {
                         val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
-                        check(lock != null) { "Job store already has a live web server owner" }
+                        if (lock == null) throw WebJobStoreOwnershipException()
                         WebJobStoreOwnership(canonicalRoot, channel).also { owners[canonicalRoot] = it }
                     } catch (failure: Exception) {
                         try { channel.close() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }

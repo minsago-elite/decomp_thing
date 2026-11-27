@@ -1198,6 +1198,7 @@ class MvpPatchWorkflowTest {
 
         assertEquals(2, client.requests.size)
         assertEquals(setOf("decompiled.c", "ghidra_decompiled.c"), client.requests.first().projectFiles.keys)
+        assertEquals(listOf("binary-reconstruction", "memory-safety"), client.requests.map { it.failureKind })
         assertTrue(client.requests.first().projectFiles.getValue("ghidra_decompiled.c").contains("ghidra"))
         assertEquals(setOf("decompile/decompiled.c", "patched.c"), client.requests.last().projectFiles.keys)
         assertTrue(output.resolve("decompile/decompiled.c").readText().contains("badge[i]"))

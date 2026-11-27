@@ -15,7 +15,7 @@ import time
 
 BUILD = Path(__file__).resolve().parent.parent / "build"
 MAX_OUTPUT_BYTES = 262144
-MAX_FILE_BYTES = 32768
+MAX_FILE_BYTES = 65536
 MAX_LINES = 240
 MAX_LINE_BYTES = 1024
 MAX_ENTRIES = 4096
@@ -60,7 +60,9 @@ def admitted_root(root, expected):
 
 
 def selected_path(parts):
-    return (parts[-2:] in (("reports", "build.log"), ("src", "main.c"))
+    return (parts[-2:] in (("reports", "build.log"), ("reports", "ghidra_stdout.log"),
+                           ("reports", "ghidra_stderr.log"), ("reports", "ghidra_resource_usage.json"),
+                           ("src", "main.c"))
             or (parts[-1].endswith(".log") and any(
                 parts[i:i + 3] == ("reports", "build", "modules") for i in range(len(parts) - 3))))
 

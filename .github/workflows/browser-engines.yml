@@ -1,0 +1,109 @@
+name: Browser engine qualification
+
+# Cross-engine packaged smoke and audit (#631, #1791). Qualify changes to the engine driver
+# before merge; unrelated pull requests avoid this additional distribution build. Explicit
+# dispatch remains available. Each report records the engine and Playwright versions.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/browser-engines.yml'
+      - 'scripts/*browser-engine*.mjs'
+      - 'scripts/packaged-browser-audit.mjs'
+      - 'scripts/packaged-browser-install.py'
+      - 'frontend/src/api/client.ts'
+      - 'frontend/tests/capability-fallbacks.test.tsx'
+  workflow_dispatch:
+    inputs:
+      engines:
+        description: Space-separated Playwright engines (firefox, webkit, chromium)
+        required: true
+        default: firefox webkit
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  engines:
+    name: Packaged cross-engine journeys
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+      PLAYWRIGHT_CORE_VERSION: 1.58.2
+      ENGINES: ${{ github.event_name == 'pull_request' && 'firefox webkit' || inputs.engines }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        with:
+          cache-read-only: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/oracle-generation.txt
+      - name: Install build-time Python requirements
+        run: python3 -m pip install --requirement requirements/oracle-generation.txt
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
+      - name: Install pinned frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Validate requested engines
+        run: |
+          engines="$(node scripts/browser-engine-input.mjs "$ENGINES")"
+          echo "ENGINES=$engines" >> "$GITHUB_ENV"
+      - name: Verify shared audit and cross-engine adapter controls
+        run: |
+          node scripts/test-packaged-browser-audit.mjs
+          node scripts/test-packaged-browser-engine-adapter.mjs
+      - name: Install test-only Playwright and browsers with host dependencies
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pw" --no-audit --no-fund --no-save "playwright-core@$PLAYWRIGHT_CORE_VERSION"
+          # shellcheck disable=SC2086
+          sudo --preserve-env=PLAYWRIGHT_BROWSERS_PATH "$(command -v node)" "$RUNNER_TEMP/pw/node_modules/playwright-core/cli.js" install-deps $ENGINES
+          # shellcheck disable=SC2086
+          node "$RUNNER_TEMP/pw/node_modules/playwright-core/cli.js" install $ENGINES
+      - name: Build the packaged distribution
+        run: |
+          ./gradlew --no-daemon distZip
+          web_distribution=("$GITHUB_WORKSPACE"/build/distributions/*.zip)
+          test "${#web_distribution[@]}" -eq 1
+          echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
+      - name: Run the packaged smoke and audit in each engine
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
+        run: |
+          status=0
+          for engine in $ENGINES; do
+            node scripts/packaged-browser-engines.mjs --engine "$engine" --archive "$WEB_TEST_ARCHIVE" \
+              --java-home "$JAVA_HOME" --python "$(command -v python3)" \
+              --playwright "$RUNNER_TEMP/pw/node_modules/playwright-core" --work-parent "$GITHUB_WORKSPACE/build" || status=1
+          done
+          exit "$status"
+      - name: Retain engine reports and screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-engine-qualification
+          retention-days: 30
+          if-no-files-found: warn
+          path: build/packaged-engines-*/

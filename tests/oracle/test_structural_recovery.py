@@ -1274,6 +1274,7 @@ class StructuralRecoveryTest(unittest.TestCase):
             REPOSITORY_ROOT / "oracle/targets/sysv-amd64-v1.json",
             REPOSITORY_ROOT / "scripts/score-structural-recovery.py",
             REPOSITORY_ROOT / "docs/structural-recovery-scoring.md",
+            REPOSITORY_ROOT / "src/main/kotlin/decompengine/oracle/structural/StructuralSelectedFunctionAssessmentV1.kt",
         )
         for path in generic_files:
             self.assertNotIn("gcc", path.read_text(encoding="utf-8").lower(), str(path))

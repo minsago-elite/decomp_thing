@@ -31,6 +31,7 @@ internal class MvpRunEvidence(
     val profileId: String,
     val profileSha256: String,
     val maximumProjectionBytes: Long = MAXIMUM_REPAIR_PROJECTION_BYTES,
+    val vulnerabilityCase: MvpVulnerabilityCase = MvpVulnerabilityCase.OUT_OF_BOUNDS_WRITE,
 ) {
     private val artifactRedactor = MvpArtifactRedactor(environment.values, maximumProjectionBytes)
     private val diagnosticRedactor = ProgressRedactor(artifactRedactor.sensitiveValues)
@@ -109,7 +110,7 @@ internal fun writeMvpSummary(
     val artifactFacts = artifacts.map { (kind, path) ->
         if (Thread.currentThread().isInterrupted) throw InterruptedException("MVP summary interrupted")
         if (path == null || !path.exists()) MvpSummaryArtifactFact(kind, null, false) else {
-            val publicPath = kind.publicRelativePath?.let { relative ->
+            val publicPath = (if (kind == MvpSummaryArtifact.FINDING) evidence.vulnerabilityCase.findingRelativePath else kind.publicRelativePath)?.let { relative ->
                 path.toAbsolutePath().normalize() == output.resolve(relative).toAbsolutePath().normalize()
             } == true
             MvpSummaryArtifactFact(kind, path.sha256(), publicPath)
@@ -133,10 +134,10 @@ internal fun writeMvpSummary(
         val sourceMapping = evidence.artifactText {
             val location = evidence.findingSourceLocation
             if (location != null) {
-                append("AddressSanitizer mapped the observed out-of-bounds write to `").append(location)
+                append(evidence.vulnerabilityCase.evidenceKind).append(" mapped the selected weakness to `").append(location)
                     .append("` in `decompile/decompiled.c`.")
             } else {
-                append("No source location was captured before the workflow stopped.")
+                append(if (evidence.vulnerabilityCase == MvpVulnerabilityCase.COMMAND_INJECTION) "Behavioral probe evidence is bound to the reconstructed source artifact; it does not establish a source line." else "No source location was captured before the workflow stopped.")
             }
         }
         val approvedDiff = evidence.patchDiff?.takeIf(String::isNotBlank)?.let {
@@ -168,8 +169,8 @@ internal fun writeMvpSummary(
                     append("unavailable | unavailable |")
                 }
             }
-            append("\n\n## CWE-787 Evidence and Source Mapping\n\n").append(sourceMapping)
-            append(" The unpatched reconstructed program is classified as CWE-787 only when its sanitizer run reports an out-of-bounds write. Exact retained output: `")
+            append("\n\n## ").append(evidence.vulnerabilityCase.cwe).append(" Evidence and Source Mapping\n\n").append(sourceMapping)
+            append(" Selected bounded case: ").append(evidence.vulnerabilityCase.id).append("; evidence method: ").append(evidence.vulnerabilityCase.evidenceKind).append(". Exact retained output: `")
                 .append(evidence.findingPath?.takeIf(Path::exists)?.relativeOrAbsolute(output) ?: "unavailable").append("`.\n\n")
             append("## Approved Source Change\n\n").append(normalizedPatch).append("\n\n").append(approvedDiff)
             append("\n\n## Build and Validation Results\n\n| Check | Status | Evidence |\n|---|---|---|\n").append(verificationRows)
@@ -179,7 +180,7 @@ internal fun writeMvpSummary(
             append("\n- Patched binary: `")
                 .append(if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published").append("`")
             append("\n- Logs: `logs/`\n- Retained evidence: `evidence/`\n\n## Residual Risks\n\n")
-            append("Validation covers the retained sanitizer reproducer and observed default behavior; it does not prove correctness for unobserved inputs. Decompiled names and source structure may differ from the original source. A final binary is published only after sanitizer, hardening, security, and behavior checks pass.\n")
+            append("Validation covers only the selected pinned corpus case, retained case-specific evidence and explicit safe behavior contract; compiler diagnostics are diagnostic-level evidence and behavioral probes do not prove all-input security; it does not prove correctness for unobserved inputs. Decompiled names and source structure may differ from the original source. A final binary is published only after case-specific evidence, hardening, security, and behavior checks pass. Authored fixture controls do not qualify live reconstruction or ACP interoperability.\n")
         }
         encodeMvpArtifactUtf8(text)
     } catch (_: MvpPatchException) {
