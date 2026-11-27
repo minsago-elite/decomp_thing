@@ -62,7 +62,12 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
     setProgress(null);
   }, [binding, session]);
   useEffect(() => refresh === 0 ? undefined : beginSourceRead(key, async signal => bindSourceArchive(
-    (await client.get('sourceArchive', archiveStatusRoute(selected), { signal })).data, selected, basePath), setRead), [client, key]);
+    (await client.get('sourceArchive', archiveStatusRoute(selected), { signal })).data, selected, basePath), next => {
+      setRead(next);
+      if (next.state === 'ready' && next.value.verification.state !== 'running') {
+        setProgress(previous => previous?.state === 'paused' && previous.readKey !== next.key ? null : previous);
+      }
+    }), [client, key]);
   const current = refresh > 0 && read ? currentSourceRead(read, key) : refresh > 0 ? { key, state: 'loading' as const } : null;
   const data = current?.state === 'ready' ? current.value : null;
   function holdLink(nextKey: string) {
@@ -92,7 +97,8 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   }, [current?.key, current?.state, data]);
   const running = progress?.state === 'submitting' || progress?.state === 'running';
   // A fresh archive read can establish a final outcome after automatic operation polling stops.
-  const paused = progress?.state === 'paused' && (progress.readKey === key || !data || data.verification.state === 'running');
+  const paused = progress?.state === 'paused';
+  const statusBusy = current?.state === 'loading' || running;
   function verify(archiveSha256: string, control: HTMLElement | null) {
     if (busy.current) return;
     const csrfToken = session.csrf();
@@ -141,8 +147,12 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   return <section class="source-archive" aria-labelledby="source-archive-title">
     <h2 id="source-archive-title">{copy.title}</h2>
     <p>{copy.distinction}</p>
-    <button type="button" disabled={current?.state === 'loading' || running} onClick={() => setRefresh(value => { holdLink([binding, value + 1].join('/')); return value + 1; })}>
-      {refresh === 0 ? copy.inspect : copy.refresh}</button>
+    <button type="button" aria-disabled={statusBusy || undefined} onClick={() => {
+      if (statusBusy || busy.current) return;
+      const next = refresh + 1;
+      holdLink([binding, next].join('/'));
+      setRefresh(next);
+    }}>{refresh === 0 ? copy.inspect : copy.refresh}</button>
     {current?.state === 'loading' && <p role="status">{copy.loading}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && verification && <>

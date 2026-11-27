@@ -179,6 +179,27 @@ it('announces the polling limit and checks the result on request without submitt
   await inspect(panel!, verified, copy.refresh);
   expect(notice()).toBe('');
   expect(button(panel!, copy.verify).hasAttribute('aria-disabled')).toBe(false);
+  button(panel!, copy.refresh).click(); await microtasks();
+  expect(notice()).toBe('');
+  paint(); await microtasks();
+  await settle(verified);
+  expect(notice()).toBe('');
   expect(transport.post).toHaveBeenCalledOnce();
   expect(log.filter(entry => entry.includes('/archive-verifications/'))).toHaveLength(120);
+});
+
+it('keeps Refresh focusable during a held status read and ignores repeat activation', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  const refresh = button(panel!, copy.refresh);
+  refresh.focus(); refresh.click(); refresh.click();
+  await microtasks(); paint(); await microtasks();
+  expect(refresh.hasAttribute('disabled')).toBe(false);
+  expect(refresh.getAttribute('aria-disabled')).toBe('true');
+  refresh.click(); await microtasks(); paint(); await microtasks();
+  expect(pending).toHaveLength(1);
+  expect(log.filter(entry => entry.endsWith('/source-archive'))).toHaveLength(2);
+  await settle(verified);
+  expect(refresh.getAttribute('aria-disabled')).not.toBe('true');
+  expect(document.activeElement).toBe(refresh);
 });

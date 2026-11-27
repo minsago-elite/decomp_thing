@@ -124,3 +124,19 @@ it('keeps intervening focus on a successful retry', async () => {
   await screen.findByRole('region', { name: 'Build log lines' });
   expect(document.activeElement).toBe(elsewhere);
 });
+
+it.each(['stay', 'move', 'blur'] as const)('handles focus from Check again when a missing log appears (%s)', async choice => {
+  transport.get.mockResolvedValueOnce({ data: { ...fixture, state: 'missing' } });
+  let complete!: (response: unknown) => void;
+  transport.get.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  const { container } = mount();
+  const elsewhere = container.appendChild(document.createElement('button'));
+  const again = await screen.findByRole('button', { name: 'Check again' });
+  again.focus(); again.click();
+  if (choice === 'move') elsewhere.focus();
+  if (choice === 'blur') again.blur();
+  complete({ data: fixture });
+  const lines = await screen.findByRole('region', { name: 'Build log lines' });
+  expect(document.activeElement).toBe(choice === 'stay' ? lines : choice === 'move' ? elsewhere : document.body);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+});

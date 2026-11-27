@@ -46,7 +46,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const mounted = useRef(true);
   // A held retry owns the initial read until it settles; same-turn activations cannot supersede it.
   const retrying = useRef(false);
-  const focusedRetryGeneration = useRef<number | null>(null);
+  const focusedRecoveryGeneration = useRef<number | null>(null);
   const recoveryButton = useRef<HTMLButtonElement>(null);
   const oversizedNotice = useRef<HTMLParagraphElement>(null);
   const [attemptState, setAttemptState] = useState<string | null>(null);
@@ -121,7 +121,14 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       followRef.current = 'off'; setFollow('off');
       if (!bufferRef.current) setStatus({ state: 'error' });
       return null;
-    } finally { requests.current.delete(controller); }
+    } finally {
+      requests.current.delete(controller);
+      // Check again stays mounted during its read. Claim focus only if the reader still has
+      // that button focused just before the result replaces it.
+      if (current() && recoveryButton.current && document.activeElement === recoveryButton.current) {
+        focusedRecoveryGeneration.current = ownGeneration;
+      }
+    }
   }, [client, jobId, runId, cancelReads]);
 
   useEffect(() => {
@@ -169,11 +176,11 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     setScrollTop(element.scrollTop);
   });
 
-  // Restore keyboard focus when the retry's result commits, including immediate settlements.
+  // Restore keyboard focus when the recovery read commits, including immediate settlements.
   useLayoutEffect(() => {
-    if (focusedRetryGeneration.current === null || status.state === 'loading') return;
-    const ownsRead = focusedRetryGeneration.current === generation.current;
-    focusedRetryGeneration.current = null;
+    if (focusedRecoveryGeneration.current === null || status.state === 'loading') return;
+    const ownsRead = focusedRecoveryGeneration.current === generation.current;
+    focusedRecoveryGeneration.current = null;
     const active = document.activeElement;
     if (!ownsRead || (active !== null && active !== document.body)) return;
     const target = viewport.current ?? recoveryButton.current ?? oversizedNotice.current;
@@ -223,7 +230,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
         const focused = document.activeElement === event.currentTarget;
         setError(''); setStatus({ state: 'loading' });
         const request = read({ tail: 'true', limit: '200' }, 'end', () => 'end');
-        focusedRetryGeneration.current = focused ? generation.current : null;
+        focusedRecoveryGeneration.current = focused ? generation.current : null;
         void request.finally(() => { retrying.current = false; });
       }}>{copy.retry}</button>
     </div>}
