@@ -29,7 +29,27 @@ interface DurableWebWorkflowAdapter {
     val publication: DurableWebWorkflowPublication? get() = null
     /** Null means checkpoint resume is unsupported; explicit retry remains a separate new attempt. */
     val checkpoints: DurableWebWorkflowCheckpointPolicy? get() = null
+    /** A distinct opt-in: the default continuation path always refuses. */
+    val continuation: DurableWebWorkflowContinuation? get() = null
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
+}
+
+/** Only detached bytes from the admitted checkpoint may reach the execution adapter. */
+class VerifiedWebCheckpoint(bytes: ByteArray, val restores: WorkflowResumeRestoration) {
+    init { require(bytes.size <= MAX_BYTES) }
+    private val content = bytes.copyOf()
+    val sha256 = decompengine.project.sha256(content)
+    fun bytes(): ByteArray = content.copyOf()
+
+    companion object {
+        const val MAX_BYTES = 1_048_576
+    }
+}
+
+interface DurableWebWorkflowContinuation {
+    /** Read only the workflow's fixed, bounded checkpoint files and return a detached capture. */
+    fun capture(request: DurableWebWorkflowCheckpointRequest): VerifiedWebCheckpoint?
+    fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint): DurableWebWorkflowOutcome
 }
 
 /**
@@ -108,10 +128,11 @@ data class DurableWebWorkflowPublicationContext(
 
 /**
  * Internal execution context. Paths are never transport DTO fields. A recovery attempt records its
- * mode/checkpoint in [WorkflowAttempt.recovery]; [predecessorReportsDirectory] is present only for resume.
+ * mode and admitted checkpoint in [WorkflowAttempt.recovery].
  * [inputSourceTree] is the selected recorded revision's retained source for adapters that require one.
  */
 data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
+    /** Retained for source compatibility. Verified continuation receives detached checkpoint bytes. */
     val predecessorReportsDirectory: Path? = null, val inputSourceTree: Path? = null)
 
 sealed interface DurableWebWorkflowOutcome {

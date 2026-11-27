@@ -970,10 +970,10 @@ class WebJobService(
     private fun <T> coordinatePinPublication(jobId: String, runId: String, command: (WorkflowAttemptStore) -> T,
         currentAttempt: (T) -> WorkflowAttempt): T {
         val owner = writableStore()
-        getAttempt(jobId, runId)
-        val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
+        val previous = getAttempt(jobId, runId)
+        val task = active[jobId] as? DurableTask
         return try {
-            command(owner).also { result -> task?.attempt = currentAttempt(result) }
+            command(owner).also { result -> task?.pinPublished(previous, currentAttempt(result)) }
         } catch (failure: Throwable) {
             if (failure is WorkflowStoreException && !failure.outcomeUnknown) {
                 throw WebJobServiceException(failure.code, "The progress retention pin request was not applied. Refresh the attempt before retrying.", failure)
@@ -1328,7 +1328,7 @@ class WebJobService(
     }
 
     private sealed interface RecoveryDecision {
-        data class Admissible(val registration: Registration, val recovery: WorkflowAttemptRecovery, val predecessorReports: Path?,
+        data class Admissible(val registration: Registration, val recovery: WorkflowAttemptRecovery,
             val inputSourceTree: Path? = null) : RecoveryDecision
         data class Refused(val code: String) : RecoveryDecision
     }
@@ -1368,8 +1368,9 @@ class WebJobService(
             null
         }
         val decision = if (mode == WorkflowRecoveryMode.RETRY) {
-            RecoveryDecision.Admissible(registration, WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY), null, inputSourceTree)
+            RecoveryDecision.Admissible(registration, WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY), inputSourceTree)
         } else {
+            if (registration.adapter.continuation == null) return refuse("RESUME_UNSUPPORTED")
             val policy = registration.adapter.checkpoints ?: return refuse("RESUME_UNSUPPORTED")
             if (predecessor.harnessCapabilityId != registration.harnessCapabilityId) return refuse("HARNESS_CHANGED")
             val directory = try { store.runReportsDirectory(jobId, predecessor.runId) } catch (_: Exception) { return refuse("CHECKPOINT_MISSING") }
@@ -1378,7 +1379,7 @@ class WebJobService(
             when (checkpoint) {
                 is DurableWebWorkflowCheckpoint.Refused -> return refuse(checkpoint.reason.code)
                 is DurableWebWorkflowCheckpoint.Verified -> RecoveryDecision.Admissible(registration,
-                    WorkflowAttemptRecovery(WorkflowRecoveryMode.RESUME, checkpoint.restores, checkpoint.checkpointSha256), directory,
+                    WorkflowAttemptRecovery(WorkflowRecoveryMode.RESUME, checkpoint.restores, checkpoint.checkpointSha256),
                     inputSourceTree)
             }
         }
@@ -1436,8 +1437,8 @@ class WebJobService(
             owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedRunVersion)
         }
         if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
-        return dispatchAdmitted(DurableTask(job, admitted.attempt, decision.registration.adapter, decision.predecessorReports,
-            decision.inputSourceTree))
+        return dispatchAdmitted(DurableTask(job, admitted.attempt, decision.registration.adapter,
+            decision.inputSourceTree, predecessor))
     }
 
     /** Shared by starts and recovery commands: a declared prerequisite must hold in the supplied snapshot. */
@@ -1872,7 +1873,16 @@ class WebJobService(
     }
 
     private inner class DurableTask(val job: Job, var attempt: WorkflowAttempt, val adapter: DurableWebWorkflowAdapter,
-        val predecessorReports: Path? = null, val inputSourceTree: Path? = null) : OwnedTask(job.id) {
+        val inputSourceTree: Path? = null, private var admittedPredecessor: WorkflowAttempt? = null) : OwnedTask(job.id) {
+        // Invoked under the service monitor only after pin publication succeeded.
+        fun pinPublished(previous: WorkflowAttempt, current: WorkflowAttempt) {
+            if (current.runId == attempt.runId) attempt = current
+            if (admittedPredecessor == previous && current == previous.copy(version = current.version,
+                    progressRetentionPinned = current.progressRetentionPinned)) {
+                admittedPredecessor = current
+            }
+        }
+        private val admitted = attempt
         private var publicationFailure: WebJobServiceException? = null
         var cancellationRequested = false
         fun failPublication(failure: WebJobServiceException) {
@@ -1888,9 +1898,13 @@ class WebJobService(
                     worker = Thread.currentThread()
                     attempt = checkNotNull(attempts).transition(jobId, attempt.runId, attempt.version, WorkflowTransition.Start).attempt
                     DurableWebWorkflowContext(job, attempt, store.runReportsDirectory(jobId, attempt.runId, create = true),
-                        predecessorReports, inputSourceTree)
+                        inputSourceTree = inputSourceTree)
                 }
-                val outcome = adapter.execute(context)
+                val outcome = when {
+                    !matchesAdmission(context.attempt) -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
+                    admitted.recovery?.mode == WorkflowRecoveryMode.RESUME -> resume(context)
+                    else -> adapter.execute(context)
+                }
                 synchronized(this@WebJobService) {
                     if (closed || stopping || (Thread.currentThread().isInterrupted && !cancellationRequested)) finish(interrupted())
                     else finish(when (outcome) {
@@ -1912,6 +1926,42 @@ class WebJobService(
                 }
             } finally { synchronized(this@WebJobService) { release() } }
         }
+        // Pinning and starting advance lifecycle fields while the admitted execution inputs stay fixed.
+        private fun matchesAdmission(current: WorkflowAttempt): Boolean = current == admitted.copy(
+            state = current.state, startedAt = current.startedAt, version = current.version,
+            progressRetentionPinned = current.progressRetentionPinned,
+        )
+
+        private fun resume(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+            val refused = DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
+            val continuation = adapter.continuation ?: return refused
+            val predecessor = synchronized(this@WebJobService) { admittedPredecessor } ?: return refused
+            val recovery = admitted.recovery ?: return refused
+            fun stillOwned(): Boolean = synchronized(this@WebJobService) {
+                publicationFailure?.let { throw it }
+                if (terminal || active[jobId] !== this || closed || stopping || cancellationRequested) {
+                    throw InterruptedException("Continuation ownership changed")
+                }
+                val snapshot = (checkNotNull(attempts).inspect(jobId) as? WorkflowJobInspection.Available)?.snapshot
+                snapshot?.latestRun == attempt && matchesAdmission(attempt) && attempt.previousRunId == predecessor.runId &&
+                    snapshot.attempts.singleOrNull { it.runId == predecessor.runId } == admittedPredecessor
+            }
+
+            if (!stillOwned()) return refused
+            val capture = try {
+                val directory = store.runReportsDirectory(jobId, predecessor.runId)
+                continuation.capture(DurableWebWorkflowCheckpointRequest(job, predecessor, directory))
+            } catch (cancelled: InterruptedException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+            if (!stillOwned() || capture == null || capture.sha256 != recovery.checkpointSha256 || capture.restores != recovery.restores) {
+                return refused
+            }
+            return continuation.continueFrom(context, capture)
+        }
+
         override fun stopPending() = finish(interrupted())
         fun finish(transition: WorkflowTransition.Finish) = completionPublication.publishCompletion<Unit> {
             publicationFailure?.let { throw it }
