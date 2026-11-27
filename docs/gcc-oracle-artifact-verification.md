@@ -100,7 +100,7 @@ docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0
 Authenticate the resulting inspect response against the reproduction lock:
 
 ```bash
-docker image inspect decomp-gcc-oracle-toolchain:16.2.0 \
+DOCKER_API_VERSION=1.49 docker image inspect decomp-gcc-oracle-toolchain:16.2.0 \
   | python3 scripts/verify-gcc-toolchain-reproduction.py \
       --lock oracle/gcc/16.2.0/toolchain-reproduction.json \
       --build-record oracle/gcc/16.2.0/build-record.json
@@ -108,13 +108,13 @@ docker image inspect decomp-gcc-oracle-toolchain:16.2.0 \
 
 The historical artifact origin remains
 `sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248`.
-Current no-cache hosted builds deterministically produce
+The reproduction lock requires image ID
 `sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511`.
 The separate lock approves that reproduction only when the Dockerfile and
 build record have their exact checked hashes, all `FROM` instructions use the
-locked base digest, the OCI config hashes exactly, and all nine ordered rootfs
-diff IDs match. Any drift fails closed even if a mutable tag has the expected
-name.
+locked base digest, and the image ID, creation time, API 1.49 inspect
+`Config` hash and all nine ordered rootfs diff IDs match. Any drift fails closed
+even if a mutable tag has the expected name.
 
 This does not relabel the historical artifacts or claim that the two OCI
 config blobs are byte-identical. The original image config blob is not
