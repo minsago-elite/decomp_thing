@@ -1,4 +1,4 @@
-import { activityCopy as copy, activityHistoryCopy } from '../copy/attempt';
+import { activityCopy as copy, activityHistoryCopy, runCopy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
 import { PrivateSessionContext, usePrivateTransport } from '../session/PrivateTransport';
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
@@ -16,7 +16,9 @@ import { ActivityHistory } from './ActivityHistory';
 import { ActivityStages } from './ActivityStages';
 import { useIdentityDigests } from './activityCorrelation';
 import { activityWindowLocation, activityWindowSearch, type ActivityNavigation } from './activityNavigation';
-import { runViewPath } from '../app/paths';
+import { appPath, runViewPath } from '../app/paths';
+import { isDeletedJob } from '../shared/retainMetadata';
+import { jobCopy } from '../copy/job';
 
 const capacity = 200;
 type ActivityPosition = { initialized: boolean; cursor: string | null; rows: WebEvent[]; last: WebEvent | null };
@@ -56,6 +58,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [rows, setRows] = useState<WebEvent[]>([]);
   const [error, setError] = useState('');
+  const [deleted, setDeleted] = useState(false);
   const [group, setGroup] = useState<'all' | ActivityGroup>('all');
   const [taskDigest, setTaskDigest] = useState('');
   const [reset, setReset] = useState(0);
@@ -173,6 +176,12 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           return;
         }
         if (transient && failures.current >= 4) void session?.revalidate();
+        // A deletion tombstone ends this attempt's activity: drop stale rows and never follow or retry again (#512).
+        if (isDeletedJob(failure)) {
+          position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
+          setDeleted(true); setError(withApiFailureReference(runCopy.thisJobWasDeleted, failure)); setFollowing(false);
+          return;
+        }
         if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
           position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
         }
@@ -209,7 +218,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     }}>
       {rows.length === capacity ? copy.continueActivityOnNextPage : following ? copy.pauseActivity : position.current.initialized ? copy.resumeActivity : copy.followActivity}
     </button>{' '}
-    <button type="button" onClick={() => {
+    <button type="button" disabled={deleted} onClick={() => {
       pageAfter.current = null;
       position.current = { initialized: false, cursor: null, rows: [], last: null };
       setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = streamingUnavailable; setPeriodic(streamingUnavailable); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
@@ -237,6 +246,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     })}</p>
     <p>{displayMessage(copy.receipt, { receipt: lastRead ? <ActivityReceiptAge receipt={lastRead} visible={availability.visible} /> : copy.noPage })}</p>
     {error && <p role="alert">{error}</p>}
+    {deleted && <p><a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></p>}
     {rows.length === capacity && <p>{copy.displayLimitReachedContinueActivityOnTheNextPageTo}</p>}
     {snapshot && <>
       <p>{displayMessage(copy.snapshot, { state: snapshot.run.state, acceptance: snapshot.run.acceptance })}</p>
