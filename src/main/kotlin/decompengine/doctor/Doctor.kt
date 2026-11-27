@@ -7,6 +7,7 @@ import decompengine.acp.AcpAgentHarness
 import decompengine.acp.AcpPreflightWorkflow
 import decompengine.acp.AcpInvocationEvidenceSnapshot
 import decompengine.acp.AcpMountEventWitness
+import decompengine.acp.validatedAcpMountTiming
 import decompengine.acp.AuthenticationPreviewFragments
 import decompengine.agent.AgentExecutionException
 import decompengine.analysis.BundledGhidra
@@ -493,6 +494,7 @@ internal fun acpDoctorFailureContext(failure: AgentExecutionException): String =
     val seen = ArrayList<Throwable>(8)
     var mountRecord: String? = null
     var mountAdmissionRecord: String? = null
+    var mountTimingRecord: String? = null
     pending.add(failure)
     failure.receipt?.failureCause?.let { pending.add(it) }
     while (pending.isNotEmpty() && seen.size < 8) {
@@ -506,6 +508,7 @@ internal fun acpDoctorFailureContext(failure: AgentExecutionException): String =
             if (admission != null && admission.length <= 192 && DOCTOR_MOUNT_ADMISSION.matches(admission)) {
                 mountAdmissionRecord = admission
             }
+            mountTimingRecord = validatedAcpMountTiming(current.timingRecord)
             break
         }
         // getSuppressed() clones the complete array. Only bounded cause links are inspected.
@@ -517,7 +520,8 @@ internal fun acpDoctorFailureContext(failure: AgentExecutionException): String =
         "recordedRemainingProcessCount=${diagnostics?.remainingProcessIds?.size ?: "MISSING"} " +
         "recordedOutputOverflow=${diagnostics?.outputLimitExceeded ?: "MISSING"} " +
         "mountEventRecord=${mountRecord ?: "MISSING"} " +
-        "mountAdmissionRecord=${mountAdmissionRecord ?: "MISSING"}").take(1024)
+        "mountAdmissionRecord=${mountAdmissionRecord ?: "MISSING"}" +
+        (mountTimingRecord?.let { " mountTimingRecord=$it" } ?: "")).take(1024)
 } catch (contextFailure: Throwable) {
     requireDoctorActive(contextFailure)
     "recordedContext=UNAVAILABLE"

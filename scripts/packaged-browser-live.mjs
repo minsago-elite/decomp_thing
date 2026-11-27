@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
 // Authored inert storage fixtures, never an analyzed or executable target.
-function record(root, index) {
+export function record(root, index) {
   const id = createHash('sha256').update(`live-dashboard:${index}`).digest('hex').slice(0, 32);
   const at = new Date(Date.parse('2026-01-01T00:00:00Z') + index * 1000).toISOString();
   return { id, filename: `live-dashboard-${index}.elf`, status: 'uploaded', created_at: at, updated_at: at,
@@ -13,7 +13,7 @@ function record(root, index) {
       machine: 'x86-64', entry_point: 0, elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
 }
 
-async function publish(root, job, input) {
+export async function publish(root, job, input) {
   // A live listing must never observe a half-written fixture job.
   const directory = join(root, '.live-job-' + job.id);
   await fs.mkdir(directory, { mode: 0o700 });

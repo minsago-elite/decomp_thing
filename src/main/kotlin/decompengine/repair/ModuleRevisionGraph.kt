@@ -7423,6 +7423,36 @@ internal fun readStableJobMetadataFile(
     )
 }
 
+internal fun readBudgetedStableRegularFile(
+    root: Path,
+    relative: String,
+    maximumBytes: Long,
+    cancellationCheck: () -> Unit,
+    admitSize: (Long) -> Unit,
+    chargeBytes: (Int) -> Unit,
+): StableRegularFile = readStableRegularFileInternal(
+    root, relative, maximumBytes, null, null, cancellationCheck, false,
+) { descriptorPath, size ->
+    admitSize(size.toLong())
+    cancellationCheck()
+    val bytes = ByteArray(size)
+    Files.newInputStream(descriptorPath).use { input ->
+        var offset = 0
+        while (offset < size) {
+            cancellationCheck()
+            val count = input.read(bytes, offset, minOf(size - offset, 16 * 1024))
+            requireUnchanged(count > 0) { "stable file-read target shrank: $relative" }
+            offset += count
+            chargeBytes(count)
+        }
+        // Each admitted entry permits one EOF probe in addition to its admitted payload.
+        // A mismatching descriptor can consume at most one extra byte, even at a zero limit.
+        cancellationCheck()
+        requireUnchanged(input.read() == -1) { "stable file-read target exceeds its reported size: $relative" }
+    }
+    bytes
+}
+
 private fun readStableRegularFileInternal(
     root: Path,
     relative: String,
@@ -7431,9 +7461,11 @@ private fun readStableRegularFileInternal(
     afterRead: (() -> Unit)?,
     cancellationCheck: () -> Unit,
     allowFinalDirectoryLinkCountChange: Boolean,
+    admittedRead: ((Path, Int) -> ByteArray)? = null,
 ): StableRegularFile {
     cancellationCheck()
-    require(maximumBytes in 1 until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
+    val minimumLimit = if (admittedRead == null) 1L else 0L
+    require(maximumBytes in minimumLimit until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
     val normalized = normalizedRelative(relative)
     val base = root.toAbsolutePath().normalize()
     RepairDescriptorReadSupport.requireSupported(base)
@@ -7471,7 +7503,7 @@ private fun readStableRegularFileInternal(
         // between observation and the first read deterministic, so readKnownSize can classify it
         // as a changed artifact instead of reporting a misleading budget or I/O failure.
         afterAuthorization?.invoke()
-        val bytes = try {
+        val bytes = admittedRead?.invoke(descriptorPath, before.size().toInt()) ?: try {
             LinuxFilesystemSyscalls.readKnownSize(readable, before.size().toInt(), cancellationCheck)
         } catch (_: LinuxFileSizeChangedException) {
             throw StableFileChangedException("stable file-read target changed size while it was read: $relative")

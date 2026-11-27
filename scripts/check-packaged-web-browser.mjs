@@ -12,11 +12,12 @@ import { seedSourceTreeFixture } from './packaged-source-tree-fixture.mjs';
 import { qualifySourceTree, qualifySourceTreeColdPage } from './packaged-browser-source-tree.mjs';
 import { SOURCE_TREE_COLD_SAMPLE_COUNT, summarizeSourceTreeColdSamples } from './packaged-browser-source-tree-cold.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
+import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -26,7 +27,7 @@ const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
-  profile: { type: 'string', default: 'loopback' },
+  profile: { type: 'string' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
@@ -36,14 +37,16 @@ const { values } = parseArgs({ options: {
   'cold-report': { type: 'string' },
   help: { type: 'boolean', default: false },
 } });
+values.profile ??= ['source-tree', 'source-tree-cold-worker'].includes(values.mode) ? 'loopback' : 'reference';
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|source-tree|live|proxy|upgrade|legacy|audit] [--profile loopback|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|source-tree|live|proxy|upgrade|legacy|audit] [--profile reference|loopback|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
-  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
+  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP, navigation timing budgets, 50 job-filter submissions, and 50 alternating source-file metadata/preview actions (100ms local feedback / 500ms first data).');
+  console.log('profile reference preserves browser defaults and enforces the documented navigation budgets; profile constrained applies 4x CPU throttling and symmetric 10 Mbit/s network throughput to audit targets, records timings without applying those budgets, and does not establish a new threshold.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
-  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
+  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh; then labels, archives and deliberately deletes one inert job with peer-tab, deep-link and focus recovery (#173).');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -56,7 +59,12 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   await fs.access(values[option]);
 }
 assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'source-tree', 'source-tree-cold-worker', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be a supported packaged browser mode');
-if (values.mode === 'source-tree' || values.mode === 'source-tree-cold-worker') assert.ok(['loopback', 'constrained'].includes(values.profile), '--profile must be loopback or constrained for source-tree mode');
+if (values.mode === 'source-tree' || values.mode === 'source-tree-cold-worker') {
+  assert.ok(['loopback', 'constrained'].includes(values.profile), '--profile must be loopback or constrained for source-tree mode');
+} else {
+  assert.ok(['reference', 'constrained'].includes(values.profile), '--profile must be reference or constrained');
+  assert.ok(values.mode === 'audit' || values.profile === 'reference', '--profile constrained is only supported with --mode audit');
+}
 if (values.mode === 'source-tree') {
   assert.equal(process.env.DECOMP_PACKAGED_SOURCE_TREE_SUPERVISED, '1',
     'Use run-packaged-browser-source-tree-supervised.mjs so the complete cold and warm process tree is owned');
@@ -855,9 +863,13 @@ async function ready(target, expression, label) {
   }, label);
 }
 
-async function capture(target, name) {
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
-  await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
+async function capture(target, name, clip) {
+  // Clipped (chart) captures stay inside the rendered viewport: beyond-viewport capture can resize
+  // the layout viewport (dropping the scrollbar) and reflow the figure after it was measured.
+  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport: false } : {}) }, target.sessionId);
+  const bytes = Buffer.from(data, 'base64');
+  await fs.writeFile(join(root, name), bytes);
+  return bytes;
 }
 
 async function prepareArchive(archivePath) {
@@ -989,13 +1001,16 @@ try {
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(repo, 'build/.ct-'));
+  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  const browserTmpForProcess = relative(repo, browserTmp);
+  assert(!isAbsolute(browserTmpForProcess) && browserTmpForProcess !== '..' && !browserTmpForProcess.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`),
+    'Browser temporary directory must remain inside the repository');
   report.browserTempDirectory = browserTmp;
   report.browserProfileDirectory = profile;
   await fs.mkdir(profile);
   const browserStartupStarted = performance.now();
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
-    cwd: repo, env: { ...process.env, TMPDIR: relative(repo, browserTmp) }, stdio: ['ignore', 'ignore', 'pipe'],
+    cwd: repo, env: { ...process.env, TMPDIR: browserTmpForProcess }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
@@ -1234,9 +1249,14 @@ try {
     report.jobDataCreated = true;
   }
   if (values.mode === 'audit') {
-    report.audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay });
+    const audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay,
+      profile: values.profile });
     await delay(100); // Drain resource events from the last measured target.
-    report.auditVerdict = assertAudit(report.audit, manifest, targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin);
+    const interactionPages = auditFixtures(repo, manifest.buildId).pages;
+    report.auditVerdict = assertAudit(audit, manifest,
+      targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin, undefined,
+      { interactionPages, extraInteractionContexts: chromiumSupplementalInteractionContexts(interactionPages), profile: values.profile });
+    report.audit = compactJobFilterAuditEvidence(audit);
     assert.deepEqual(report.auditVerdict.failures, [], `Packaged audit failures:\n${report.auditVerdict.failures.join('\n')}`);
     assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
@@ -1553,6 +1573,7 @@ try {
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
+      report.jobLifecycle = await qualifyLifecycle({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
     }
     if (historyFixture) {
@@ -1747,15 +1768,15 @@ try {
     }
   }
   await externalizeSourceTreeRequestEvidence();
-  const retained = scrubTokens(boundReport(report), sensitiveValues);
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained, null, 2) + '\n');
-  if (values['cold-report']) await fs.writeFile(values['cold-report'], JSON.stringify(retained, null, 2) + '\n');
+  const retained = boundReport(scrubTokens(report, sensitiveValues));
+  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained));
+  if (values['cold-report']) await fs.writeFile(values['cold-report'], JSON.stringify(retained));
   if (externalCancellation && (retained.externalCancellation !== externalCancellation || retained.status !== 'failed')) {
     report.status = 'failed';
     report.externalCancellation = externalCancellation;
-    const cancelledReport = scrubTokens(boundReport(report), sensitiveValues);
-    await fs.writeFile(join(root, 'report.json'), JSON.stringify(cancelledReport, null, 2) + '\n');
-    if (values['cold-report']) await fs.writeFile(values['cold-report'], JSON.stringify(cancelledReport, null, 2) + '\n');
+    const cancelledReport = boundReport(scrubTokens(report, sensitiveValues));
+    await fs.writeFile(join(root, 'report.json'), JSON.stringify(cancelledReport));
+    if (values['cold-report']) await fs.writeFile(values['cold-report'], JSON.stringify(cancelledReport));
   }
   finalReportWritten = true;
   if (externalCancellation) process.exitCode = 1;
