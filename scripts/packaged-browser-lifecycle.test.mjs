@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { assertDeletionAlert, LISTING_BUSY_RETRY_DELAYS_MS, readDeletionAcknowledgement, readListingMembership } from './packaged-browser-lifecycle.mjs';
+import { assertDeletionAlert, createDeletionCapture, DELETION_CAPTURE_WINDOW, LISTING_BUSY_RETRY_DELAYS_MS, readDeletionAcknowledgement, readListingMembership } from './packaged-browser-lifecycle.mjs';
 
 const jobId = 'c'.repeat(32);
 const operationId = 'jobdel_' + 'a'.repeat(32);
@@ -152,4 +152,81 @@ test('the default retry bound is small and finite', () => {
   assert.ok(LISTING_BUSY_RETRY_DELAYS_MS.length > 0 && LISTING_BUSY_RETRY_DELAYS_MS.length <= 6);
   assert.ok(LISTING_BUSY_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0) <= 8_000);
   assert.ok(Object.isFrozen(LISTING_BUSY_RETRY_DELAYS_MS));
+});
+
+// #1891: the original DELETE body is read exactly once, from its own requestId, whatever
+// order Chrome delivers the request, response and completion events in.
+function capture() {
+  const reads = [];
+  const state = createDeletionCapture(id => { reads.push(id); return { body: 'body-of-' + id, base64Encoded: false }; });
+  return { state, reads };
+}
+const steps = {
+  request: state => state.request('d1', 'DELETE'),
+  response: state => state.response('d1', { status: 202 }),
+  finished: state => state.finished('d1'),
+};
+const orders = [['request', 'response', 'finished'], ['response', 'request', 'finished'], ['request', 'finished', 'response'],
+  ['finished', 'response', 'request'], ['response', 'finished', 'request'], ['finished', 'request', 'response']];
+for (const order of orders) {
+  test('reads the original DELETE body once for event order ' + order.join(' > '), async () => {
+    const { state, reads } = capture();
+    for (const [index, step] of order.entries()) {
+      steps[step](state);
+      assert.equal(state.hasBody('d1'), index === order.length - 1);
+    }
+    state.finished('d1');
+    state.response('d1', { status: 500 });
+    assert.deepEqual(await state.body('d1'), { body: 'body-of-d1', base64Encoded: false });
+    assert.deepEqual(reads, ['d1']);
+    assert.equal(state.responseOf('d1').status, 202, 'the first, original response is kept');
+  });
+}
+
+test('never reads a body for a non-DELETE request', () => {
+  const { state, reads } = capture();
+  state.request('g1', 'GET'); state.response('g1', { status: 200 }); state.finished('g1');
+  assert.equal(state.hasBody('g1'), false);
+  assert.deepEqual(reads, []);
+});
+
+test('a missing completion is named, not reported as a bare timeout', () => {
+  const { state } = capture();
+  state.request('d1', 'DELETE'); state.response('d1', { status: 202 });
+  assert.equal(state.hasBody('d1'), false);
+  assert.equal(state.describe('d1'), 'DELETE requestId d1 events [requestWillBeSent:DELETE, responseReceived:202]; missing loadingFinished');
+  state.failed('d1', 'net::ERR_ABORTED', true);
+  assert.match(state.describe('d1'), /loadingFailed:net::ERR_ABORTED:canceled\]; missing loadingFinished; loadingFailed \{"errorText":"net::ERR_ABORTED","canceled":true\}$/);
+  assert.equal(capture().state.describe('zz'), 'no Network event observed for DELETE requestId zz');
+});
+
+test('a failed body read is reported, not replaced', async () => {
+  const state = createDeletionCapture(() => { throw new Error('No resource with given identifier found'); });
+  state.request('d1', 'DELETE'); state.response('d1', { status: 202 }); state.finished('d1');
+  assert.deepEqual(await state.body('d1'), { error: 'Error: No resource with given identifier found' });
+});
+
+test('unrelated traffic is bounded and never evicts a DELETE', () => {
+  const { state } = capture();
+  state.response('d1', { status: 202 }); state.request('d1', 'DELETE');
+  for (let index = 0; index < DELETION_CAPTURE_WINDOW * 4; index++) { state.request('g' + index, 'GET'); state.finished('g' + index); }
+  assert.equal(state.describe('g0'), 'no Network event observed for DELETE requestId g0');
+  state.finished('d1');
+  assert.equal(state.hasBody('d1'), true);
+});
+
+test('duplicate DELETE traffic cannot add body reads or displace the first DELETE', async () => {
+  const { state, reads } = capture();
+  state.request('first', 'DELETE');
+  for (let index = 0; index <= DELETION_CAPTURE_WINDOW; index++) {
+    const id = 'duplicate-' + index;
+    state.request(id, 'DELETE');
+    state.response(id, { status: 202 });
+    state.finished(id);
+  }
+  state.response('first', { status: 202 });
+  state.finished('first');
+  assert.equal((await state.body('first')).body, 'body-of-first');
+  assert.deepEqual(reads, ['first']);
+  assert.equal(state.responseOf('duplicate-0'), undefined);
 });

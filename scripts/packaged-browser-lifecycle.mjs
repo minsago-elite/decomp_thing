@@ -23,6 +23,67 @@ async function press(cdp, tab, name) {
 }
 const deletedNotice = `document.querySelector('[role="alert"]')?.textContent.includes('This job was deleted. Its files were removed and cannot be recovered')`;
 
+// CDP reports the request, response and completion separately. Hold early events until
+// the first DELETE is identified. The caller independently counts every DELETE on the tab.
+export const DELETION_CAPTURE_WINDOW = 64;
+export function createDeletionCapture(readBody) {
+  const recent = new Map();
+  let deletionId;
+
+  function observe(id, eventName, update) {
+    if (deletionId !== undefined && id !== deletionId) return;
+    let entry = recent.get(id);
+    if (!entry) {
+      if (recent.size >= DELETION_CAPTURE_WINDOW) recent.delete(recent.keys().next().value);
+      entry = { trace: [] };
+      recent.set(id, entry);
+    }
+    if (entry.trace.length < 16) entry.trace.push(eventName);
+    update(entry);
+    if (id === deletionId && entry.response && entry.finished && !entry.body) {
+      entry.body = Promise.resolve().then(() => readBody(id)).catch(error => ({ error: String(error) }));
+    }
+  }
+
+  return {
+    request(id, method) {
+      if (method === 'DELETE' && deletionId === undefined) {
+        deletionId = id;
+        for (const key of recent.keys()) {
+          if (key !== id) recent.delete(key);
+        }
+      }
+      observe(id, 'requestWillBeSent:' + method, entry => { entry.method ??= method; });
+    },
+    response(id, response) {
+      observe(id, 'responseReceived:' + response.status, entry => { entry.response ??= response; });
+    },
+    finished(id) {
+      observe(id, 'loadingFinished', entry => { entry.finished = true; });
+    },
+    failed(id, errorText, canceled) {
+      const reason = String(errorText).slice(0, 160);
+      observe(id, 'loadingFailed:' + reason + (canceled ? ':canceled' : ''), entry => {
+        entry.failure ??= { errorText: reason, canceled: Boolean(canceled) };
+      });
+    },
+    hasBody: id => Boolean(recent.get(id)?.body),
+    body: id => recent.get(id)?.body,
+    responseOf: id => recent.get(id)?.response,
+    describe(id) {
+      const entry = recent.get(id);
+      if (!entry) return `no Network event observed for DELETE requestId ${id}`;
+      const missing = [];
+      if (!entry.method) missing.push('requestWillBeSent');
+      if (!entry.response) missing.push('responseReceived');
+      if (!entry.finished) missing.push('loadingFinished');
+      return `DELETE requestId ${id} events [${entry.trace.join(', ')}]`
+        + (missing.length ? `; missing ${missing.join(', ')}` : '')
+        + (entry.failure ? `; loadingFailed ${JSON.stringify(entry.failure)}` : '');
+    },
+  };
+}
+
 export function readDeletionAcknowledgement(response, payload, jobId, jobApiUrl) {
   assert.equal(response.status, 202, 'DELETE did not acknowledge the operation');
   assert.equal(response.url, jobApiUrl);
@@ -118,21 +179,12 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   const tab = await makeTarget();
   const jobApiUrl = browserOrigin + '/nested/api/v1/jobs/' + job.id;
-  const deleteResponses = new Map();
-  const deleteBodies = new Map();
+  const capture = createDeletionCapture(requestId => cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
   const listingBusy = [];
-  cdp.on('Network.responseReceived', ({ requestId, response }) => {
-    if (tab.requests.some(request => request.requestId === requestId && request.method === 'DELETE')) {
-      deleteResponses.set(requestId, response);
-    }
-  }, tab.sessionId);
-  cdp.on('Network.loadingFinished', ({ requestId }) => {
-    // Read the original body before Chrome can evict it. A later GET can already be completed.
-    if (deleteResponses.has(requestId)) {
-      deleteBodies.set(requestId, cdp.call('Network.getResponseBody', { requestId }, tab.sessionId)
-        .catch(error => ({ error: String(error) })));
-    }
-  }, tab.sessionId);
+  cdp.on('Network.requestWillBeSent', ({ requestId, request }) => capture.request(requestId, request.method), tab.sessionId);
+  cdp.on('Network.responseReceived', ({ requestId, response }) => capture.response(requestId, response), tab.sessionId);
+  cdp.on('Network.loadingFinished', ({ requestId }) => capture.finished(requestId), tab.sessionId);
+  cdp.on('Network.loadingFailed', ({ requestId, errorText, canceled }) => capture.failed(requestId, errorText, canceled), tab.sessionId);
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
   await cdp.call('Page.navigate', { url: jobUrl }, tab.sessionId);
   await ready(tab, `document.querySelector('h2')?.textContent === 'lifecycle-fixture.elf' && document.querySelector('input[name="label"]:not(:disabled)') !== null`, 'lifecycle job route');
@@ -189,10 +241,14 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.equal(deleteRequests.length, 1);
   const [{ requestId, url }] = deleteRequests;
   assert.equal(url, jobApiUrl);
-  await waitFor(() => deleteBodies.has(requestId), 'original DELETE body', 10_000);
-  const payload = await deleteBodies.get(requestId);
-  assert.ok(!payload.error, 'Original DELETE body unavailable: ' + payload.error);
-  const { acknowledged, location, bodySha256 } = readDeletionAcknowledgement(deleteResponses.get(requestId), payload, job.id, jobApiUrl);
+  try {
+    await waitFor(() => capture.hasBody(requestId), 'original DELETE body', 10_000);
+  } catch (error) {
+    throw new Error(error.message + '; ' + capture.describe(requestId), { cause: error });
+  }
+  const payload = await capture.body(requestId);
+  assert.ok(!payload.error, 'Original DELETE body unavailable: ' + payload.error + '; ' + capture.describe(requestId));
+  const { acknowledged, location, bodySha256 } = readDeletionAcknowledgement(capture.responseOf(requestId), payload, job.id, jobApiUrl);
   const { operationId } = acknowledged;
   const rendered = await evaluate(tab, `${deletedAlert}?.innerText`);
   assertDeletionAlert(acknowledged.state, rendered);
