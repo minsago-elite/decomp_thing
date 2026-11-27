@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
-export const CONNECTION_SCHEMA = 'packaged-connection-notice/v1';
+export const CONNECTION_SCHEMA = 'packaged-connection-notice/v2';
 export const CONNECTION_VIEWPORTS = Object.freeze([
   Object.freeze({ name: 'desktop', width: 1440, height: 900 }),
   Object.freeze({ name: 'narrow', width: 390, height: 844 }),
@@ -78,19 +78,23 @@ export const PAGE_STATE = `(async () => {
 /** In-page DOM facts for the scoped standards checks; not a computed accessible name. */
 export function connectionDomProbe() {
   const text = (node) => (node?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
-  const asides = [...document.querySelectorAll('aside.connection-notice')];
-  const aside = asides[0] ?? null;
-  const statuses = aside ? [...aside.querySelectorAll('[role="status"]')] : [];
+  // #1896 landed contract: a <section> named by its own heading, with the named status on the changing content.
+  const notices = [...document.querySelectorAll('.connection-notice')];
+  const notice = notices[0] ?? null;
+  const statuses = notice ? [...notice.querySelectorAll('[role="status"]')] : [];
   const status = statuses[0] ?? null;
+  const labelledby = notice?.getAttribute('aria-labelledby') ?? null;
+  const labelled = labelledby ? document.getElementById(labelledby) : null;
   const interactive = 'a[href],button,input,select,textarea,[tabindex]';
   return {
-    asideCount: asides.length,
-    aside: aside ? { tag: aside.tagName.toLowerCase(), role: aside.getAttribute('role'), label: aside.getAttribute('aria-label') } : null,
-    statuses: statuses.map((node) => ({ tag: node.tagName.toLowerCase(), label: node.getAttribute('aria-label'), isAside: node === aside })),
+    noticeCount: notices.length,
+    container: notice ? { tag: notice.tagName.toLowerCase(), role: notice.getAttribute('role'), label: notice.getAttribute('aria-label'), labelledby,
+      labelledHeading: labelled ? { tag: labelled.tagName.toLowerCase(), insideStatus: status !== null && status.contains(labelled) } : null } : null,
+    statuses: statuses.map((node) => ({ tag: node.tagName.toLowerCase(), label: node.getAttribute('aria-label'), isContainer: node === notice })),
     headings: status ? [...status.querySelectorAll('h1,h2,h3,h4,h5,h6')].map((h) => ({ level: Number(h.tagName[1]), text: text(h) })) : [],
     messages: status ? [...status.querySelectorAll('p')].map(text) : [],
-    interactive: aside ? aside.querySelectorAll(interactive).length : null,
-    asideWithRole: document.querySelectorAll('aside[role]').length,
+    interactive: notice ? notice.querySelectorAll(interactive).length : null,
+    asideCount: document.querySelectorAll('aside.connection-notice').length,
     h1: text(document.querySelector('main h1')),
   };
 }
@@ -110,23 +114,27 @@ export function summarizeConnectionAx(nodes) {
   const role = (node) => node?.role?.value ?? null;
   const name = (node) => node?.name?.value ?? null;
   const label = CONNECTION_COPY.label;
+  // The landed section is a region named by its visible heading (aria-labelledby), never a complementary.
+  const regionNames = [CONNECTION_COPY.offline.heading, CONNECTION_COPY.reconnected.heading];
+  const regions = live.filter((node) => role(node) === 'region' && regionNames.includes(name(node)));
   const complementary = live.filter((node) => role(node) === 'complementary' && name(node) === label);
   const named = live.filter((node) => name(node) === label && !['StaticText', 'InlineTextBox'].includes(role(node)));
   const within = (node, set) => ancestors(node).some((a) => set.includes(a));
-  const statuses = live.filter((node) => role(node) === 'status' && within(node, complementary));
+  const statuses = live.filter((node) => role(node) === 'status' && within(node, regions));
   const namedStatuses = statuses.filter((node) => name(node) === label);
   const headings = live.filter((node) => role(node) === 'heading' && within(node, namedStatuses));
   return {
     computed: true,
+    region: { count: regions.length, names: regions.map((node) => cap(name(node))).slice(0, 4) },
     complementary: { count: complementary.length },
     namedRoles: named.map((node) => role(node)).slice(0, 8),
-    status: { withinComplementary: statuses.length, named: namedStatuses.length },
+    status: { withinRegion: statuses.length, named: namedStatuses.length },
     headings: headings.map((node) => cap(name(node))).slice(0, 4),
   };
 }
 
 export function axeExpression() {
-  return `axe.run({ include: [['aside.connection-notice']] },
+  return `axe.run({ include: [['.connection-notice']] },
     { runOnly: { type: 'rule', values: ${JSON.stringify(AXE_RULES)} }, resultTypes: ['violations', 'incomplete'] })
     .then(result => ({ version: axe.version,
       violations: result.violations.map(v => ({ id: v.id, nodes: v.nodes.length })),
@@ -145,9 +153,11 @@ export function assessConnectionDom(d = {}, state) {
   const failures = [];
   const fail = (m) => failures.push(m);
   const expected = CONNECTION_COPY[state];
-  if (d.asideCount !== 1 || d.aside?.tag !== 'aside' || d.aside?.role !== null || d.aside?.label !== CONNECTION_COPY.label) fail('notice is not one native aside without a role override');
-  if (d.asideWithRole !== 0) fail('an aside carries an explicit role');
-  if (!Array.isArray(d.statuses) || d.statuses.length !== 1 || d.statuses[0].tag !== 'div' || d.statuses[0].isAside !== false || d.statuses[0].label !== CONNECTION_COPY.label) fail('status must be one labelled inner div');
+  const c = d.container;
+  if (d.noticeCount !== 1 || c?.tag !== 'section' || c?.role !== null || c?.label !== null) fail('notice is not one native section without a role or aria-label override');
+  if (!c?.labelledby || c?.labelledHeading?.tag !== 'h2' || c?.labelledHeading?.insideStatus !== true) fail('section is not named by the status h2 via aria-labelledby');
+  if (d.asideCount !== 0) fail('former aside container present');
+  if (!Array.isArray(d.statuses) || d.statuses.length !== 1 || d.statuses[0].tag !== 'div' || d.statuses[0].isContainer !== false || d.statuses[0].label !== CONNECTION_COPY.label) fail('status must be one labelled inner div');
   if (!same(d.headings, [{ level: 2, text: expected.heading }])) fail(`heading copy ${JSON.stringify(d.headings ?? null)}`);
   if (!same(d.messages, [...expected.messages])) fail(`message copy ${JSON.stringify(d.messages ?? null)}`);
   if (d.interactive !== 0) fail('notice contains interactive content');
@@ -185,8 +195,9 @@ export function assessConnectionObservation(o, viewport, state) {
   if (o.onLine !== (state !== 'offline')) fail(`navigator.onLine is ${o.onLine}`);
   const ax = o.accessibilityTree ?? {};
   if (ax.source !== 'chrome-cdp-getFullAXTree' || ax.computed !== true) fail('roles/names not from the computed Chrome accessibility tree');
-  if (ax.complementary?.count !== 1) fail('expected exactly one complementary landmark named Connection status');
-  if (ax.status?.withinComplementary !== 1 || ax.status?.named !== 1) fail('expected exactly one status named Connection status inside the complementary');
+  if (ax.region?.count !== 1 || !same(ax.region?.names, [expected.heading])) fail(`expected exactly one region named by the ${state} heading`);
+  if (ax.complementary?.count !== 0) fail('a complementary landmark named Connection status is present');
+  if (ax.status?.withinRegion !== 1 || ax.status?.named !== 1) fail('expected exactly one status named Connection status inside the region');
   if (!same(ax.headings, [expected.heading])) fail(`computed status heading ${JSON.stringify(ax.headings ?? null)}`);
   for (const m of assessConnectionDom(o.dom, state)) fail(m);
   for (const m of assessConnectionAxe(o.axe)) fail(m);
@@ -366,7 +377,7 @@ export async function qualifyConnectionNotice({ cdp, makeTarget, evaluate, root,
         }
         record.initial = countRequests(target.requests.slice(loadStart));
         record.signedOut = true;
-        record.noticeBefore = await ev(`document.querySelector('aside.connection-notice') !== null`, 'notice before');
+        record.noticeBefore = await ev(`document.querySelector('.connection-notice') !== null`, 'notice before');
         // Trusted focus: programmatic start, one real CDP Tab, then pin the element for identity checks.
         await ev(`(window.__connectionNoticeInput = [], addEventListener('keydown', e => window.__connectionNoticeInput.push(e.isTrusted), true), document.querySelector('main h1').focus(), true)`, 'focus start');
         await call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
@@ -383,7 +394,7 @@ export async function qualifyConnectionNotice({ cdp, makeTarget, evaluate, root,
           await call('Network.emulateNetworkConditions', offline ? OFFLINE : ONLINE);
           const heading = CONNECTION_COPY[state].heading;
           await poll(target, `(window.__connectionNoticeEvents ?? []).some(e => e.type === ${JSON.stringify(offline ? 'offline' : 'online')})
-            && document.querySelector('aside.connection-notice h2')?.textContent === ${JSON.stringify(heading)}`, `${state} notice at ${viewport.name}`);
+            && document.querySelector('.connection-notice h2')?.textContent === ${JSON.stringify(heading)}`, `${state} notice at ${viewport.name}`);
           let quiet = 0;
           if (!offline) { const t0 = now(); await sleep(quietMs); quiet = now() - t0; }
           const page = await ev(PAGE_STATE, `${state} state`);

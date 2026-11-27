@@ -72,6 +72,7 @@ class StableControlFileTest {
             }
 
             assertTrue(failure.message.orEmpty().contains("mutated"), failure.message)
+            assertTargetedMutationDiagnostic(failure)
             assertContentEquals(original, Files.readAllBytes(displaced))
             assertContentEquals(replacement, Files.readAllBytes(input))
         }
@@ -94,6 +95,7 @@ class StableControlFileTest {
                     file.verifyUnchanged("same-inode control fixture")
                 }
                 assertTrue(failure.message.orEmpty().contains("mutated"), failure.message)
+                assertTargetedMutationDiagnostic(failure)
             }
         }
 
@@ -128,7 +130,65 @@ class StableControlFileTest {
                 }
 
                 assertTrue(failure.message.orEmpty().contains("mutated"), failure.message)
+                assertTargetedMutationDiagnostic(failure)
                 assertContentEquals(expectedDestination, destination)
+            }
+        }
+
+    @Test
+    fun `real selected and watched directory mutations remain refused`() =
+        inControlTemporaryDirectory { root ->
+            val mutations: List<Pair<String, (Path) -> Unit>> = listOf(
+                "append" to { input ->
+                    Files.newOutputStream(input, StandardOpenOption.APPEND).use { it.write(0x55) }
+                },
+                "chmod" to { input ->
+                    Files.setPosixFilePermissions(input, PosixFilePermissions.fromString("r--------"))
+                },
+                "hardlink" to { input ->
+                    Files.createLink(input.resolveSibling("alias.bin"), input)
+                },
+                "close-write" to { input ->
+                    Files.newByteChannel(input, StandardOpenOption.WRITE).use { }
+                },
+                "rename" to { input ->
+                    Files.move(input, input.resolveSibling("renamed.bin"))
+                },
+                "unlink" to { input ->
+                    Files.delete(input)
+                },
+                "directory-self-chmod" to { input ->
+                    Files.setPosixFilePermissions(input.parent, PosixFilePermissions.fromString("r-x------"))
+                },
+            )
+
+            for ((name, mutate) in mutations) {
+                val caseRoot = root.resolve(name)
+                Files.createDirectories(caseRoot)
+                val input = caseRoot.resolve("selected.bin")
+                val bytes = ByteArray(64) { index -> index.toByte() }
+                writeOwnerFile(input, bytes)
+                val originalParentPermissions = Files.getPosixFilePermissions(caseRoot)
+                val file = StableControlFile.open(input, bytes.size.toLong(), "$name mutation fixture")
+                try {
+                    mutate(input)
+                    val failure = assertFailsWith<FullTreeControlException> {
+                        file.readExactly(0L, bytes.size, "$name mutation fixture")
+                    }
+                    assertTrue(failure.message.orEmpty().isNotBlank(), "$name returned an empty refusal")
+                    val mutationDiagnostic = failure.suppressed
+                        .singleOrNull { it.javaClass.simpleName == "MutationDiagnostic" }
+                        ?.message
+                        .orEmpty()
+                    if (mutationDiagnostic.isNotEmpty()) {
+                        assertTrue(mutationDiagnostic.toByteArray(Charsets.UTF_8).size <= 2 * 1024)
+                    }
+                } finally {
+                    if (name == "directory-self-chmod") {
+                        Files.setPosixFilePermissions(caseRoot, originalParentPermissions)
+                    }
+                    file.close()
+                }
             }
         }
 
@@ -622,5 +682,20 @@ class StableControlFileTest {
         } catch (failure: InvocationTargetException) {
             throw failure.targetException
         }
+    }
+
+    private fun assertTargetedMutationDiagnostic(failure: FullTreeControlException) {
+        val diagnosticThrowable = failure.suppressed.singleOrNull { it.javaClass.simpleName == "MutationDiagnostic" }
+            ?: error("missing mutation diagnostic; message=${failure.message}; suppressed=${failure.suppressed.toList()}")
+        val diagnostic = diagnosticThrowable.message.orEmpty()
+        assertTrue(diagnostic.contains("scope=TARGETED"), "unexpected diagnostic: $diagnostic")
+        assertTrue(
+            diagnostic.contains("reason=FILE_EVENT") || diagnostic.contains("reason=PARENT_NAME_MATCH"),
+            diagnostic,
+        )
+        assertTrue(diagnostic.contains("parentWatch="), diagnostic)
+        assertTrue(diagnostic.contains("fileWatch="), diagnostic)
+        assertTrue(diagnostic.contains("observedElapsedNanos="), diagnostic)
+        assertTrue(diagnostic.toByteArray(Charsets.UTF_8).size <= 2 * 1024)
     }
 }

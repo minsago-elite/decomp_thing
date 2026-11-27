@@ -1,0 +1,40 @@
+name: Ten C vulnerability repair qualification
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ten-c-vulnerability-repairs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TMPDIR: ${{ github.workspace }}/build/c-vul-qualification/tmp
+      PYTHONDONTWRITEBYTECODE: '1'
+      CCACHE_DISABLE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Prepare repository-owned scratch
+        run: mkdir -p "$TMPDIR"
+      - name: Install qualification compiler and source mapper
+        run: |
+          sudo apt-get -o Acquire::Retries=2 update
+          sudo apt-get -o Acquire::Retries=2 install -y --no-install-recommends clang-18 llvm-18 binutils
+      - name: Exercise refusal controls
+        run: python3 scripts/test-qualify-c-vul.py
+      - name: Qualify every pinned vulnerable fixture and corrected reference
+        run: python3 scripts/qualify-c-vul.py --clang /usr/bin/clang-18
+      - name: Retain exact-source qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ten-c-vulnerability-repair-qualification
+          path: |
+            build/c-vul-qualification/report.json
+            build/c-vul-qualification/logs
+          if-no-files-found: error

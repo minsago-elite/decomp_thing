@@ -12,7 +12,6 @@ import decompengine.repair.RepairIndexProfile
 import decompengine.repair.RepairResourceBudget
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
-import decompengine.repair.readStableRepairFile
 import decompengine.repair.requireRepairReleaseGraphAdmission
 import decompengine.repair.repairRevisionDirectoryEntryLimit
 import decompengine.repair.requireSingleLegacyRollbackOrigin
@@ -96,11 +95,20 @@ internal class ArchivedRepairReleaseLineage private constructor(
 internal object RepairAcpEvidenceArchiveVerifier {
     // Count observations before deduplication: a weakly consistent directory iterator may repeat.
     // The caller owns and closes the stream even when either admission check refuses an entry.
-    internal fun boundedDeclaredSourceEntryNames(entries: Iterable<Path>, maximumEntries: Int): Set<String> {
+    internal fun boundedDeclaredSourceEntryNames(
+        entries: Iterable<Path>,
+        maximumEntries: Int,
+        budget: ArchiveAuditReadBudget? = null,
+    ): Set<String> {
         require(maximumEntries > 0)
         val names = linkedSetOf<String>()
         var observedEntries = 0
-        for (entry in entries) {
+        val iterator = entries.iterator()
+        while (true) {
+            budget?.checkpoint()
+            if (!iterator.hasNext()) break
+            budget?.visitEntry()
+            val entry = iterator.next()
             require(observedEntries < maximumEntries) {
                 "repair release declared source inventory exceeds its entry bound"
             }
@@ -130,6 +138,17 @@ internal object RepairAcpEvidenceArchiveVerifier {
         manifest: SourceTreeManifest,
         reconstructionProfile: ReconstructionProfile,
         repairProfileProvider: () -> RepairIndexProfile,
+    ): ArchivedRepairReleaseLineage = verifyIfPresent(
+        ArchiveEvidenceReader(projectDir), payloadSha256, payloadSizes, manifest, reconstructionProfile, repairProfileProvider,
+    )
+
+    fun verifyIfPresent(
+        reader: ArchiveEvidenceReader,
+        payloadSha256: Map<String, String>,
+        payloadSizes: Map<String, Long>,
+        manifest: SourceTreeManifest,
+        reconstructionProfile: ReconstructionProfile,
+        repairProfileProvider: () -> RepairIndexProfile,
     ): ArchivedRepairReleaseLineage {
         val repairPaths = payloadSha256.keys.filterTo(linkedSetOf()) { path ->
             path == REPAIR_HISTORY_PATH || path.startsWith(REPAIR_STATE_PREFIX)
@@ -147,7 +166,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         }
 
         val graphBytes = readPayloadFile(
-            projectDir,
+            reader,
             REPAIR_GRAPH_PATH,
             MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES,
             payloadSha256,
@@ -163,8 +182,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
             declaredSourcesScanned = true
             // Resource inventory only: include irrelevant files and empty directories. The
             // manifest/stable read checks byte identity, never an external historical origin.
-            val names = Files.newDirectoryStream(projectDir.resolve(REPAIR_STATE_PREFIX.removeSuffix("/"))).use { entries ->
-                boundedDeclaredSourceEntryNames(entries, repairRevisionDirectoryEntryLimit(graph.budget))
+            reader.budget?.checkpoint()
+            val names = Files.newDirectoryStream(reader.root.resolve(REPAIR_STATE_PREFIX.removeSuffix("/"))).use { entries ->
+                boundedDeclaredSourceEntryNames(entries, repairRevisionDirectoryEntryLimit(graph.budget), reader.budget)
             }
             val declaredPaths = repairPaths.filter(REPAIR_LEGACY_GRAPH_PATH::matches).sorted()
             require(names.filter { REPAIR_LEGACY_GRAPH_PATH.matches(REPAIR_STATE_PREFIX + it) }.toSet() ==
@@ -182,7 +202,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 }
                 remaining -= admitted
                 // Exact admitted size closes growth between metadata admission and stable read.
-                val bytes = readPayloadFile(projectDir, path, admitted, payloadSha256, payloadSizes)
+                val bytes = readPayloadFile(reader, path, admitted, payloadSha256, payloadSizes)
                 require(bytes.size.toLong() == admitted)
                 // Preserve existing byte-credit refusal precedence (including its digest diagnostic).
                 consume(path.substringAfterLast('/'), bytes)
@@ -209,7 +229,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         graph.runs.forEach { run ->
             verifyRepairValidationObservedArtifactsForArchive(run.validationObservations.entries,
                 payloadSha256, payloadSizes) { path, limit ->
-                readPayloadFile(projectDir, path, limit, payloadSha256, payloadSizes)
+                readPayloadFile(reader, path, limit, payloadSha256, payloadSizes)
             }
         }
         val unknownRepairPaths = repairPaths.filterNot { path ->
@@ -225,14 +245,14 @@ internal object RepairAcpEvidenceArchiveVerifier {
         repairPaths.filter(REPAIR_LEGACY_PATH::matches).forEach { path ->
             // A bounded graph scan already authenticated these same bytes; do not reread bodies.
             if (!declaredSourcesScanned || !REPAIR_LEGACY_GRAPH_PATH.matches(path)) {
-                val bytes = readPayloadFile(projectDir, path, MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES,
+                val bytes = readPayloadFile(reader, path, MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES,
                     payloadSha256, payloadSizes)
                 verifyPreservedLegacyBytes(path, bytes)
             }
         }
 
         val bindingBytes = readPayloadFile(
-            projectDir,
+            reader,
             REPAIR_RECOVERY_BINDING_PATH,
             minOf(graph.budget.maximumGraphBytes, MAXIMUM_REPAIR_RECOVERY_BINDING_BYTES),
             payloadSha256,
@@ -243,7 +263,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         val manifestByPath = manifest.files.associateBy(GeneratedFileEvidence::path)
         val reconstructed = verifyGraphLineage(
             graph,
-            projectDir,
+            reader,
             payloadSha256,
             payloadSizes,
             manifestByPath,
@@ -252,9 +272,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
         require(graph.nodes.none { it.status == "rejected" && it.rollbackRecord == null }) {
             "repair release rejected attempt lacks a finalized rollback record"
         }
-        val verifiedReceipts = verifyReceipts(graph, projectDir, payloadSha256, payloadSizes)
-        verifyHistory(graph, projectDir, payloadSha256, payloadSizes)
-        verifyValidationReceipts(graph, projectDir, payloadSha256, payloadSizes, reconstructionProfile)
+        val verifiedReceipts = verifyReceipts(graph, reader, payloadSha256, payloadSizes)
+        verifyHistory(graph, reader, payloadSha256, payloadSizes)
+        verifyValidationReceipts(graph, reader, payloadSha256, payloadSizes, reconstructionProfile)
 
         val nodesById = graph.nodes.associateBy(ReleaseRepairNode::id)
         val qualifiedContributions = linkedSetOf<String>()
@@ -308,7 +328,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
     private fun verifyGraphLineage(
         graph: ReleaseRepairGraph,
-        projectDir: Path,
+        reader: ArchiveEvidenceReader,
         payloadSha256: Map<String, String>,
         payloadSizes: Map<String, Long>,
         manifestByPath: Map<String, GeneratedFileEvidence>,
@@ -515,7 +535,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         referencedBlobs.forEach { (digest, size) ->
             val path = "$REPAIR_BLOB_PREFIX$digest"
             val bytes = readPayloadFile(
-                projectDir,
+                reader,
                 path,
                 graph.budget.maximumSourceFileBytes,
                 payloadSha256,
@@ -532,7 +552,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 "repair release graph source is absent from source_tree_manifest.json: ${head.path}"
             }
             val current = readPayloadFile(
-                projectDir,
+                reader,
                 head.path,
                 graph.budget.maximumSourceFileBytes,
                 payloadSha256,
@@ -572,7 +592,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
     private fun verifyReceipts(
         graph: ReleaseRepairGraph,
-        projectDir: Path,
+        reader: ArchiveEvidenceReader,
         payloadSha256: Map<String, String>,
         payloadSizes: Map<String, Long>,
     ): Map<String, VerifiedAcpExecutionReceiptDocument> {
@@ -585,7 +605,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 "repair ACP receipt path or schema is cross-paired: ${node.id}"
             }
             val bytes = readPayloadFile(
-                projectDir,
+                reader,
                 expectedPath,
                 MAXIMUM_REPAIR_ACP_RECEIPT_BYTES,
                 payloadSha256,
@@ -630,12 +650,12 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
     private fun verifyHistory(
         graph: ReleaseRepairGraph,
-        projectDir: Path,
+        reader: ArchiveEvidenceReader,
         payloadSha256: Map<String, String>,
         payloadSizes: Map<String, Long>,
     ) {
         val bytes = readPayloadFile(
-            projectDir,
+            reader,
             REPAIR_HISTORY_PATH,
             minOf(graph.budget.maximumProjectionBytes, MAXIMUM_REPAIR_PROJECTION_BYTES),
             payloadSha256,
@@ -659,14 +679,14 @@ internal object RepairAcpEvidenceArchiveVerifier {
             "repair release history is missing or contains stale iterations"
         }
         iterations.zip(expectedNodes).forEach { (element, node) ->
-            verifyHistoryIteration(element.requiredObject("repair release history iteration"), node, projectDir)
+            verifyHistoryIteration(element.requiredObject("repair release history iteration"), node, reader)
         }
     }
 
     /** Recompute provider observations from archived bytes; graph success labels are insufficient. */
     private fun verifyValidationReceipts(
         graph: ReleaseRepairGraph,
-        projectDir: Path,
+        reader: ArchiveEvidenceReader,
         payloadSha256: Map<String, String>,
         payloadSizes: Map<String, Long>,
         reconstructionProfile: ReconstructionProfile,
@@ -694,7 +714,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
             }
             val path = selectRepairValidationReceiptForArchive(proof.evidenceSha256, observation?.primary,
                 payloadSha256, payloadSizes)
-            val bytes = readPayloadFile(projectDir, path,
+            val bytes = readPayloadFile(reader, path,
                 minOf(graph.budget.maximumIndexEvidenceBytes, MAXIMUM_REPAIR_PROJECTION_BYTES),
                 payloadSha256, payloadSizes)
             val receipt = strictObject(bytes, HISTORY_JSON_LIMITS, "repair validation receipt")
@@ -821,7 +841,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         }
     }
 
-    private fun verifyHistoryIteration(root: JsonObject, node: ReleaseRepairNode, projectDir: Path) {
+    private fun verifyHistoryIteration(root: JsonObject, node: ReleaseRepairNode, reader: ArchiveEvidenceReader) {
         root.requireExactKeys(HISTORY_ITERATION_FIELDS, "repair release history iteration")
         val metadata = requireNotNull(node.repairMetadata)
         require(root.requiredInt("index", "repair release history iteration") == metadata.iterationIndex &&
@@ -855,11 +875,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
             }
             val replacement = patch.requiredString("replacementHex", "repair release history patch")
                 .decodeLowerHex("repair release history patch")
-            val blob = readStableRepairFile(
-                projectDir,
+            val blob = reader.read(
                 "$REPAIR_BLOB_PREFIX${delta.afterBlobSha256}",
                 maxOf(1L, delta.afterBytes),
-            )
+            ).bytes
             require(replacement.contentEquals(blob) && sha256(replacement) == delta.afterSha256) {
                 "repair release history patch bytes differ from graph revision ${node.id}"
             }
@@ -882,7 +901,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
     }
 
     private fun readPayloadFile(
-        projectDir: Path,
+        reader: ArchiveEvidenceReader,
         relativePath: String,
         maximumBytes: Long,
         payloadSha256: Map<String, String>,
@@ -898,7 +917,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
         require(expectedSize in 0..maximumBytes) {
             "repair release evidence exceeds its $maximumBytes-byte bound: $relativePath"
         }
-        val bytes = readStableRepairFile(projectDir, relativePath, maximumBytes)
+        val readLimit = if (reader.budget == null) maximumBytes else expectedSize
+        val bytes = reader.read(relativePath, readLimit).bytes
         require(bytes.size.toLong() == expectedSize && sha256(bytes) == expectedDigest) {
             "repair release evidence changed after archive payload inspection: $relativePath"
         }

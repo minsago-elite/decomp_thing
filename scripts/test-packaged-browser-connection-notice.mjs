@@ -23,7 +23,7 @@ const png = (w, h) => { const b = Buffer.alloc(33); Buffer.from([0x89, 0x50, 0x4
 function axNodes(state, t) {
   const n = (nodeId, parentId, role, name) => ({ nodeId: String(nodeId), parentId: parentId === null ? undefined : String(parentId), ignored: false, role: { value: role }, name: { value: name } });
   const heading = t.axHeading ?? CONNECTION_COPY[state].heading;
-  const nodes = [n(1, null, 'RootWebArea', 'Home'), n(2, 1, t.axNoComplementary ? 'generic' : 'complementary', CONNECTION_COPY.label),
+  const nodes = [n(1, null, 'RootWebArea', 'Home'), n(2, 1, t.axNoRegion ? 'generic' : t.axComplementary ? 'complementary' : 'region', t.axComplementary ? CONNECTION_COPY.label : CONNECTION_COPY[state].heading),
     n(3, 2, t.axWrongStatusName ? 'status' : 'status', t.axWrongStatusName ? '' : CONNECTION_COPY.label), n(4, 3, 'heading', heading),
     n(5, 1, 'complementary', 'Local session'), n(6, 5, 'status', '')];
   if (t.axDuplicateStatus) nodes.push(n(7, 2, 'status', CONNECTION_COPY.label));
@@ -71,16 +71,17 @@ function fake(t = {}) {
     if (expression === PAGE_STATE) return { href: s.href, historyLength: 2, timeOrigin: 1, navigationEntries: 1, navigationType: 'navigate', storage: s.storage,
       focus: { tag: 'a', text: 'Skip', same: s.focusSame }, onLine: s.online, events: s.events.map((e) => ({ ...e })) };
     if (expression.startsWith('(function connectionDomProbe') || expression.startsWith('(connectionDomProbe')) {
-      if (!s.events.length) return { asideCount: 0, aside: null, statuses: [], headings: [], messages: [], interactive: null, asideWithRole: 0, h1: HOME.h1 };
+      if (!s.events.length) return { noticeCount: 0, container: null, statuses: [], headings: [], messages: [], interactive: null, asideCount: 0, h1: HOME.h1 };
       const c = CONNECTION_COPY[s.online ? 'reconnected' : 'offline'];
-      return { asideCount: 1, aside: { tag: 'aside', role: t.oldAside ? 'status' : null, label: CONNECTION_COPY.label },
-        statuses: t.oldAside ? [{ tag: 'aside', label: CONNECTION_COPY.label, isAside: true }] : [{ tag: 'div', label: CONNECTION_COPY.label, isAside: false }],
-        headings: [{ level: 2, text: c.heading }], messages: t.wrongCopy ? ['changed'] : [...c.messages], interactive: 0, asideWithRole: t.oldAside ? 1 : 0, h1: HOME.h1 };
+      return { noticeCount: 1, container: t.oldAside ? { tag: 'aside', role: 'status', label: CONNECTION_COPY.label, labelledby: null, labelledHeading: null }
+          : { tag: 'section', role: null, label: null, labelledby: 'connection-notice-heading', labelledHeading: { tag: 'h2', insideStatus: !t.headingOutsideStatus } },
+        statuses: t.oldAside ? [{ tag: 'aside', label: CONNECTION_COPY.label, isContainer: true }] : [{ tag: 'div', label: CONNECTION_COPY.label, isContainer: false }],
+        headings: [{ level: 2, text: c.heading }], messages: t.wrongCopy ? ['changed'] : [...c.messages], interactive: 0, asideCount: t.oldAside ? 1 : 0, h1: HOME.h1 };
     }
     if (expression === axeExpression()) return { version: AXE_VERSION, violations: t.oldAside ? [{ id: 'aria-allowed-role', nodes: 1 }] : [], incomplete: [],
       passes: t.vacuous ? [] : ['aria-allowed-role', 'aria-prohibited-attr', 'aria-allowed-attr'] };
     if (expression.endsWith(';true')) return true;
-    if (expression.startsWith("document.querySelector('aside.connection-notice') !== null")) return false;
+    if (expression.startsWith("document.querySelector('.connection-notice') !== null")) return false;
     if (expression.includes('__connectionNoticeInput = []')) return true;
     if (expression.includes('window.__connectionNoticeFocus = a')) return { trusted: !t.untrustedKey, tag: 'a' };
     if (expression.includes('innerWidth')) return { ...s.viewport };
@@ -128,12 +129,14 @@ test('clean scripted run passes the gate with 4 observations, verified PNGs, and
 });
 
 const cases = {
-  'missing complementary': [{ axNoComplementary: true }, /one complementary/],
+  'missing region': [{ axNoRegion: true }, /one region named/],
+  'former complementary landmark': [{ axComplementary: true }, /one region named/],
+  'heading outside status': [{ headingOutsideStatus: true }, /named by the status h2/],
   'duplicate status': [{ axDuplicateStatus: true }, /exactly one status/],
   'unnamed status': [{ axWrongStatusName: true }, /exactly one status/],
   'wrong AX heading': [{ axHeading: 'x' }, /computed status heading/],
   'wrong copy': [{ wrongCopy: true }, /message copy/],
-  'old aside[role=status]': [{ oldAside: true }, /native aside/],
+  'old aside[role=status]': [{ oldAside: true }, /native section/],
   'vacuous axe': [{ vacuous: true }, /vacuous/],
   'synthetic events': [{ synthetic: true }, /not trusted/],
   'untrusted focus input': [{ untrustedKey: true }, /trusted CDP input/],
@@ -230,9 +233,10 @@ test('authenticated-before and schema drift fail the gate', async () => {
   assert.ok(f.some((x) => /before any local session/.test(x)) && f.some((x) => /schema/.test(x)));
 });
 
-test('AX summarizer scopes statuses to the named complementary', () => {
+test('AX summarizer scopes statuses to the heading-named region', () => {
   const ax = summarizeConnectionAx(axNodes('offline', {}));
-  assert.deepEqual(ax.status, { withinComplementary: 1, named: 1 });
+  assert.deepEqual(ax.region, { count: 1, names: [CONNECTION_COPY.offline.heading] });
+  assert.deepEqual(ax.status, { withinRegion: 1, named: 1 });
   assert.deepEqual(ax.headings, [CONNECTION_COPY.offline.heading]);
   assert.deepEqual(summarizeConnectionAx([]), { computed: false });
 });

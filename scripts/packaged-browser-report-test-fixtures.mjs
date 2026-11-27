@@ -148,7 +148,7 @@ export function fakeConnectionBrowser() {
       case 'Network.emulateNetworkConditions': { const was = s.online; s.online = !params.offline; if (was !== s.online) s.events.push({ type: s.online ? 'online' : 'offline', trusted: true, onLine: s.online, target: 'window' }); return {}; }
       case 'Accessibility.getFullAXTree': {
         const n = (id, parent, role, name) => ({ nodeId: String(id), parentId: parent === null ? undefined : String(parent), ignored: false, role: { value: role }, name: { value: name } });
-        return { nodes: [n(1, null, 'RootWebArea', 'Home'), n(2, 1, 'complementary', CONNECTION_COPY.label), n(3, 2, 'status', CONNECTION_COPY.label),
+        return { nodes: [n(1, null, 'RootWebArea', 'Home'), n(2, 1, 'region', CONNECTION_COPY[s.online ? 'reconnected' : 'offline'].heading), n(3, 2, 'status', CONNECTION_COPY.label),
           n(4, 3, 'heading', CONNECTION_COPY[s.online ? 'reconnected' : 'offline'].heading)] };
       }
       case 'Page.captureScreenshot': return { data: tinyPng(s.viewport.width, s.viewport.height).toString('base64') };
@@ -162,12 +162,13 @@ export function fakeConnectionBrowser() {
       storage: { localCount: 0, sessionCount: 0, sha256: 'a'.repeat(64) }, focus: { tag: 'a', text: 'Skip', same: true }, onLine: s.online, events: s.events.map((e) => ({ ...e })) };
     if (expression.startsWith('(function connectionDomProbe') || expression.startsWith('(connectionDomProbe')) {
       const c = CONNECTION_COPY[s.online ? 'reconnected' : 'offline'];
-      return { asideCount: 1, aside: { tag: 'aside', role: null, label: CONNECTION_COPY.label }, statuses: [{ tag: 'div', label: CONNECTION_COPY.label, isAside: false }],
-        headings: [{ level: 2, text: c.heading }], messages: [...c.messages], interactive: 0, asideWithRole: 0, h1: HOME.h1 };
+      return { noticeCount: 1, container: { tag: 'section', role: null, label: null, labelledby: 'connection-notice-heading', labelledHeading: { tag: 'h2', insideStatus: true } },
+        statuses: [{ tag: 'div', label: CONNECTION_COPY.label, isContainer: false }],
+        headings: [{ level: 2, text: c.heading }], messages: [...c.messages], interactive: 0, asideCount: 0, h1: HOME.h1 };
     }
     if (expression === connectionAxeExpression()) return { version: CONNECTION_AXE_VERSION, violations: [], incomplete: [], passes: ['aria-allowed-role', 'aria-prohibited-attr', 'aria-allowed-attr'] };
     if (expression.endsWith(';true')) return true;
-    if (expression.startsWith("document.querySelector('aside.connection-notice') !== null")) return false;
+    if (expression.startsWith("document.querySelector('.connection-notice') !== null")) return false;
     if (expression.includes('__connectionNoticeInput = []')) return true;
     if (expression.includes('window.__connectionNoticeFocus = a')) return { trusted: true, tag: 'a' };
     if (expression.includes('innerWidth')) return { ...s.viewport };
