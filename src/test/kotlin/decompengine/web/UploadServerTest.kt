@@ -276,17 +276,21 @@ class UploadServerTest {
     }
 
     @Test
-    fun `legacy exploration does not pair observations with empty candidate ids`() = withServer { server, root ->
+    fun `legacy exploration does not pair observations with empty or missing candidate ids`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val reports = root.resolve(id).resolve("reports").createDirectories()
-        reports.resolve("exploration.json").writeText(
-            """{"candidateCount":1,"coverageIncreased":false,"baselineOutputSignatures":0,"expandedOutputSignatures":0,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.5,"inputCount":1,"sourceCount":1,"outputSignatureCount":1,"newOutputSignatureCount":0,"sandboxed":true,"networkIsolated":true},"candidates":[{"id":"","source":"SEED","args":[],"stdinHex":""}],"observations":[{"candidateId":"","exitCode":7,"stdoutHex":"4142"}]}""",
+        val report = reports.resolve("exploration.json")
+        val rows = listOf(
+            """{"id":"","source":"SEED","args":[],"stdinHex":""}""" to """{"candidateId":"","exitCode":7,"stdoutHex":"4142"}""",
+            """{"source":"SEED","args":[],"stdinHex":""}""" to """{"exitCode":7,"stdoutHex":"4142"}""",
         )
-
-        val html = request(server, "GET", "/jobs/$id").body.decodeToString()
-        val section = html.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
-        assertTrue(section.contains("<td>Not reported</td><td><code>Not reported</code></td>"), section)
-        assertTrue(!section.contains(">AB<"), section)
+        for ((candidate, observation) in rows) {
+            report.writeText("""{"candidateCount":1,"coverageIncreased":false,"baselineOutputSignatures":0,"expandedOutputSignatures":0,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.5,"inputCount":1,"sourceCount":1,"outputSignatureCount":1,"newOutputSignatureCount":0,"sandboxed":true,"networkIsolated":true},"candidates":[$candidate],"observations":[$observation]}""")
+            val html = request(server, "GET", "/jobs/$id").body.decodeToString()
+            val section = html.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
+            assertTrue(section.contains("<td>Not reported</td><td><code>Not reported</code></td>"), section)
+            assertTrue(!section.contains(">AB<"), section)
+        }
     }
 
     @Test
