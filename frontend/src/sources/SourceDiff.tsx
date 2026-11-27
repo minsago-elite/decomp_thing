@@ -71,9 +71,7 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
     }
     return { head, runs, nextCursor: page.page.nextCursor };
   }, setRead), [client, key]);
-  const loaded = currentSourceRead(read, key);
-  const latest = older?.state === 'ready' ? older : null;
-  const current = latest ?? loaded;
+  const current = currentSourceRead(read, key);
   const value = current.state === 'ready' ? current.value : null;
   function loadOlder(attempts: Attempts) {
     if (attempts.nextCursor === null) return;
@@ -84,11 +82,18 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
       if (page.jobId !== selected.jobId) throw new ApiClientError('invalid_response');
       const known = new Set(attempts.runs.map(run => run.runId));
       return { head: attempts.head, runs: [...attempts.runs, ...page.items.filter(run => !known.has(run.runId))], nextCursor: page.page.nextCursor };
-    }, setOlder);
+    }, next => {
+      setOlder(next);
+      if (next.state === 'ready') {
+        setRead(previous => previous.key === key ? { key, state: 'ready', value: next.value } : previous);
+      }
+    });
   }
   const options = value ? value.runs.filter(run => run.resultRevisionId !== null && run.runId !== selected.runId) : [];
   const parent = value ? sourceDiffParent(value.head, value.runs) : null;
-  const selectedValue = choice || (parent ? `${parent.runId}/${parent.revisionId}` : options[0] ? `${options[0].runId}/${options[0].resultRevisionId}` : '');
+  const shown = new Set(options.map(run => `${run.runId}/${run.resultRevisionId}`));
+  // Compare submits only an option the select is displaying; an undisplayed choice falls back to the visible default.
+  const selectedValue = (choice && shown.has(choice) ? choice : '') || (parent ? `${parent.runId}/${parent.revisionId}` : options[0] ? `${options[0].runId}/${options[0].resultRevisionId}` : '');
   return <section aria-labelledby="source-diff-choose">
     <h2 id="source-diff-choose">{copy.diffChoose}</h2>
     <p>{copy.diffChooseNotice}</p>
@@ -97,7 +102,7 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
     {value && (options.length === 0 ? <p>{copy.diffNoOtherRevision}</p> : <form class="source-search-form" onSubmit={event => {
       event.preventDefault();
       const [runId, revisionId] = selectedValue.split('/');
-      if (runId && revisionId) { onChoose(); location.route(sourceDiffPath(basePath, selected, { runId, revisionId })); }
+      if (runId && revisionId && shown.has(selectedValue)) { onChoose(); location.route(sourceDiffPath(basePath, selected, { runId, revisionId })); }
     }}>
       <label>{copy.diffBaseChoice}
         <select value={selectedValue} onChange={event => setChoice((event.target as HTMLSelectElement).value)}>
@@ -111,7 +116,7 @@ function BaseChooser({ selected, basePath, onChoose }: { selected: SourceSelecti
     </form>)}
     {value && <p role="status">{message(value.nextCursor === null ? copy.diffAttemptsAll : copy.diffAttemptsPartial, { count: value.runs.length })}</p>}
     {value?.nextCursor != null && <button type="button" disabled={older?.state === 'loading'} onClick={() => { loadOlder(value); }}>{copy.diffLoadOlder}</button>}
-    {older?.state === 'failed' && <p role="alert">{sourceReadMessage(older.failure)}</p>}
+    {older?.state === 'failed' && older.key.startsWith(`${key}/`) && <p role="alert">{sourceReadMessage(older.failure)}</p>}
   </section>;
 }
 

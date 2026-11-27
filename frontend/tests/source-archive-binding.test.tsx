@@ -1,0 +1,157 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { options } from 'preact';
+import { render, within } from '@testing-library/preact';
+import { LocationProvider } from 'preact-iso/router';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type * as ClientModule from '../src/api/client';
+import type { Operation, SourceArchive as Status } from '../src/api/generated';
+import { decodeResponse } from '../src/api/decode';
+import { archiveCopy as copy } from '../src/copy/archive';
+import { SourceArchive } from '../src/sources/SourceArchive';
+
+// Passive effects run after a paint the browser may deliver late (#1880). Held frames model that: the verified result
+// commits while passive effects stay queued, so focus must already be on the result at that commit.
+type Pending = { kind: string; path: string; signal: AbortSignal; resolve: (value: unknown) => void };
+const transport = vi.hoisted(() => ({
+  get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>(),
+  post: vi.fn<(kind: string, path: string, requestKind: string, data: unknown, options: { signal: AbortSignal }) => Promise<unknown>>(),
+}));
+vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+const jobId = 'a'.repeat(32);
+const selected = { jobId, runId: 'run_1', revisionId: 'revision_1' };
+const root = `/jobs/${jobId}/runs/run_1/revisions/revision_1`;
+const read = (name: string) => readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8').replaceAll('job_1', jobId);
+const status = (name: string): Status => decodeResponse(read(name), 'sourceArchive').data;
+const verified = status('source-archive-verified');
+const variant = (verification: Partial<Status['verification']>): Status =>
+  decodeResponse(JSON.stringify({ ...JSON.parse(read('source-archive-verified')) as object,
+    data: { ...verified, verification: { ...verified.verification, ...verification } } }), 'sourceArchive').data;
+const before = variant({ state: 'not-verified', operationId: null, verifiedAt: null });
+const failedStatus = variant({ state: 'failed', verifiedAt: null, failureCode: 'ARCHIVE_INVALID' });
+const failedOperation = (JSON.parse(read('operation-archive-verify-failed')) as { data: Operation }).data;
+const operation = (state: Operation['state']): Operation => ({ ...failedOperation, state, endedAt: state === 'running' ? null : failedOperation.endedAt,
+  message: null });
+const session = { csrf: () => 'csrf_token_1' };
+
+let held: (() => void)[] = [];
+const hold = (callback: () => void) => { held.push(callback); };
+let restoreFrame = () => undefined as void;
+let pending: Pending[] = [];
+let log: string[] = [];
+beforeEach(() => {
+  vi.useFakeTimers(); transport.get.mockReset(); transport.post.mockReset(); held = []; pending = []; log = [];
+  const deferred = (kind: string, path: string, signal: AbortSignal) => new Promise(resolve => { pending.push({ kind, path, signal, resolve }); });
+  transport.get.mockImplementation((kind, path, { signal }) => { log.push(`get ${path}`); return deferred(kind, path, signal); });
+  transport.post.mockImplementation((kind, path, _request, _body, { signal }) => { log.push(`post ${path}`); return deferred(kind, path, signal); });
+  const previous = Object.getOwnPropertyDescriptor(options, 'requestAnimationFrame');
+  restoreFrame = () => { if (previous) Object.defineProperty(options, 'requestAnimationFrame', previous); else Reflect.deleteProperty(options, 'requestAnimationFrame'); };
+  options.requestAnimationFrame = hold;
+});
+afterEach(() => { restoreFrame(); vi.useRealTimers(); });
+
+async function microtasks() { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }
+/** Renders commit; passive effects stay held. No act(), which would flush them. */
+async function settle(value: unknown) { const next = pending.shift()!; expect(next).toBeDefined(); next.resolve({ data: value }); await microtasks(); }
+function paint() { const queue = held; held = []; for (const callback of queue) callback(); }
+const button = (scope: HTMLElement, name: string) => within(scope).getByRole('button', { name });
+const result = (scope: HTMLElement) => scope.querySelector<HTMLElement>('[data-archive-state]');
+function mount(panels = 1) {
+  const view = render(<LocationProvider scope="/">{Array.from({ length: panels }, (_, index) =>
+    <SourceArchive key={index} selected={selected} basePath="/" session={session} />)}</LocationProvider>);
+  return { view, panels: [...view.container.querySelectorAll<HTMLElement>('section.source-archive')] };
+}
+/** Explicit status read: its passive read effect starts on paint; it never moves focus. */
+async function inspect(panel: HTMLElement, value: Status, name: string = copy.inspect) {
+  button(panel, name).click(); await microtasks();
+  expect(pending).toHaveLength(0);
+  paint(); await microtasks();
+  expect(pending.map(call => call.path)).toEqual([`${root}/source-archive`]);
+  await settle(value); paint();
+  expect(result(panel)?.dataset.archiveState).toBe(value.verification.state);
+}
+/** Explicit verification up to the committed reread, with passive effects still held. */
+async function verify(panel: HTMLElement, terminal: Operation['state'], after: Status) {
+  button(panel, copy.verify).click(); await microtasks();
+  expect(pending.map(call => call.kind)).toEqual(['operation']);
+  await settle(operation('running'));
+  await vi.advanceTimersByTimeAsync(1000); await microtasks();
+  expect(pending.map(call => call.path)).toEqual([`${root}/archive-verifications/operation_1`]);
+  await settle(operation(terminal));
+  expect(result(panel)).toBeNull();
+  paint(); await microtasks();
+  expect(pending.map(call => call.path)).toEqual([`${root}/source-archive`]);
+  await settle(after);
+  const committed = result(panel);
+  expect(committed?.dataset.archiveState).toBe(after.verification.state);
+  // Still the holder (act() would swap it), so no passive effect has run since the read effect was painted.
+  expect(Reflect.get(options, 'requestAnimationFrame')).toBe(hold);
+  return committed!;
+}
+
+it('focuses the verified result when the reader still waits on the activated Verify control', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  button(panel!, copy.verify).focus();
+  const committed = await verify(panel!, 'completed', verified);
+  expect(document.activeElement).toBe(committed);
+});
+
+it('keeps keyboard focus when the reader moves elsewhere during verification, and recovers on the next activation', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  const elsewhere = document.createElement('input');
+  document.body.appendChild(elsewhere);
+  try {
+    button(panel!, copy.verify).focus();
+    button(panel!, copy.verify).click(); await microtasks();
+    await settle(operation('running'));
+    // Duplicate activation while running is still ignored.
+    button(panel!, copy.verify).click(); await microtasks();
+    expect(log.filter(entry => entry.startsWith('post '))).toHaveLength(1);
+    elsewhere.focus();
+    await vi.advanceTimersByTimeAsync(1000); await microtasks();
+    await settle(operation('completed'));
+    paint(); await microtasks();
+    await settle(verified);
+    expect(result(panel!)?.dataset.archiveState).toBe('verified');
+    expect(document.activeElement).toBe(elsewhere);
+    expect(panel!.querySelector('[role="status"]#source-archive-operation')?.textContent).not.toBe('');
+    // Keyboard recovery: a fresh activation from the Verify control again lands on its result.
+    paint(); await microtasks();
+    button(panel!, copy.verify).focus();
+    const committed = await verify(panel!, 'completed', verified);
+    expect(document.activeElement).toBe(committed);
+  } finally { elsewhere.remove(); }
+});
+
+it('fails safely and never polls a substituted operation ID from a same-job response', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  button(panel!, copy.verify).click(); await microtasks();
+  await settle(operation('running'));
+  await vi.advanceTimersByTimeAsync(1000); await microtasks();
+  expect(pending[0]?.path).toBe(`${root}/archive-verifications/operation_1`);
+  const mismatched = decodeResponse(JSON.stringify({ apiVersion: 1, kind: 'operation', requestId: 'request_op_2',
+    data: { ...operation('completed'), operationId: 'operation_2' } }), 'operation');
+  await settle(mismatched.data);
+  await vi.advanceTimersByTimeAsync(5000); paint(); await microtasks();
+  expect(log).not.toContain(`get ${root}/archive-verifications/operation_2`);
+  expect(log.filter(entry => entry.endsWith('/source-archive'))).toHaveLength(1);
+  expect(pending).toHaveLength(0);
+  expect(within(panel!).getByRole('alert')).toBeTruthy();
+  // Only the authoritative status grants the verified label; the substituted completion granted nothing.
+  expect(result(panel!)?.dataset.archiveState).toBe('not-verified');
+  expect(within(panel!).queryByText(copy.downloadVerified)).toBeNull();
+});
+
+it('binds every poll to the POST operation ID through success and failure', async () => {
+  const { panels: [panel] } = mount();
+  await inspect(panel!, before);
+  await verify(panel!, 'failed', failedStatus);
+  expect(result(panel!)?.dataset.archiveState).toBe('failed');
+  paint(); await microtasks();
+  await verify(panel!, 'completed', verified);
+  expect(log.filter(entry => entry.includes('/archive-verifications/')))
+    .toEqual([`get ${root}/archive-verifications/operation_1`, `get ${root}/archive-verifications/operation_1`]);
+});

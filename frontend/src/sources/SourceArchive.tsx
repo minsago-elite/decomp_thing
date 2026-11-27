@@ -33,6 +33,18 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   const result = useRef<HTMLParagraphElement>(null);
   // Key of the one verification-triggered read whose result takes focus; manual and other reads never match it.
   const focusResult = useRef<string | null>(null);
+  // The control whose activation is still awaiting its result. Any intervening focus elsewhere releases the claim.
+  const awaiting = useRef<{ control: HTMLElement | null; origin: Element | null } | null>(null);
+  useEffect(() => {
+    const release = (event: FocusEvent) => {
+      if (awaiting.current && event.target !== awaiting.current.control) {
+        awaiting.current = null;
+        focusResult.current = null;
+      }
+    };
+    document.addEventListener('focusin', release);
+    return () => { document.removeEventListener('focusin', release); };
+  }, []);
   useEffect(() => () => { stop.current?.(); stop.current = null; }, []);
   // A verification belongs to the selected revision and session; changing either abandons it and its feedback.
   const binding = [selected.jobId, selected.runId, selected.revisionId].join('/');
@@ -40,7 +52,7 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   useEffect(() => {
     if (owner.current.binding === binding && owner.current.session === session) return;
     owner.current = { binding, session };
-    stop.current?.(); stop.current = null; busy.current = false;
+    stop.current?.(); stop.current = null; busy.current = false; awaiting.current = null; focusResult.current = null;
     setProgress(null);
   }, [binding, session]);
   useEffect(() => refresh === 0 ? undefined : beginSourceRead(key, async signal => bindSourceArchive(
@@ -51,14 +63,20 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
   useLayoutEffect(() => {
     if (!current || current.state === 'loading' || current.key !== focusResult.current) return;
     focusResult.current = null;
-    if (data) result.current?.focus();
+    const claim = awaiting.current;
+    awaiting.current = null;
+    // Focus follows only while the reader still waits where they activated Verify (or on nothing after it unmounted).
+    const active = document.activeElement;
+    const waiting = claim !== null && (active === null || active === document.body || active === claim.control || active === claim.origin);
+    if (data && waiting) result.current?.focus();
   }, [current?.key, current?.state, data]);
   const running = progress?.state === 'submitting' || progress?.state === 'running';
-  function verify(archiveSha256: string) {
+  function verify(archiveSha256: string, control: HTMLElement | null) {
     if (busy.current) return;
     const csrfToken = session.csrf();
     if (!csrfToken) { setProgress({ state: 'failed', failure: new ApiClientError('http_error', { status: 401, serverCode: 'SESSION_REQUIRED' }) }); return; }
     busy.current = true;
+    awaiting.current = { control, origin: document.activeElement };
     setProgress({ state: 'submitting' });
     const controller = new AbortController();
     stop.current = () => { controller.abort(); };
@@ -67,13 +85,16 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
         let value = bindArchiveOperation((await client.post('operation', archiveVerificationsRoute(selected), 'archiveVerificationRequest',
           { archiveSha256 }, { csrfToken, idempotencyKey: crypto.randomUUID(), signal: controller.signal })).data, selected.jobId);
         if (controller.signal.aborted) return;
+        // Every later poll is bound to the operation and job the POST created; a response naming another fails safely.
+        const operationId = value.operationId;
         setProgress({ state: 'running', value });
         // Bounded polling of this one operation; it stops at a terminal state, when the panel unmounts or at the limit.
         for (let attempt = 0; attempt < ARCHIVE_POLL_LIMIT && !terminal(value); attempt++) {
           await new Promise(resolve => setTimeout(resolve, ARCHIVE_POLL_MS));
           if (controller.signal.aborted) return;
-          value = bindArchiveOperation((await client.get('operation', archiveOperationRoute(selected, value.operationId), { signal: controller.signal })).data, selected.jobId);
+          value = bindArchiveOperation((await client.get('operation', archiveOperationRoute(selected, operationId), { signal: controller.signal })).data, selected.jobId);
           if (controller.signal.aborted) return;
+          if (value.operationId !== operationId) throw new ApiClientError('invalid_response');
           setProgress({ state: 'running', value });
         }
         if (controller.signal.aborted) return;
@@ -84,7 +105,7 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
           return count + 1;
         });
       } catch (failure) {
-        if (!controller.signal.aborted) { busy.current = false; setProgress({ state: 'failed', failure }); }
+        if (!controller.signal.aborted) { busy.current = false; awaiting.current = null; setProgress({ state: 'failed', failure }); }
       }
     })();
   }
@@ -118,7 +139,7 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
       </p>
       <p>{copy.boundary}</p>
       {data.archive.sha256 !== null && <button type="button" aria-disabled={running ? 'true' : undefined}
-        aria-describedby="source-archive-operation" onClick={() => { if (!running) verify(data.archive.sha256!); }}>{copy.verify}</button>}
+        aria-describedby="source-archive-operation" onClick={event => { if (!running) verify(data.archive.sha256!, event.currentTarget); }}>{copy.verify}</button>}
       {data.archive.contentHref !== null && <p><a href={data.archive.contentHref} download="">
         {verification.state === 'verified' ? copy.downloadVerified : copy.downloadUnverified}</a></p>}
     </>}
