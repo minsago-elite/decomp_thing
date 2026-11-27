@@ -41,9 +41,15 @@ function confirms(data: Job, jobId: string, before: string, change: Change): Job
   return bound;
 }
 
-/** Display label and archive flag. A bound, confirming GET after each mutation becomes the next editable job. */
-export function JobOrganization({ job, client, basePath, session, onChanged }: {
-  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>; onChanged: (job: Job) => void;
+/**
+ * Display label and archive flag. A bound, confirming GET after each mutation becomes the next editable job. With
+ * `readJob`, the owning page issues and orders that GET against its other job reads, so a newer observation is never
+ * rewound and a readback that does not confirm the save is never applied; without it the bound read is handed to
+ * `onChanged`.
+ */
+export function JobOrganization({ job, client, basePath, session, onChanged, readJob }: {
+  job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>;
+  onChanged?: (job: Job) => void; readJob?: (signal: AbortSignal, accepts?: (job: Job) => boolean) => Promise<Job | null>;
 }) {
   const copy = jobOrganizationCopy;
   const availability = useBrowserAvailability();
@@ -85,6 +91,11 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
   }, [job.jobId, basePath, available, client, session, copy.unconfirmed]);
   const trimmed = label.trim();
   const invalid = trimmed.length > 0 && [...trimmed].length > 120;
+  /** One GET of this job, ordered by the owning page when it supplies `readJob`; the caller binds the result. */
+  async function reread(signal: AbortSignal, accepts?: (job: Job) => boolean): Promise<Job | null> {
+    if (readJob) return readJob(signal, accepts);
+    return (await client.get('job', `/jobs/${job.jobId}`, { signal })).data;
+  }
   async function save(event: Event) {
     event.preventDefault();
     if (active.current || !available) return;
@@ -110,12 +121,14 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
       // Any 2xx may have written; only an exact, confirming acknowledgement allows the readback to report Saved.
       confirms(ack, jobId, before, change);
       notifyLibraryChanged(basePath);
-      const fresh = confirms((await client.get('job', `/jobs/${jobId}`, { signal: controller.signal })).data, jobId, before, change);
+      // The page applies the readback only when it confirms this change; a mismatch leaves the shown job alone.
+      const read = await reread(controller.signal, data => { try { confirms(data, jobId, before, change); return true; } catch { return false; } });
       if (controller.signal.aborted) return;
+      const fresh = confirms(read as Job, jobId, before, change);
       // Confirmed fields adopt the server form; anything edited after submission stays the user's.
       dirty.current = { label: dirty.current.label && latest.current.label !== submitted.label,
         archived: dirty.current.archived && latest.current.archived !== submitted.archived };
-      onChanged(fresh);
+      if (!readJob) onChanged?.(fresh);
       setNotice(copy.saved);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
@@ -136,10 +149,12 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
         : code(failure) === 'STORAGE_UNCONFIRMED' ? copy.unconfirmed : copy.failed, failure));
       if (status(failure) === 412) {
         try {
-          const fresh = bindJob((await client.get('job', `/jobs/${jobId}`, { signal: controller.signal })).data, jobId);
-          if (controller.signal.aborted || fresh.version === before) return;
+          const read = await reread(controller.signal);
+          if (controller.signal.aborted || !read) return;
+          const fresh = bindJob(read, jobId);
+          if (fresh.version === before) return;
           // The next deliberate Save is guarded by this version; edited fields are kept, nothing is resent.
-          onChanged(fresh);
+          if (!readJob) onChanged?.(fresh);
           setServerLabel(fresh.label ?? null);
         } catch { /* The visible conflict notice already asks for a refresh. */ }
       }

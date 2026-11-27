@@ -23,10 +23,12 @@ async function press(cdp, tab, name) {
 }
 const deletedNotice = `document.querySelector('[role="alert"]')?.textContent.includes('This job was deleted. Its files were removed and cannot be recovered')`;
 
-// CDP reports the request, response and completion separately. Hold early events until
-// the first DELETE is identified. The caller independently counts every DELETE on the tab.
+// CDP reports the request, response and terminal event separately. Network is only a bounded
+// event and identity observer: it never reads a body (the Fetch stage owns the single read).
+// Early events are held until the first DELETE is identified; later ones are ignored.
 export const DELETION_CAPTURE_WINDOW = 64;
-export function createDeletionCapture(readBody) {
+export const DELETION_TRACE_LIMIT = 16;
+export function createDeletionCapture() {
   const recent = new Map();
   let deletionId;
 
@@ -38,11 +40,8 @@ export function createDeletionCapture(readBody) {
       entry = { trace: [] };
       recent.set(id, entry);
     }
-    if (entry.trace.length < 16) entry.trace.push(eventName);
+    if (entry.trace.length < DELETION_TRACE_LIMIT) entry.trace.push(eventName);
     update(entry);
-    if (id === deletionId && entry.response && entry.finished && !entry.body) {
-      entry.body = Promise.resolve().then(() => readBody(id)).catch(error => ({ error: String(error) }));
-    }
   }
 
   return {
@@ -59,29 +58,94 @@ export function createDeletionCapture(readBody) {
       observe(id, 'responseReceived:' + response.status, entry => { entry.response ??= response; });
     },
     finished(id) {
-      observe(id, 'loadingFinished', entry => { entry.finished = true; });
+      observe(id, 'loadingFinished', entry => { entry.terminal ??= 'finished'; });
     },
     failed(id, errorText, canceled) {
       const reason = String(errorText).slice(0, 160);
       observe(id, 'loadingFailed:' + reason + (canceled ? ':canceled' : ''), entry => {
         entry.failure ??= { errorText: reason, canceled: Boolean(canceled) };
+        entry.terminal ??= canceled ? 'canceled' : 'failed';
       });
     },
-    hasBody: id => Boolean(recent.get(id)?.body),
-    body: id => recent.get(id)?.body,
+    deletionId: () => deletionId,
+    size: () => recent.size,
     responseOf: id => recent.get(id)?.response,
+    terminalOf: id => recent.get(id)?.terminal,
     describe(id) {
       const entry = recent.get(id);
       if (!entry) return `no Network event observed for DELETE requestId ${id}`;
       const missing = [];
       if (!entry.method) missing.push('requestWillBeSent');
       if (!entry.response) missing.push('responseReceived');
-      if (!entry.finished) missing.push('loadingFinished');
+      if (!entry.terminal) missing.push('loadingFinished or loadingFailed');
       return `DELETE requestId ${id} events [${entry.trace.join(', ')}]`
         + (missing.length ? `; missing ${missing.join(', ')}` : '')
         + (entry.failure ? `; loadingFailed ${JSON.stringify(entry.failure)}` : '');
     },
   };
+}
+
+// #1891/#512: Chrome may cancel the page's completed DELETE loader after the app has consumed the
+// whole 202 body (loadingFailed net::ERR_ABORTED canceled, no loadingFinished), after which
+// Network.getResponseBody has nothing to return. The Fetch domain, scoped to the job URL and
+// paused at the response stage, reads the JVM's own body bytes exactly once before the page
+// receives them, then continues the response unmodified. Every paused request is continued
+// exactly once; the continued and error records are bounded.
+export const INTERCEPTION_RECORD_LIMIT = 64;
+export function createDeletionInterception(call) {
+  let first;
+  let bodyReads = 0;
+  let paused = 0;
+  const continued = [];
+  const errors = [];
+  const keep = (list, value) => { if (list.length < INTERCEPTION_RECORD_LIMIT) list.push(value); };
+  return {
+    async paused({ requestId, networkId, request, responseStatusCode, responseHeaders, responseErrorReason }) {
+      paused++;
+      const respond = responseErrorReason === undefined && responseStatusCode !== undefined;
+      let read;
+      if (request?.method === 'DELETE' && first === undefined && respond) {
+        first = { requestId, networkId, url: request.url, status: responseStatusCode, headerList: (responseHeaders ?? []).slice(0, 64).map(({ name, value }) => ({ name, value })) };
+        bodyReads++;
+        first.body = Promise.resolve().then(() => call('Fetch.getResponseBody', { requestId })).catch(error => ({ error: String(error).slice(0, 200) }));
+        read = first.body;
+      }
+      try { if (read) await read; } finally {
+        try {
+          await call(respond ? 'Fetch.continueResponse' : 'Fetch.continueRequest', { requestId });
+          keep(continued, requestId);
+        } catch (error) { keep(errors, String(error).slice(0, 200)); }
+      }
+    },
+    captured: () => first !== undefined,
+    first: () => first,
+    bodyReads: () => bodyReads,
+    pausedCount: () => paused,
+    continued: () => [...continued],
+    errors: () => [...errors],
+  };
+}
+
+/** Enable response interception for `run` and always release it, whether `run` succeeds or throws. */
+export async function withResponseInterception(call, patterns, run) {
+  await call('Fetch.enable', { patterns });
+  let failure;
+  try { return await run(); } catch (error) { failure = error; throw error; } finally {
+    try { await call('Fetch.disable', {}); } catch (error) {
+      if (!failure) throw new Error('Fetch.disable failed: ' + String(error).slice(0, 200), { cause: error });
+    }
+  }
+}
+
+/** The Fetch-stage view of one response in the shape readDeletionAcknowledgement verifies. */
+export function interceptedResponse(intercepted) {
+  const headers = {};
+  for (const { name, value } of intercepted.headerList) {
+    const key = name.toLowerCase();
+    assert.ok(!(key in headers), 'Intercepted DELETE repeats header ' + key);
+    headers[key] = value;
+  }
+  return { status: intercepted.status, url: intercepted.url, headers };
 }
 
 export function readDeletionAcknowledgement(response, payload, jobId, jobApiUrl) {
@@ -96,6 +160,37 @@ export function readDeletionAcknowledgement(response, payload, jobId, jobApiUrl)
   assert.equal(headers.location, new URL(jobApiUrl).pathname + '/operations/' + acknowledged.operationId);
   assert.ok(['running', 'completed'].includes(acknowledged.state), 'Unexpected DELETE acknowledgement state');
   return { acknowledged, location: headers.location, bodySha256: createHash('sha256').update(body).digest('hex') };
+}
+
+/**
+ * Cross-check the single Fetch-stage read against the independent Network observation: the paused
+ * DELETE is the tab's own DELETE, the response carries a nonempty X-Request-ID that the error-free
+ * body envelope repeats, Content-Length equals the actual decoded body length, and Network saw the
+ * same status, URL and identity headers. Only then is the acknowledgement read.
+ */
+export async function verifyInterceptedDeletion({ intercepted, observed, requestId, jobId, jobApiUrl, describe = () => '' }) {
+  assert.ok(intercepted, 'No DELETE was paused at the Fetch response stage; ' + describe());
+  assert.equal(intercepted.networkId, requestId, 'Intercepted DELETE is not the DELETE the tab sent');
+  const payload = await intercepted.body;
+  {
+    assert.ok(payload && !payload.error && typeof payload.body === 'string', 'Original DELETE body unavailable: ' + payload?.error + '; ' + describe());
+    const fetchResponse = interceptedResponse(intercepted);
+    assert.ok(observed, 'Network never observed the DELETE response; ' + describe());
+    assert.equal(observed.status, fetchResponse.status, 'Network and Fetch disagree on status');
+    assert.equal(observed.url, fetchResponse.url, 'Network and Fetch disagree on URL');
+    const observedHeaders = Object.fromEntries(Object.entries(observed.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]));
+    for (const name of ['location', 'x-request-id', 'content-type', 'content-length']) assert.equal(observedHeaders[name], fetchResponse.headers[name], 'Network and Fetch disagree on ' + name);
+    const responseRequestId = fetchResponse.headers['x-request-id'];
+    assert.ok(typeof responseRequestId === 'string' && responseRequestId.trim() !== '', 'DELETE response has no nonempty X-Request-ID');
+    const bytes = Buffer.from(payload.body, payload.base64Encoded ? 'base64' : 'utf8');
+    assert.ok(bytes.length > 0, 'DELETE body is empty');
+    assert.match(String(fetchResponse.headers['content-length']), /^[0-9]+$/, 'DELETE response has no numeric Content-Length');
+    assert.equal(Number(fetchResponse.headers['content-length']), bytes.length, 'DELETE body length differs from Content-Length');
+    const envelope = JSON.parse(bytes.toString('utf8'));
+    assert.equal(envelope.requestId, responseRequestId, 'DELETE body is not bound to its own X-Request-ID');
+    const acknowledgement = readDeletionAcknowledgement(fetchResponse, payload, jobId, jobApiUrl);
+    return { ...acknowledgement, fetchResponse, responseRequestId, bodyBytes: bytes.length };
+  }
 }
 
 export function assertDeletionAlert(state, rendered) {
@@ -179,7 +274,7 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
 
   const tab = await makeTarget();
   const jobApiUrl = browserOrigin + '/nested/api/v1/jobs/' + job.id;
-  const capture = createDeletionCapture(requestId => cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
+  const capture = createDeletionCapture();
   const listingBusy = [];
   cdp.on('Network.requestWillBeSent', ({ requestId, request }) => capture.request(requestId, request.method), tab.sessionId);
   cdp.on('Network.responseReceived', ({ requestId, response }) => capture.response(requestId, response), tab.sessionId);
@@ -235,20 +330,29 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.equal(await evaluate(tab, deleteDisabled), true, 'Delete accepted the label instead of the file name');
   await evaluate(tab, setInput('input[name="confirm"]', 'lifecycle-fixture.elf'));
   assert.equal(await evaluate(tab, deleteDisabled), false);
-  await evaluate(tab, click('Delete permanently'));
-  await ready(tab, deletedNotice, 'deleted notice in deleting tab');
-  const deleteRequests = tab.requests.filter(request => request.method === 'DELETE');
-  assert.equal(deleteRequests.length, 1);
-  const [{ requestId, url }] = deleteRequests;
-  assert.equal(url, jobApiUrl);
-  try {
-    await waitFor(() => capture.hasBody(requestId), 'original DELETE body', 10_000);
-  } catch (error) {
-    throw new Error(error.message + '; ' + capture.describe(requestId), { cause: error });
-  }
-  const payload = await capture.body(requestId);
-  assert.ok(!payload.error, 'Original DELETE body unavailable: ' + payload.error + '; ' + capture.describe(requestId));
-  const { acknowledged, location, bodySha256 } = readDeletionAcknowledgement(capture.responseOf(requestId), payload, job.id, jobApiUrl);
+  // Only the exact job resource is paused, only for the click below; nothing is fulfilled or rewritten.
+  const interception = createDeletionInterception((method, params) => cdp.call(method, params, tab.sessionId));
+  cdp.on('Fetch.requestPaused', event => { void interception.paused(event); }, tab.sessionId);
+  const fetchCall = (method, params) => cdp.call(method, params, tab.sessionId);
+  const requestId = await withResponseInterception(fetchCall, [{ urlPattern: jobApiUrl, requestStage: 'Response' }], async () => {
+    await evaluate(tab, click('Delete permanently'));
+    await ready(tab, deletedNotice, 'deleted notice in deleting tab');
+    const deleteRequests = tab.requests.filter(request => request.method === 'DELETE');
+    assert.equal(deleteRequests.length, 1);
+    const [{ requestId: sent, url }] = deleteRequests;
+    assert.equal(url, jobApiUrl);
+    try {
+      await waitFor(() => interception.captured() && interception.continued().includes(interception.first().requestId), 'original DELETE body at the Fetch response stage', 10_000);
+    } catch (error) {
+      throw new Error(error.message + '; ' + capture.describe(sent) + '; Fetch errors ' + JSON.stringify(interception.errors()), { cause: error });
+    }
+    return sent;
+  });
+  assert.deepEqual(interception.errors(), [], 'Fetch interception failed to continue a paused request');
+  assert.equal(interception.bodyReads(), 1, 'DELETE body must be read exactly once, at the Fetch stage');
+  const { acknowledged, location, bodySha256, fetchResponse, bodyBytes } = await verifyInterceptedDeletion({
+    intercepted: interception.first(), observed: capture.responseOf(requestId), requestId, jobId: job.id, jobApiUrl, describe: () => capture.describe(requestId) });
+  const networkTerminal = capture.describe(requestId);
   const { operationId } = acknowledged;
   const rendered = await evaluate(tab, `${deletedAlert}?.innerText`);
   assertDeletionAlert(acknowledged.state, rendered);
@@ -311,7 +415,8 @@ export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, rea
   assert.deepEqual(peer.exceptions, []);
   return { realBackend: true, labelEditedEvidenceUnchanged: true, archiveOrganizationOnly: true, archiveDistinctFromExport: true,
     defaultListingHidesArchived: true, typedConfirmationRequiresFileName: true, deleteRequests: 1, jobDirectoryRemoved: true,
-    deletionOperation: { location, operationId, jobId: job.id, action: acknowledged.action, status: 202, bodySha256,
+    deletionOperation: { location, operationId, jobId: job.id, action: acknowledged.action, status: 202, bodySha256, bodySource: 'Fetch.getResponseBody@Response', bodyReads: interception.bodyReads(), bodyBytes, networkTerminal, networkTerminalKind: capture.terminalOf(requestId) ?? null,
+      requestId: fetchResponse.headers['x-request-id'], interceptedRequests: interception.continued().length,
       acknowledgedState: acknowledged.state, rendered, state: operation.state, message: operation.message }, detachedDataPurged: true, previewInputBytes: 64,
     peerTabReconciled: true, deepLinkReloadShowsDeleted: true, apiGone: 410, noUndoPromised: true,
     keyboardReturnFocus: landingFocus, mutationRequests: methods.length, listingBusyRetried: listingBusy, executionStarted: false };
