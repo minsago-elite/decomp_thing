@@ -183,6 +183,30 @@ def groovy_path(path):
     return "'" + str(path).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
+def binding_exec_groovy(helper, java_home, gradle_home, binding_path):
+    """Read the helper's single bounded stdout line and retain Gradle's failure."""
+    return f'''def bindingOutput = null
+def bindingDiagnostic = ''
+try {{
+    bindingOutput = p.providers.exec {{
+        commandLine({groovy_path(pathlib.Path(sys.executable).resolve())}, '-B', {groovy_path(helper)},
+            'bindings', {java_home}, {gradle_home}, {binding_path}, Double.toString(remainingBindingSeconds))
+        environment = ['PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1']
+        ignoreExitValue = true
+    }}
+    bindingDiagnostic = bindingOutput.standardOutput.asText.get()
+    bindingOutput.result.get().assertNormalExitValue()
+}} catch (Throwable bindingFailure) {{
+    def summary = bindingDiagnostic.trim()
+    if (summary.length() > 512) summary = ''
+    if (!(summary ==~ /atomic binding failure stage=(budget|jdk|gradle|validate|write) cause=[A-Za-z][A-Za-z0-9_]{{0,95}}/))
+        summary = 'atomic binding failure stage=unknown cause=diagnostic-unavailable'
+    logger.lifecycle(summary)
+    throw bindingFailure
+}}
+'''
+
+
 def install_root():
     # All existing distribution verifiers consume this build-directory location.
     return WORK / "root-build/install" / APP
@@ -365,9 +389,7 @@ p.tasks.matching {{ it.name == "installDist" }}.configureEach {{ install ->
         def bindingPath = new File({groovy_path(WORK / f"command-{command_id:02d}-bindings.json")})
         def remainingBindingSeconds = (encoder.deadline - System.nanoTime()) / 1000000000.0d
         if (remainingBindingSeconds <= 0) throw new GradleException('snapshot/binding deadline')
-        p.providers.exec {{ commandLine({groovy_path(pathlib.Path(sys.executable).resolve())}, '-B', {groovy_path(helper)},
-            'bindings', selectedJavaHome, gradle.gradleHomeDir.absolutePath, bindingPath.absolutePath, Double.toString(remainingBindingSeconds)) }}.result.get().assertNormalExitValue()
-        if (bindingPath.length() > 33554432) throw new GradleException('binding JSON exceeds bound')
+''' + binding_exec_groovy(helper, 'selectedJavaHome', 'gradle.gradleHomeDir.absolutePath', 'bindingPath.absolutePath') + f'''        if (bindingPath.length() > 33554432) throw new GradleException('binding JSON exceeds bound')
         def bindings = new JsonSlurper().parse(bindingPath, 'UTF-8')
         def plan = [declaredInputsFormat: 'declared-inputs-v1', jdkBinding: bindings.jdkBinding, gradleBinding: bindings.gradleBinding,
             acp: acp, runRoot: {groovy_path(WORK)}, repoRoot: {groovy_path(ROOT)}, installInputs: files(install.inputs.files), producers: producers,
