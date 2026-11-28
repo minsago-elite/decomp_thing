@@ -643,12 +643,12 @@ internal data class ExportProcessCleanupResult(
     val refusedHandles: List<ExportProcessRefusal> = emptyList(),
 )
 
-/** A PID together with the start instant of the process holding it; unlike a PID, it is not reused. */
+/** A PID together with the start instant of the process holding it, which tells a reused PID apart. */
 internal data class ExportProcessIdentity(val pid: Long, val startInstant: java.time.Instant) {
     override fun toString(): String = "$pid@${startInstant.toEpochMilli()}"
 }
 
-/** A live process the tree observed but refused, because its identity was not tied to the owned launch. */
+/** A live handle the tree refused to retain or signal, because its identity was not tied to the owned launch. */
 internal data class ExportProcessRefusal(val pid: Long, val startInstant: java.time.Instant?, val reason: String) {
     override fun toString(): String = "$pid@${startInstant?.toEpochMilli() ?: "unknown"} ($reason)"
 }
@@ -936,7 +936,7 @@ internal class ExportProcessTree(
         }
         // Refused handles were never retained or signalled; record them even when absence is confirmed.
         val refusalDiagnostic = refusals.takeIf { it.isNotEmpty() }?.joinToString(
-            prefix = "refused unowned identities: ",
+            prefix = "refused handles not tied to the owned launch: ",
             postfix = if (refusalsTruncated) ", and further refusals" else "",
         )
         val result = ExportProcessCleanupResult(

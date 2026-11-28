@@ -421,7 +421,7 @@ class GhidraExportLaunchTest {
                 result.refusedHandles.map { it.pid to it.startInstant?.toEpochMilli() },
                 "refused handles must be recorded in the cleanup evidence",
             )
-            assertTrue(result.diagnostic.orEmpty().startsWith("refused unowned identities: 7002@2100"), result.diagnostic)
+            assertTrue(result.diagnostic.orEmpty().startsWith("refused handles not tied to the owned launch: 7002@2100"), result.diagnostic)
         }
     }
 
