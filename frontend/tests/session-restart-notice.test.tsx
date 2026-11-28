@@ -52,6 +52,7 @@ function noMutations(gateway: ReturnType<typeof setup>['gateway']) {
 it('announces a changed known instance only after explicit authenticated bootstrap and clears the notice on a stable refresh', async () => {
   const { session, gateway, data } = setup();
   await session.initialize({ kind: 'absent' }); render(<SessionStatus session={session} />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); }); // live regions become ready after a paint
   expect(screen.queryByText(notice)).toBeNull();
   const invalidated = vi.fn(() => { expect(session.csrf()).toBeNull(); }); session.onInvalidated(invalidated);
   gateway.bootstrap.mockResolvedValue({ ...data, serverInstanceId: 'server_fixture_replacement' });

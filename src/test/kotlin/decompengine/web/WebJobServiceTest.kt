@@ -29,6 +29,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
@@ -433,6 +435,53 @@ class WebJobServiceTest {
             stopper.join(5000)
         }
         assertFalse(publisher.isAlive)
+        assertFalse(stopper.isAlive)
+    }
+
+    @Test fun `launch permits are bounded and a shutdown signal either refuses a grant or interrupts its holder`() {
+        val stopping = java.util.concurrent.atomic.AtomicBoolean(false)
+        val fence = WebCompletionPublicationFence(1) { stopping.set(true) }
+        val held = assertNotNull(fence.grantLaunch { "first" })
+        assertNull(fence.grantLaunch { error("a permit beyond capacity must not prepare") })
+        fence.releaseLaunch(held)
+
+        val preparing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val launch = java.util.concurrent.FutureTask {
+            val permit = checkNotNull(fence.grantLaunch {
+                preparing.countDown()
+                check(release.await(15, TimeUnit.SECONDS))
+                assertFalse(stopping.get(), "shutdown cannot publish while a grant is being prepared")
+                "prepared"
+            })
+            try { Thread.sleep(15_000) } catch (_: InterruptedException) { interrupted.set(true) }
+            finally { fence.releaseLaunch(permit) }
+            permit.prepared
+        }
+        val launcher = Thread(launch, "pure-launch-permit-holder").apply { isDaemon = true }
+        val stopper = Thread({ fence.signalShutdown() }, "pure-launch-permit-shutdown").apply { isDaemon = true }
+        try {
+            launcher.start()
+            assertTrue(preparing.await(15, TimeUnit.SECONDS))
+            stopper.start()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+            while (stopper.state != Thread.State.WAITING && stopper.isAlive && System.nanoTime() < deadline) Thread.yield()
+            assertEquals(Thread.State.WAITING, stopper.state)
+            assertFalse(stopping.get())
+            release.countDown()
+            assertEquals("prepared", launch.get(15, TimeUnit.SECONDS))
+            stopper.join(15_000)
+            assertTrue(interrupted.get(), "shutdown must interrupt the holder of a permit granted before its signal")
+            assertTrue(stopping.get())
+            assertNull(fence.grantLaunch { error("no permit may be prepared after the shutdown signal") })
+        } finally {
+            release.countDown()
+            launcher.interrupt()
+            launcher.join(5000)
+            stopper.join(5000)
+        }
+        assertFalse(launcher.isAlive)
         assertFalse(stopper.isAlive)
     }
 
