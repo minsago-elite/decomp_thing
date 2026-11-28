@@ -51,24 +51,6 @@ coordinator JVM. Reconstruction retains its existing wall-clock and descendant-R
 monitor, termination and resumable exporter checks. A separate JVM and RSS sampling
 alone are not a kernel sandbox or cgroup receipt.
 
-Export cleanup keeps an inventory of the worker's descendants, keyed by PID and
-start instant. OpenJDK lists descendants by parent PID, so a scan from a root whose
-PID was reused yields the replacement's children. A descendant whose parent is the
-worker or a retained process is owned. One whose parent holds the worker's or a
-retained PID with a different start instant, or whose parent was already refused,
-is a replacement: it is never signalled, does not block confirmed absence, and is
-listed under `refusedProcessHandles` in `reports/ghidra_resource_usage.json` and in
-any cleanup failure. Anything else, such as a grandchild that init adopted between
-the scan and its admission, is treated as possibly owned: it is signalled after its
-PID and start instant are read again, and cleanup stays unconfirmed while it lives,
-which quarantines later export launches.
-
-This is not race-free ownership. Linux start instants have clock-tick (10 ms)
-resolution and OpenJDK signals by numeric PID after its own start-time check, so a
-PID reused within one tick, or between a recheck and its signal, is not told apart.
-Launch-bound, race-free ownership of the worker tree is tracked in
-[#2009](https://github.com/minsago-elite/decomp_thing/issues/2009).
-
 Patch decompilation, reconstruction, web reconstruction, doctor and the legacy
 reconstruction pipeline use the bundled API worker. The old reflective adapter and
 synthetic-on-missing-export fallback are removed. Real tests statically analyze

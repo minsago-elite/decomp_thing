@@ -61,8 +61,6 @@ remaining deadline. Expired work cannot return a successful exported model.
 | `remainingWallClockNanosAtLaunch` | Remaining allowance sampled at the prelaunch gate after preparation, including the parent constraint. |
 | `maximumResidentBytesLimit` | Existing configured worker resident-memory ceiling. |
 | `maximumResidentBytesObserved` | Existing worker/process-descendant sampling result; not parent JVM RSS. |
-| `refusedProcessHandles` | Up to 32 descendant handles cleanup refused, each with `pid`, `startEpochMillis` and `reason`; republished after cleanup. See [bundled Ghidra](bundled-ghidra.md). |
-| `refusedProcessHandlesTruncated` | Whether further refusals were omitted from that list. |
 
 These values describe the configured invocation and the launch observation; they
 do not rewrite immutable profile budgets. Resource and diagnostic files may be

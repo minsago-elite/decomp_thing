@@ -27,9 +27,6 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
 fun interface ProgramModelAnalyzer {
     fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel
@@ -314,10 +311,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         var stderr: CompletableFuture<ByteArray>? = null
         var diagnosticsPublished = false
         var primaryFailure: Throwable? = null
-        // Stream sizes and refusal evidence last written to the resource report, if it was written.
-        var publishedUsage: Triple<Int, Int, Pair<List<ExportProcessRefusal>, Boolean>>? = null
-        fun writeResourceUsage(stdoutRetained: Int, stderrRetained: Int) {
-            val refusals = processTree.refusalEvidence()
+        fun publishDiagnostics(stdoutBytes: ByteArray, stderrBytes: ByteArray, beforeWrite: () -> Unit = {}) {
+            beforeWrite()
+            reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
+            beforeWrite()
+            reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
+            beforeWrite()
             reports.resolve("ghidra_resource_usage.json").writeText(
                 "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
                     "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
@@ -325,20 +324,9 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     "\"parentWallClockMillisLimit\":${deadline.parentMaximumMillis}," +
                     "\"remainingWallClockNanosAtLaunch\":$remainingNanosAtLaunch," +
                     "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
-                    "\"stdoutBytesRetained\":$stdoutRetained,\"stderrBytesRetained\":$stderrRetained," +
-                    "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}," +
-                    "\"refusedProcessHandles\":${exportRefusalJson(refusals.first)}," +
-                    "\"refusedProcessHandlesTruncated\":${refusals.second}}\n",
+                    "\"stdoutBytesRetained\":${stdoutBytes.size},\"stderrBytesRetained\":${stderrBytes.size}," +
+                    "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
             )
-            publishedUsage = Triple(stdoutRetained, stderrRetained, refusals)
-        }
-        fun publishDiagnostics(stdoutBytes: ByteArray, stderrBytes: ByteArray, beforeWrite: () -> Unit = {}) {
-            beforeWrite()
-            reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
-            beforeWrite()
-            reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
-            beforeWrite()
-            writeResourceUsage(stdoutBytes.size, stderrBytes.size)
             diagnosticsPublished = true
         }
         try {
@@ -497,12 +485,6 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             } else if (treeResult.failure != null) {
                 recordCleanupFailure(treeResult.failure)
             }
-            // A report published before cleanup gains any handles cleanup refused, on either outcome.
-            publishedUsage?.let { (stdoutRetained, stderrRetained, refusals) ->
-                if (refusals != (treeResult.refusedHandles to treeResult.refusedHandlesTruncated)) {
-                    cleanup { writeResourceUsage(stdoutRetained, stderrRetained) }
-                }
-            }
             preserveTaskFailures()
             // Cancelling a CompletableFuture that is still queued marks the future done without
             // running its body/finally settlement acknowledgement. Stop the owned process and
@@ -611,7 +593,18 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             }
             val usagePath = reports.resolve("ghidra_resource_usage.json")
             if (primaryFailure is InterruptedException && !Files.exists(usagePath, LinkOption.NOFOLLOW_LINKS)) {
-                cleanup { writeResourceUsage(0, 0) }
+                cleanup {
+                    usagePath.writeText(
+                        "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
+                            "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
+                            "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}," +
+                            "\"parentWallClockMillisLimit\":${deadline.parentMaximumMillis}," +
+                            "\"remainingWallClockNanosAtLaunch\":$remainingNanosAtLaunch," +
+                            "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
+                            "\"stdoutBytesRetained\":0,\"stderrBytesRetained\":0," +
+                            "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
+                    )
+                }
             }
             if (taskCleanupInterrupted || treeResult.failure is InterruptedException) cleanupInterrupted = true
             if (cleanupInterrupted) Thread.currentThread().interrupt()
@@ -646,20 +639,7 @@ internal data class ExportProcessCleanupResult(
     val confirmedAbsent: Boolean,
     val failure: Throwable?,
     val diagnostic: String? = null,
-    /** Handles the tree observed but did not retain or signal; bounded, see [refusedHandlesTruncated]. */
-    val refusedHandles: List<ExportProcessRefusal> = emptyList(),
-    val refusedHandlesTruncated: Boolean = false,
 )
-
-/** A PID together with the start instant of the process holding it, which tells a reused PID apart. */
-internal data class ExportProcessIdentity(val pid: Long, val startInstant: java.time.Instant) {
-    override fun toString(): String = "$pid@${startInstant.toEpochMilli()}"
-}
-
-/** A handle the tree observed but did not retain or signal, with the reason it was refused. */
-internal data class ExportProcessRefusal(val pid: Long, val startInstant: java.time.Instant?, val reason: String) {
-    override fun toString(): String = "$pid@${startInstant?.toEpochMilli() ?: "unknown"} ($reason)"
-}
 
 /** References retained after unresolved cleanup prevent another launch from assuming capacity. */
 internal data class ExportProcessCleanupOwner(
@@ -692,22 +672,7 @@ private fun moveExportCandidate(candidate: Path, target: Path) {
     }
 }
 
-/**
- * One invocation-wide grace + force/wait window; only the retained observations are covered.
- *
- * OpenJDK enumerates descendants by parent PID, so a scan from a root whose PID was reused yields the
- * replacement's children. Each yielded handle is classified by its current parent:
- * - the owned root or a retained identity: retained as owned;
- * - a process at the root's or a retained PID with a different start instant, or an identity already
- *   refused as a replacement: refused and recorded, and it does not block confirmed absence;
- * - anything else (reparented to init or a subreaper, or unreadable): retained as possibly owned.
- * Every retained handle is signalled only after its PID and start instant are read again, and any
- * live retained handle keeps cleanup unconfirmed.
- *
- * Known limit, tracked in #2009: Linux start instants have clock-tick (10 ms) resolution and OpenJDK
- * signals by numeric PID after its own start-time check. A PID reused within one tick, or between a
- * recheck and its signal, is therefore not told apart. Race-free ownership needs a launch-bound boundary.
- */
+/** One invocation-wide grace + force/wait window; only the retained observations are covered. */
 internal class ExportProcessTree(
     private val process: Process,
     private val gracefulTermination: Duration,
@@ -717,27 +682,11 @@ internal class ExportProcessTree(
         root.descendants().use { stream -> stream.forEach { retain(it) } }
     },
 ) {
-    // [identity] is null only for a live handle whose start instant could not be read.
-    private class RetainedHandle(val identity: ExportProcessIdentity?, val handle: ProcessHandle, val provenOwned: Boolean)
-
     private var terminationStartedNanos: Long? = null
     private var result: ExportProcessCleanupResult? = null
     private var rootHandle: ProcessHandle? = null
-    // Null when the root's start instant could not be read; descendants are then at most possibly owned.
-    private var rootIdentity: ExportProcessIdentity? = null
-    // Keyed by identity, or by the handle itself when its identity is unreadable.
-    private val observedHandles = LinkedHashMap<Any, RetainedHandle>()
-    // Ownership is fixed at fork, so a confirmed replacement stays refused even after it is reparented.
-    private val replacementIdentities = HashSet<ExportProcessIdentity>()
-    private val refusals = LinkedHashSet<ExportProcessRefusal>()
-    private var refusalsTruncated = false
+    private val observedHandles = LinkedHashSet<ProcessHandle>()
     private var observationFailure: Throwable? = null
-
-    init {
-        // Bind the root identity as close to launch as possible. observe() retries a failed
-        // toHandle() and records that failure as before.
-        runCatching { bindRoot(process.toHandle()) }
-    }
 
     /** Monitoring and cleanup share identities, limits and sticky observation failures. */
     fun residentBytes(): Long {
@@ -746,7 +695,7 @@ internal class ExportProcessTree(
             // terminate() has already made the final bounded observations in that case.
             if (result == null) observe("while monitoring resident memory")
             observationFailure?.let { throw it }
-            listOfNotNull(rootHandle) + observedHandles.values.map { it.handle }
+            listOfNotNull(rootHandle) + observedHandles.toList()
         }
         return handles.distinctBy { it.pid() }.sumOf { handle ->
             runCatching {
@@ -761,100 +710,26 @@ internal class ExportProcessTree(
         }
     }
 
-    /** Bounded refusal evidence so far; [terminate] returns the final list with its result. */
-    @Synchronized
-    fun refusalEvidence(): Pair<List<ExportProcessRefusal>, Boolean> = refusals.toList() to refusalsTruncated
-
     // Called only under this inventory's monitor/termination lock. Retain each yielded
     // identity before any later stream error, including observations made before cleanup.
     private fun observe(stage: String) {
         try {
-            val root = rootHandle ?: process.toHandle().also(::bindRoot)
-            descendantObservation(root, ::admit)
+            val root = rootHandle ?: process.toHandle().also { rootHandle = it }
+            descendantObservation(root) { handle ->
+                if (!observedHandles.contains(handle)) {
+                    if (observedHandles.size + 1 >= MAXIMUM_RETAINED_HANDLES) {
+                        throw IllegalStateException("Ghidra export process inventory exceeded $MAXIMUM_RETAINED_HANDLES retained handles")
+                    }
+                    // ProcessHandle equality, not PID alone, distinguishes reused identities.
+                    // Only never-observed descendants remain outside this retained inventory.
+                    observedHandles.add(handle)
+                }
+            }
         } catch (failure: Throwable) {
             if (observationFailure == null) observationFailure = GhidraAnalysisException(
                 "Ghidra export process observation failed $stage", failure,
             ) else if (observationFailure !== failure) observationFailure?.addSuppressed(failure)
         }
-    }
-
-    private fun bindRoot(root: ProcessHandle) {
-        rootHandle = root
-        rootIdentity = identityOf(root)
-    }
-
-    // The identity [handle] denotes now, or null once its process has exited or cannot be read.
-    private fun identityOf(handle: ProcessHandle): ExportProcessIdentity? = runCatching {
-        handle.info().startInstant().orElse(null)?.let { ExportProcessIdentity(handle.pid(), it) }
-    }.getOrNull()
-
-    // Classify a yielded descendant by its current parent. Parents are yielded before their children,
-    // so one hop ties the whole chain. A parent changes only when it exits, and then only to init or a
-    // subreaper; a different process at an owned PID therefore started after the owned one was gone.
-    private fun admit(candidate: ProcessHandle) {
-        val identity = identityOf(candidate)
-        if (identity == null) {
-            // An exited candidate needs nothing. A live one may be ours, so it keeps cleanup unconfirmed
-            // even though it cannot be rechecked for a signal.
-            if (runCatching { candidate.isAlive }.getOrDefault(true) && !observedHandles.containsKey(candidate)) {
-                retain(candidate, RetainedHandle(null, candidate, provenOwned = false))
-            }
-            return
-        }
-        if (observedHandles.containsKey(identity) || identity in replacementIdentities) return
-        val root = rootHandle
-        // Read before the parent: a root already gone cannot be the parent read afterwards.
-        val rootGone = rootIdentity == null && root != null && runCatching { !root.isAlive }.getOrDefault(false)
-        val parentHandle = runCatching { candidate.parent().orElse(null) }.getOrNull()
-        val parent = parentHandle?.let(::identityOf)
-        // The parent read describes this identity only if the candidate still holds its PID afterwards.
-        val current = identityOf(candidate)
-        if (current != identity) {
-            if (current != null) refuse(identity.pid, identity.startInstant, "PID changed identity to $current during admission")
-            return
-        }
-        val parentEntry = parent?.let { observedHandles[it] }
-        when {
-            parent != null && parent == rootIdentity -> retain(identity, RetainedHandle(identity, candidate, provenOwned = true))
-            parentEntry != null -> retain(identity, RetainedHandle(identity, candidate, parentEntry.provenOwned))
-            parent != null && parent in replacementIdentities ->
-                replacement(identity, "parent $parent was refused as a replacement")
-            parent != null && (parent.pid == rootIdentity?.pid || observedHandles.values.any { it.identity?.pid == parent.pid }) ->
-                replacement(identity, "parent PID ${parent.pid} now names $parent, not the owned process")
-            rootGone && parentHandle?.pid() == root?.pid() ->
-                replacement(identity, "parent PID ${root?.pid()} outlived the owned root")
-            else -> retain(identity, RetainedHandle(identity, candidate, provenOwned = false))
-        }
-    }
-
-    private fun retain(key: Any, entry: RetainedHandle) {
-        if (observedHandles.size + 1 >= MAXIMUM_RETAINED_HANDLES) {
-            throw IllegalStateException("Ghidra export process inventory exceeded $MAXIMUM_RETAINED_HANDLES retained handles")
-        }
-        // Only never-observed or refused descendants remain outside this retained inventory.
-        observedHandles[key] = entry
-    }
-
-    private fun replacement(identity: ExportProcessIdentity, reason: String) {
-        if (replacementIdentities.size < MAXIMUM_REPLACEMENT_IDENTITIES) replacementIdentities.add(identity)
-        refuse(identity.pid, identity.startInstant, reason)
-    }
-
-    // Whether [handle] still denotes [recorded]: true when it does, false once that process is absent
-    // (including when its PID now names another process), and null when a live PID cannot be rechecked.
-    private fun recheck(recorded: ExportProcessIdentity?, handle: ProcessHandle): Boolean? {
-        if (!handle.isAlive) return false
-        val current = identityOf(handle) ?: return null
-        if (recorded == null) return null
-        if (current == recorded) return true
-        refuse(current.pid, current.startInstant, "reuses the PID of retained $recorded")
-        return false
-    }
-
-    private fun refuse(pid: Long, startInstant: java.time.Instant?, reason: String) {
-        val refusal = ExportProcessRefusal(pid, startInstant, reason)
-        if (refusal in refusals) return
-        if (refusals.size < MAXIMUM_RETAINED_HANDLES) refusals.add(refusal) else refusalsTruncated = true
     }
 
     @Synchronized
@@ -874,43 +749,29 @@ internal class ExportProcessTree(
         result?.let { return it }
         val started = terminationStartedNanos ?: nanoTime().also { terminationStartedNanos = it }
         val graceNanos = gracefulTermination.toNanos()
-        fun knownHandles(): List<RetainedHandle> = observedHandles.values.toList()
+        fun knownHandles(): List<ProcessHandle> = observedHandles.toList()
         fun aliveOrUnknown(): Boolean {
             var alive = false
             try { alive = process.isAlive || alive } catch (failure: Throwable) {
                 observationFailure = observationFailure ?: failure
             }
             val root = rootHandle
-            if (root != null) try { alive = recheck(rootIdentity, root) != false || alive } catch (failure: Throwable) {
+            if (root != null) try { alive = root.isAlive || alive } catch (failure: Throwable) {
                 observationFailure = observationFailure ?: failure
             }
-            for (entry in knownHandles()) try {
-                alive = recheck(entry.identity, entry.handle) != false || alive
-            } catch (failure: Throwable) {
+            for (handle in knownHandles()) try { alive = handle.isAlive || alive } catch (failure: Throwable) {
                 observationFailure = observationFailure ?: failure
             }
             return alive || observationFailure != null
         }
         fun signal(force: Boolean) {
-            knownHandles().asReversed().forEach { entry ->
-                try {
-                    when (recheck(entry.identity, entry.handle)) {
-                        true -> if (force) entry.handle.destroyForcibly() else entry.handle.destroy()
-                        null -> refuse(
-                            entry.handle.pid(), entry.identity?.startInstant,
-                            "live identity could not be rechecked before signalling",
-                        )
-                        false -> Unit
-                    }
-                } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
+            knownHandles().asReversed().forEach { handle ->
+                try { if (handle.isAlive) { if (force) handle.destroyForcibly() else handle.destroy() } }
+                catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
             }
             val root = rootHandle
             var rootAlive: Boolean? = null
-            if (root != null) try {
-                rootAlive = recheck(rootIdentity, root)
-                // An unverifiable root handle is left to the owned Process below, which the JDK binds to the launch.
-                if (rootAlive == null) refuse(root.pid(), null, "root identity could not be rechecked before signalling")
-            } catch (failure: Throwable) {
+            if (root != null) try { rootAlive = root.isAlive } catch (failure: Throwable) {
                 observationFailure = observationFailure ?: failure
             }
             // A ProcessHandle can report native exit before its owning Process acknowledges exit.
@@ -977,12 +838,10 @@ internal class ExportProcessTree(
             rootHandle?.let { describe("process", it) }
         }
         rootHandle?.let { handle ->
-            if (runCatching { recheck(rootIdentity, handle) != false }.getOrDefault(false)) describe("root", handle)
+            if (runCatching { handle.isAlive }.getOrDefault(false)) describe("root", handle)
         }
-        knownHandles().forEach { entry ->
-            if (runCatching { recheck(entry.identity, entry.handle) != false }.getOrDefault(false)) {
-                describe(if (entry.provenOwned) "descendant" else "possible-descendant", entry.handle)
-            }
+        knownHandles().forEach { handle ->
+            if (runCatching { handle.isAlive }.getOrDefault(false)) describe("descendant", handle)
         }
         val cleanupDiagnostic = when {
             cleanupFailure != null -> "process observation failed: ${cleanupFailure.message ?: cleanupFailure.javaClass.simpleName}"
@@ -990,17 +849,10 @@ internal class ExportProcessTree(
             !confirmed || stillObservedAlive -> "process absence was not confirmed within the cleanup allowance"
             else -> null
         }
-        // Refused handles were never retained or signalled; record them even when absence is confirmed.
-        val refusalDiagnostic = refusals.takeIf { it.isNotEmpty() }?.joinToString(
-            prefix = "refused handles: ",
-            postfix = if (refusalsTruncated) ", and further refusals" else "",
-        )
         val result = ExportProcessCleanupResult(
             confirmedAbsent = confirmed && !stillObservedAlive && cleanupFailure == null,
             failure = cleanupFailure,
-            diagnostic = listOfNotNull(cleanupDiagnostic, refusalDiagnostic).joinToString("; ").ifEmpty { null },
-            refusedHandles = refusals.toList(),
-            refusedHandlesTruncated = refusalsTruncated,
+            diagnostic = cleanupDiagnostic,
         )
         this.result = result
         return result
@@ -1024,8 +876,6 @@ internal class ExportProcessTree(
 
     private companion object {
         const val MAXIMUM_RETAINED_HANDLES = 32
-        // Bounds memory for a replacement tree; past it, each scan still classifies by parent.
-        const val MAXIMUM_REPLACEMENT_IDENTITIES = 1024
         val FORCE_EXIT_WAIT_NANOS: Long = TimeUnit.SECONDS.toNanos(5)
         val POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(25)
     }
@@ -1139,15 +989,6 @@ class ArchivalReconstructionService(
         return ArchivalReconstructionResult(project, build, bundle)
     }
 }
-
-private fun exportRefusalJson(refusals: List<ExportProcessRefusal>): String =
-    JsonArray(refusals.map { refusal ->
-        JsonObject(mapOf(
-            "pid" to JsonPrimitive(refusal.pid),
-            "startEpochMillis" to JsonPrimitive(refusal.startInstant?.toEpochMilli()),
-            "reason" to JsonPrimitive(refusal.reason),
-        ))
-    }).toString()
 
 private fun startExportProcess(command: List<String>, workDir: Path): Process =
     ProcessBuilder(command).directory(workDir.toFile()).start()
