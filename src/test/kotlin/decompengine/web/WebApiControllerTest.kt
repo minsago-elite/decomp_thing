@@ -72,7 +72,7 @@ class WebApiControllerTest {
             assertEquals("50", limits.getValue("defaultPageLimit").jsonPrimitive.content)
             assertEquals("200", limits.getValue("maxPageLimit").jsonPrimitive.content)
             assertFalse(first.toString().contains(root.toString()))
-            server.stop()
+            server.stopWhenIdle()
             server = create()
             server.start()
             assertError(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 401, "SESSION_REQUIRED")
@@ -82,7 +82,7 @@ class WebApiControllerTest {
             assertEquals(first.getValue("uiBuildId"), restarted.getValue("uiBuildId"))
             assertEquals(first.getValue("limits"), restarted.getValue("limits"))
             assertEquals(0, executions)
-        } finally { server.stop(); root.toFile().deleteRecursively() }
+        } finally { server.stopWhenIdle(); root.toFile().deleteRecursively() }
     }
 
     @Test
@@ -144,7 +144,7 @@ class WebApiControllerTest {
                 JobReconstructor { _, _ -> executions++ }, uiMode = mode,
                 basePath = if (mode == WebUiMode.SPA) "/workbench/" else "/")
             instance.start()
-            try { action(instance) } finally { instance.stop() }
+            try { action(instance) } finally { instance.stopWhenIdle() }
         }
         fun remember(id: String) { persisted[id] = Files.readAllBytes(root.resolve(id).resolve("job.json")) }
         fun unchanged() {
@@ -354,7 +354,7 @@ class WebApiControllerTest {
             assertError(request(server, "$path/snapshot", headers = headers), 503, "PROGRESS_UNAVAILABLE")
             assertError(request(server, "$path/events", headers = headers), 503, "PROGRESS_UNAVAILABLE")
             assertFalse(executed)
-        } finally { server.stop(); root.toFile().deleteRecursively() }
+        } finally { server.stopWhenIdle(); root.toFile().deleteRecursively() }
     }
 
     @Test
@@ -494,7 +494,7 @@ class WebApiControllerTest {
                     .getValue("state").jsonPrimitive.content)
                 assertError(request(server, "$path/content", headers = headers + ("Accept" to "text/plain")), 413, "LOG_TOO_LARGE")
             }
-        } finally { server.stop(); root.toFile().deleteRecursively() }
+        } finally { server.stopWhenIdle(); root.toFile().deleteRecursively() }
     }
 
     @Test
@@ -596,7 +596,7 @@ class WebApiControllerTest {
             JobReconstructor { _, _ -> error("Unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/workbench/")
         server.start()
         try { block(server, store, job.id, run.runId) }
-        finally { server.stop(); root.toFile().deleteRecursively() }
+        finally { server.stopWhenIdle(); root.toFile().deleteRecursively() }
     }
 
     /** Client body completion can precede the route finally; await only this test server's admitted handlers. */
@@ -708,7 +708,7 @@ class WebApiControllerTest {
             }
             assertEquals(before, Files.readString(record))
             assertFalse(executed)
-        } finally { server.stop(); root.toFile().deleteRecursively() }
+        } finally { server.stopWhenIdle(); root.toFile().deleteRecursively() }
     }
 
     @Test
@@ -956,7 +956,7 @@ class WebApiControllerTest {
             kotlin.test.assertContentEquals(publishedMetadata, Files.readAllBytes(root.resolve(id).resolve("job.json")))
             priorUnchanged()
 
-            server.stop()
+            server.stopWhenIdle()
             server = start()
             val reopenedHeaders = headers(server)
             val reconciled = assertEnvelope(request(server, location,
@@ -972,7 +972,7 @@ class WebApiControllerTest {
             kotlin.test.assertContentEquals(bytes, Files.readAllBytes(published.binaryPath))
             priorUnchanged()
         } finally {
-            server.stop()
+            server.stopWhenIdle()
             root.toFile().deleteRecursively()
         }
     }
@@ -993,13 +993,13 @@ class WebApiControllerTest {
         var server = start()
         try {
             val original = assertEnvelope(upload(server, elfFixture(), headers(server)), 201, "job")
-            server.stop()
+            server.stopWhenIdle()
             server = start()
             val repeated = upload(server, elfFixture(), headers(server))
             assertEquals(original, assertEnvelope(repeated, 201, "job"))
             assertEquals("true", repeated.headers().firstValue("Idempotency-Replayed").orElseThrow())
             assertEquals(1, JobStore(root).jobIds().size)
-        } finally { server.stop(); root.toFile().deleteRecursively() }
+        } finally { server.stopWhenIdle(); root.toFile().deleteRecursively() }
     }
 
     @Test
@@ -1079,7 +1079,7 @@ class WebApiControllerTest {
             assertEquals("web-http-failure request_id=$id status=401 code=SESSION_REQUIRED", diagnostics.single())
             assertFalse(diagnostics.single().contains(canary))
             assertFalse(response.body().contains(canary))
-        } finally { server.stop(); root.toFile().deleteRecursively() }
+        } finally { server.stopWhenIdle(); root.toFile().deleteRecursively() }
     }
 
     private fun upload(server: UploadServer, bytes: ByteArray, headers: Map<String, String>, filename: String = "fixture.elf", boundary: String = "upload_api_fixture", path: String = "/workbench/api/v1/jobs"): HttpResponse<String> {
@@ -1153,6 +1153,6 @@ class WebApiControllerTest {
             JobReconstructor { _, _ -> error("Unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/workbench/",
             requestDiagnosticOutput = requestDiagnosticOutput)
         server.start()
-        try { block(server, store, job.id) } finally { server.stop(); root.toFile().deleteRecursively() }
+        try { block(server, store, job.id) } finally { server.stopWhenIdle(); root.toFile().deleteRecursively() }
     }
 }

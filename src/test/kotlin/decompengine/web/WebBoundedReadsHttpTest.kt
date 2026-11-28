@@ -168,7 +168,7 @@ class WebBoundedReadsHttpTest {
                 awaitHandlers(server)
                 assertStorageRestored(names, before)
             }
-        } finally { server.stop() }
+        } finally { server.stopWhenIdle() }
     }
 
     @Test
@@ -243,7 +243,7 @@ class WebBoundedReadsHttpTest {
             uploadPeers.forEach { runCatching { it.socket.close() } }
             statusExecutor.shutdownNow()
             assertTrue(statusExecutor.awaitTermination(5, TimeUnit.SECONDS))
-            server.stop()
+            server.stopWhenIdle()
         }
     }
 
@@ -394,7 +394,7 @@ class WebBoundedReadsHttpTest {
                     assertEquals("INVALID_CURSOR", foreign.errorCode())
                 }
             }
-        } finally { server.stop() }
+        } finally { server.stopWhenIdle() }
     }
 
     @Test
@@ -551,7 +551,7 @@ class WebBoundedReadsHttpTest {
                 assertEquals(beforeNames, entries(), "read requests create no storage entries")
                 assertEquals(beforeBytes, digest(), "read requests do not mutate persisted upload or source artifacts")
             }
-        } finally { server.stop() }
+        } finally { server.stopWhenIdle() }
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
