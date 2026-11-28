@@ -22,6 +22,7 @@
     ".github/workflows/gcc-oracle-model.yml",
     ".github/workflows/llvm-reference-runtime-capture.yml",
     "scripts/capture-gcc-preprocessing-reference.py",
+    "scripts/capture-gcc-reproduction-inspect.py",
     "scripts/fetch-gcc-oracle-source.py",
     "scripts/generate-gcc-behavior-corpus.py",
     "scripts/generate-gcc-compiler-engine-build-records.py",

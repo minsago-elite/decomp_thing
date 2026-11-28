@@ -1,0 +1,54 @@
+{
+  "apiVersion": 1,
+  "kind": "jobDeletionPreview",
+  "requestId": "request_deletion_preview",
+  "data": {
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "version": "job_version_1",
+    "displayFilename": "synthetic.elf",
+    "label": null,
+    "attemptCount": "2",
+    "pinnedAttemptCount": "0",
+    "storage": {
+      "originalInputs": {
+        "bytes": "4096",
+        "entries": "1"
+      },
+      "reports": {
+        "bytes": "1200",
+        "entries": "3"
+      },
+      "sourceSnapshots": {
+        "bytes": "8000",
+        "entries": "12"
+      },
+      "logs": {
+        "bytes": "900",
+        "entries": "2"
+      },
+      "archives": {
+        "bytes": "5000",
+        "entries": "1"
+      },
+      "metadata": {
+        "bytes": "1500",
+        "entries": "3"
+      },
+      "temporary": {
+        "bytes": "0",
+        "entries": "0"
+      },
+      "other": {
+        "bytes": "0",
+        "entries": "0"
+      }
+    },
+    "totalBytes": "20696",
+    "storageComplete": true,
+    "protections": [],
+    "deletable": true,
+    "finality": "permanent",
+    "undoAvailable": false,
+    "tombstoneRetentionMs": "86400000"
+  }
+}

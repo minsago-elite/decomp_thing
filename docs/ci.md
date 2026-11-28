@@ -228,6 +228,11 @@ regular XML input, including nested/case-variant XML. Gradle's regular binary
 result files remain allowed; symlink files/directories and nonregular entries
 refuse. Missing, linked, malformed, oversized, foreign, duplicate and empty reports refuse; the retained receipt binds the exact
 XML bytes/hash. Core runs the report gate's positive and negative controls.
+The `restart` packaged-browser mode (see `docs/web-browser-support.md`) runs pinned Chrome headfully
+under Xvfb, restarts the packaged JVM with SIGTERM only, and exercises background-tab suspension,
+two-tab observation and a stale progress-pin write; its sanitized report and screenshots are retained
+in `packaged-web-verification`.
+
 The focused `packaged-browser-expiry-test-reports` artifact retains the exact
 expiry XML and gate receipt for independent byte/hash checks without restoring
 browser journey payloads. The existing full packaged evidence upload is retained.
@@ -247,6 +252,10 @@ existing destination. Ubuntu CI installs the archive's `deb.deps`, following the
 The browser is separate from all application distributions. CI explicitly uses
 `--no-sandbox` on its disposable runner; each report records that setting and the
 actual executable digest/CDP version. It does not qualify browser sandbox behavior.
+Packaged-browser reports also retain a bounded target lifecycle trace and
+per-target initialization phase timings/outcomes. The trace hashes target/session
+identifiers and omits page URLs, titles and CDP payloads so an initialization
+timeout can be localized without retaining browser-private navigation data.
 
 The packaged lane retains JSON reports, screenshots, tool pins and JVM test
 reports as `packaged-web-verification` for 14 days even after failure. Session
@@ -279,7 +288,7 @@ their checks. GitHub branch-protection requirements remain separate as noted abo
 | Kotlin core / oracle / live / live-fulltree / aggregate | Normal; complementary ordinary core/oracle namespaces and tagged full-tree/complement live groups run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Primary live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every shard to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
 | Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
 | ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
-| GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. Manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
+| GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. The LLVM workflow also emits a dedicated `required-contract` check that succeeds only after the normal provenance lane succeeds; manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
 | Retained GCC driver DWARF interfaces | Explicit dispatch, or a triggered PR run already carrying `qualify:driver-dwarf-interfaces`. Applying the label alone is not a configured workflow trigger. | `driver-dwarf-interfaces` in [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml) |
 | LLVM native runtime measurement | Explicit dispatch with `qualification=native-runtime-measurement`; measurement does not approve a production runtime. | `native-runtime-measurement` in [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
 | LLVM oracle clean rebuild | Manual dispatch only; run when the locked source/toolchain/flags/artifact pair needs fresh rebuild evidence. | [llvm-oracle-rebuild.yml](../.github/workflows/llvm-oracle-rebuild.yml) |
@@ -441,6 +450,10 @@ toolchain recipe and checks its immutable base, Dockerfile, build-record
 binding, platform, and every recorded live tool's exact executable bytes and
 version output. The Docker image ID is retained as origin provenance rather
 than used as a false layer-reproducibility claim.
+On push/PR events, `llvm-oracle-model.yml` publishes the uniquely named
+`LLVM oracle required-contract` check (job ID `llvm-required-contract`). It fails
+if the normal provenance lane does not pass, so branch protection can require
+this LLVM status independently of the ACP workflow's `required-contract` check.
 
 The expensive source rebuild is intentionally manual. Run the `LLVM oracle
 clean rebuild` workflow when the source lock, toolchain, flags, or artifact
@@ -565,3 +578,107 @@ mandatory.
 
 This is prepared source. Its own normal Actions must establish hit/miss behavior
 and any download or whole-CI savings; no measured speedup is claimed.
+
+## Passive host mount diagnostics (#1799, #1530, #1551)
+
+Ordinary Kotlin partitions and required ACP CI start an owned passive observer
+before host preparation and stop it after the existing ACP quota release. All
+existing preparation, qualification, assertions and release steps retain their
+order and behavior. The observer does not correct, tolerate or retry events,
+admit work, or establish cleanup. Start/stop failures do not waive any product
+failure. The separate `*-host-mount-observation` artifact is uploaded with
+`always()`, including on job failure. Abrupt runner loss can prevent both stop
+and upload; absence is incomplete evidence, never successful qualification.
+
+`scripts/ci-observe-host-mount-events.py` opens one `/proc/self/mountinfo`
+descriptor. It seeks to zero and reads that descriptor to EOF for the initial
+bounded snapshot, then polls it for `POLLPRI|POLLERR`. Each positive notification
+acknowledges the event counter on that descriptor and causes one bounded read/diff
+on the same descriptor, preserving its observation identity. Timeouts produce neither an event nor `NO_NET_DELTA`. `POLLHUP`,
+`POLLNVAL`, read errors, malformed/duplicate rows and input limits produce
+`UNAVAILABLE` and an incomplete stop. The full canonical comparison includes
+mount ID, parent, device, root, target, mount options, all optional fields,
+filesystem, source and superblock options. Kernel root labels (including namespace
+handles and deleted/noncanonical paths) remain opaque hashed values. Only target
+paths participate in path-shape classification. Option ordering is canonicalized.
+A positive event with the same complete table produces `NO_NET_DELTA`, with
+ABA and coalescing **UNKNOWN**. Snapshot differences cannot recover intermediate
+changes or identify an actor. A notification can coalesce several changes;
+absence of a visible difference does not establish benignness.
+
+An owned stop drains pending notifications with nonblocking polls on the same
+descriptor. Only a quiet final poll permits a complete `SIGNAL` stop; its
+`coverageEnd` anchor conservatively ends coverage at that poll's start, before
+descriptor close and STOP-record publication. The original duration, a stop-time
+bound, output capacity and a finite poll count bound draining. Exhausting any
+bound or encountering an error leaves the interval incomplete.
+
+Records retain the mount namespace inode, hashes of full canonical rows/tables,
+private roots, targets and sources, a closed filesystem vocabulary (other names
+hash), propagation labels plus a hash of all optional fields, and a closed target
+class: credentials, user-runtime, snap, docker, binfmt, decomp, workspace, system
+or other. These are path-shape descriptions, not actor or security judgments.
+Only exact members of the script's fixed system-target allowlist appear raw.
+No substring/name-based secret detection permits publication. Options and
+superblock options also hash; no environment, raw mount table, journal or
+arbitrary exception message is emitted. Hashes allow equality comparisons and
+are not a guarantee against guessing known paths.
+
+Each row relates to explicitly configured observation roots as `AT`, `UNDER`,
+`ANCESTOR` or `DISJOINT`, using component boundaries. Current workflows configure
+the workspace and its build directory. **These roots are not the complete
+product covered-authority projection.** A disjoint event is not proof that it is
+irrelevant or safe, and cannot override the product's sticky refusal witness.
+
+The output is complete JSON lines in `observations.jsonl` plus one
+`lifecycle.json` document. Observation output is capped at 508 records / 252 KiB;
+lifecycle output is at most one record / 4 KiB, jointly below 512 records /
+256 KiB. Capacity is reserved for start, error, overflow and stop markers; JSON
+is never byte-sliced. On output pressure the observer records `OVERFLOW`, marks
+incomplete, and stops. Input is capped at 1 MiB, 4096 rows, 64 fields per row,
+4096 bytes per field and eight configured roots. Oversized/incomplete tables
+are rejected instead of diffing a partial snapshot. The poll interval is at most
+250 ms and observer lifetime at most six hours. Deadline termination ends only
+that observation interval and cannot prove the job's remaining interval clean.
+Every record stream remains diagnostic-only with no qualification authority.
+
+The control directory is workspace/build-owned, exclusive and mode 0700; a
+second start never adopts it. Control/ownership files bind the CI run/attempt/lane,
+workspace and directory identity, command hash, token, PID and process start
+ticks. The worker registers `owned.json` before observation starts so a failed
+startup remains available to authenticated stop. It publishes `ready.json` only
+after opening the mount descriptor, registering its poll and recording the
+baseline successfully, while still within the deadline and not stopping.
+Ownership registration alone does not permit the start command to report READY.
+Stop validates the ownership identities, opens a pidfd, checks the pinned process
+identity again and uses only `pidfd_send_signal(SIGTERM)`. It never falls back
+to signaling a numerical PID or process group, escalates signals or adopts an
+unrelated process. A missing/mismatched owner, absent start/stop or unavailable
+pidfd is explicitly incomplete. Stop waits at most three seconds and records a
+survivor if necessary; that record grants no cleanup authority. The independent
+observer deadline still applies. Background stdin/stdout/stderr are disconnected
+from CI step pipes; control files are not uploaded. No namespace, capability,
+privileged command, native product query or auth/provider operation is added.
+
+Start, reads and stop include bounded anchors: Python `time.monotonic_ns()`
+before and after a `time.time_ns()` realtime sample. Read start/end anchors
+bound the snapshot interval, not the instant of the causing operation. Wall
+clock adjustments and scheduling uncertainty must be retained. Java
+`System.nanoTime()` has an arbitrary origin that its API does not guarantee
+across processes. An exact Python/JVM monotonic join requires retained evidence
+for the pinned runtime/platform; sharing a host is insufficient. Without that
+evidence, clock joins are conditional or unknown, using anchor uncertainty
+rather than inventing an exact causal timeline. Observations do not resolve any
+of the original issues' acceptance criteria by themselves.
+
+Local controls use authored mount tables and mocked poll/read/clock/process/
+signal operations only. They never start a daemon or observe the local host:
+
+```bash
+/usr/bin/python3.14 -B scripts/test-ci-observe-host-mount-events.py --verbose
+```
+
+Ubuntu CI uses `python3`. Test temporary files stay under
+`build/1799-passive-diagnostics/o1-controls`; local AST, YAML, diff and control
+logs/source hashes are retained there. Parent integration and Opus review precede
+any push; these local controls are not full #1799 qualification.

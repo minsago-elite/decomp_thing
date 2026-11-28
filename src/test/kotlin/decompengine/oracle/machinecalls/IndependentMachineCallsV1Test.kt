@@ -26,6 +26,15 @@ class IndependentMachineCallsV1Test {
         action(input.produce(cfgDecoder()))
     }
 
+    internal fun withCrossBaseFixture(action: (JsonObject) -> Unit) = fixture { root ->
+        val input = input(root, listOf(Symbol("caller", 0x110, 6), Symbol("target", 0x150, 1),
+            Symbol("cross-base", 0x180, 0x180, value = 0x3ffff0UL)), listOf(0x110, 0x150))
+        action(input.produce(MachineInstructionDecoderV1 { address, bytes ->
+            if (address == 0x400110UL) instruction(address, bytes, "direct-call", 5, target = 0x400150UL)
+            else instruction(address, bytes, "return")
+        }))
+    }
+
     internal fun withWorkerFixture(action: (Path, Path, String, String, String) -> Unit) = fixture { root ->
         val input = input(root, listOf(Symbol("caller", 0x110, 16), Symbol("target", 0x150, 1), Symbol("truncated", 0x170, 1)),
             listOf(0x110, 0x150, 0x170), code = mapOf(0x110 to byteArrayOf(-24, 59, 0, 0, 0, -1, -48, -112, -61),
@@ -64,6 +73,21 @@ class IndependentMachineCallsV1Test {
         assertEquals("unresolved-missing-symbol-extent", canonical.single { it.text("id") == "canonical-190" }.text("disposition"))
         assertEquals("unresolved-no-emitted-address", canonical.single { it.text("id") == "inlined-only" }.text("disposition"))
         assertEquals(listOf(0x400110UL, 0x400120UL, 0x400180UL), visited)
+        assertNoNegativeAuthority(report)
+    }
+
+    @Test fun `below base absolute extents revoke all intersecting caller and target ownership`() = withCrossBaseFixture { report ->
+        val roots = report.records("roots")
+        assertEquals(3, roots.size)
+        for (root in roots) assertTrue("overlapping-symbol-extents" in root.texts("ownershipProblems"))
+        val crossing = roots.single { it["rva"] == JsonNull }
+        assertTrue("below-image-base" in crossing.texts("ownershipProblems"))
+        assertEquals("0x170", crossing.text("endExclusiveRva"))
+        assertEquals(listOf("0x110", "0x150"), roots.filter { it["rva"] != JsonNull }.map { it.text("rva") })
+        assertEquals(3L, report.count("rootsWithUnresolvedOwnership"))
+        assertEquals(0L, report.count("instructionAttempts"))
+        assertEquals(0L, report.count("physicalCallSites"))
+        assertEquals(0L, report.count("positiveInternalCallSites"))
         assertNoNegativeAuthority(report)
     }
 
@@ -357,6 +381,9 @@ class IndependentMachineCallsV1Test {
 
 internal fun withMachineCallComponentFixtureV1(action: (JsonObject) -> Unit) =
     IndependentMachineCallsV1Test().withComponentFixture(action)
+
+internal fun withMachineCallCrossBaseFixtureV1(action: (JsonObject) -> Unit) =
+    IndependentMachineCallsV1Test().withCrossBaseFixture(action)
 
 internal fun withMachineCallWorkerFixtureV1(action: (Path, Path, String, String, String) -> Unit) =
     IndependentMachineCallsV1Test().withWorkerFixture(action)

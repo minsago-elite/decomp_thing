@@ -14,6 +14,8 @@ internal class WebStreamResources(
     private val maximumPerSession: Int = 2,
     private val lifetimeMs: Long = 30_000,
     private val shutdownTimeoutMs: Long = 1000,
+    /** Runs without the stream gate once a stopped resource releases its last reservation late. */
+    private val onDrained: () -> Unit = {},
 ) : AutoCloseable {
     init {
         require(maximumConnections in 1..16 && maximumPerSession in 1..2)
@@ -31,6 +33,8 @@ internal class WebStreamResources(
     }.apply { removeOnCancelPolicy = true }
 
     internal data class Snapshot(val active: Int, val cleanupFailures: Int, val stopped: Boolean)
+    internal data class Limits(val maximumConnections: Int, val maximumPerSession: Int, val lifetimeMs: Long)
+    internal val limits = Limits(maximumConnections, maximumPerSession, lifetimeMs)
     fun snapshot(): Snapshot = synchronized(gate) {
         Snapshot(leases.size, leases.count { it.cleanupFailed }, stopped)
     }
@@ -102,8 +106,12 @@ internal class WebStreamResources(
         }
     }
 
-    private fun release(lease: Lease) = synchronized(gate) {
-        if (lease.workDone && lease.cleanupDone) leases.remove(lease)
+    private fun release(lease: Lease) {
+        val drained = synchronized(gate) {
+            lease.workDone && lease.cleanupDone && leases.remove(lease) && stopped && leases.isEmpty()
+        }
+        // An owner whose bounded shutdown gave up must still learn when the last stream finally ends.
+        if (drained) try { onDrained() } catch (_: Exception) { /* The owner reports its own cleanup failure. */ }
     }
 
     /** A false result preserves outstanding reservations; it must not be reported as clean shutdown. */
@@ -126,4 +134,50 @@ internal class WebStreamResources(
     }
 
     override fun close() { shutdown() }
+}
+
+/**
+ * Per-request close deadline. A streaming download renews it while it makes progress: each renewal allows another
+ * idle interval, never beyond an absolute lifetime, so a stalled or abandoned client releases its descriptors.
+ */
+internal class WebRequestDeadline(
+    private val scheduler: java.util.concurrent.ScheduledExecutorService,
+    private val target: AutoCloseable,
+    initialMs: Long,
+    private val idleMs: Long = DOWNLOAD_IDLE_MS,
+    private val maximumMs: Long = DOWNLOAD_MAXIMUM_MS,
+    private val nanoTime: () -> Long = System::nanoTime,
+) {
+    private val started = nanoTime()
+    private var lastRenewal = started
+    @Volatile var expired = false
+        private set
+    private var future: ScheduledFuture<*>? = schedule(initialMs)
+
+    private fun schedule(delayMs: Long): ScheduledFuture<*>? = try {
+        scheduler.schedule({ expired = true; try { target.close() } catch (_: Exception) {} }, delayMs, TimeUnit.MILLISECONDS)
+    } catch (_: java.util.concurrent.RejectedExecutionException) { expired = true; null }
+
+    /** Called after successful progress; renewals are coalesced to at most one per second. */
+    fun renew() = synchronized(this) {
+        val now = nanoTime()
+        if (expired || now - lastRenewal < 1_000_000_000L) return@synchronized
+        val remaining = maximumMs - (now - started) / 1_000_000
+        if (remaining <= 0 || future?.cancel(false) != true) return@synchronized
+        lastRenewal = now
+        future = schedule(minOf(idleMs, remaining))
+    }
+
+    fun cancel() = synchronized(this) { future?.cancel(false); Unit }
+
+    companion object {
+        // Identity-keyed per request: HttpExchange attributes are shared by every exchange of one HttpContext.
+        private val active = java.util.Collections.synchronizedMap(java.util.IdentityHashMap<Any, WebRequestDeadline>())
+        fun register(exchange: Any, deadline: WebRequestDeadline) { active[exchange] = deadline }
+        fun release(exchange: Any) { active.remove(exchange) }
+        fun of(exchange: Any): WebRequestDeadline? = active[exchange]
+        /** Matches the bootstrap `downloadIdleMs` limit. */
+        const val DOWNLOAD_IDLE_MS = 120_000L
+        const val DOWNLOAD_MAXIMUM_MS = 60L * 60 * 1000
+    }
 }

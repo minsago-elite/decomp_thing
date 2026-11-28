@@ -28,6 +28,17 @@ function read(value: Report) {
 }
 const table = () => screen.findByRole('table', { name: 'Output signature counts reported by the producer' });
 
+it('retains the numeric summary without mounting an unavailable report case reader', async () => {
+  const value = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration-unavailable.json'), 'utf8')) as ResponseOf<'report'>).data;
+  expect(value.sourceArtifact!.content?.projection).toBe('unavailable');
+  const { fetcher } = read(value);
+  await table();
+  expect(screen.getByText(/Download and retained case details withheld/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Read retained case details' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Download observed exploration JSON' })).toBeNull();
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
 it('presents frozen repeated-signature sample counts with their real denominator and report binding', async () => {
   const value = report(); const { fetcher } = read(value); const grid = await table();
   const expanded = within(grid).getByRole('row', { name: /Expanded distinct exit\/output signatures/ });
@@ -64,10 +75,11 @@ it('retains exact uint64 signature counters above JavaScript safe integer precis
   const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
   expect(document.getElementById('output-signature-chart-counts')!.textContent).toContain('9007199254740993');
   expect(document.getElementById('output-signature-chart-counts')!.textContent).toContain('18446744073709551615');
-  const bars = chart.querySelectorAll<HTMLElement>('.output-signature-bar');
-  expect(bars).toHaveLength(2); expect(bars[0]!.style.width).toBe('100%');
-  expect(Number.parseFloat(bars[1]!.style.width)).toBeGreaterThan(0);
-  expect(Number.parseFloat(bars[1]!.style.width)).toBeLessThan(100);
+  const bars = chart.querySelectorAll<SVGRectElement>('.output-signature-bar');
+  expect(bars).toHaveLength(2); expect(bars[0]!.getAttribute('width')).toBe('100');
+  expect(Number.parseFloat(bars[1]!.getAttribute('width')!)).toBeGreaterThan(0);
+  expect(Number.parseFloat(bars[1]!.getAttribute('width')!)).toBeLessThan(100);
+  expect(chart.querySelector('[style]')).toBeNull();
 });
 
 it('keeps an empty sample explicit without a zero denominator fraction or a success percentage', async () => {
@@ -137,8 +149,9 @@ it('charts zero new signatures as an observed count within a nonempty sample', a
   const value = report(); summary(value).confidence.newOutputSignatureCount = '0';
   const { fetcher } = read(value); const grid = await table();
   const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
-  const bars = chart.querySelectorAll<HTMLElement>('.output-signature-bar');
-  expect(bars).toHaveLength(2); expect(bars[0]!.style.width).toBe('100%'); expect(bars[1]!.style.width).toBe('0%');
+  const bars = chart.querySelectorAll<SVGRectElement>('.output-signature-bar');
+  expect(bars).toHaveLength(2); expect(bars[0]!.getAttribute('width')).toBe('100'); expect(bars[1]!.getAttribute('width')).toBe('0');
+  expect(chart.querySelector('[style]')).toBeNull();
   expect(within(grid).getByRole('row', { name: /New distinct exit\/output signatures/ }).textContent).toContain('0');
   expect(screen.getByText('Expanded distinct exit/output signatures: 2. New distinct exit/output signatures: 0.')).toBeTruthy();
   expect(screen.getByText(/No branch, statement, function or complete-behavior coverage denominator/)).toBeTruthy();
@@ -149,8 +162,9 @@ it('charts all reported signatures as new without presenting a program-coverage 
   const value = report(); summary(value).confidence.newOutputSignatureCount = '2';
   const { fetcher } = read(value); const grid = await table();
   const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
-  const bars = chart.querySelectorAll<HTMLElement>('.output-signature-bar');
-  expect(bars).toHaveLength(2); expect(bars[0]!.style.width).toBe('100%'); expect(bars[1]!.style.width).toBe('100%');
+  const bars = chart.querySelectorAll<SVGRectElement>('.output-signature-bar');
+  expect(bars).toHaveLength(2); expect(bars[0]!.getAttribute('width')).toBe('100'); expect(bars[1]!.getAttribute('width')).toBe('100');
+  expect(chart.querySelector('[style]')).toBeNull();
   expect(within(grid).getByText('Expanded observed signatures: 2')).toBeTruthy();
   expect(screen.getByText('Expanded distinct exit/output signatures: 2. New distinct exit/output signatures: 2.')).toBeTruthy();
   expect(screen.queryByText(/100%|0%/)).toBeNull(); expect(fetcher).toHaveBeenCalledOnce();

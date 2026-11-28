@@ -96,6 +96,13 @@ class SecureRepairRuntimeSurfaceTest {
         assertFalse(configurationFields.any(RepairRuntimeProfileProvider::class.java::isAssignableFrom))
         assertFalse(configurationFields.any(RepairIndexProfile::class.java::isAssignableFrom))
         assertFalse(configurationFields.any(RepairValidationStrategy::class.java::isAssignableFrom))
+
+        val snapshot = javap(RepairExplorationSnapshot::class.java)
+        assertTrue(session.lines().any { it.contains("prepareExploration(java.nio.file.Path, java.nio.file.Path)") })
+        assertTrue(session.lines().any { it.contains("RepairExplorationSnapshot") })
+        assertFalse(snapshot.lines().any { it.trimStart().startsWith("public") && it.contains("binding();") })
+        assertFalse(snapshot.contains("ModuleRevisionGraph"))
+        assertFalse(snapshot.contains("TraceGuidedRepairLoop"))
     }
 
     @Test

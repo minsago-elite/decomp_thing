@@ -1,5 +1,6 @@
 package decompengine.exploration
 
+import decompengine.validation.BehaviorExecutionLaunchException
 import decompengine.validation.BehaviorExecutionOutcomeException
 import decompengine.validation.BehaviorExecutionTimeoutException
 import decompengine.validation.BehaviorOutputLimitException
@@ -18,6 +19,7 @@ internal enum class ExplorationSamplePhase(val wire: String) {
 internal enum class ExplorationFailureReason(val kind: String, val code: String, val description: String) {
     TIMEOUT("timeout", "behavior-deadline-exceeded", "a timeout"),
     SANDBOX_UNAVAILABLE("tooling-unavailable", "sandbox-unavailable", "unavailable sandbox tooling"),
+    LAUNCH_FAILURE("execution-failure", "sandbox-wrapper-start-failed", "a sandbox invocation wrapper process start failure"),
     OUTPUT_LIMIT("execution-failure", "output-limit-exceeded", "an output-limit failure"),
     UNVERIFIED_COMPLETION("execution-failure", "completion-unverified", "unverified execution completion"),
     INTERRUPTED("interrupted", "producer-interrupted", "an interruption"),
@@ -28,6 +30,7 @@ internal enum class ExplorationFailureReason(val kind: String, val code: String,
         fun from(failure: Exception): ExplorationFailureReason = when (failure) {
             is BehaviorExecutionTimeoutException -> TIMEOUT
             is SandboxUnavailableException -> SANDBOX_UNAVAILABLE
+            is BehaviorExecutionLaunchException -> LAUNCH_FAILURE
             is BehaviorOutputLimitException -> OUTPUT_LIMIT
             is BehaviorExecutionOutcomeException -> UNVERIFIED_COMPLETION
             is InterruptedException -> INTERRUPTED

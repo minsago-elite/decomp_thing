@@ -5,6 +5,8 @@ import decompengine.project.ModuleObservedBehavior
 import decompengine.project.ModuleObservedCase
 import decompengine.project.ModuleObservationAttribution
 import decompengine.project.writeProjectEvidenceAtomically
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import decompengine.validation.ProcessInput
 import decompengine.validation.SandboxRunner
 import kotlinx.serialization.json.Json
@@ -17,7 +19,6 @@ import java.nio.file.Path
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Locale
-import java.util.concurrent.CompletableFuture
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 import kotlin.io.path.writeText
@@ -93,12 +94,7 @@ class PythonAngrExplorer(
             argvBytes.toString(),
             stdinBytes.toString(),
         )
-        val process = ProcessBuilder(command).start()
-        val stdoutFuture = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
-        val stderrFuture = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
-        val exitCode = process.waitFor()
-        val stdout = stdoutFuture.join()
-        val stderr = stderrFuture.join()
+        val (exitCode, stdout, stderr) = collectOwnedExplorationProcess(ProcessBuilder(command).start())
         if (exitCode != 0) {
             val reason = if (exitCode == 124) "timed out after ${timeoutSeconds}s" else "failed with exit code $exitCode"
             error("angr candidate generation $reason: ${stderr.ifBlank { stdout }}")
@@ -258,8 +254,7 @@ class StaticHintGenerator(
         val process = ProcessBuilder(stringsPath.pathString, "-a", "-n", "3", binaryPath.pathString)
             .redirectErrorStream(true)
             .start()
-        val output = process.inputStream.bufferedReader().readText()
-        val exitCode = process.waitFor()
+        val (exitCode, output) = collectOwnedExplorationProcess(process)
         if (exitCode != 0) error("strings failed with exit code $exitCode: $output")
         val hints = output.lineSequence()
             .map(String::trim)
@@ -333,7 +328,11 @@ data class CoverageReport(
     val networkIsolated: Boolean = observations.isNotEmpty() && observations.all { it.networkIsolated }
 }
 
-class OutputCoverageMeasurer(private val sandbox: SandboxRunner = SandboxRunner()) {
+class OutputCoverageMeasurer(
+    private val sandbox: SandboxRunner = SandboxRunner(),
+    /** Called after every finished sample, successful or not; an owner can treat it as progress. */
+    private val onSample: () -> Unit = {},
+) {
     fun measure(binaryPath: Path, baseline: List<CandidateInput>, expanded: List<CandidateInput>): CoverageReport =
         measure(binaryPath, baseline, expanded, capture = null)
 
@@ -378,7 +377,7 @@ class OutputCoverageMeasurer(private val sandbox: SandboxRunner = SandboxRunner(
                 stdoutHex = stdoutHex,
                 stderrHex = stderrHex,
                 networkIsolated = output.networkIsolated,
-            ).also { capture?.completed(phase, it) }
+            ).also { capture?.completed(phase, it); onSample() }
         } catch (failure: Exception) {
             if (capture != null) capture.failed(phase, index, failure)
             throw failure
@@ -423,6 +422,7 @@ data class ExplorationReport(
     val confidence: ConfidenceScore,
     val reportPath: Path,
     val angrDiagnostics: AngrDiagnostics? = null,
+    val displayOnlyRetainedInputs: List<ProcessInput>? = null,
 )
 
 /**
@@ -462,8 +462,18 @@ class AutomaticExplorer(
     private val maxCandidates: Int = 192,
     private val moduleObservationAttributor: ModuleObservationAttributor? = null,
 ) {
-    fun explore(binaryPath: Path, seedInputs: List<CandidateInput>, reportsDir: Path): ExplorationReport {
+    fun explore(
+        binaryPath: Path,
+        seedInputs: List<CandidateInput>,
+        reportsDir: Path,
+        displayOnlyRetainedInputs: List<ProcessInput>? = null,
+    ): ExplorationReport {
         require(seedInputs.isNotEmpty()) { "at least one seed input is required" }
+        // Retained inputs are optional display data. Do not let a row that cannot fit this
+        // presentation contract prevent candidate generation or authoritative repair work.
+        displayOnlyRetainedInputs?.let { inputs ->
+            require(inputs.size <= 10_000) { "retained exploration corpus exceeds its source contract" }
+        }
         val observationInputSha256 = moduleObservationAttributor?.let { hashObservationInput(binaryPath) }
         val expanded = proposeExplorationInputs(seedInputs,
             angr = { angrExplorer.generate(binaryPath) },
@@ -482,7 +492,8 @@ class AutomaticExplorer(
         }
         val confidence = ConfidenceScorer.score(expanded, coverageReport, sandboxed = true)
         reportsDir.createDirectories()
-        val report = ExplorationReport(expanded, coverageReport, confidence, reportPath, angrExplorer.diagnostics)
+        val report = ExplorationReport(expanded, coverageReport, confidence, reportPath, angrExplorer.diagnostics,
+            displayOnlyRetainedInputs?.map { ProcessInput(it.id, it.args.toList(), it.stdin.copyOf()) })
         reportPath.writeText(report.toJson())
         if (moduleObservationAttributor != null) {
             require(observationInputSha256 == hashObservationInput(binaryPath)) { "exploration input changed while observing module cases" }
@@ -491,6 +502,11 @@ class AutomaticExplorer(
         return report
     }
 }
+
+/** Linux process state Z: exited and awaiting its parent's wait; no other platform reports one. */
+internal fun isZombie(pid: Long): Boolean = try {
+    java.nio.file.Files.readString(java.nio.file.Path.of("/proc/$pid/stat")).substringAfterLast(") ").firstOrNull() == 'Z'
+} catch (_: Exception) { false }
 
 private fun hashObservationInput(path: Path): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -506,7 +522,8 @@ private fun hashObservationInput(path: Path): String {
     return digest.digest().toHex()
 }
 
-private fun ExplorationReport.toJson(): String = """
+private fun ExplorationReport.toJson(): String {
+    val base = """
 {
   "candidateCount": ${candidates.size},
   "coverageIncreased": ${coverage.increased},
@@ -532,6 +549,76 @@ ${coverage.observations.joinToString(",\n") { it.toJson().prependIndent("    ") 
   ]
 }
 """.trimIndent() + "\n"
+    val retained = displayOnlyRetainedInputs ?: return base
+    val prefix = base.removeSuffix("}\n")
+    val bounded = boundedExplorationRetainedInputs(retained, (1000 - candidates.size).coerceAtLeast(0), prefix)
+        ?: return base
+    return prefix + ",\n  \"schema\": \"decomp-exploration\",\n  \"schemaVersion\": 2,\n  \"state\": \"complete\",\n" +
+        "  \"retainedInputs\": [\n" + bounded.rows.joinToString(",\n") +
+        "\n  ],\n  \"retainedInputsOmitted\": ${bounded.omitted}\n}\n"
+}
+
+internal data class BoundedExplorationRetainedInputs(val rows: List<String>, val omitted: Int)
+
+internal fun boundedExplorationRetainedInputs(inputs: List<ProcessInput>, maximumCases: Int, basePrefix: String): BoundedExplorationRetainedInputs? {
+    val reportLimitBytes = 1_048_576L
+    val reportNodeLimit = StrictJsonLimits().maximumNodes
+    val fieldPrefix = ",\n  \"schema\": \"decomp-exploration\",\n  \"schemaVersion\": 2,\n  \"state\": \"complete\",\n  \"retainedInputs\": [\n"
+    val fieldSuffix = "\n  ],\n  \"retainedInputsOmitted\": "
+    val fixedBytes = basePrefix.toByteArray(Charsets.UTF_8).size.toLong() +
+        fieldPrefix.toByteArray(Charsets.UTF_8).size + fieldSuffix.toByteArray(Charsets.UTF_8).size +
+        "${inputs.size}\n}\n".toByteArray(Charsets.UTF_8).size
+    if (fixedBytes > reportLimitBytes) return null
+    val nodeBudgetSkeleton = basePrefix + fieldPrefix + fieldSuffix + "${inputs.size}\n}\n"
+    var nodeCount = try {
+        val limits = StrictJsonLimits(
+            maximumInputBytes = reportLimitBytes.toInt(),
+            maximumNodes = reportNodeLimit,
+        )
+        countExplorationJsonNodes(OracleJson.parse(nodeBudgetSkeleton.toByteArray(Charsets.UTF_8), limits))
+    } catch (_: Exception) {
+        // If the existing report already consumes the whole reader budget, omit the optional
+        // retained-input section instead of publishing a versioned report the reader rejects.
+        return null
+    }
+    var rowBytes = 0L
+    val rows = ArrayList<String>()
+    val includedIds = HashSet<String>()
+    for (input in inputs) {
+        val idBytes = input.id.toByteArray(Charsets.UTF_8).size
+        if (input.id.isEmpty() || idBytes > 128 || input.args.size > 256 ||
+            input.args.any { it.toByteArray(Charsets.UTF_8).size > 8192 } || input.stdin.size > 262_144) continue
+        if (input.id in includedIds) continue
+        if (rows.size == maximumCases) continue
+        val row = input.toJson().prependIndent("    ")
+        val rowByteCount = row.toByteArray(Charsets.UTF_8).size.toLong()
+        val separatorBytes = if (rows.isEmpty()) 0L else ",\n".toByteArray(Charsets.UTF_8).size.toLong()
+        if (fixedBytes + rowBytes + separatorBytes + rowByteCount > reportLimitBytes) continue
+        // Each retained row contributes an object, id string, args array, stdinHex string, and
+        // one string node for each argument. Keys do not count toward StrictJsonLimits nodes.
+        val rowNodes = 4L + input.args.size
+        if (rowNodes > reportNodeLimit - nodeCount) continue
+        rows += row
+        rowBytes += separatorBytes + rowByteCount
+        nodeCount += rowNodes.toInt()
+        includedIds.add(input.id)
+    }
+    return BoundedExplorationRetainedInputs(rows, inputs.size - rows.size)
+}
+
+private fun countExplorationJsonNodes(value: kotlinx.serialization.json.JsonElement): Int = when (value) {
+    is kotlinx.serialization.json.JsonObject -> 1 + value.values.sumOf(::countExplorationJsonNodes)
+    is kotlinx.serialization.json.JsonArray -> 1 + value.sumOf(::countExplorationJsonNodes)
+    else -> 1
+}
+
+private fun ProcessInput.toJson(): String = """
+{
+  "id": "${id.escapeJson()}",
+  "args": [${args.joinToString(", ") { "\"${it.escapeJson()}\"" }}],
+  "stdinHex": "${stdin.toHex()}"
+}
+""".trimIndent()
 
 private fun AngrDiagnostics.toJson(): String = """
 {

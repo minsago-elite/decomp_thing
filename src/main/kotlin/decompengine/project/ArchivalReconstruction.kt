@@ -769,10 +769,19 @@ internal class ExportProcessTree(
                 try { if (handle.isAlive) { if (force) handle.destroyForcibly() else handle.destroy() } }
                 catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
             }
-            try { if (process.isAlive) { if (force) process.destroyForcibly() else process.destroy() } }
-            catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
-            try {
-                rootHandle?.let { if (it.isAlive) { if (force) it.destroyForcibly() else it.destroy() } }
+            val root = rootHandle
+            var rootAlive: Boolean? = null
+            if (root != null) try { rootAlive = root.isAlive } catch (failure: Throwable) {
+                observationFailure = observationFailure ?: failure
+            }
+            // A ProcessHandle can report native exit before its owning Process acknowledges exit.
+            // Do not signal that already-absent process through the stale Java view; waitFor below
+            // settles the acknowledgement inside this same bounded cleanup window.
+            if (rootAlive != false) try {
+                if (process.isAlive) { if (force) process.destroyForcibly() else process.destroy() }
+            } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
+            if (rootAlive == true && root != null) try {
+                if (force) root.destroyForcibly() else root.destroy()
             } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
         }
         fun remaining(allowance: Long): Long {
@@ -915,12 +924,14 @@ class ArchivalReconstructionService(
         adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        progress.runContext(model.inputSha256, profile.sha256)
         val project = outputDir.resolve("source-tree")
+        val compilerFeedback = ModuleCompilerFeedbackStore(outputDir, model.inputSha256, profile.sha256)
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        SourceTreeGenerator.generate(
+        SourceTreeGenerator.generateWithCompilerFeedback(
             model,
             project,
             hostSafetyLimits = hostSafetyLimits,
@@ -928,6 +939,8 @@ class ArchivalReconstructionService(
             observedBehavior = observedBehavior,
             profile = profile,
             progress = progress,
+            compilerFeedback = { moduleId -> runCatching { compilerFeedback.read(moduleId) }.getOrNull() },
+            onCompilerFeedback = { feedback -> runCatching { compilerFeedback.write(feedback) } },
         ) { completed, total, module ->
             moduleTotal = total
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")

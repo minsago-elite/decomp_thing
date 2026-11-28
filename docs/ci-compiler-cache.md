@@ -1,7 +1,8 @@
 # Actions compiler cache
 
-The ordinary Gradle jobs use the open-source basic provider for dependencies and
-wrapper validation. A separate workspace directory, `build/ci-compiler-cache`,
+The ordinary Gradle jobs use the pinned open-source `minsago-elite/gradle-cache-action`
+for Gradle dependency caching and a separately pinned `gradle/actions/wrapper-validation`
+step for wrapper authentication. A separate workspace directory, `build/ci-compiler-cache`,
 holds Gradle task outputs. `DECOMP_CI_COMPILER_CACHE=1` selects that directory only
 in these Actions jobs; other invocations keep their existing local cache path.
 
@@ -27,8 +28,23 @@ per-partition duplication. It refuses publication above one GiB; retained entrie
 also remain subject to GitHub's repository cache quota and eviction. Dependency
 caches are not copied into this directory or duplicated for each source revision.
 
-The existing basic provider's read-only policy is preserved. Manually selected
-LLVM observation/qualification jobs are unchanged and do not use this wrapper.
+Dependency cache writes are restricted to the repository default branch, with
+existing read-only callers remaining read-only. All consumers use
+`cache-family: decomp-gradle-dependencies-v1`, allowing a read-only workflow or PR
+job to fall back to a default-branch manifest from another workflow. Default-branch
+CI jobs such as `web-packaged` and the Kotlin partitions can publish these manifests.
+The first cross-workflow restore requires a manifest and its content units to be
+available in the repository cache. Matrix jobs pass `${{ toJSON(matrix) }}`; the
+composite defaults to `{}` for non-matrix jobs. Generated and metadata cache keys
+include the publishing job's scope. On family fallback, the action restores the
+units referenced by the publishing job's manifest.
+
+Manually selected LLVM observation jobs retain their explicit private Gradle homes
+and read-only policy. Offline Ghidra verification still prepares inputs online
+before copying dependency caches into its separate private replay home. No new
+cache ownership is introduced for deliberately cold jobs or private replay homes.
+The dependency action excludes `build/ci-compiler-cache`; its shared family never
+changes the single default-branch compiler publisher or the one-GiB limit.
 
 ## Evidence
 
@@ -40,7 +56,8 @@ release, and no fixed CI or CPU improvement is claimed.
 
 Provider contracts:
 
-- [Pinned basic Gradle provider](https://github.com/gradle/actions/blob/3f5f9adaf7d9fecd50b5935e54106014257a94e6/docs/setup-gradle.md#basic-caching)
+- [Gradle dependency cache contract](https://github.com/minsago-elite/gradle-cache-action/blob/6dea8fd64949676aa3da5d1e107d8efaaca7e05a/README.md)
+- [Pinned wrapper validation](https://github.com/gradle/actions/blob/8da46b539cd8fe6ab27ca75128919a18d757604c/wrapper-validation/action.yml)
 - [Pinned restore-only action](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/restore/action.yml)
 - [Pinned save-only action](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/save/action.yml)
 - [Gradle build cache input validation](https://docs.gradle.org/current/userguide/build_cache.html)

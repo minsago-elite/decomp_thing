@@ -243,6 +243,19 @@ jobs:
             build/test-results/test
             build/reports/junit-signatures
 
+  llvm-required-contract:
+    name: LLVM oracle required-contract
+    if: always() && github.event_name != 'workflow_dispatch'
+    needs:
+      - provenance-artifacts-and-ground-truth
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Require the LLVM oracle model normal verification lane
+        run: |
+          test "${{ needs['provenance-artifacts-and-ground-truth'].result }}" = 'success'
+
   native-runtime-measurement:
     if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'native-runtime-measurement'
     runs-on: ubuntu-24.04
@@ -483,9 +496,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6; retain wrapper authentication
+      - uses: minsago-elite/gradle-cache-action@6dea8fd64949676aa3da5d1e107d8efaaca7e05a
         with:
-          cache-provider: basic
+          cache-family: decomp-gradle-dependencies-v1
+          cache-key-prefix: decomp-gradle-v1
           cache-read-only: true
       - name: Authenticate the fixed Docker and rootless tool archives
         run: |
@@ -761,9 +776,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6; retain wrapper authentication
+      - uses: minsago-elite/gradle-cache-action@6dea8fd64949676aa3da5d1e107d8efaaca7e05a
         with:
-          cache-provider: basic
+          cache-family: decomp-gradle-dependencies-v1
+          cache-key-prefix: decomp-gradle-v1
           cache-read-only: true
       - name: Install pinned build-only frontend toolchain
         run: |
@@ -823,9 +840,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6; retain wrapper authentication
+      - uses: minsago-elite/gradle-cache-action@6dea8fd64949676aa3da5d1e107d8efaaca7e05a
         with:
-          cache-provider: basic
+          cache-family: decomp-gradle-dependencies-v1
+          cache-key-prefix: decomp-gradle-v1
           cache-read-only: true
       - name: Install pinned build-only frontend toolchain
         run: |

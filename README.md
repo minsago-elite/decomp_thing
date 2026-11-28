@@ -93,6 +93,22 @@ scripts/validate-mvp-docker.sh .env.legacy-openai
 
 The script uses the no-network, read-only `fixture-builder` profile with a bounded temporary filesystem to compile only `01_out_of_bounds_write.c` with pinned Clang flags into an isolated `binary_01` input directory. Fixture source is mounted read-only only in that builder and is absent from both runtime services. The script then runs `llm_bin_patch patch` through Compose and checks original CWE-787 evidence, isolated execution guarantees, exact `[03] Alexandria Stone` behavior, hashes, logs, secret redaction, and stable output layout. Successful runs contain `decompile/decompiled.c`, `patched_c/patched.c`, `patched_binary/patched_binary`, `evidence/`, `logs/`, and `summary/SUMMARY.md`; failed runs keep available evidence but never publish the final binary.
 
+## Ten vulnerability cases
+
+The patch command also accepts `--case 01` through `--case 10` (or the matching
+`CWE-...` identifier) for the pinned C vulnerability corpus. The default remains
+CWE-787. For example, `llm_bin_patch patch binary_10 --output output --case 10`
+uses a literal-message repair contract and a harmless command-interpretation
+probe. Other cases use the appropriate ASan, UBSan, leak, or compiler diagnostic
+checks, with explicit safe behavior where the original execution is undefined.
+Clang and LLVM source-mapping tools are required for the supplemental checks;
+unsupported tools or isolation boundaries fail validation. Approval and
+authenticated ACP release requirements still apply.
+
+See [the ten-case qualification contracts](docs/c-vul-qualification.md) for
+expected outcomes and limitations. Authored-reference and workflow control tests
+do not establish live model reconstruction quality or all-input equivalence.
+
 ## Browser GUI
 
 Building the application now also builds its embedded Preact UI. Use the pinned
@@ -142,6 +158,14 @@ Pass `--evidence-only` to build a diagnostic inventory while retaining the compl
 For web reconstruction, set `WEB_RECONSTRUCTION_MODE=evidence-only` to select the same diagnostic policy.
 
 The output includes `source-tree/` for normal editing, `source-tree.zip` for archival, and `reconstruction.json` for automation. The tree contains shared types, module headers and implementations, a parallel incremental Makefile, the whole-program recovery model, module ownership plan, unresolved entities, per-module prompt budget, prompt hash, acceptance decision, source hash, confidence limitations, tool versions, and build logs. Checkpoints are reused only when their recorded source hash still matches, so an interrupted run preserves accepted module bytes. `ARCHIVE_MANIFEST.sha256` verifies the archive payload.
+
+When the same output directory is used with another input binary, its analysis, source tree, archive, progress snapshot, run history, and compiler feedback are preserved under `input-cache/<input-sha256>/` and restored when that input is selected again. Existing output is migrated without replacing its input-bound checkpoints. Full run histories are bounded, redacted observations tied to the analyzed input and profile; they do not grant acceptance authority. Inspect them without rerunning a workflow:
+
+```bash
+llm_bin_patch runs list ./output/program-source
+llm_bin_patch runs replay ./output/program-source [run-id]
+llm_bin_patch runs follow ./output/program-source [run-id]
+```
 
 ## Development
 

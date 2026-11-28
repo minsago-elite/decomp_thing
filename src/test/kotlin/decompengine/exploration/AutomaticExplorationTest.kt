@@ -10,6 +10,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import decompengine.validation.ProcessInput
+import decompengine.oracle.core.OracleJson
+import decompengine.web.webExplorationReport
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -202,6 +204,95 @@ class AutomaticExplorationTest {
         assertTrue(json.contains("\"newOutputSignatures\""))
         assertTrue(json.contains("\"observations\""))
         assertTrue(json.contains("\"argvStates\": 2"))
+    }
+
+    @Test
+    fun `retained regression inputs are display only and do not affect exploration score`() {
+        val tempDir = createTempDirectory("exploration-retained-display-")
+        val binary = compileBranchingProgram(tempDir)
+        val seed = listOf(CandidateInput("empty", CandidateSource.SEED))
+        val explorer = AutomaticExplorer(angrExplorer = FakeAngrExplorer())
+        val ordinary = explorer.explore(binary, seed, tempDir.resolve("ordinary"))
+        val retained = (0..1000).map { index ->
+            ProcessInput(if (index == 0) "retained_case" else "retained_$index", listOf("known"), byteArrayOf(0, -1))
+        }
+        val withRetained = explorer.explore(binary, seed, tempDir.resolve("with-retained"), retained)
+        assertEquals(ordinary.candidates, withRetained.candidates)
+        assertEquals(ordinary.coverage, withRetained.coverage)
+        assertEquals(ordinary.confidence, withRetained.confidence)
+        val report = Json.parseToJsonElement(withRetained.reportPath.readText()).jsonObject
+        assertEquals("decomp-exploration", report.getValue("schema").jsonPrimitive.content)
+        assertEquals(2, report.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        val retainedRows = report.getValue("retainedInputs").jsonArray
+        assertTrue(retainedRows.size + report.getValue("candidates").jsonArray.size <= 1000)
+        assertEquals(retained.size - retainedRows.size, report.getValue("retainedInputsOmitted").jsonPrimitive.content.toInt())
+        val item = retainedRows.first().jsonObject
+        assertEquals("retained_case", item.getValue("id").jsonPrimitive.content)
+        assertEquals("known", item.getValue("args").jsonArray.single().jsonPrimitive.content)
+        assertEquals("00ff", item.getValue("stdinHex").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `unrenderable retained regression inputs are omitted without aborting exploration`() {
+        val tempDir = createTempDirectory("exploration-retained-omit-")
+        val binary = compileBranchingProgram(tempDir)
+        val seed = listOf(CandidateInput("empty", CandidateSource.SEED))
+        val retained = listOf(
+            ProcessInput("oversized-arguments", List(257) { "x" }, byteArrayOf()),
+            ProcessInput("oversized-argument", listOf("x".repeat(8193)), byteArrayOf()),
+            ProcessInput("x".repeat(129), listOf("known"), byteArrayOf()),
+            ProcessInput("visible", listOf("known"), byteArrayOf(0, -1)),
+        )
+
+        val report = AutomaticExplorer(angrExplorer = FakeAngrExplorer()).explore(
+            binary, seed, tempDir.resolve("reports"), retained,
+        )
+
+        assertTrue(report.coverage.observations.isNotEmpty())
+        val json = Json.parseToJsonElement(report.reportPath.readText()).jsonObject
+        assertEquals(1, json.getValue("retainedInputs").jsonArray.size)
+        assertEquals("visible", json.getValue("retainedInputs").jsonArray.single().jsonObject
+            .getValue("id").jsonPrimitive.content)
+        assertEquals(3, json.getValue("retainedInputsOmitted").jsonPrimitive.content.toInt())
+    }
+
+    @Test
+    fun `retained rows fit the remaining serialized report byte budget`() {
+        val base = "{\"padding\":\"${"x".repeat(900_000)}\"}\n"
+        val retained = listOf(ProcessInput("large", emptyList(), ByteArray(100_000)))
+
+        val bounded = requireNotNull(boundedExplorationRetainedInputs(retained, 1, base.removeSuffix("}\n")))
+
+        assertTrue(bounded.rows.isEmpty())
+        assertEquals(1, bounded.omitted)
+    }
+
+    @Test
+    fun `retained rows stay within the whole report JSON node budget`() {
+        val tempDir = createTempDirectory("exploration-retained-node-budget-")
+        val binary = compileBranchingProgram(tempDir)
+        val seed = listOf(CandidateInput("empty", CandidateSource.SEED))
+        val noSymbolicCandidates = object : AngrExplorer {
+            override fun generate(binaryPath: java.nio.file.Path): List<CandidateInput> = emptyList()
+        }
+        val retained = (0 until 390).map { index ->
+            ProcessInput("retained_$index", List(256) { "" }, byteArrayOf())
+        }
+
+        val report = AutomaticExplorer(angrExplorer = noSymbolicCandidates, maxCandidates = 1)
+            .explore(binary, seed, tempDir.resolve("reports"), retained)
+        val bytes = report.reportPath.toFile().readBytes()
+        val parsed = OracleJson.parse(bytes).jsonObject
+        val rows = parsed.getValue("retainedInputs").jsonArray
+
+        assertTrue(rows.isNotEmpty())
+        assertTrue(rows.size < retained.size, "the node budget must omit some otherwise displayable rows")
+        assertEquals(retained.size, rows.size + parsed.getValue("retainedInputsOmitted").jsonPrimitive.content.toInt())
+        assertEquals(
+            "available",
+            webExplorationReport("job_node_budget", "run_node_budget", bytes)
+                .getValue("state").jsonPrimitive.content,
+        )
     }
 
     @Test

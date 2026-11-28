@@ -2,6 +2,8 @@ import type { RevisionDirectory, RevisionFile } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { metadataFailureKind } from '../shared/retainMetadata';
 import { sourceCopy as copy } from '../copy/sources';
+import { jobCopy } from '../copy/job';
+import { isDeletedJob } from '../shared/retainMetadata';
 import { sourceReadRoute } from '../app/paths';
 import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 
@@ -67,7 +69,9 @@ export function sourceReadMessage(failure: unknown): string {
   if (failure instanceof ApiClientError) {
     // Source-specific outcomes first, then the shared session/denied/missing/unsupported/corrupt/server
     // categories (#628), so each failure class names its own next step.
-    if (failure.code === 'invalid_request') text = copy.invalid;
+    if (isDeletedJob(failure)) text = jobCopy.thisJobWasDeleted;
+    else if (failure.code === 'invalid_request') text = copy.invalid;
+    else if (failure.status === 404) text = copy.noSnapshot;
     else if (failure.status === 429) text = copy.busy;
     else if (failure.status === 416) text = copy.invalidRange;
     else if (failure.status === 409 || failure.status === 410 || ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) text = copy.expired;
@@ -81,7 +85,8 @@ export type PreviewNotice = 'not-viewable' | 'too-large' | 'runtime-disabled' | 
 export function sourceFilePolicy(item: RevisionFile['item'], maximumChunkBytes: string): {
   preview: PreviewNotice; download: boolean; downloadNotice: 'too-large' | 'not-archivable' | null;
 } {
-  const tooLarge = BigInt(item.sizeBytes) > SOURCE_FILE_LIMIT;
+  // A manifest-only entry has no recorded size; the server still enforces the reader ceiling on read.
+  const tooLarge = item.sizeBytes !== null && BigInt(item.sizeBytes) > SOURCE_FILE_LIMIT;
   return {
     preview: !item.declaredViewable ? 'not-viewable' : tooLarge ? 'too-large'
       : BigInt(maximumChunkBytes) < 4n ? 'runtime-disabled' : 'available',
@@ -148,7 +153,8 @@ export function currentSourceRead<T>(value: SourceReadState<T>, key: string): So
 }
 
 /** One callback read with latest-only publication, independent of transport cancellation cooperation. */
-export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>, publish: (state: SourceReadState<T>) => void): () => void {
+export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>, publish: (state: SourceReadState<T>) => void,
+  onDeleted?: (failure: unknown) => void): () => void {
   const controller = new AbortController();
   publish({ key, state: 'loading' });
   void Promise.resolve().then(() => {
@@ -157,7 +163,18 @@ export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => P
   }).then(value => {
     if (!controller.signal.aborted) publish({ key, state: 'ready', value });
   }).catch((failure: unknown) => {
-    if (!controller.signal.aborted) publish({ key, state: 'failed', failure });
+    if (controller.signal.aborted) return;
+    if (onDeleted && isDeletedJob(failure)) onDeleted(failure);
+    else publish({ key, state: 'failed', failure });
   });
   return () => { controller.abort(); };
+}
+
+/**
+ * A non-empty download attribute keeps the router from treating the attachment link as an
+ * in-app route (preact-iso skips only truthy `link.download`, and `download=""` is falsy).
+ * The server's Content-Disposition still names the saved file.
+ */
+export function sourceDownloadName(displayName: string): string {
+  return displayName.split('/').filter(Boolean).at(-1) ?? 'source';
 }

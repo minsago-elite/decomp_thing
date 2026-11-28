@@ -2,16 +2,40 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
-/** Wait for the lazy route, authenticated session and enabled upload control. */
-async function waitForUploadControl(tab, ready, label = 'workspace upload control') {
-  await ready(tab, `location.pathname === '/nested/' &&
-    document.body.innerText.includes('Local session connected.') &&
-    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`, label);
+async function readJobRecord(path) {
+  try {
+    return JSON.parse(await fs.readFile(path, 'utf8'));
+  } catch (error) {
+    assert.fail(`Expected valid job metadata at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
-/** Wait for the upload control, then select the isolated non-executable fixture. */
+/** SessionStatus can settle before the lazy upload form has its authenticated limits (#1697 predicate). */
+export const uploadFormReady = `document.body.innerText.includes('Local session connected.') &&
+  document.querySelector('#upload-guidance')?.textContent.includes('The complete request limit is 33554432 bytes') &&
+  document.querySelector('#binary-file:not(:disabled)') !== null`;
+
+/** Committed selection predicate (#1697); the qualify flows use the equivalent #1758 selection wait. */
+export function uploadSubmitReady(label) {
+  return `(() => {
+    const picker = document.querySelector('#binary-file');
+    const submit = document.querySelector('.upload-panel button[type="submit"]');
+    return picker?.files?.[0]?.name === 'inert-browser-fixture.elf' &&
+      submit?.textContent === ${JSON.stringify(label)} && !submit.disabled;
+  })()`;
+}
+
+// The connected shell can render before the lazy Home route mounts its upload panel.
+async function readyForUpload(tab, ready) {
+  await ready(tab, `location.pathname === '/nested/' &&
+    document.body.innerText.includes('Local session connected.') &&
+    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`,
+  'workspace upload control');
+}
+
+/** Wait for the lazy route, then select the isolated, non-executable fixture. */
 export async function selectUploadFixture({ tab, evaluate, ready }) {
-  await waitForUploadControl(tab, ready);
+  await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -86,7 +110,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   await ready(tab, `location.pathname === '/nested/jobs/${ids[0]}' && document.body.innerText.includes('inert-browser-fixture.elf')`, 'retry recovers durable job route');
   assert.deepEqual(await evaluate(tab, 'window.__uploadProof()'), { requests: 1, sameKey: true, hidden: true });
   assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
-  const record = JSON.parse(await fs.readFile(join(data, ids[0], 'job.json'), 'utf8'));
+  const record = await readJobRecord(join(data, ids[0], 'job.json'));
   assert.equal(record.status, 'uploaded');
   const files = await fs.readdir(join(data, ids[0]));
   assert.deepEqual(files.sort(), ['input.elf', 'job.json', 'upload-receipt.json']);
@@ -161,7 +185,7 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   async function select(size, name) {
-    await waitForUploadControl(tab, ready, 'failure workspace upload control');
+    await readyForUpload(tab, ready);
     await evaluate(tab, `(() => {
       const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(${size})], ${JSON.stringify(name)}));
       const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
@@ -211,7 +235,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   }, tab.sessionId);
   const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await waitForUploadControl(tab, ready, 'measured workspace upload control');
+  await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);

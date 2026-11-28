@@ -16,6 +16,8 @@ internal class RepairHistorySnapshot internal constructor(
     attempts: List<RepairRecordedAttempt>,
     val pending: RepairRecordedAttempt?,
     retainedCases: List<RepairRecordedIdentity>,
+    /** Present only when the fully accepted head is the graph root, accepted as an assessed baseline. */
+    val acceptedBaseline: RepairRecordedAcceptedBaseline? = null,
 ) {
     val viewSchemaVersion: Int get() = 5
     val qualification: RepairRecordedQualification get() = RepairRecordedQualification.RECORDED_METADATA_ONLY
@@ -23,6 +25,16 @@ internal class RepairHistorySnapshot internal constructor(
     val attempts: List<RepairRecordedAttempt> = immutableRecordedList(attempts)
     val retainedCases: List<RepairRecordedIdentity> = immutableRecordedList(retainedCases)
 }
+
+/**
+ * A root revision accepted without a repair iteration: its identity, source digest and the recorded
+ * acceptance proof's assurance. Root nodes are not attempts, so this is the only view of them.
+ */
+internal data class RepairRecordedAcceptedBaseline internal constructor(
+    val identity: RepairRecordedIdentity,
+    val sourceRevisionSha256: String,
+    val assurance: RepairValidationAssurance,
+)
 
 /** Continuations name the same captured graph; no selection grants filesystem authority. */
 internal data class RepairRecordedHistorySelection(

@@ -21,10 +21,14 @@ export function OutputSignatureBreadth({ summary, bindingId }: { summary: Explor
       <div role="img" aria-labelledby="output-signature-chart-title"
         aria-describedby={[bindingId, 'output-signature-chart-counts', 'output-signature-counts-caption', 'output-signature-chart-note'].filter(Boolean).join(' ')}>
         <div class="output-signature-series"><span>{copy.expandedSignatureMeasurement}</span>
-          <div class="output-signature-track"><span class="output-signature-bar" style={{ width: '100%' }} /></div>
+          <svg class="output-signature-track" viewBox="0 0 100 14" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+            <rect class="output-signature-bar" width="100" height="14" />
+          </svg>
         </div>
         <div class="output-signature-series"><span>{copy.newSignatureMeasurement}</span>
-          <div class="output-signature-track"><span class="output-signature-bar" style={{ width: `${addedWidth}%` }} /></div>
+          <svg class="output-signature-track" viewBox="0 0 100 14" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+            <rect class="output-signature-bar" width={addedWidth} height="14" />
+          </svg>
         </div>
       </div>
       <p id="output-signature-chart-note">{copy.signatureChartApproximation}</p>

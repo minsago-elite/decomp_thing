@@ -55,3 +55,27 @@ export const progressRetentionSummaryCopy = {
   "periodicProgressCleanupIsDisabled": "Periodic progress cleanup is disabled.",
   "noneRecorded": "None recorded"
 } as const;
+
+export const storageSummaryCopy = {
+  "storage": "Stored data",
+  "explanation": "Reads logical file sizes in the job store and previews what scheduled maintenance would do. Reading changes nothing and starts no work.",
+  "read": "Read storage and maintenance preview",
+  "reading": "Reading storage…",
+  "failed": "Storage could not be read. Nothing was changed.",
+  "partial": "Not every entry could be inspected; totals are lower bounds.",
+  "total": "Total",
+  "jobs": "Jobs",
+  "originalInputs": "Uploaded inputs",
+  "reports": "Reports",
+  "sourceSnapshots": "Source snapshots",
+  "logs": "Logs and progress history",
+  "archives": "Source archives",
+  "metadata": "Job records",
+  "temporary": "Temporary files",
+  "other": "Other files",
+  "pendingDeletions": "Deletions still cleaning up",
+  "maintenance": "Maintenance preview (dry run)",
+  "automaticDeletionDisabled": "Jobs are never deleted automatically. Maintenance only shortens old unpinned progress history and finishes interrupted deletions.",
+  "affected": "{jobs} jobs affected; about {bytes} reclaimable.",
+  "protectedJobs": "{count} jobs are protected from deletion now (active work, pins, downloads or holds)."
+} as const;

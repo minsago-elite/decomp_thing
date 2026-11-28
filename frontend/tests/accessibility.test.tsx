@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, fireEvent, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import axe from 'axe-core';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
@@ -42,10 +42,18 @@ const responses: Record<string, () => unknown> = {
   revisionDirectory: () => bound('revision-directory-root', selected),
   revisionFile: () => bound('revision-file-root', selected),
   sourceSearch: () => bound('source-search-complete', selected),
+  sourceDiff: () => { const document = bound('source-diff-page', selected); (document.data.page as { limit: number }).limit = 50; return document; },
+  sourceFileDiff: () => bound('source-file-diff-text', selected),
+  sourceArchive: () => ({ data: { ...(JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/source-archive-stale.json'), 'utf8')
+    .replaceAll('job_1', jobId).replaceAll('"/api/v1/', '"/nested/api/v1/')) as Fixture).data, binding: selected } }),
   sourceCatalog: () => bound('source-catalog', { jobId, runId, revisionId: null }),
   validationHistory: () => bound('validation-history', { jobId, runId, revisionId: null }),
   recovery: () => fixture('recovery-empty'),
   progressPin: () => fixture('progress-pin'),
+  functionInventory: () => bound('function-inventory', selected),
+  moduleInventory: () => bound('module-inventory', selected),
+  moduleDetail: () => bound('module-detail', selected),
+  entityDetail: () => bound('entity-detail-function-references', selected),
 };
 
 beforeEach(() => {
@@ -86,6 +94,8 @@ async function violations() {
 }
 
 const fileId = (fixture('revision-file-root').data.item as { fileId: string }).fileId;
+const diffFile = fixture('source-file-diff-text').data as { baseFile: { fileId: string }; headFile: { fileId: string } };
+const diffBase = 'baseRunId=run_1&baseRevisionId=revision_1';
 
 // Each case names text that only the populated view renders, so a failed read cannot pass as the view.
 const privateRoutes: [name: string, path: string, rendered: string | RegExp][] = [
@@ -101,6 +111,13 @@ const privateRoutes: [name: string, path: string, rendered: string | RegExp][] =
   ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${fileId}`, 'Makefile'],
   ['source search form', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search`, 'Enter text to search the recorded inputs of this revision.'],
   ['source search results', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search?q=needle`, /Showing 4 matches on this page/],
+  ['source comparison chooser', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff`, 'Choose a base revision'],
+  ['source comparison list', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff?${diffBase}`, /4 changed files/],
+  ['source file comparison', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff/file?${diffBase}&baseFileId=${diffFile.baseFile.fileId}&headFileId=${diffFile.headFile.fileId}`, '@@ -4,4 +4,5 @@'],
+  ['function inventory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions`, 'Showing 1–3 of 5 matching functions (5 recorded).'],
+  ['module inventory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/modules`, 'Recorded totals'],
+  ['module detail', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/modules/extra`, 'src/modules/extra.c'],
+  ['function detail', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions/fn_0000000000401000`, 'Recorded prototype'],
   ['unknown page', '/nested/not-a-route', 'Page unavailable'],
 ];
 
@@ -116,6 +133,17 @@ for (const [name, path, rendered] of privateRoutes) {
     expect(await violations()).toEqual([]);
   });
 }
+
+it('has no automated WCAG A/AA violations with the source archive panel open', async () => {
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`);
+  render(<App basePath="/nested" session={auth} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Show source archive status' }));
+  await screen.findByText('Not verified: the archive changed since its last verification.');
+  await settle();
+  expect(document.querySelector('main [role="alert"]')).toBeNull();
+  expect(await violations()).toEqual([]);
+}, 15000);
 
 it('has no automated WCAG A/AA violations on the public shell without a session', async () => {
   history.replaceState(null, '', '/nested/');
@@ -134,6 +162,17 @@ it('has no automated WCAG A/AA violations with display preferences open', async 
   expect(await violations()).toEqual([]);
 });
 
+it('has no automated WCAG A/AA violations when a revision records an unsupported program model', async () => {
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'functionInventory'
+    ? bound('function-inventory-unsupported', selected) : Promise.reject(new ApiClientError('http_error', { serverCode: 'NOT_FOUND' }))));
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions`);
+  render(<App basePath="/nested" session={auth} />);
+  await screen.findByRole('alert');
+  await settle();
+  expect(await violations()).toEqual([]);
+});
+
 it('has no automated WCAG A/AA violations when a job read fails', async () => {
   transport.get.mockImplementation(() => Promise.reject(new ApiClientError('http_error', { serverCode: 'NOT_FOUND' })));
   const auth = await session();
@@ -144,6 +183,93 @@ it('has no automated WCAG A/AA violations when a job read fails', async () => {
   expect(await violations()).toEqual([]);
 });
 
+// Keyboard completion of downloads (#615): attachment links stay native anchors. preact-iso only
+// skips truthy `link.download`, so an empty attribute would turn the download into a route change.
+it('keeps source downloads as native links that the router does not intercept', async () => {
+  const auth = await session();
+  const path = `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${fileId}`;
+  history.replaceState(null, '', path);
+  render(<App basePath="/nested" session={auth} />);
+  const link = await screen.findByRole('link', { name: 'Download complete recorded input' });
+  expect(link.getAttribute('download')).toBe('Makefile');
+  link.focus();
+  expect(document.activeElement).toBe(link);
+  // fireEvent returns false when a handler called preventDefault (an in-app navigation).
+  expect(fireEvent.click(link)).toBe(true);
+  expect(window.location.pathname).toBe(path);
+  for (const anchor of document.querySelectorAll('a[download]')) expect(anchor.getAttribute('download')).not.toBe('');
+});
+
+// Route changes announce through one heading focus and the document title (#615); the shared
+// loading status is cleared once the view is ready, so it never repeats stale text.
+it('announces each route change once without repeating live-region output', async () => {
+  const auth = await session();
+  history.replaceState(null, '', '/nested/');
+  render(<App basePath="/nested" session={auth} />);
+  await screen.findByRole('heading', { level: 1 });
+  await settle();
+  const status = document.querySelector('main > p.sr-only[role="status"]')!;
+  const focused: string[] = [];
+  const record = (event: FocusEvent) => {
+    if (event.target instanceof HTMLHeadingElement && event.target.tagName === 'H1') focused.push(event.target.textContent ?? '');
+  };
+  document.addEventListener('focusin', record);
+  try {
+    for (const [name, title] of [['Runtime status', 'Runtime status'], ['Upload', 'Upload a binary'], ['Workspace', 'Jobs']] as const) {
+      fireEvent.click(screen.getByRole('link', { name }));
+      await waitFor(() => expect(document.activeElement?.tagName).toBe('H1'));
+      await settle();
+      expect(document.title).toBe(`${title} · Decomp Workbench`);
+      expect(document.activeElement?.tagName).toBe('H1');
+      expect(status.textContent).toBe('');
+    }
+    expect(focused).toHaveLength(3);
+    expect(new Set(focused).size).toBe(3);
+  } finally {
+    document.removeEventListener('focusin', record);
+  }
+});
+
+// Job lifecycle controls (#510, #511, #512) and storage accounting (#506).
+for (const [name, preview] of [['deletable', 'job-deletion-preview'], ['protected', 'job-deletion-preview-protected']] as const) {
+  it(`has no automated WCAG A/AA violations with a ${name} deletion review open`, async () => {
+    responses.jobDeletionPreview = () => fixture(preview);
+    try {
+      const auth = await session();
+      history.replaceState(null, '', `/nested/jobs/${jobId}`);
+      render(<App basePath="/nested" session={auth} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Review what would be deleted' }));
+      expect(await screen.findByText('Source snapshots')).toBeTruthy();
+      if (name === 'deletable') fireEvent.input(screen.getByLabelText(/Type the file name/), { target: { value: 'synthetic.elf' } });
+      await settle();
+      expect(await violations()).toEqual([]);
+    } finally { delete responses.jobDeletionPreview; }
+  });
+}
+
+it('has no automated WCAG A/AA violations on a deleted job', async () => {
+  transport.get.mockImplementation(() => Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' })));
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  render(<App basePath="/nested" session={auth} />);
+  expect(await screen.findByText(/This job was deleted/)).toBeTruthy();
+  await settle();
+  expect(await violations()).toEqual([]);
+});
+
+it('has no automated WCAG A/AA violations with storage and the maintenance preview read', async () => {
+  responses.storageSummary = () => fixture('storage-summary');
+  responses.maintenancePreview = () => fixture('maintenance-preview');
+  try {
+    const auth = await session();
+    history.replaceState(null, '', '/nested/runtime');
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Read storage and maintenance preview' }));
+    expect(await screen.findByText('Maintenance preview (dry run)')).toBeTruthy();
+    await settle();
+    expect(await violations()).toEqual([]);
+  } finally { delete responses.storageSummary; delete responses.maintenancePreview; }
+});
 it('has no automated WCAG A/AA violations with a server version notice', async () => {
   const auth = await session();
   history.replaceState(null, '', `/nested/jobs/${jobId}`);

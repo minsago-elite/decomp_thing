@@ -67,11 +67,21 @@ it('keeps the entire expanded sample unobserved after a baseline failure', () =>
 
 it.each([
   ['timeout', 'behavior-deadline-exceeded'], ['tooling-unavailable', 'sandbox-unavailable'],
+  ['execution-failure', 'sandbox-wrapper-start-failed'],
   ['execution-failure', 'output-limit-exceeded'], ['execution-failure', 'completion-unverified'],
   ['interrupted', 'producer-interrupted'], ['execution-failure', 'execution-io-failed'], ['unclassified', 'unclassified-exception'],
 ])('recognizes only the exact typed reason pair %s / %s', (kind, code) => {
   const value = fixture(); value.failure.kind = kind; value.failure.code = code;
   expect(parse(value).failure.code).toBe(code); expect(parse(value).cases[0]?.observation?.exitCode).toBe(124);
+});
+
+it('renders sandbox launcher start failure separately from generic execution I/O failure', async () => {
+  const value = fixture(); value.failure.kind = 'execution-failure'; value.failure.code = 'sandbox-wrapper-start-failed';
+  await read(value);
+  await screen.findByRole('table', { name: 'Retained candidate records' });
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect case expanded position 1: "repeat"' }));
+  expect(screen.getAllByText('Producer-reported that the sandbox invocation wrapper process could not start.').length).toBeGreaterThan(0);
+  expect(screen.queryByText(/execution I\/O failure/)).toBeNull();
 });
 
 it('rejects forged progress, mismatched positions, signatures, reason pairs and unsupported candidate fields', () => {

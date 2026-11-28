@@ -5,6 +5,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Run, Report, ResponseOf, RevisionDirectory, RevisionFile } from '../src/api/generated';
 import { sourceCopy } from '../src/copy/sources';
+import { stopOutcomeCopy } from '../src/copy/attemptOutcome';
 import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
@@ -112,6 +113,24 @@ it('pins attempt identity and shows completed candidate separately from acceptan
     expect(screen.queryByText('9007199254740993')).toBeNull();
   } finally { auth.dispose(); }
 });
+
+it.each(Object.keys(stopOutcomeCopy) as (keyof typeof stopOutcomeCopy)[])(
+  'preserves the catalogued stop description and technical code for %s', async terminalReason => {
+    const auth = await session();
+    transport.get.mockResolvedValue({ data: { ...sample, terminalReason } });
+    history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+    try {
+      render(<App basePath="/nested" session={auth} />);
+      const code = await screen.findByText(terminalReason, { selector: 'code' });
+      const description = code.closest('dd')!;
+      const outcome = stopOutcomeCopy[terminalReason];
+      expect(description.textContent).toBe(`${outcome.label}. ${outcome.detail} Recorded code ${terminalReason}.`);
+      expect(description.querySelector('strong')?.textContent).toBe(outcome.label);
+      expect(code.textContent).toBe(terminalReason);
+      expect(transport.get).toHaveBeenCalledOnce();
+    } finally { auth.dispose(); }
+  },
+);
 
 it('shows a canonical reference on an attempt read failure without exposing its server code', async () => {
   const auth = await session();
