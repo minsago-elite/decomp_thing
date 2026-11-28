@@ -218,6 +218,7 @@ jobs:
           node --test scripts/packaged-browser-cdp-diagnostics.test.mjs
           node --test scripts/packaged-browser-native-download.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
+        id: packaged-archives
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
           DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
@@ -331,9 +332,12 @@ jobs:
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode proxy --no-sandbox
           git diff --exit-code -- frontend/ contracts/web/v1/
-      # #536 qualification gates run after the ordinary Structure journey and the Vite proxy,
-      # so a budget failure cannot keep those steps from running.
+      # #536 qualification gates run after the ordinary Structure journey and the Vite proxy, and each
+      # runs once the archives are built even when an earlier step or gate failed, so every profile
+      # still records evidence. The final gate step fails the job if any of them did not pass.
       - name: Measure twenty fresh-process cold function-inventory loads on loopback
+        id: structure-cold-loopback
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
         timeout-minutes: 25
         env:
           STRUCTURE_COLD_REPORT_DIR: ${{ github.workspace }}/build/packaged-web-ci
@@ -344,6 +348,8 @@ jobs:
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --no-sandbox
       - name: Measure twenty fresh-process cold function-inventory loads on constrained profile
+        id: structure-cold-constrained
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
         timeout-minutes: 25
         env:
           STRUCTURE_COLD_REPORT_DIR: ${{ github.workspace }}/build/packaged-web-ci
@@ -354,17 +360,36 @@ jobs:
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --no-sandbox
       - name: Verify bounded program-structure views with one hundred thousand recorded functions on loopback
+        id: structure-budget-loopback
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
         run: |
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --structure-profile loopback --no-sandbox
       - name: Verify bounded program-structure interactions with one hundred thousand functions on constrained profile
+        id: structure-budget-constrained
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
         run: |
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --structure-profile constrained --no-sandbox
+      - name: Require every structure budget gate to pass
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
+        env:
+          COLD_LOOPBACK: ${{ steps.structure-cold-loopback.outcome }}
+          COLD_CONSTRAINED: ${{ steps.structure-cold-constrained.outcome }}
+          BUDGET_LOOPBACK: ${{ steps.structure-budget-loopback.outcome }}
+          BUDGET_CONSTRAINED: ${{ steps.structure-budget-constrained.outcome }}
+        run: |
+          failed=0
+          for gate in COLD_LOOPBACK COLD_CONSTRAINED BUDGET_LOOPBACK BUDGET_CONSTRAINED; do
+            outcome="${!gate}"
+            echo "$gate=$outcome"
+            if [ "$outcome" != success ]; then failed=1; fi
+          done
+          exit "$failed"
       - name: Retain sanitized packaged web evidence
         uses: actions/upload-artifact@v7
         if: always()

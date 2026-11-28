@@ -195,7 +195,10 @@ first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budg
   and reflow, with the #1879 module-body observations recorded on failure. It applies
   none of the budgets below and does not verify source or browser identity. CI runs it
   before the Vite proxy step, and runs the cold samples and both profiled journeys after
-  that step, so a budget failure cannot skip the ordinary journey or the proxy.
+  that step, so a budget failure cannot skip the ordinary journey or the proxy. Each of
+  those four gates runs once the archives are built, even when an earlier step or gate
+  failed, so every profile records evidence; a final step fails the job if any gate did
+  not pass.
   Failures of the profiled journeys and cold samples carry the same bounded #1879
   observations in the report's `structureFailurePhase`.
 - `node scripts/check-packaged-web-browser.mjs --mode structure --structure-profile <loopback-or-constrained>` seeds a persisted
