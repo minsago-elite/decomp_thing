@@ -13,8 +13,9 @@ type Phase = NonNullable<ProgressObservation['fields']['phase']>;
 const phaseStates = {
   analyzing: 'running', planning: 'running', agent_running: 'running',
   policy_checking: 'validating', build_validating: 'validating', behavior_validating: 'validating',
-  // A provisional or compile-valid result still awaits its remaining checks.
-  provisional: 'validating', compile_valid: 'validating',
+  provisional: 'validating',
+  // Compile-only repair is terminal, but does not establish behavioral acceptance.
+  compile_valid: 'completed',
   // Unresolved work could not proceed without further input or another attempt.
   unresolved: 'blocked',
   accepted: 'accepted', rolled_back: 'rolled-back', completed: 'completed', cancelled: 'cancelled',

@@ -7,7 +7,7 @@ import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
 import type { ProgressObservation, Snapshot, WebEvent } from '../src/api/generated';
 import { Activity } from '../src/jobs/Activity';
-import { attemptStage, observationStage, progressMeasure, taskStages } from '../src/jobs/activityStages';
+import { attemptStage, observationStage, progressMeasure, stageTone, taskStages } from '../src/jobs/activityStages';
 import { correlate, identityDigests } from '../src/jobs/activityCorrelation';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
@@ -62,6 +62,23 @@ describe('stage derivation', () => {
     ]);
   });
 
+  it('settles a compile-only producer sequence without claiming acceptance', () => {
+    const task = 'a'.repeat(64);
+    const stages = taskStages([
+      observation(0, 'task_started', { taskIdSha256: task }),
+      observation(1, 'agent_finished', { taskIdSha256: task, validationPending: true, stopReason: 'completed' }),
+      observation(2, 'workflow_phase', { taskIdSha256: task, phase: 'build_validating' }),
+      observation(3, 'workflow_run_state', { taskIdSha256: task, phase: 'compile_valid' }),
+      observation(4, 'context_usage', { taskIdSha256: task }),
+    ]);
+    expect(stages).toEqual([
+      expect.objectContaining({ taskDigest: task, state: 'completed', sequence: '3', observations: 5 }),
+    ]);
+    expect(stageTone(stages[0]!.state)).toBe('settled');
+    expect(observationStage(observation(5, 'workflow_phase', { phase: 'provisional' }).payload)).toBe('validating');
+    expect(observationStage(observation(6, 'workflow_run_state', { phase: 'accepted' }).payload)).toBe('accepted');
+  });
+
   it('reports a percentage only with an authoritative, bounded denominator', () => {
     expect(progressMeasure(2n, null)).toEqual({ kind: 'count', completed: 2n });
     expect(progressMeasure(2n, { value: 4n, authoritative: false })).toEqual({ kind: 'count', completed: 2n });
@@ -80,6 +97,26 @@ describe('correlation', () => {
     expect(correlate(sha256('rev_b'), digests, ['result-revision'])).toEqual({ state: 'linked', identity: { kind: 'result-revision', id: 'rev_b' } });
     expect(correlate(sha256('run_a'), digests, ['result-revision'])).toEqual({ state: 'matched', identity: { kind: 'attempt', id: 'run_a' } });
     expect(correlate(sha256('rev_b').slice(0, 63) + '0', digests, ['result-revision'])).toEqual({ state: 'unlinked' });
+  });
+
+  it('preserves both revision relations and selects the linkable one when IDs coincide', async () => {
+    const digests = await identityDigests({ runId: 'run_a', previousRunId: null, inputRevisionId: 'rev_same', resultRevisionId: 'rev_same' });
+    const digest = sha256('rev_same');
+    expect(digests.get(digest)).toEqual([
+      { kind: 'input-revision', id: 'rev_same' }, { kind: 'result-revision', id: 'rev_same' },
+    ]);
+    expect(correlate(digest, digests, ['result-revision'])).toEqual({ state: 'linked', identity: { kind: 'result-revision', id: 'rev_same' } });
+    expect(correlate(digest, digests, ['input-revision'])).toEqual({ state: 'linked', identity: { kind: 'input-revision', id: 'rev_same' } });
+    expect(correlate(digest, digests, [])).toEqual({ state: 'matched', identity: { kind: 'input-revision', id: 'rev_same' } });
+    expect(correlate(digest.slice(0, 63), digests, ['result-revision'])).toEqual({ state: 'unlinked' });
+  });
+
+  it('does not invent result links for a distinct input or an unpublished result', async () => {
+    for (const resultRevisionId of ['rev_result', null]) {
+      const digests = await identityDigests({ runId: 'run_a', previousRunId: null, inputRevisionId: 'rev_input', resultRevisionId });
+      expect(correlate(sha256('rev_input'), digests, ['result-revision'])).toEqual({ state: 'matched', identity: { kind: 'input-revision', id: 'rev_input' } });
+      expect(correlate(sha256('rev_unknown'), digests, ['result-revision'])).toEqual({ state: 'unlinked' });
+    }
   });
 });
 
@@ -128,6 +165,31 @@ describe('activity stages view', () => {
     expect(screen.getByText(/^1 observed tasks reached a final reported stage/)).toBeTruthy();
   });
 
+  it('renders terminal compile-valid task and attempt observations as settled, not validating or accepted', async () => {
+    const task = 'a'.repeat(64);
+    const { current } = mount({ state: 'running', startedAt: '2026-09-05T00:00:01Z' });
+    transport.get.mockResolvedValueOnce(current).mockResolvedValueOnce(page([
+      observation(0, 'task_started', { taskIdSha256: task }),
+      observation(1, 'workflow_phase', { taskIdSha256: task, phase: 'build_validating' }),
+      observation(2, 'workflow_run_state', { taskIdSha256: task, phase: 'compile_valid' }),
+      observation(3, 'workflow_run_state', { phase: 'compile_valid' }),
+    ]));
+    fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+    const table = await screen.findByRole('table', { name: 'Reported task stages' });
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      const mark = within(row).getByText('Completed without acceptance');
+      expect(mark.getAttribute('data-tone')).toBe('settled');
+    }
+    expect(within(table).queryByText('Validating')).toBeNull();
+    expect(within(table).queryByText('Accepted')).toBeNull();
+    expect(screen.getByText(/Attempt at snapshot/).textContent).toContain('Running');
+    expect(screen.getByText(/^Observed tasks: 1\./)).toBeTruthy();
+    expect(screen.getByText(/^1 observed tasks reached a final reported stage/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/\d+%/);
+  });
+
   it('links a matching result revision and previous attempt, and labels every other reference', async () => {
     const { current } = mount({ state: 'completed', startedAt: '2026-09-05T00:00:01Z', endedAt: '2026-09-05T00:00:02Z',
       terminalReason: 'COMPLETED', acceptance: 'accepted', resultRevisionId: 'rev_result_1', previousRunId: 'run_previous_1' });
@@ -143,6 +205,25 @@ describe('activity stages view', () => {
     expect(screen.getByRole('link', { name: 'Open the previous attempt' }).getAttribute('href')).toBe(`/nested/jobs/${current.data.run.jobId}/runs/run_previous_1`);
     expect(screen.getAllByText('Not recorded: this observation has no correlation for this reference.')).toHaveLength(2);
     expect(screen.getByText(/Attempt at snapshot/).textContent).toContain('Accepted');
+  });
+
+  it('links result sources when the result reuses the input revision without treating task/session references as revisions', async () => {
+    const { current } = mount({ state: 'completed', startedAt: '2026-09-05T00:00:01Z', endedAt: '2026-09-05T00:00:02Z',
+      terminalReason: 'COMPLETED', acceptance: 'accepted', inputRevisionId: 'rev_same', resultRevisionId: 'rev_same' });
+    const digest = sha256('rev_same');
+    transport.get.mockResolvedValueOnce(current).mockResolvedValueOnce(page([
+      observation(0, 'workflow_run_state', { revisionIdSha256: digest, taskIdSha256: digest, sessionIdSha256: digest }),
+    ]));
+    fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+    expect(screen.queryByRole('link', { name: 'Browse result revision sources' })).toBeNull();
+    fireEvent.click(await screen.findByText('Correlation details for sequence 0'));
+    const browse = await screen.findByRole('link', { name: 'Browse result revision sources' });
+    expect(browse.getAttribute('href')).toBe(`/nested/jobs/${current.data.run.jobId}/runs/${current.data.run.runId}/revisions/rev_same/sources/root`);
+    expect(screen.getAllByRole('link', { name: 'Browse result revision sources' })).toHaveLength(1);
+    expect(screen.queryByText(/Input sources are not browsable/)).toBeNull();
+    expect(screen.getByText('No task evidence page is published.')).toBeTruthy();
+    expect(screen.getByText('No session evidence page is published.')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Open the previous attempt' })).toBeNull();
   });
 
   it('marks provider reasoning as withheld and never shows its measurements', async () => {
