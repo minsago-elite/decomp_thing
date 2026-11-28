@@ -19,6 +19,12 @@ oracle_ext4_scratch_profile() {
       scratch_profile_name=bundled-ghidra-resume-control
       environment_prefix=DECOMP_TEST_BUNDLED_GHIDRA_RESUME_CONTROL_EXT4
       image_size=1G; inode_count=16384 ;;
+    --gcc-metadata-reference-first|--gcc-metadata-reference-replay)
+      scratch_profile_name="${1#--}"
+      local metadata_run="${1#--gcc-metadata-reference-}"
+      environment_prefix="DECOMP_GCC_METADATA_${metadata_run^^}"
+      # The reference owner admits 128..512 MiB and needs at least 4096 available inodes.
+      image_size=512M; inode_count=16384 ;;
     --gcc-engine-cc1-fresh|--gcc-engine-cc1-resume|--gcc-engine-lto1-fresh|--gcc-engine-lto1-resume)
       scratch_profile_name="${1#--}"
       local engine_mode="${1#--gcc-engine-}"

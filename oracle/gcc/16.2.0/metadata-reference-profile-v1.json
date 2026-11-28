@@ -1,0 +1,554 @@
+{
+  "alternateBasename": "candidate-cc",
+  "artifactIdentities": {
+    "driver": {
+      "bytes": 2349296,
+      "guestPath": "/oracle/install/bin/gcc",
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    },
+    "frontend": {
+      "bytes": 41935768,
+      "guestPath": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+      "sha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+    }
+  },
+  "batches": [
+    {
+      "artifactRoles": [
+        "driver"
+      ],
+      "id": "driver"
+    },
+    {
+      "artifactRoles": [
+        "driver",
+        "frontend"
+      ],
+      "id": "frontend"
+    }
+  ],
+  "cases": [
+    {
+      "arguments": [
+        "--version"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "version"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "version",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-dumpversion"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "version"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "dumpversion",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-dumpfullversion"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "version"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "dumpfullversion",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-dumpmachine"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "target"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "dumpmachine",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-v"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "version",
+        "target",
+        "configuration"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "verbose-configuration",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-print-search-dirs"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "search-directory"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "print-search-dirs",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-print-prog-name=cc1"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "search-directory"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "print-prog-name-cc1",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-print-libgcc-file-name"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "search-directory"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "print-libgcc-file-name",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "--help"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "help"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "help",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [],
+      "batchId": "driver",
+      "categories": [
+        "missing-input"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "no-input",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-c",
+        "absent.c"
+      ],
+      "batchId": "frontend",
+      "categories": [
+        "missing-input"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "missing-input-file",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-o"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "option-validation",
+        "missing-input"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "option-missing-argument",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-x",
+        "bogus",
+        "source.c"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "option-validation"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "option-invalid-language",
+      "inputs": [
+        {
+          "base64": "aW50IG1haW4odm9pZCkgeyByZXR1cm4gMDsgfQo=",
+          "bytes": 29,
+          "path": "source.c",
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-std=bogus",
+        "-c",
+        "source.c"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "option-validation",
+        "unsupported-option"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "option-invalid-standard",
+      "inputs": [
+        {
+          "base64": "aW50IG1haW4odm9pZCkgeyByZXR1cm4gMDsgfQo=",
+          "bytes": 29,
+          "path": "source.c",
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-march=bogus",
+        "-c",
+        "source.c"
+      ],
+      "batchId": "frontend",
+      "categories": [
+        "option-validation"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "option-invalid-frontend-value",
+      "inputs": [
+        {
+          "base64": "aW50IG1haW4odm9pZCkgeyByZXR1cm4gMDsgfQo=",
+          "bytes": 29,
+          "path": "source.c",
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "--bogus-long"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "unsupported-option",
+        "missing-input"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "unsupported-long-option",
+      "inputs": [],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-fbogus-flag",
+        "-c",
+        "source.c"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "unsupported-option"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "unsupported-flag-option",
+      "inputs": [
+        {
+          "base64": "aW50IG1haW4odm9pZCkgeyByZXR1cm4gMDsgfQo=",
+          "bytes": 29,
+          "path": "source.c",
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-c",
+        "bad.c"
+      ],
+      "batchId": "frontend",
+      "categories": [
+        "malformed-input"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "malformed-source",
+      "inputs": [
+        {
+          "base64": "aW50IG1haW4odm9pZCkgeyByZXR1cm4gMCB9Cg==",
+          "bytes": 28,
+          "path": "bad.c",
+          "sha256": "b6aeb27447c5b6109f88d664e8ce156ea440920f4699c7fcec4d99bf89ce62ba"
+        }
+      ],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "data.bin"
+      ],
+      "batchId": "driver",
+      "categories": [
+        "malformed-input"
+      ],
+      "environment": {
+        "COMPILER_PATH": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+        "LC_ALL": "C",
+        "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "id": "malformed-link-input",
+      "inputs": [
+        {
+          "base64": "AG5vdCBhbiBvYmplY3QK",
+          "bytes": 15,
+          "path": "data.bin",
+          "sha256": "5f5e17bf2c1c38b188c9ea7bbc65a9d89f74ad574244cd551a079bf8339456f4"
+        }
+      ],
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "executableRole": "driver",
+  "id": "gcc-16-2-0-metadata-reference-v1",
+  "identitySubstitutions": [
+    {
+      "alternateBinding": "executable-basename",
+      "id": "driver-basename",
+      "patterns": [
+        "^(gcc)(?=: (?:fatal )?error: )",
+        "^(gcc)(?= \\(GCC\\) )",
+        "^Usage: (gcc)(?= \\[options\\] file\\.\\.\\.$)",
+        "(?<= invoked by )(gcc)(?=\\.  )"
+      ],
+      "permitted": "the basename a candidate driver is invoked as",
+      "token": "gcc",
+      "where": "the driver program name: the prefix of driver diagnostics (`gcc: error:`, `gcc: fatal error:`), the `--version` banner (`gcc (GCC) 16.2.0`), and the `--help` usage line and sub-process sentence (`Usage: gcc`, `invoked by gcc.`)"
+    },
+    {
+      "alternateBinding": "executable-argv0",
+      "id": "driver-argv0",
+      "patterns": [
+        "^COLLECT_GCC=(/oracle/install/bin/gcc)$"
+      ],
+      "permitted": "the exact argv[0] string a candidate driver is invoked with",
+      "token": "/oracle/install/bin/gcc",
+      "where": "the `COLLECT_GCC=` line of `-v` output"
+    },
+    {
+      "alternateBinding": "unchanged",
+      "id": "install-prefix",
+      "patterns": [
+        "(?<![\\w/.])(/oracle/install)(?=/)",
+        "^Configured with: .* --prefix=(/oracle/install)(?= |$)"
+      ],
+      "permitted": "the candidate's configured install prefix, applied to the whole prefix only",
+      "token": "/oracle/install",
+      "where": "install-prefix components of search-directory and `-v` configuration output"
+    }
+  ],
+  "imageConfigSha256": "103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f",
+  "limits": {
+    "maximumAggregateOutputBytes": 16777216,
+    "maximumArtifactBytes": 4194304,
+    "maximumStderrBytes": 1048576,
+    "maximumStdoutBytes": 1048576,
+    "wallClockMillisPerInvocation": 60000
+  },
+  "schemaVersion": 1
+}

@@ -421,6 +421,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "gccMetadataReference",
+    taskDescription = "Stages or captures the fixed GCC metadata reference with explicit trusted deployment provisioning",
+    entryPoint = "decompengine.oracle.gcc.GccMetadataReferenceCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "verifyLlvmBehaviorQualificationTiers",
     taskDescription = "Authenticates bounded CI smoke and full LLVM behavior qualification tiers; --args='--event <github event> --tier <tier>'",
     entryPoint = "decompengine.oracle.behavior.LlvmBehaviorQualificationTiersCli",
