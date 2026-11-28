@@ -1479,22 +1479,62 @@ public class ExportProgramModelOwned extends GhidraScript {
             currentProgram.getFunctionManager().getFunctionContaining(target) == null &&
             currentProgram.getListing().getInstructionContaining(target) == null;
     }
-    private static final int MAXIMUM_SWITCH_DESTINATION_REFERENCES = 4096;
-    // Ghidra's switch recovery records a recovered table as COMPUTED_JUMP flow references from the
-    // function's indirect jump to each destination, and types the table slots as untyped pointers.
-    // Such a slot is control flow consumed by the decompiler's switch, not a C-visible object, so it
-    // needs no typed declaration. Every other untyped pointer keeps its missing-target refusal.
-    private boolean recoveredSwitchTableSlot(Function function, Data data) throws Exception {
+    private static final int MAXIMUM_SWITCH_PROVENANCE_WORK = 4096;
+    // Ghidra's switch analysis (DecompilerSwitchAnalysisCmd) records a recovered jump table as
+    // COMPUTED_JUMP flow references from the indirect jump J to each case, an ANALYSIS label
+    // "switchD" at J and an ANALYSIS label "switchdataD_<table>" at the table address, both in the
+    // global namespace "switchD_<J>", and types pointer-sized slots as untyped pointers. Such a slot is
+    // control flow consumed by the decompiler's switch, not a C-visible object, so it needs no typed
+    // declaration. The slot is exempt only with that provenance: the read targets the table address
+    // labelled for J, the slot value is a case of that same J in this function, and the reading
+    // instruction falls straight through to J. Every lookup is charged to one traversal budget, and
+    // missing evidence or an exhausted budget keeps the missing-target refusal.
+    private boolean recoveredSwitchTableSlot(Function function, Instruction reader, Reference read, Data data) throws Exception {
         DataType type = data.getDataType();
         if (!(type instanceof Pointer) || ((Pointer)type).getDataType() != null) return false;
         Object value = data.getValue();
-        if (!(value instanceof Address) || !function.getBody().contains((Address)value)) return false;
-        ReferenceIterator references = currentProgram.getReferenceManager().getReferencesTo((Address)value);
-        for (int seen = 0; seen < MAXIMUM_SWITCH_DESTINATION_REFERENCES && references.hasNext(); seen++) {
+        Address table = data.getAddress();
+        if (!(value instanceof Address) || !function.getBody().contains((Address)value) || !read.getToAddress().equals(table))
+            return false;
+        int work = 0;
+        ghidra.program.model.symbol.SymbolTable symbols = currentProgram.getSymbolTable();
+        List<ghidra.program.model.symbol.Namespace> switchSpaces = new ArrayList<>();
+        for (Symbol symbol : symbols.getSymbols(table)) {
             checkByteCancellation();
-            Reference reference = references.next();
-            if (reference.getReferenceType().isComputed() && reference.getReferenceType().isJump() &&
-                function.getBody().contains(reference.getFromAddress())) return true;
+            if (++work > MAXIMUM_SWITCH_PROVENANCE_WORK) return false;
+            ghidra.program.model.symbol.Namespace space = symbol.getParentNamespace();
+            if (symbol.getSource() == ghidra.program.model.symbol.SourceType.ANALYSIS &&
+                symbol.getName().equals("switchdataD_" + table) && space != null && !space.isGlobal() &&
+                space.getParentNamespace() != null && space.getParentNamespace().isGlobal()) switchSpaces.add(space);
+        }
+        if (switchSpaces.isEmpty()) return false;
+        ReferenceIterator references = currentProgram.getReferenceManager().getReferencesTo((Address)value);
+        while (references.hasNext()) {
+            checkByteCancellation();
+            if (++work > MAXIMUM_SWITCH_PROVENANCE_WORK) return false;
+            Reference flow = references.next();
+            Address jump = flow.getFromAddress();
+            if (!flow.getReferenceType().isComputed() || !flow.getReferenceType().isJump() || !function.getBody().contains(jump))
+                continue;
+            boolean attributed = false;
+            for (ghidra.program.model.symbol.Namespace space : switchSpaces) {
+                checkByteCancellation();
+                if (++work > MAXIMUM_SWITCH_PROVENANCE_WORK) return false;
+                Symbol label = space.getName().equals("switchD_" + jump) ? symbols.getSymbol("switchD", jump, space) : null;
+                if (label != null && label.getSource() == ghidra.program.model.symbol.SourceType.ANALYSIS) {
+                    attributed = true;
+                    break;
+                }
+            }
+            if (!attributed) continue;
+            Instruction step = reader;
+            while (step != null && !step.getAddress().equals(jump)) {
+                checkByteCancellation();
+                if (++work > MAXIMUM_SWITCH_PROVENANCE_WORK) return false;
+                Address next = step.getFlowType().isFallthrough() ? step.getFallThrough() : null;
+                step = next != null && function.getBody().contains(next) ? currentProgram.getListing().getInstructionAt(next) : null;
+            }
+            if (step != null) return true;
         }
         return false;
     }
@@ -2572,7 +2612,7 @@ public class ExportProgramModelOwned extends GhidraScript {
                             planningEvidence.retainGlobal(global.id, globalRecord);
                         }
                         referencedGlobals.add(global.id);
-                        if (data != null && !recoveredSwitchTableSlot(function, data)) {
+                        if (data != null && !recoveredSwitchTableSlot(function, instruction, reference, data)) {
                             List<DataType> dataTypes = java.util.Collections.singletonList(data.getDataType());
                             PlannedTypeCoverage dataCoverage;
                             try {

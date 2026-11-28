@@ -92,6 +92,7 @@ class GhidraReferencedBytesExporterTest {
             assertTrue(work.resolve("controlled-listing.log").readText().contains("owned addressed primitive and indirect origin controls passed"))
             assertTrue(work.resolve("controlled-listing.log").readText().contains("owned mixed listing raw globals two phase refusals and failed partial statuses passed"))
             assertTrue(work.resolve("controlled-listing.log").readText().contains("owned clean admitted listing and authored typed full positive passed"))
+            assertTrue(work.resolve("controlled-listing.log").readText().contains("owned switch-table slot provenance and ordinary pointer refusal controls passed"))
             run("typed-prototype", listOf(javaBin.resolve("java").toString(), "-Djava.io.tmpdir=$temporary", "-Duser.home=$home",
                 "-Djava.util.prefs.userRoot=$home/prefs", "-Djna.tmpdir=$temporary", "-XX:-UsePerfData", "-cp", classpath,
                 "OwnedExporterPrototypeProbe", work.resolve("prototype-controls").toString(), applicationRoots.single().toString()))
