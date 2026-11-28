@@ -173,7 +173,11 @@ credentials outside the agent, analyzed program, candidate build and terminal
 children. The agent receives an admitted invocation/session-bound model channel;
 its channel identity, destination policy, bounds, cancellation and revocation
 must be qualified together. Authentication and session lifecycle remain with
-[#70](https://github.com/minsago-elite/decomp_thing/issues/70).
+[#70](https://github.com/minsago-elite/decomp_thing/issues/70). The typed
+destination, operation, authentication and limit policy that the transport will
+enforce is described in
+[the provider transport policy](acp-provider-transport-policy.md). Nothing in
+this document can select it yet.
 
 The explicit `provenance: "secret"` environment binding above forwards the named
 value to the agent during initialize. It therefore cannot carry a provider
