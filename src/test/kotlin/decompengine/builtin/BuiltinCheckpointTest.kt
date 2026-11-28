@@ -151,6 +151,101 @@ class BuiltinCheckpointTest {
         assertFalse(Files.readString(fixture.journal.path).contains("private-secret"))
     }
 
+    private fun commitment(fixture: Fixture, reference: BuiltinCheckpointReference) =
+        BuiltinJournalCommitment(reference.records, Files.size(fixture.journal.path), reference.headSha256)
+
+    @Test fun `inadmissible secrets are refused before a checkpoint can be resumed`() {
+        val fixture = fixture()
+        val reference = suspended(fixture)
+        val before = Files.readAllBytes(fixture.journal.path)
+        listOf("true", "false", "null", "12345678", "short-1", "prefix[REDACTED]", "********").forEach { refused ->
+            assertFailsWith<IllegalArgumentException> { harness(fixture, ModelProvider { _, _ -> error("unused") }, secrets = listOf(refused)) }
+            assertFailsWith<IllegalArgumentException> {
+                BuiltinJournal.reopenCheckpoint(fixture.journal, request(), commitment(fixture, reference), listOf(refused))
+            }
+        }
+        assertContentEquals(before, Files.readAllBytes(fixture.journal.path))
+        val resumed = harness(fixture, ModelProvider { _, _ -> answer() }, secrets = listOf("private-secret"))
+            .resumeReceipt(request(), reference) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
+    }
+
+    @Test fun `typed tool argument collisions persist as markers and cannot resume as original context`() {
+        val fixture = fixture("typed")
+        val secret = "-91827364"
+        val seek = ModelToolCall("seek1", "seek", buildJsonObject { put("position", -9182736455L) })
+        val receipt = harness(fixture, ModelProvider { _, _ -> answer(listOf(seek)) }, Session(fixture.source, seek = true),
+            secrets = listOf(secret)).executeReceipt(request()) {}
+        val reference = assertNotNull(assertIs<BuiltinLoopEvidence>(receipt.providerEvidence).checkpoint)
+        assertFalse(Files.readString(fixture.journal.path).contains("91827364"))
+        val checkpoint = BuiltinJournal.inspect(fixture.journal, AgentExecutionRequestBinding.capture(request()), commitment(fixture, reference))
+            .records.last().getValue("payload").jsonObject.getValue("resumeState").jsonObject
+        val arguments = checkpoint.getValue("context").jsonObject.getValue("messages").jsonArray
+            .flatMap { it.jsonObject.getValue("toolCalls").jsonArray }.single().jsonObject.getValue("arguments").jsonObject
+        assertEquals(JsonPrimitive("[REDACTED]"), arguments["position"])
+        var calls = 0
+        val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }, Session(fixture.source, seek = true),
+            secrets = listOf(secret)).resumeReceipt(request(), reference) {}
+        assertIs<AgentExecutionOutcome.Failed>(rejected.outcome); assertEquals(0, calls)
+    }
+
+    @Test fun `secrets colliding with schema keys or record kinds fail closed and leave the checkpoint resumable`() {
+        val fixture = fixture("schema")
+        val reference = suspended(fixture)
+        val before = Files.readAllBytes(fixture.journal.path)
+        for (secret in listOf("inputTokens", "CHECKPOINT")) {
+            var calls = 0
+            val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }, secrets = listOf(secret))
+                .resumeReceipt(request(), reference) {}
+            assertIs<AgentExecutionOutcome.Failed>(rejected.outcome, secret); assertEquals(0, calls, secret)
+            assertContentEquals(before, Files.readAllBytes(fixture.journal.path))
+        }
+        val resumed = harness(fixture, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), reference) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
+        // A fresh invocation under a colliding secret also fails closed without a rewritten or verbatim record.
+        val fresh = fixture("schema-fresh")
+        val failed = harness(fresh, ModelProvider { _, _ -> answer(listOf(edit())) }, secrets = listOf("inputTokens")).executeReceipt(request()) {}
+        assertIs<AgentExecutionOutcome.Failed>(failed.outcome)
+        val written = Files.readString(fresh.journal.path)
+        assertFalse(written.contains("inputTokens")); assertFalse(written.contains("[REDACTED]"))
+        val committed = assertIs<BuiltinLoopEvidence>(failed.providerEvidence).journal!!.commitment
+        BuiltinJournal.inspect(fresh.journal, AgentExecutionRequestBinding.capture(request()), committed)
+    }
+
+    @Test fun `continuation scans the exact committed bytes of the prefix`() {
+        val fixture = fixture("bytes")
+        val escaped = "ED]\\tTAIL"
+        // The record tree holds a real tab; only its serialized bytes spell the secret.
+        val reference = assertNotNull(assertIs<BuiltinLoopEvidence>(harness(fixture,
+            ModelProvider { _, _ -> answer(listOf(edit(text = "candidate [REDACTED]\tTAIL"))) }).executeReceipt(request()) {}.providerEvidence).checkpoint)
+        val before = Files.readAllBytes(fixture.journal.path)
+        assertTrue(before.decodeToString().contains(escaped))
+        var calls = 0
+        val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }, secrets = listOf(escaped))
+            .resumeReceipt(request(), reference) {}
+        assertIs<AgentExecutionOutcome.Failed>(rejected.outcome); assertEquals(0, calls)
+        assertContentEquals(before, Files.readAllBytes(fixture.journal.path))
+        val resumed = harness(fixture, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), reference) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
+    }
+
+    @Test fun `continuation refuses a committed prefix written under weaker redaction rules`() {
+        val fixture = fixture("weaker")
+        val secret = "q\"uoted-token"
+        // The previous matcher redacted raw and one-layer spellings only, so this prefix is what it would have kept.
+        val twoLayers = JsonPrimitive(JsonPrimitive(secret).toString()).toString().drop(1).dropLast(1)
+        val reference = assertNotNull(assertIs<BuiltinLoopEvidence>(harness(fixture,
+            ModelProvider { _, _ -> answer(listOf(edit(text = "candidate $twoLayers"))) }).executeReceipt(request()) {}.providerEvidence).checkpoint)
+        val before = Files.readAllBytes(fixture.journal.path)
+        var calls = 0
+        val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }, secrets = listOf(secret))
+            .resumeReceipt(request(), reference) {}
+        assertIs<AgentExecutionOutcome.Failed>(rejected.outcome); assertEquals(0, calls)
+        assertContentEquals(before, Files.readAllBytes(fixture.journal.path))
+        val resumed = harness(fixture, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), reference) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
+    }
+
     @Test fun `torn journal appended intent and modified commitment prevent continuation`() {
         for (damage in listOf("torn", "intent", "marker")) {
             val fixture = fixture(damage)
@@ -228,17 +323,22 @@ class BuiltinCheckpointTest {
         assertIs<AgentExecutionOutcome.Failed>(initial.outcome); assertEquals(0, calls)
     }
 
-    private inner class Session(val source: Path, val description: String = "edit fixture") : BuiltinToolSession {
+    private inner class Session(val source: Path, val description: String = "edit fixture", val seek: Boolean = false) : BuiltinToolSession {
         var executions = 0
         var closed = false
         override val definitions = listOf(ModelToolDefinition("edit", description, buildJsonObject {
             put("type", "object"); put("additionalProperties", false)
             putJsonObject("properties") { putJsonObject("text") { put("type", "string") } }
             putJsonArray("required") { add("text") }
+        })) + if (!seek) emptyList() else listOf(ModelToolDefinition("seek", "seek a signed position", buildJsonObject {
+            put("type", "object"); put("additionalProperties", false)
+            putJsonObject("properties") { putJsonObject("position") { put("type", "integer") } }
+            putJsonArray("required") { add("position") }
         }))
         override fun authorize(call: ModelToolCall, control: BuiltinExecutionControl) = true
         override fun execute(call: ModelToolCall, control: BuiltinExecutionControl): BuiltinToolResult {
             control.checkpoint(); executions++
+            if (call.name == "seek") return BuiltinToolResult("sought")
             Files.writeString(source, call.arguments.getValue("text").jsonPrimitive.content)
             return BuiltinToolResult("edited")
         }

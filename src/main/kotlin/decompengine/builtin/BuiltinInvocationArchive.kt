@@ -81,9 +81,17 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
     val schemaVersion = 1
 
     companion object {
+        /** [secrets] is the active redaction policy; export never relies on the rules a prefix was written under. */
         fun capture(identity: BuiltinInvocationArchiveIdentity, request: AgentExecutionRequest, receipt: AgentExecutionReceipt,
-            configuration: BuiltinJournalConfiguration, limits: BuiltinInvocationArchiveLimits = BuiltinInvocationArchiveLimits()): BuiltinInvocationArchiveDocument = guarded {
+            configuration: BuiltinJournalConfiguration, secrets: Collection<String>,
+            limits: BuiltinInvocationArchiveLimits = BuiltinInvocationArchiveLimits()): BuiltinInvocationArchiveDocument {
+            // Sanitized configuration refusal stays distinct from journal/archive verification failure.
+            val redactor = BuiltinRedactor(secrets)
+            return guarded {
             check(identity.binding == receipt.requestBinding && identity.binding == AgentExecutionRequestBinding.capture(request))
+            // Archive-only identifiers (workflow, task, prompt) never pass through START; apply its fail-closed check here.
+            val archiveIdentity = identity.json()
+            check(redactor.compliant(archiveIdentity))
             check(BuiltinJournal.identity(configuration.identity, identity.binding) == BuiltinJournal.identity(identity.journal, identity.binding))
             val provider = receipt.providerEvidence
             val loop = when (provider) {
@@ -95,6 +103,8 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
             val journal = BuiltinJournal.inspect(configuration, identity.binding, evidence.commitment)
             check(journal.complete == evidence.complete && journal.indeterminate == evidence.indeterminate)
             check(journal.complete) // Suspended checkpoints remain private recovery evidence, not terminal invocation artifacts.
+            check(BuiltinJournal.compliantRecords(journal.records, redactor))
+            check(BuiltinJournal.compliantCommittedBytes(configuration, journal, evidence.commitment, redactor))
             val returned = (receipt.outcome as? AgentExecutionOutcome.Returned)?.result
             val candidates = when (provider) {
                 is BuiltinCapturedExecutionEvidence -> provider.candidateChanges
@@ -108,7 +118,7 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
             }
             val json = buildJsonObject {
                 put("schemaVersion", 1); put("kind", "builtin-invocation-archive")
-                put("identity", identity.json()); put("releaseQualified", false)
+                put("identity", archiveIdentity); put("releaseQualified", false)
                 putJsonObject("receipt") {
                     put("outcome", outcome); put("stop", loop.stop.name); put("cleanupComplete", loop.cleanupComplete)
                     put("failureKind", (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure?.kind?.name)
@@ -126,8 +136,13 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
                 }
                 put("records", JsonArray(journal.records))
             }
+            // Archive envelope and receipt fields are schema-owned too: never rewritten, refused if they match.
+            check(redactor.compliant(json))
             val bytes = boundedProviderJson(limits.maximumBytes) { it.writeProviderValue(json) }
+            // The tree check cannot see serialization escapes or record separators; scan the exact bytes.
+            check(BuiltinJournal.compliantBytes(bytes, redactor))
             BuiltinInvocationArchiveDocument(bytes, verifyBuiltinInvocationArchive(bytes, identity, evidence.commitment, limits))
+            }
         }
     }
 }
@@ -322,16 +337,21 @@ private fun validateBuiltinArchivedArguments(schema: JsonObject, value: JsonElem
             val length = text.content.codePointCount(0, text.content.length)
             val minimum = schema["minLength"]?.jsonPrimitive?.int ?: 0
             val maximum = schema["maxLength"]?.jsonPrimitive?.int ?: Int.MAX_VALUE
-            check(minimum >= 0 && maximum >= minimum && length in minimum..maximum)
+            check(minimum >= 0 && maximum >= minimum)
+            // Redaction changes length, so a redacted argument keeps only its type and enum obligations.
+            check(length in minimum..maximum || BUILTIN_REDACTION_MARKER in text.content)
             schema["enum"]?.jsonArray?.let { allowed -> check(allowed.size in 1..1024 && text in allowed) }
         }
         "integer" -> {
             check(schema.keys.all { it in setOf("type", "minimum", "maximum") })
-            check(!value.jsonPrimitive.isString)
-            val number = value.jsonPrimitive.long
             val minimum = schema["minimum"]?.jsonPrimitive?.long ?: Long.MIN_VALUE
             val maximum = schema["maximum"]?.jsonPrimitive?.long ?: Long.MAX_VALUE
-            check(minimum <= maximum && number in minimum..maximum)
+            check(minimum <= maximum)
+            // A provider integer containing a declared secret is persisted as exactly the marker string.
+            if (value != JsonPrimitive(BUILTIN_REDACTION_MARKER)) {
+                check(!value.jsonPrimitive.isString)
+                check(value.jsonPrimitive.long in minimum..maximum)
+            }
         }
         else -> error("Unsupported archived tool schema")
     }

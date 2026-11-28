@@ -13,14 +13,15 @@ import kotlin.test.*
 class BuiltinInvocationArchiveTest {
     @TempDir lateinit var directory: Path
     private val base = mapOf("source.c" to "old".toByteArray())
-    private fun request(root: AgentWorkspaceRoot) = AgentExecutionRequest("repair source private-secret", listOf(root),
+    private fun request(root: AgentWorkspaceRoot, sensitiveContext: String = "private-secret") = AgentExecutionRequest("repair source $sensitiveContext", listOf(root),
         accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(AgentWorkspacePath(root.id, "source.c"), setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE)))))
-    private fun response(calls: List<ModelToolCall> = emptyList(), finish: ModelFinishReason = if (calls.isEmpty()) ModelFinishReason.STOP else ModelFinishReason.TOOL_CALLS) =
-        ModelResponse("", calls, finish, ModelUsage(100, 10, false), 1)
+    private fun response(calls: List<ModelToolCall> = emptyList(), finish: ModelFinishReason = if (calls.isEmpty()) ModelFinishReason.STOP else ModelFinishReason.TOOL_CALLS,
+        text: String = "") = ModelResponse(text, calls, finish, ModelUsage(100, 10, false), 1)
     private fun write() = ModelToolCall("write1", "write_text", buildJsonObject { put("root", "project"); put("path", "source.c"); put("content", "candidate") })
     private data class Invocation(val configuration: BuiltinJournalConfiguration, val request: AgentExecutionRequest,
-        val receipt: AgentExecutionReceipt, val identity: BuiltinInvocationArchiveIdentity)
-    private fun invocation(name: String = "invocation", ending: String = "done"): Invocation {
+        val receipt: AgentExecutionReceipt, val identity: BuiltinInvocationArchiveIdentity, val secrets: List<String>)
+    private fun invocation(name: String = "invocation", ending: String = "done", declaredSecrets: List<String> = listOf("private-secret"),
+        echoedProviderState: String = ""): Invocation {
         val root = Files.createDirectory(directory.resolve(name))
         Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
         val source = BuiltinWorkspaceSnapshot.capture(base.mapKeys { AgentWorkspacePath("project", it.key) })
@@ -28,47 +29,88 @@ class BuiltinInvocationArchiveTest {
             "b".repeat(64), "c".repeat(64)))
         var turns = 0
         val provider = ModelProvider { _, _ ->
-            if (turns++ == 0) response(listOf(write()))
+            if (turns++ == 0) response(listOf(write()), text = echoedProviderState)
             else when (ending) {
                 "failed" -> throw ModelProviderException(ModelFailureKind.TRANSPORT)
-                "refused" -> response(finish = ModelFinishReason.REFUSED)
-                else -> response()
+                "refused" -> response(finish = ModelFinishReason.REFUSED, text = echoedProviderState)
+                else -> response(text = echoedProviderState)
             }
         }
         lateinit var request: AgentExecutionRequest
         val execution = CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider,
-            journalConfiguration = configuration, secrets = listOf("private-secret")), base, setOf("source.c"), RepairResourceBudget(),
-            { root -> request(root).also { request = it } }) {}
+            journalConfiguration = configuration, secrets = declaredSecrets), base, setOf("source.c"), RepairResourceBudget(),
+            { root -> request(root, declaredSecrets.joinToString(" ")).also { request = it } }) {}
         val identity = BuiltinInvocationArchiveIdentity("repair", "attempt-1", "d".repeat(64), AgentExecutionRequestBinding.capture(request), configuration.identity)
-        return Invocation(configuration, request, execution.receipt, identity)
+        return Invocation(configuration, request, execution.receipt, identity, declaredSecrets)
     }
-    private fun capture(invocation: Invocation) = BuiltinInvocationArchiveDocument.capture(invocation.identity, invocation.request,
-        invocation.receipt, invocation.configuration)
+    private fun capture(invocation: Invocation, secrets: List<String> = invocation.secrets,
+        identity: BuiltinInvocationArchiveIdentity = invocation.identity) =
+        BuiltinInvocationArchiveDocument.capture(identity, invocation.request, invocation.receipt, invocation.configuration, secrets)
     private fun commitment(invocation: Invocation) = assertIs<BuiltinCapturedExecutionEvidence>(invocation.receipt.providerEvidence).loop.journal!!.commitment
     private fun encode(value: JsonObject) = boundedProviderJson(64 * 1024 * 1024) { it.writeProviderValue(value) }
     private fun root(document: BuiltinInvocationArchiveDocument) = Json.parseToJsonElement(document.bytes.decodeToString()).jsonObject
 
     @Test fun `portable captured artifact verifies without runtime journal paths and never claims release qualification`() {
-        val invocation = invocation()
-        val document = capture(invocation)
-        assertTrue(document.verified.candidateEvidenceComplete)
-        assertFalse(document.verified.releaseComplete)
-        assertFalse(document.verified.indeterminate)
-        assertEquals("returned-COMPLETED", document.verified.terminalOutcome)
-        assertEquals(invocation.receipt.requestBinding.requestSha256, document.verified.requestSha256)
-        assertEquals(1, document.verified.candidateChanges.size)
-        val audit = root(document).getValue("receipt").jsonObject.getValue("toolAudit").jsonObject
-        assertEquals(1, audit.getValue("filesystem").jsonArray.size)
-        assertTrue(audit.getValue("restoration").jsonArray.isEmpty())
-        val bytes = document.bytes
-        Files.delete(invocation.configuration.path)
-        val restored = verifyBuiltinInvocationArchive(bytes, invocation.identity, commitment(invocation))
-        assertEquals(document.verified.resultChangesSha256, restored.resultChangesSha256)
-        assertFalse(bytes.decodeToString().contains("private-secret"))
-        assertFalse(bytes.decodeToString().contains(directory.toString()))
-        val copy = document.bytes; copy[0] = 0
-        assertEquals('{'.code.toByte(), document.bytes[0])
-        assertEquals(checkpointHash(bytes), document.sha256)
+        val credential = "credential-sentinel-7d2d"
+        val endpoint = "https://provider.invalid/v1?token=endpoint-sentinel-13a1"
+        val transientToken = "transient-provider-token-b87c"
+        val operatorValue = "operator-config-value-291e"
+        val escapedProviderSecret = "escaped\nprovider\"token-61ae"
+        val privatePathMarker = "operator-config-path-only-041f"
+        val declaredSecrets = listOf("private-secret", credential, endpoint, transientToken, operatorValue, escapedProviderSecret)
+        val providerEcho = buildJsonObject {
+            declaredSecrets.forEachIndexed { index, secret -> put("state-$index", secret) }
+            put("escaped", JsonPrimitive(JsonPrimitive(escapedProviderSecret).toString()))
+        }.toString()
+        val sentinels = declaredSecrets + privatePathMarker + JsonPrimitive(escapedProviderSecret).toString().drop(1).dropLast(1)
+        for ((index, ending) in listOf("done", "refused", "failed").withIndex()) {
+            val invocation = invocation("runtime-$privatePathMarker-$index", ending, declaredSecrets, providerEcho)
+            assertTrue(invocation.configuration.path.toString().contains(privatePathMarker))
+            val document = capture(invocation)
+            if (ending == "done") {
+                assertTrue(document.verified.candidateEvidenceComplete)
+                assertEquals("returned-COMPLETED", document.verified.terminalOutcome)
+                assertEquals(invocation.receipt.requestBinding.requestSha256, document.verified.requestSha256)
+                assertEquals(1, document.verified.candidateChanges.size)
+                val audit = root(document).getValue("receipt").jsonObject.getValue("toolAudit").jsonObject
+                assertEquals(1, audit.getValue("filesystem").jsonArray.size)
+                assertTrue(audit.getValue("restoration").jsonArray.isEmpty())
+            } else {
+                assertFalse(document.verified.candidateEvidenceComplete)
+                assertFalse(document.verified.releaseComplete)
+                assertEquals(ending == "failed", document.verified.indeterminate)
+            }
+            assertFalse(document.verified.releaseComplete)
+            val bytes = document.bytes
+            val serialized = bytes.decodeToString()
+            sentinels.forEach { assertFalse(serialized.contains(it), "archive leaked a sensitive sentinel") }
+            fun assertNoSentinel(value: JsonElement) {
+                when (value) {
+                    is JsonObject -> value.forEach { (key, child) ->
+                        sentinels.forEach { assertFalse(key.contains(it), "archive key leaked a sensitive sentinel") }
+                        assertNoSentinel(child)
+                    }
+                    is JsonArray -> value.forEach(::assertNoSentinel)
+                    is JsonPrimitive -> if (value.isString) sentinels.forEach {
+                        assertFalse(value.content.contains(it), "archive value leaked a sensitive sentinel")
+                    }
+                }
+            }
+            assertNoSentinel(Json.parseToJsonElement(serialized))
+            val records = Json.parseToJsonElement(serialized).jsonObject.getValue("records").jsonArray
+            records.filter { it.jsonObject.getValue("kind").jsonPrimitive.content == BuiltinJournalKind.MODEL_RESPONSE.name }
+                .forEach { record ->
+                    val embedded = record.jsonObject.getValue("payload").jsonObject.getValue("text").jsonPrimitive.content
+                    assertNoSentinel(Json.parseToJsonElement(embedded))
+                }
+            Files.delete(invocation.configuration.path)
+            val restored = verifyBuiltinInvocationArchive(bytes, invocation.identity, commitment(invocation))
+            assertEquals(document.verified.resultChangesSha256, restored.resultChangesSha256)
+            assertFalse(restored.releaseComplete)
+            val copy = document.bytes; copy[0] = 0
+            assertEquals('{'.code.toByte(), document.bytes[0])
+            assertEquals(checkpointHash(bytes), document.sha256)
+        }
     }
 
     @Test fun `failed archive binds failure classification to terminal evidence`() {
@@ -192,10 +234,159 @@ class BuiltinInvocationArchiveTest {
             verifyBuiltinInvocationArchive(document.bytes, invocation.identity, commitment(invocation), bound)
         } }
         assertFailsWith<BuiltinJournalException> { BuiltinInvocationArchiveDocument.capture(invocation.identity, invocation.request, invocation.receipt,
-            invocation.configuration, BuiltinInvocationArchiveLimits(maximumBytes = 1024)) }
+            invocation.configuration, invocation.secrets, BuiltinInvocationArchiveLimits(maximumBytes = 1024)) }
         val duplicate = document.bytes.decodeToString().replaceFirst("{", "{\"schemaVersion\":1,")
         assertFailsWith<BuiltinJournalException> { verifyBuiltinInvocationArchive(duplicate.toByteArray(), invocation.identity, commitment(invocation)) }
         assertFailsWith<BuiltinJournalException> { verifyBuiltinInvocationArchive(encode(JsonObject(root(document) + ("extra" to JsonPrimitive(true)))),
             invocation.identity, commitment(invocation)) }
+    }
+
+    @Test fun `literal collisions archive provider arguments as markers and inadmissible secrets are refused`() {
+        listOf("true", "false", "null", "12345678", "short-1", "prefix[REDACTED]", "********").forEach { refused ->
+            assertFailsWith<IllegalArgumentException> {
+                BuiltinCapturedRepairHarness(ModelProvider { _, _ -> error("unused") }, secrets = listOf(refused))
+            }
+            assertFailsWith<IllegalArgumentException> {
+                BuiltinAgentHarness(ModelProvider { _, _ -> error("unused") }, { _, _ -> error("unused") }, secrets = listOf(refused))
+            }
+        }
+        val ordinary = invocation("ordinary")
+        listOf("true", "12345678").forEach { refused ->
+            assertFailsWith<IllegalArgumentException> { capture(ordinary, listOf(refused)) }
+        }
+        val secret = "-91827364"
+        val journalDirectory = Files.createDirectory(directory.resolve("typed-journal"))
+        Files.setPosixFilePermissions(journalDirectory, PosixFilePermissions.fromString("rwx------"))
+        val configuration = BuiltinJournalConfiguration(journalDirectory.resolve("journal.jsonl"),
+            BuiltinJournalIdentity("fixture", "scripted-v1", "a".repeat(64), "b".repeat(64), "c".repeat(64)))
+        val request = AgentExecutionRequest("seek evidence", listOf(AgentWorkspaceRoot("project", Path.of("/fixture/project"))),
+            emptyList(), AgentAccessPolicy(emptyList()))
+        val session = object : BuiltinToolSession {
+            override val definitions = listOf(ModelToolDefinition("seek", "Seek a signed position", buildJsonObject {
+                put("type", "object"); put("additionalProperties", false)
+                putJsonObject("properties") { putJsonObject("position") { put("type", "integer") } }
+                putJsonArray("required") { add("position") }
+            }))
+            override fun authorize(call: ModelToolCall, control: BuiltinExecutionControl) = true
+            override fun execute(call: ModelToolCall, control: BuiltinExecutionControl) = BuiltinToolResult("sought")
+            override fun changes(control: BuiltinExecutionControl) = emptyList<AgentFileChange>()
+            override fun close() = Unit
+        }
+        var turns = 0
+        val provider = ModelProvider { _, _ ->
+            if (turns++ == 0) response(listOf(ModelToolCall("seek1", "seek", buildJsonObject { put("position", -9182736455L) })))
+            else response()
+        }
+        val receipt = BuiltinAgentHarness(provider, { _, _ -> session }, secrets = listOf(secret), journalConfiguration = configuration)
+            .executeReceipt(request) {}
+        val identity = BuiltinInvocationArchiveIdentity("repair", "typed-1", "d".repeat(64), AgentExecutionRequestBinding.capture(request),
+            configuration.identity)
+        val document = BuiltinInvocationArchiveDocument.capture(identity, request, receipt, configuration, listOf(secret))
+        assertTrue(document.verified.candidateEvidenceComplete)
+        val serialized = document.bytes.decodeToString()
+        assertFalse(serialized.contains("91827364"))
+        val requested = Json.parseToJsonElement(serialized).jsonObject.getValue("records").jsonArray
+            .single { it.jsonObject["kind"] == JsonPrimitive("TOOL_REQUEST") }.jsonObject.getValue("payload").jsonObject
+        assertEquals(JsonPrimitive("[REDACTED]"), requested.getValue("arguments").jsonObject["position"])
+        val commitment = assertIs<BuiltinLoopEvidence>(receipt.providerEvidence).journal!!.commitment
+        Files.delete(configuration.path)
+        assertTrue(verifyBuiltinInvocationArchive(document.bytes, identity, commitment).candidateEvidenceComplete)
+    }
+
+    @Test fun `export refuses a committed prefix written under weaker redaction rules`() {
+        val secret = "q\"uoted-token"
+        // Two escaping layers: the previous matcher redacted only raw and one-layer spellings.
+        val twoLayers = JsonPrimitive(JsonPrimitive(secret).toString()).toString().drop(1).dropLast(1)
+        val invocation = invocation("weaker", declaredSecrets = emptyList(), echoedProviderState = "state $twoLayers")
+        val before = Files.readAllBytes(invocation.configuration.path)
+        assertTrue(before.decodeToString().lines().filter { it.isNotEmpty() }.any { line ->
+            Json.parseToJsonElement(line).jsonObject.getValue("payload").jsonObject["text"]?.jsonPrimitive?.content?.contains(twoLayers) == true
+        }, "fixture must persist the two-layer spelling under the weaker rules")
+        assertFailsWith<BuiltinJournalException> { capture(invocation, listOf(secret)) }
+        assertContentEquals(before, Files.readAllBytes(invocation.configuration.path))
+        assertTrue(capture(invocation, emptyList()).verified.candidateEvidenceComplete)
+    }
+
+    @Test fun `archive-only identifiers and envelope fields carrying a declared secret are refused`() {
+        val invocation = invocation()
+        val taskSecret = "task-secret-91ab"
+        val leaking = BuiltinInvocationArchiveIdentity("repair", taskSecret, invocation.identity.promptSha256,
+            invocation.identity.binding, invocation.identity.journal)
+        assertFailsWith<BuiltinJournalException> { capture(invocation, invocation.secrets + taskSecret, leaking) }
+        // "journalComplete" is an archive receipt key only; it is never rewritten, so export fails closed.
+        assertFalse(Files.readString(invocation.configuration.path).contains("journalComplete"))
+        assertFailsWith<BuiltinJournalException> { capture(invocation, invocation.secrets + "journalComplete") }
+        assertTrue(capture(invocation).verified.candidateEvidenceComplete)
+    }
+
+    @Test fun `export scans the raw committed journal bytes and the serialized archive bytes`() {
+        val escaped = "ED]\\tTAIL"
+        // Written without the secret declared: the record holds a real tab, its bytes spell the secret.
+        val weaker = invocation("bytes-weaker", declaredSecrets = emptyList(), echoedProviderState = "[REDACTED]\tTAIL")
+        val before = Files.readAllBytes(weaker.configuration.path)
+        assertTrue(before.decodeToString().contains(escaped))
+        assertFailsWith<BuiltinJournalException> { capture(weaker, listOf(escaped)) }
+        assertContentEquals(before, Files.readAllBytes(weaker.configuration.path))
+        val ordinary = invocation("bytes-ordinary")
+        val journal = Files.readString(ordinary.configuration.path)
+        val archive = capture(ordinary).bytes.decodeToString()
+        // Records are newline-separated in the journal and comma-separated in the archive.
+        val archiveOnly = "\"version\":1},{\"kind\""
+        val journalOnly = "\"version\":1}\n{\"kind\""
+        assertTrue(archive.contains(archiveOnly) && !journal.contains(archiveOnly))
+        assertTrue(journal.contains(journalOnly) && !archive.contains(journalOnly))
+        assertFailsWith<BuiltinJournalException> { capture(ordinary, ordinary.secrets + archiveOnly) }
+        assertFailsWith<BuiltinJournalException> { capture(ordinary, ordinary.secrets + journalOnly) }
+        assertTrue(capture(ordinary).verified.candidateEvidenceComplete)
+    }
+
+    @Test fun `redacted call ids and tool names keep distinct aliases and the archive verifies`() {
+        val secrets = listOf("private-one", "private-two", "toolsecret-a", "toolsecret-b")
+        for (scenario in listOf("equal", "different")) {
+            val journalDirectory = Files.createDirectory(directory.resolve("alias-$scenario"))
+            Files.setPosixFilePermissions(journalDirectory, PosixFilePermissions.fromString("rwx------"))
+            val configuration = BuiltinJournalConfiguration(journalDirectory.resolve("journal.jsonl"),
+                BuiltinJournalIdentity("fixture", "scripted-v1", "a".repeat(64), "b".repeat(64), "c".repeat(64)))
+            val request = AgentExecutionRequest("note evidence", listOf(AgentWorkspaceRoot("project", Path.of("/fixture/project"))),
+                emptyList(), AgentAccessPolicy(emptyList()))
+            fun tool(name: String) = ModelToolDefinition(name, "Record a note", buildJsonObject {
+                put("type", "object"); put("additionalProperties", false)
+                putJsonObject("properties") { putJsonObject("text") { put("type", "string") } }
+                putJsonArray("required") { add("text") }
+            })
+            val session = object : BuiltinToolSession {
+                override val definitions = listOf(tool("toolsecret-a"), tool("toolsecret-b"))
+                override fun authorize(call: ModelToolCall, control: BuiltinExecutionControl) = true
+                override fun execute(call: ModelToolCall, control: BuiltinExecutionControl) = BuiltinToolResult("noted")
+                override fun changes(control: BuiltinExecutionControl) = emptyList<AgentFileChange>()
+                override fun close() = Unit
+            }
+            val second = if (scenario == "equal") ModelToolCall("private-two", "toolsecret-a", buildJsonObject { put("text", "same") })
+                else ModelToolCall("private-two", "toolsecret-b", buildJsonObject { put("text", "other") })
+            var turns = 0
+            val provider = ModelProvider { _, _ ->
+                if (turns++ == 0) response(listOf(ModelToolCall("private-one", "toolsecret-a", buildJsonObject { put("text", "same") }), second))
+                else response()
+            }
+            val receipt = BuiltinAgentHarness(provider, { _, _ -> session }, secrets = secrets, journalConfiguration = configuration)
+                .executeReceipt(request) {}
+            assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(receipt.providerEvidence).stop, scenario)
+            val identity = BuiltinInvocationArchiveIdentity("repair", "alias-$scenario", "d".repeat(64),
+                AgentExecutionRequestBinding.capture(request), configuration.identity)
+            val document = BuiltinInvocationArchiveDocument.capture(identity, request, receipt, configuration, secrets)
+            assertTrue(document.verified.candidateEvidenceComplete, scenario)
+            val serialized = document.bytes.decodeToString()
+            secrets.forEach { assertFalse(serialized.contains(it), scenario) }
+            val records = Json.parseToJsonElement(serialized).jsonObject.getValue("records").jsonArray.map { it.jsonObject }
+            val requests = records.filter { it["kind"] == JsonPrimitive("TOOL_REQUEST") }.map { it.getValue("payload").jsonObject }
+            assertEquals(listOf("[REDACTED-call-1]", "[REDACTED-call-2]"), requests.map { it.getValue("id").jsonPrimitive.content }, scenario)
+            assertEquals(if (scenario == "equal") listOf("[REDACTED-tool-1]", "[REDACTED-tool-1]") else listOf("[REDACTED-tool-1]", "[REDACTED-tool-2]"),
+                requests.map { it.getValue("name").jsonPrimitive.content }, scenario)
+            assertEquals(listOf("[REDACTED-call-1]", "[REDACTED-call-2]"), records.filter { it["kind"] == JsonPrimitive("TOOL_RESULT") }
+                .map { it.getValue("payload").jsonObject.getValue("callId").jsonPrimitive.content }, scenario)
+            val commitment = assertIs<BuiltinLoopEvidence>(receipt.providerEvidence).journal!!.commitment
+            Files.delete(configuration.path)
+            assertTrue(verifyBuiltinInvocationArchive(document.bytes, identity, commitment).candidateEvidenceComplete, scenario)
+        }
     }
 }

@@ -5,12 +5,19 @@ import decompengine.builtin.provider.*
 import decompengine.repair.*
 import com.fasterxml.jackson.core.JsonFactory
 import kotlinx.serialization.json.*
+import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayOutputStream
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 import kotlin.test.*
 
 class BuiltinCapturedContextToolsTest {
+    @TempDir lateinit var directory: Path
+    private fun privateDirectory(name: String): Path = Files.createDirectory(directory.resolve(name)).also {
+        Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
+    }
     private fun request(context: List<AgentContextInput> = emptyList(), root: AgentWorkspaceRoot = AgentWorkspaceRoot("project", Path.of("/fixture"))) =
         AgentExecutionRequest("inspect authorized context", listOf(root), context, AgentAccessPolicy(listOf(
             AgentPathRule(AgentWorkspacePath("project", "src/a.c"), setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE)),
@@ -229,5 +236,110 @@ class BuiltinCapturedContextToolsTest {
         assertEquals(BuiltinStop.VALIDATION_REQUIRED, evidence.loop.stop)
         assertEquals(listOf("list_directory", "read_evidence"), evidence.contextAudit.map { it.tool })
         assertTrue(evidence.candidateChanges.isEmpty())
+    }
+
+    @Test fun `a secret split across evidence pages is masked in persisted results and later history`() {
+        val secret = "split-secret-4f1c9"
+        // The 4096-character page boundary falls after "split-se"; offsets must remain those of the original text.
+        val body = "x".repeat(4096 - 8) + secret + "y".repeat(100)
+        val files = mapOf("src/a.c" to "a".toByteArray(), "src/b.c" to "b".toByteArray(), "write-only.c" to "private".toByteArray())
+        val snapshot = BuiltinWorkspaceSnapshot.capture(files.mapKeys { AgentWorkspacePath("project", it.key) })
+        val configuration = BuiltinJournalConfiguration(privateDirectory("split-journal").resolve("journal.jsonl"),
+            BuiltinJournalIdentity("fixture", "scripted-v1", snapshot.sha256, "b".repeat(64), "c".repeat(64)))
+        val pages = mutableListOf<JsonObject>()
+        var step = 0
+        val provider = ModelProvider { request, _ ->
+            if (step > 0) pages += Json.parseToJsonElement(request.messages.last().content).jsonObject
+            when (step++) {
+                0 -> response(listOf(ModelToolCall("page_1", "read_evidence", buildJsonObject { put("id", "trace"); put("offset", 0) })))
+                1 -> response(listOf(ModelToolCall("page_2", "read_evidence", buildJsonObject { put("id", "trace"); put("offset", 4096) })))
+                else -> response()
+            }
+        }
+        val execution = CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider,
+            journalConfiguration = configuration, secrets = listOf(secret)), files, setOf("src/a.c", "write-only.c"),
+            RepairResourceBudget(), { root -> request(listOf(AgentContextInput("trace", body)), root) }) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinCapturedExecutionEvidence>(execution.receipt.providerEvidence).loop.stop)
+        assertEquals(listOf(0, 4096), pages.map { it.getValue("offset").jsonPrimitive.int })
+        assertEquals(4096, pages[0].getValue("nextOffset").jsonPrimitive.int)
+        val first = pages[0].getValue("text").jsonPrimitive.content
+        val second = pages[1].getValue("text").jsonPrimitive.content
+        assertEquals(4096, first.length)
+        assertTrue(first.endsWith("*".repeat(8)) && second.startsWith("*".repeat(secret.length - 8)))
+        assertEquals(body.replace(secret, "*".repeat(secret.length)), first + second)
+        val journal = Files.readString(configuration.path)
+        listOf(secret.take(8), secret.drop(8)).forEach { assertFalse(journal.contains(it), "evidence fragment persisted") }
+    }
+
+    @Test fun `built-in writer unicode escapes of a secret are redacted from a real evidence page`() {
+        val secret = "esc\u001Bsecret-77"
+        val request = request(listOf(AgentContextInput("trace", "before $secret after")))
+        // An unmasked page exercises the journal matcher against the Jackson writer's own uppercase escape.
+        val page = BuiltinCapturedContextTools(request, emptyList(), 8192, 10)
+            .execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace"))), control(request)).content
+        assertTrue(page.contains("esc\\u001Bsecret-77"))
+        assertFalse(page.contains(JsonPrimitive(secret).toString().drop(1).dropLast(1)))
+        val configuration = BuiltinJournalConfiguration(privateDirectory("unicode-journal").resolve("journal.jsonl"),
+            BuiltinJournalIdentity("fixture", "scripted-v1", "a".repeat(64), "b".repeat(64), "c".repeat(64)))
+        val journal = BuiltinJournal.open(configuration, request, listOf(secret))
+        // Tool results are designated content, exactly as the harness persists them in TOOL_RESULT.
+        journal.use { it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("page", it.content(JsonPrimitive(page))) }) }
+        val persisted = BuiltinJournal.inspect(configuration, AgentExecutionRequestBinding.capture(request), journal.evidence.commitment)
+            .records.last().getValue("payload").jsonObject.getValue("page").jsonPrimitive.content
+        assertTrue(persisted.contains("[REDACTED]"))
+        assertFalse(persisted.contains("secret-77"))
+    }
+
+    @Test fun `an evidence mask that would spell a declared secret fails the page closed`() {
+        assertFailsWith<IllegalArgumentException> { BuiltinRedactor(listOf("********")) }
+        // Masking "zz-secret1" yields "**********zz-tail", which contains the second secret.
+        val secrets = listOf("zz-secret1", "***zz-tail")
+        val request = request(listOf(AgentContextInput("trace", "zz-secret1zz-tail")))
+        val tools = BuiltinCapturedContextTools(request, emptyList(), 8192, 10, BuiltinRedactor(secrets))
+        val page = tools.execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace"))), control(request))
+        assertTrue(page.failed)
+        assertFalse(page.content.contains("zz-tail"))
+    }
+
+    @Test fun `large repetitive evidence reads scan only the page window and stay cancellable`() {
+        val secret = "aaaaaaaa"
+        val body = "a".repeat(32 * 1024 * 1024)
+        val redactor = BuiltinRedactor(listOf(secret))
+        val threads = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        var allocatedBefore = 0L
+        var allocated = -1L
+        var started = 0L
+        var elapsed = Duration.ZERO
+        var page: JsonObject? = null
+        var step = 0
+        // The first and only read of this omitted body in the invocation is cold: no warm-up, no prior page.
+        val provider = ModelProvider { request, _ ->
+            if (step++ == 0) response(listOf(ModelToolCall("cold_1", "read_evidence", buildJsonObject {
+                put("id", "trace"); put("offset", 16 * 1024 * 1024)
+            }))).also { allocatedBefore = threads.currentThreadAllocatedBytes; started = System.nanoTime() }
+            else {
+                allocated = threads.currentThreadAllocatedBytes - allocatedBefore
+                elapsed = Duration.ofNanos(System.nanoTime() - started)
+                page = Json.parseToJsonElement(request.messages.last().content).jsonObject
+                response()
+            }
+        }
+        val files = mapOf("src/a.c" to "a".toByteArray(), "src/b.c" to "b".toByteArray(), "write-only.c" to "private".toByteArray())
+        val execution = CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider, secrets = listOf(secret)),
+            files, setOf("src/a.c", "write-only.c"), RepairResourceBudget(), { root -> request(listOf(AgentContextInput("trace", body)), root) }) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinCapturedExecutionEvidence>(execution.receipt.providerEvidence).loop.stop)
+        val read = assertNotNull(page)
+        assertEquals("*".repeat(4096), read.getValue("text").jsonPrimitive.content)
+        assertEquals(16 * 1024 * 1024 + 4096, read.getValue("nextOffset").jsonPrimitive.int)
+        assertEquals(decompengine.project.sha256(body.toByteArray()), read.getValue("sha256").jsonPrimitive.content)
+        // A cold whole-body digest alone would allocate the 32 MiB UTF-8 encoding.
+        assertTrue(allocated in 0 until 8L * 1024 * 1024, "cold page read allocated $allocated bytes")
+        assertTrue(elapsed < Duration.ofSeconds(2), "cold page read took $elapsed")
+        // Work is bounded by the window: a handful of cancellation checks, not one per body match.
+        var checks = 0
+        redactor.maskSlice(body, 16 * 1024 * 1024, 16 * 1024 * 1024 + 4096) { checks++ }
+        assertTrue(checks in 1..16, "scan performed $checks cancellation checks")
+        class Cancelled : RuntimeException()
+        assertFailsWith<Cancelled> { redactor.maskSlice(body, 0, 4096) { throw Cancelled() } }
     }
 }
