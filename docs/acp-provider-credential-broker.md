@@ -148,14 +148,18 @@ The tests use no real credentials and make no external connection. Hosted CI sta
 
 - `AcpProviderCredentialSourceTest` covers each credential failure against synthetic `auth.json` files under
   `build/test-tmp/acp-provider-broker/`.
-- `AcpProviderBrokerTest` is the integration control. It uses a synthetic Codex login, and a test CA and leaf
-  certificate generated at run time and written under `build/test-tmp/acp-provider-broker/`. A synthetic
-  resolver returns a public numeric address. A recording connector connects to a local TLS server on 127.0.0.1
-  instead, and then completes the module client's `handshake` with `withTestTrustAnchors`, so certificate and
-  host name verification are the production checks. The control shows that:
+- `AcpProviderBrokerTest` is the integration control. Each scenario runs in a fresh JVM whose only trust
+  customization is the standard `javax.net.ssl.trustStore` properties. They name a test CA generated at run
+  time under `build/test-tmp/acp-provider-broker/`, so the broker uses the module TLS client's production
+  platform-trust code, and the test JVM's own trust is never changed. Each scenario uses a synthetic Codex
+  login and a synthetic resolver that returns a public numeric address. A recording connector connects to a
+  local TLS server on 127.0.0.1 instead. A loopback server is not an admissible `connect` destination, so the
+  connector reaches the client's private layered handshake by reflection, as the #958 TLS probe does.
+  Certificate checks, SNI and host name verification are therefore the production code. The control shows
+  that:
   - the credential is checked before any resolution or connection;
   - the pinned numeric address is used without re-resolution;
-  - SNI and hostname verification use the policy host;
+  - SNI and hostname verification use the policy host, and platform trust without the test root refuses;
   - redirects are refused without a second connection;
   - the upstream head is exactly the policy-owned headers and the credential headers, and the body is the
     validated body;
