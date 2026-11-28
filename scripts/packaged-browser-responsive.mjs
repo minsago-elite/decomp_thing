@@ -268,7 +268,7 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
   profiles = RESPONSIVE_PROFILES, sizing = RESPONSIVE_SIZING, sizeProfile = emulateProfile, sizeControl = emulateControl, afterNavigate = null, restoreMetrics = true,
   // Default-identity hooks (real zoom only overrides them): the clip and its recorded extra fields, the page reading, and a
   // post-capture check whose fields are merged into the screenshot record. The defaults send exactly the v2 emulation calls.
-  clipFor = (r, v) => ({ clip: snapClip(r, v) }), pageExpression = PAGE, afterCapture = null }) {
+  clipFor = (r, v) => ({ clip: snapClip(r, v) }), pageExpression = PAGE, afterCapture = null, captureShot = null }) {
   let target = null; let failed = false; let fetchHandler = null;
   const call = (method, params = {}) => cdp.call(method, params, target.sessionId);
   const served = [];
@@ -324,6 +324,8 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
     return previous;
   };
   const shot = async (o, clipExpr, viewport) => {
+    // Real zoom only: the evidence PNG is cut from viewport captures (disclosures may span several scrolled viewports).
+    if (captureShot && clipExpr) return captureShot({ o, name: screenshotName(o), clipExpr, viewport, rect, full: o.subject === 'disclosure' });
     const round = (v) => Math.round(v * 1000) / 1000;
     let clip = null; let elementRect = null; let extra = {};
     if (clipExpr) {
@@ -764,7 +766,7 @@ export function fixtureFailures(f) {
 }
 
 /** Bounded, no-symlink regular-file read of one fixed-name PNG; returns size, sha256 and IHDR dimensions. */
-export async function readResponsivePng(directory, name, { maxBytes = MAX_RESPONSIVE_PNG_BYTES, names = FIXED_NAMES } = {}) {
+export async function readResponsivePng(directory, name, { maxBytes = MAX_RESPONSIVE_PNG_BYTES, names = FIXED_NAMES, withBuffer = false } = {}) {
   if (!names.has(name)) throw new Error(`unexpected screenshot name ${JSON.stringify(cap(String(name)))}`);
   const path = join(directory, name);
   const link = await fs.lstat(path);
@@ -783,7 +785,7 @@ export async function readResponsivePng(directory, name, { maxBytes = MAX_RESPON
       if (length > maxBytes) throw new Error(`${name} exceeds ${maxBytes} bytes`);
     }
     const bytes = buffer.subarray(0, length);
-    return { bytes: length, sha256: sha256(bytes), ...pngDimensions(bytes) };
+    return { bytes: length, sha256: sha256(bytes), ...pngDimensions(bytes), ...(withBuffer ? { buffer: Buffer.from(bytes) } : {}) };
   } finally { await handle.close(); }
 }
 
