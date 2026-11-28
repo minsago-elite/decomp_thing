@@ -168,7 +168,8 @@ it('a foreign or same-version 412 readback is not adopted and the guard is uncha
   render(<Org fetcher={f} onChanged={changed} />);
   fireEvent.input(input(), { target: { value: 'Mine' } }); save();
   await settled();
-  expect(status()).toContain(copy.changed);
+  // #635: an answered 412 says the change was refused until a newer version is applied.
+  expect(status()).toContain(copy.refused);
   expect(status()).not.toContain('current version is shown');
   expect(changed).not.toHaveBeenCalled();
   expect(screen.queryByText(/current label is/)).toBeNull();
@@ -181,7 +182,7 @@ it('a same-version or failed 412 readback asks for refresh without claiming the 
     const view = render(<Org fetcher={f} />);
     fireEvent.input(input(), { target: { value: 'Mine' } }); save();
     await settled();
-    expect(status()).toContain(copy.changed);
+    expect(status()).toContain(copy.refused);
     expect(status()).not.toContain('current version is shown');
     expect(input().value).toBe('Mine');
     expect(f).toHaveBeenCalledTimes(2);
@@ -189,7 +190,7 @@ it('a same-version or failed 412 readback asks for refresh without claiming the 
   }
 });
 
-it('a cancelled 412 readback reports an unconfirmed result without implying a write may have landed', async () => {
+it('a cancelled 412 readback keeps the answered refusal without implying a write may have landed', async () => {
   let readbackSignal: AbortSignal | undefined;
   const f = vi.fn<typeof fetch>().mockImplementation((_url, init) => {
     if (init?.method === 'PATCH') return Promise.resolve(fail(412, 'VERSION_CONFLICT')());
@@ -207,7 +208,9 @@ it('a cancelled 412 readback reports an unconfirmed result without implying a wr
   expect(document.body.textContent).toContain(copy.paused);
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
   await act(() => { window.dispatchEvent(new Event('online')); });
-  await waitFor(() => expect(document.body.textContent).toContain(copy.unconfirmed));
+  // #635: the server answered the change, so its refusal stands; the cut read never claims the current version is shown.
+  await waitFor(() => expect(document.body.textContent).toContain(copy.refused));
+  expect(document.body.textContent).not.toContain('current version is shown');
   expect(document.body.textContent).not.toContain('may have been written');
   expect(f).toHaveBeenCalledTimes(2);
   expect(input().value).toBe('Mine');

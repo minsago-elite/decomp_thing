@@ -802,6 +802,7 @@ jobs:
             build/test-results/c4aShutdownIsolated
             build/reports/junit-signatures
             build/web-job-recovery-inventory.json
+            build/reports/web-resource-baseline
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
             build/reports/tests/v3BoundaryPublicationIsolated

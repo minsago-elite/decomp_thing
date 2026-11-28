@@ -106,6 +106,26 @@
               "outcome": "rejected",
               "status": 403,
               "reasonCode": "CSRF_DENIED"
+            },
+            {
+              "sequence": "9",
+              "recordedAt": "2026-09-05T00:00:03Z",
+              "requestId": null,
+              "actor": {
+                "kind": "browser_session",
+                "sessionDigest": "abababababababababababababababababababababababababababababababab"
+              },
+              "action": "revision.archive-verify",
+              "target": {
+                "jobId": "1234567890abcdef1234567890abcdef",
+                "runId": "run_example_1",
+                "expectedVersion": null,
+                "resultVersion": null,
+                "revisionId": "revision_example_1"
+              },
+              "outcome": "accepted",
+              "status": 202,
+              "reasonCode": null
             }
           ],
           "omittedEntries": "6",

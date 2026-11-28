@@ -243,7 +243,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} onDeleted={markDeleted} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
-        readJob={(signal, accepts) => readJob(signal, 'observe', accepts)} onDeleted={markDeleted} />
+        readJob={(signal, mode, accepts) => readJob(signal, mode ?? 'observe', accepts)} onDeleted={markDeleted} />
       <JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
         onDeleted={(result, failure) => { if (result) setOperation(result); confirmDeletion(issue(), failure); }} />
     </>}
