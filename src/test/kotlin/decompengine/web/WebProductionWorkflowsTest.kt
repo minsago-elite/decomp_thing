@@ -495,6 +495,7 @@ class WebProductionWorkflowsTest {
     fun `evidence-only import consumes an owner snapshot that later upload replacement cannot reach`() = withRoot { root ->
         val original = elfFixture()
         val replacement = elfFixture().also { it[it.size - 1] = 0x55 }
+        val tampered = elfFixture().also { it[it.size - 1] = 0x66 }
         val job = JobStore(root).createFromUpload("snapshot-input.elf", original)
         val consumed = mutableListOf<Pair<Path, ByteArray>>()
         var forgeAfterTamper = false
@@ -509,7 +510,7 @@ class WebProductionWorkflowsTest {
                 if (forgeAfterTamper) {
                     val owned = Files.readAllBytes(binary)
                     Files.setPosixFilePermissions(binary, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
-                    Files.write(binary, replacement)
+                    Files.write(binary, tampered)
                     Files.setPosixFilePermissions(binary, java.nio.file.attribute.PosixFilePermissions.fromString("r--------"))
                     // The importer claims the snapshot's digest although the snapshot no longer holds those bytes.
                     published(PublishedEvidenceModel(sha256(owned), sha256(owned), "{}".toByteArray(), "f".repeat(64)))
