@@ -207,7 +207,7 @@ class GccBundledPlannerOutputCaptureTest {
                 val failure = assertFailsWith<GccBundledHostMemoryBudgetException> {
                     GccBundledPlannerOutputCapture.captureOwned(tracker, LinuxFilesystemSyscalls.duplicate(run), CONTROL,
                         control.identity, request, { copied = true; model.copyOf() }, 4, 0,
-                        GccBundledHostMemoryBudget.WORKING_RESERVATION_BYTES + charge * model.size - 1, ContainedCommandOperationDeadline(2_000))
+                        GccBundledHostMemoryBudget.WORKING_RESERVATION_BYTES + charge * model.size - 1, ContainedCommandOperationDeadline(60_000))
                 }
                 assertTrue(failure.message.orEmpty().contains("captured model copy and assessment"), failure.toString())
                 assertFalse(copied, "the model copy must follow its admission")
@@ -239,7 +239,7 @@ class GccBundledPlannerOutputCaptureTest {
                 val direct = GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, 4, 0)
                 val tracker = GccBundledHostWorkTracker()
                 val owned = GccBundledPlannerOutputCapture.captureOwned(tracker, LinuxFilesystemSyscalls.duplicate(run), CONTROL,
-                    control.identity, request, { model }, 4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(2_000))
+                    control.identity, request, { model }, 4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(60_000))
                 assertContentEquals(direct.planBytes, owned.planBytes)
                 assertContentEquals(direct.canonicalBytes, owned.canonicalBytes)
                 tracker.requireRetired(5_000)
@@ -250,7 +250,7 @@ class GccBundledPlannerOutputCaptureTest {
                 val started = System.nanoTime()
                 assertFailsWith<GccBundledHostWorkTimeoutException> {
                     GccBundledPlannerOutputCapture.captureOwned(tracker, LinuxFilesystemSyscalls.duplicate(run), CONTROL,
-                        control.identity, request, { model }, 4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(2_000) { 0L }) { stage ->
+                        control.identity, request, { model }, 4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(5_000) { 0L }) { stage ->
                         stages += stage
                         if (stage == "reading planner output file" && blocked.count != 0L) {
                             blocked.countDown()
@@ -259,7 +259,7 @@ class GccBundledPlannerOutputCaptureTest {
                     }
                 }
                 val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-                assertTrue(blocked.count == 0L && elapsedMillis in 2_000..12_000, "elapsed $elapsedMillis ms")
+                assertTrue(blocked.count == 0L && elapsedMillis in 5_000..15_000, "elapsed $elapsedMillis ms")
                 assertEquals(listOf("planner output capture"), tracker.inFlightStages)
                 assertFailsWith<IllegalStateException> { tracker.requireRetired(50) }
                 release.countDown()

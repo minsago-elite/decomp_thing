@@ -56,7 +56,7 @@ class GccBundledDeadlineBoundPublicationTest {
         val clock = Clock()
         val failure = assertFailsWith<IllegalStateException> {
             publish(root, clock.deadline(), fault = { hit ->
-                if (hit == DescriptorBoundCommitFaultPoint.AFTER_PREPARED_SYNC) clock.now = 1_500_000_000L
+                if (hit == DescriptorBoundCommitFaultPoint.AFTER_PREPARED_SYNC) clock.leave(500)
             })
         }
         assertTrue(failure.message.orEmpty().contains("requires 1000 ms"), failure.toString())
@@ -72,12 +72,13 @@ class GccBundledDeadlineBoundPublicationTest {
             val release = CountDownLatch(1)
             val started = System.nanoTime()
             assertFailsWith<GccBundledHostWorkTimeoutException>(point.name) {
-                publish(root, Clock().deadline(), tracker = tracker, fault = { hit ->
+                publish(root, Clock(BLOCKED_ALLOWANCE_MILLIS).deadline(), tracker = tracker, fault = { hit ->
                     if (hit == point) { blocked.countDown(); awaitIgnoringInterrupts(release) }
                 })
             }
             val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-            assertTrue(blocked.count == 0L && elapsedMillis in 2_000..12_000, "${point.name}: $elapsedMillis ms")
+            assertTrue(blocked.count == 0L && elapsedMillis in BLOCKED_ALLOWANCE_MILLIS..BLOCKED_ALLOWANCE_MILLIS + 10_000,
+                "${point.name}: $elapsedMillis ms")
             assertEquals(listOf("result publication"), tracker.inFlightStages, point.name)
             release.countDown()
             tracker.requireRetired(10_000)
@@ -126,10 +127,12 @@ class GccBundledDeadlineBoundPublicationTest {
         assertContentEquals(FOREIGN, Files.readAllBytes(root.resolve(NAME)))
     }
 
-    private class Clock {
+    /** A frozen operation clock; a large default allowance keeps slow host fsyncs from timing out ordinary cases. */
+    private class Clock(val maximumMillis: Long = 60_000) {
         var now = 0L
-        fun deadline() = ContainedCommandOperationDeadline(2_000) { now }
-        fun expire() { now = 2_000_000_000L }
+        fun deadline() = ContainedCommandOperationDeadline(maximumMillis) { now }
+        fun expire() { now = maximumMillis * 1_000_000L }
+        fun leave(millis: Long) { now = (maximumMillis - millis) * 1_000_000L }
     }
 
     private fun publish(
@@ -164,6 +167,7 @@ class GccBundledDeadlineBoundPublicationTest {
 
     private companion object {
         const val NAME = "result.json"
+        const val BLOCKED_ALLOWANCE_MILLIS = 5_000L
         val BYTES = "{\"complete\":false}\n".toByteArray()
         val FOREIGN = "{\"foreign\":true}\n".toByteArray()
     }
