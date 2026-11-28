@@ -28,7 +28,7 @@ const code = (failure: unknown) => failure instanceof ApiClientError ? failure.s
  */
 export function JobOrganization({ job, client, basePath, session, onChanged, readJob, onDeleted }: {
   job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>;
-  onChanged?: (job: Job) => void; readJob?: (signal: AbortSignal) => Promise<Job | null>; onDeleted?: (failure: unknown) => void;
+  onChanged?: (job: Job) => void; readJob?: (signal: AbortSignal, mode?: 'retry') => Promise<Job | null>; onDeleted?: (failure: unknown) => void;
 }) {
   const copy = jobOrganizationCopy;
   const availability = useBrowserAvailability();
@@ -40,13 +40,19 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
   const active = useRef<AbortController | null>(null);
   useEffect(() => { setLabel(job.label ?? ''); setArchived(job.archived ?? false); }, [job.jobId, job.version, job.label, job.archived]);
   useEffect(() => () => { active.current?.abort(); }, [job.jobId, available]);
+  // A save aborted because another job is shown no longer owns the controls or the notice.
+  useEffect(() => { active.current = null; setBusy(false); setNotice(''); }, [job.jobId]);
   const trimmed = label.trim();
   const invalid = trimmed.length > 0 && [...trimmed].length > 120;
-  /** One GET of this job; a response naming another job is ignored. */
-  async function reread(signal: AbortSignal) {
-    if (readJob) { await readJob(signal); return; }
+  /**
+   * One GET of this job; a response naming another job is ignored. Resolves whether the read job is now shown. A
+   * `retry` read rejects instead of returning a job it did not apply, such as one a newer failed Refresh overtook.
+   */
+  async function reread(signal: AbortSignal, mode?: 'retry') {
+    if (readJob) return (await readJob(signal, mode)) !== null && !signal.aborted;
     const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal });
-    if (!signal.aborted && fresh.data.jobId === job.jobId) onChanged?.(fresh.data);
+    if (signal.aborted || fresh.data.jobId !== job.jobId) return false;
+    onChanged?.(fresh.data); return true;
   }
   async function save(event: Event) {
     event.preventDefault();
@@ -60,31 +66,39 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
     if (!csrfToken) { setNotice(copy.denied); return; }
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setNotice(copy.saving);
+    let answered = false;
     try {
       await client.put('job', `/jobs/${job.jobId}`, 'jobOrganizationRequest', change, {
         csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID(), signal: controller.signal,
       }, 'PATCH');
+      answered = true;
       notifyLibraryChanged(basePath);
       await reread(controller.signal);
       if (controller.signal.aborted) return;
       setNotice(copy.saved);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
+      answered = true;
       if (isDeletedJob(failure) && onDeleted) { onDeleted(failure); return; }
-      setNotice(withApiFailureReference(status(failure) === 412 ? copy.changed
+      // A refusal names the current version as shown only once its readback is applied (#635).
+      setNotice(withApiFailureReference(status(failure) === 412 ? copy.refused
         : status(failure) === 422 ? copy.invalidLabel
         : [401, 403].includes(status(failure)) ? copy.denied
         : code(failure) === 'STORAGE_UNAVAILABLE' ? copy.storage
         : code(failure) === 'STORAGE_UNCONFIRMED' ? copy.unconfirmed : copy.failed, failure));
       if (status(failure) === 412) {
         try {
-          await reread(controller.signal);
+          if (await reread(controller.signal, 'retry')) setNotice(withApiFailureReference(copy.changed, failure));
         } catch (readFailure: unknown) {
           if (!controller.signal.aborted && isDeletedJob(readFailure)) onDeleted?.(readFailure);
         }
       }
     } finally {
-      if (active.current === controller) { active.current = null; setBusy(false); }
+      if (active.current === controller) {
+        active.current = null; setBusy(false);
+        // Lost availability ended the change without an answer; it may or may not have been written.
+        if (controller.signal.aborted && !answered) setNotice(copy.unconfirmed);
+      }
     }
   }
   return <section aria-labelledby="job-organize-title">

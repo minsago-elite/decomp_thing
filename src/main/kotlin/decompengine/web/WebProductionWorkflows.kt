@@ -7,16 +7,23 @@ import decompengine.exploration.AutomaticExplorer
 import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
 import decompengine.jobs.BestEffortProgressJournal
+import decompengine.jobs.Job
+import decompengine.jobs.MAX_JOB_INPUT_BYTES
 import decompengine.jobs.WorkflowAcceptanceReference
 import decompengine.jobs.WorkflowCandidate
+import decompengine.jobs.WorkflowEvidenceModel
 import decompengine.jobs.WorkflowExecutionLimits
+import decompengine.jobs.WorkflowRepairBinding
 import decompengine.jobs.WorkflowKind
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.ArchivalReconstructionService
+import decompengine.project.ProgramModelAnalyzer
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.repair.ModuleRevisionStatus
+import decompengine.repair.RepairPublicationCommitment
+import decompengine.repair.RepairPublicationOwner
 import decompengine.repair.RepairPublicationMode
 import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.RepairHistoryReadStatus
@@ -24,6 +31,7 @@ import decompengine.repair.RepairHistorySnapshot
 import decompengine.repair.RepairRunStatus
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
+import decompengine.repair.hashStableRegularFile
 import decompengine.repair.readProjectRecordedRepairHistory
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.JsonObject
@@ -34,7 +42,14 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.PosixFileAttributes
+import java.nio.file.attribute.PosixFilePermissions
+
+internal data class WebRepairResult(val status: RepairRunStatus, val publication: RepairPublicationCommitment? = null) {
+    init { require(publication == null || status == RepairRunStatus.FULLY_ACCEPTED) }
+}
 
 /**
  * The existing CLI/legacy implementations behind each production adapter. Tests substitute inert
@@ -44,8 +59,11 @@ import java.nio.file.attribute.BasicFileAttributes
 internal interface WebWorkflowEngines {
     /** [activity] is called after each completed exploration sample. */
     fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
-    fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress)
-    fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus
+    /** Evidence-only reconstruction receives the owner's [WebInputSnapshot] as [binary], never the live upload path. */
+    fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+        published: (PublishedEvidenceModel) -> Unit)
+    fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,
+        owner: RepairPublicationOwner?): WebRepairResult
 
     companion object {
         fun production(environment: Map<String, String>, sensitiveValues: Collection<String>): WebWorkflowEngines = object : WebWorkflowEngines {
@@ -54,21 +72,35 @@ internal interface WebWorkflowEngines {
                     .explore(binary, listOf(CandidateInput("seed_default", CandidateSource.SEED)), reportsDirectory)
             }
 
-            override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
+            override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+                published: (PublishedEvidenceModel) -> Unit) {
                 // The explicit request mode replaces the legacy WEB_RECONSTRUCTION_MODE environment choice.
                 val selected = environment + (WEB_RECONSTRUCTION_MODE_KEY to mode.configurationValue)
                 val strategy = selectWebReconstructionStrategy(selected, progress)
                 Files.createDirectories(reportsDirectory)
                 Files.writeString(reportsDirectory.resolve("reconstruction_harness_selection.json"), renderWebReconstructionHarnessSelection(strategy))
-                ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
+                val bundled = GhidraHeadlessProgramModelAnalyzer.bundled()
+                val analyzer = if (mode == WebReconstructionMode.EVIDENCE_ONLY) {
+                    val bounded = bundled.withExportBudgets(strategy.profile.budgets)
+                    ProgramModelAnalyzer { input, directory ->
+                        bounded.analyzeWithPublishedModel(input, directory) { digest, imported, bytes ->
+                            published(PublishedEvidenceModel(digest, imported, bytes, strategy.profile.sha256))
+                        }
+                    }
+                } else bundled
+                ArchivalReconstructionService(analyzer, strategy.reconstructor,
                     profile = strategy.profile, progress = progress).reconstruct(binary, reportsDirectory)
             }
 
-            override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
+            override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,
+                owner: RepairPublicationOwner?): WebRepairResult {
                 val configuration = RepairRuntimeConfiguration("generated-c-make-v1", reportsDirectory.resolve("repair_history.json"),
                     harnessOverride = harness)
                 return SecureRepairRuntime.open(configuration).use { runtime ->
-                    runtime.runRepair(project, binary, listOf(ProcessInput("default")), reportsDirectory, REPAIR_ITERATIONS).runState.status
+                    val inputs = listOf(ProcessInput("default"))
+                    val result = if (owner == null) runtime.runRepair(project, binary, inputs, reportsDirectory, REPAIR_ITERATIONS)
+                        else runtime.runOwnedRepair(project, binary, inputs, reportsDirectory, REPAIR_ITERATIONS, owner)
+                    WebRepairResult(result.runState.status, result.publication)
                 }
             }
         }
@@ -188,23 +220,154 @@ internal class ReconstructWorkflowAdapter(
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
         if (agent && !allowTestOnlyExecution) return DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = true)
+        var evidenceModel: WorkflowEvidenceModel? = null
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->
                 val progress = MeteredWorkflowProgress(journal, meter)
+                // Only a route that executes nothing from the upload and contacts no agent commits a model, so no
+                // untrusted execution shares this attempt. It imports an owner-private snapshot, never the live upload.
+                // When no snapshot can be made, the attempt still imports the live upload but can never commit a model.
+                val snapshot = if (agent || launch.executesBinary || launch.contactsAgent) null
+                    else WebInputSnapshot.create(context.job, context.reportsDirectory)
                 try {
-                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress)
+                    engines.reconstruct(snapshot?.path ?: context.job.binaryPath, context.reportsDirectory, mode, progress) { published ->
+                        evidenceModel = evidenceModelCommitment(context.job.id, context.attempt.runId, snapshot, published)
+                    }
                 } catch (failure: Exception) {
                     progress.phase(AgentWorkflowPhase.FAILED)
                     throw failure
+                } finally {
+                    snapshot?.close()
                 }
             }
         }
         // Candidate output is recorded whenever a canonical source revision exists; it is never acceptance.
         val candidate = reconstructionCandidate(context.reportsDirectory.resolve("source-tree"))
         return when (unwrap(result)) {
-            is BoundedWorkflowResult.Returned -> DurableWebWorkflowOutcome.Completed(candidate, usage)
-            is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
-            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
+            is BoundedWorkflowResult.Returned -> DurableWebWorkflowOutcome.Completed(candidate, usage, evidenceModel = evidenceModel)
+            is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage, evidenceModel = evidenceModel)
+            is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage, evidenceModel = evidenceModel)
+        }
+    }
+}
+
+/**
+ * A model the bundled analyzer published. [inputSha256] is the exporter's own read of the executable path;
+ * [importedProgramSha256] is the isolated worker's report, over its stdout pipe, of the digest Ghidra recorded
+ * for the bytes it actually imported, or null when the worker reported none or the report was not attested.
+ */
+internal class PublishedEvidenceModel(val inputSha256: String, val importedProgramSha256: String?,
+    bytes: ByteArray, val profileSha256: String) {
+    private val content = bytes.copyOf()
+    val size get() = content.size
+    val sha256 = decompengine.project.sha256(content)
+}
+
+/**
+ * Commit a published model only to the owner's snapshot, the bytes the worker imported. The snapshot is
+ * immutable while the worker runs, and the imported Program's own digest and the model's inputSha256 must
+ * both equal the digest the owner computed while copying it. No commitment, and so no resume from this
+ * model, results when: no snapshot exists; the snapshot changed; the worker reported no imported-Program
+ * digest; either digest differs from the snapshot; or the model is outside 1..[WorkflowEvidenceModel.MAX_BYTES].
+ */
+internal fun evidenceModelCommitment(jobId: String, runId: String, snapshot: WebInputSnapshot?,
+    published: PublishedEvidenceModel): WorkflowEvidenceModel? {
+    val digest = snapshot?.sha256 ?: return null
+    if (published.importedProgramSha256 == null || published.importedProgramSha256 != digest) return null
+    if (published.inputSha256 != digest || published.size !in 1..WorkflowEvidenceModel.MAX_BYTES) return null
+    if (!snapshot.unchanged()) return null
+    return WorkflowEvidenceModel(jobId, runId, digest, published.sha256, published.size, published.profileSha256)
+}
+
+/**
+ * An owner-private, read-only copy of an attempt's selected upload, written from one stable read of it and
+ * hashed by the owner as it was copied. The directory is created fresh (mode 0700) for each attempt and the
+ * file is read-only (0400), so a later change to the upload path cannot reach the importer. [close] removes it.
+ */
+internal class WebInputSnapshot private constructor(private val directory: Path, val path: Path, val sha256: String,
+    private val identity: Any) : AutoCloseable {
+    /** Rechecked after import: the same read-only regular file, still holding the hashed bytes. */
+    fun unchanged(): Boolean = try {
+        val attributes = Files.readAttributes(path, PosixFileAttributes::class.java, NOFOLLOW_LINKS)
+        attributes.isRegularFile && attributes.fileKey() == identity && attributes.permissions() == READ_ONLY &&
+            streamSha256(path) == sha256
+    } catch (_: java.io.IOException) {
+        false
+    }
+
+    override fun close() {
+        try { Files.deleteIfExists(path) } catch (_: java.io.IOException) { }
+        try { Files.deleteIfExists(directory) } catch (_: java.io.IOException) { }
+    }
+
+    companion object {
+        private val PRIVATE_DIRECTORY = PosixFilePermissions.fromString("rwx------")
+        private val PRIVATE_FILE = PosixFilePermissions.fromString("rw-------")
+        private val READ_ONLY = PosixFilePermissions.fromString("r--------")
+
+        /** Null when the selected upload has no stable, bounded identity; the attempt then commits nothing. */
+        fun create(job: Job, workDirectory: Path): WebInputSnapshot? {
+            val upload = job.binaryPath.parent ?: return null
+            if (upload.fileName.toString() != job.id || job.binaryPath.fileName.toString() != "input.elf" ||
+                job.sizeBytes !in 1..MAX_JOB_INPUT_BYTES) return null
+            val storageRoot = upload.parent ?: return null
+            var directory: Path? = null
+            var target: Path? = null
+            try {
+                Files.createDirectories(workDirectory)
+                val created = Files.createDirectory(workDirectory.resolve("input-snapshot-${randomToken()}"),
+                    PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY)).also { directory = it }
+                val owner = Files.readAttributes(created, PosixFileAttributes::class.java, NOFOLLOW_LINKS)
+                require(owner.isDirectory && owner.permissions() == PRIVATE_DIRECTORY) { "snapshot directory is not owner-private" }
+                val file = created.resolve("input.elf").also { target = it }
+                val written = java.security.MessageDigest.getInstance("SHA-256")
+                var total = 0L
+                val stable = Files.newByteChannel(file, setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, NOFOLLOW_LINKS),
+                    PosixFilePermissions.asFileAttribute(PRIVATE_FILE)).use { channel ->
+                    hashStableRegularFile(storageRoot, "${job.id}/input.elf",
+                        declaredSize = { require(it == job.sizeBytes.toLong()) },
+                        readBytes = { _, read -> require(read <= job.sizeBytes.toLong()) },
+                        cancellationCheck = { if (Thread.currentThread().isInterrupted) throw InterruptedException() },
+                        consumeBytes = { buffer, count ->
+                            val chunk = java.nio.ByteBuffer.wrap(buffer, 0, count)
+                            while (chunk.hasRemaining()) channel.write(chunk)
+                            written.update(buffer, 0, count)
+                            total += count
+                        },
+                    )
+                }
+                // The stable read revalidates the upload after its last chunk; only then is the copy trusted.
+                val digest = written.digest().joinToString("") { "%02x".format(it) }
+                require(digest == stable.sha256 && total == job.sizeBytes.toLong()) { "snapshot differs from the stable read" }
+                Files.setPosixFilePermissions(file, READ_ONLY)
+                val identity = Files.readAttributes(file, PosixFileAttributes::class.java, NOFOLLOW_LINKS).fileKey()
+                    ?: error("snapshot has no file identity")
+                return WebInputSnapshot(created, file, digest, identity)
+            } catch (failure: Exception) {
+                target?.let { try { Files.deleteIfExists(it) } catch (_: java.io.IOException) { } }
+                directory?.let { try { Files.deleteIfExists(it) } catch (_: java.io.IOException) { } }
+                if (failure is InterruptedException) throw failure
+                // The optional checkpoint needs a verified snapshot; evidence-only analysis still runs without one.
+                return null
+            }
+        }
+
+        private fun randomToken(): String {
+            val bytes = ByteArray(16).also(java.security.SecureRandom()::nextBytes)
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+
+        private fun streamSha256(path: Path): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            Files.newInputStream(path, NOFOLLOW_LINKS).use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
         }
     }
 }
@@ -258,14 +421,22 @@ internal class RepairWorkflowAdapter(
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             // The attempt owns a private copy; the selected revision's retained evidence is never modified.
             copyWebSourceTree(input, project)
-            engines.repair(project, context.job.binaryPath, context.reportsDirectory, harness)
+            val owner = context.attempt.repairPublicationNonce?.let {
+                RepairPublicationOwner(context.job.id, context.attempt.runId, it)
+            }
+            engines.repair(project, context.job.binaryPath, context.reportsDirectory, harness, owner)
         }
-        val candidate = repairCandidate(project, context.attempt.startedAt?.toEpochMilli(), acceptTestOnlyPublication)
-        return when (val completed = unwrap(result)) {
+        val completed = unwrap(result)
+        val binding = (completed as? BoundedWorkflowResult.Returned)?.value?.publication?.let {
+            WorkflowRepairBinding.from(context.attempt, it)
+        }
+        val candidate = binding?.let { WorkflowCandidate(webSourceRevisionId(it.sourceSha256), it.sourceSha256) }
+            ?: repairCandidate(project, context.attempt.startedAt?.toEpochMilli(), acceptTestOnlyPublication)
+        return when (completed) {
             is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
             is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
-            is BoundedWorkflowResult.Returned -> when (completed.value) {
-                RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID -> DurableWebWorkflowOutcome.Completed(candidate, usage)
+            is BoundedWorkflowResult.Returned -> when (completed.value.status) {
+                RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID -> DurableWebWorkflowOutcome.Completed(candidate, usage, binding = binding)
                 RepairRunStatus.NO_CHANGES -> DurableWebWorkflowOutcome.Completed(candidate, usage, WorkflowTerminalReason.NO_CHANGES)
                 RepairRunStatus.ITERATION_EXHAUSTED, RepairRunStatus.RESOURCE_EXHAUSTED ->
                     DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)

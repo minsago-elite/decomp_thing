@@ -11,6 +11,10 @@ import decompengine.project.sha256
 import decompengine.repair.DeclarativeRepairIndexProfile
 import decompengine.repair.ModuleRevisionGraph
 import decompengine.repair.open
+import decompengine.repair.RepairPublicationOwner
+import decompengine.repair.RepairPublicationCommitment
+import decompengine.repair.RepairValidationObservedOutcome
+import decompengine.repair.repairValidationPublishedTextArtifact
 import decompengine.repair.RepairEvidence
 import decompengine.repair.RepairHistoryReadStatus
 import decompengine.repair.RepairIndexLayout
@@ -49,6 +53,99 @@ import kotlin.test.*
 /** Inert engines only: no binary, Ghidra, sandbox or model agent runs in these controls. */
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebProductionWorkflowsTest {
+    @Test
+    fun `repair publication binds identical projects to the live dispatch and refuses a copied graph`() = withRoot { root ->
+        val source = root.resolve("template")
+        writeSourceTree(source, "identical")
+        val jobStore = JobStore(root.resolve("jobs"))
+        val job = jobStore.createFromUpload("same.elf", elfFixture())
+        val engines = FakeEngines()
+        val adapter = RepairWorkflowAdapter(engines, FAST, "agent-acp")
+        fun run(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome.Completed =
+            assertIs<DurableWebWorkflowOutcome.Completed>(adapter.execute(context))
+        fun contextFor(runId: String, nonce: String): DurableWebWorkflowContext {
+            val reports = root.resolve(runId)
+            val initial = context(root, reports, WebWorkflowDefaults.REPAIR)
+            return initial.copy(job = job, inputSourceTree = source, attempt = initial.attempt.copy(jobId = job.id,
+                workflow = WorkflowKind.REPAIR, runId = runId, repairPublicationNonce = nonce))
+        }
+        val first = contextFor("run_first", "publication_first")
+        val second = contextFor("run_second", "publication_second")
+        engines.ownedRepair = ::commitFixtureObservation
+        val a = assertNotNull(run(first).binding)
+        val b = assertNotNull(run(second).binding)
+        assertEquals(a.sourceSha256, b.sourceSha256)
+        assertEquals(a.graphRunId, b.graphRunId)
+        assertEquals(a.receiptSha256, b.receiptSha256)
+        assertNotEquals(a.invocationId, b.invocationId)
+        assertNotEquals(a.graphSha256, b.graphSha256)
+
+        val copied = root.resolve("copied")
+        copyWebSourceTree(first.reportsDirectory.resolve("source-tree"), copied)
+        ModuleRevisionGraph.open(copied, PROFILE).use { graph ->
+            assertNull(graph.capturePublication(a.graphRunId))
+        }
+        val stale = assertNotNull(engines.lastPublication)
+        engines.ownedRepair = { _, _ -> stale }
+        assertFailsWith<IllegalArgumentException> { run(contextFor("run_third", "publication_third")) }
+    }
+
+    @Test
+    fun `repair publication survives service restart without publishing acceptance or executing again`() = withRoot { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("pipeline.elf", elfFixture())
+        val engines = FakeEngines().also { it.ownedRepair = ::commitFixtureObservation }
+        val binding = service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val input = service.requestDurableStart(job.id, version(service, job.id),
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "binding_reconstruct_01").attempt
+            val repair = service.requestDurableStart(job.id, version(service, job.id),
+                NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, input.candidate!!.revisionId,
+                    "agent-acp"), "binding_repair_start_01").attempt
+            assertEquals(WorkflowRecoveryDisposition.COMPLETED_UNPUBLISHED, repair.recoveryDisposition)
+            val result = assertNotNull(repair.repairBinding)
+            val graph = readProjectRecordedRepairHistory(store.runReportsDirectory(job.id, repair.runId).resolve("source-tree"))
+            assertEquals(assertNotNull(graph.snapshot).graphSha256, result.graphSha256)
+            result
+        }
+        val metadata = root.resolve(job.id).resolve("workflow-state.json")
+        val before = metadata.readBytes()
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val stored = assertNotNull(service.presentation(job.id).snapshot).attempts.last()
+            assertEquals(binding, stored.repairBinding)
+            assertNull(stored.acceptedRevision)
+            assertNull(service.startupReconciliation(), "production has no registered acceptance publisher")
+        }
+        assertContentEquals(before, metadata.readBytes())
+        assertEquals(2, engines.calls.get())
+    }
+
+    /** Inert owner-side graph metadata. The receipt is deliberately opaque to a binding producer. */
+    private fun commitFixtureObservation(project: Path, owner: RepairPublicationOwner): RepairPublicationCommitment =
+        ModuleRevisionGraph.open(project, PROFILE).use { graph ->
+            graph.enableRunContract()
+            graph.retainRegressionInputs(INPUTS)
+            val run = graph.beginRun(1, 60_000, owner)
+            val binary = sha256("original".toByteArray())
+            graph.bindOriginalBinary(binary)
+            graph.bindExpectedObservations(sha256("expected".toByteArray()))
+            val invocation = graph.validationInvocation(null)
+            val receipt = "{}"
+            val path = project.resolve("reports/fixture.validation.json")
+            path.writeText(receipt)
+            val artifact = repairValidationPublishedTextArtifact(path, receipt)
+            val proof = RepairValidationProof(invocation.sourceRevisionSha256, invocation.profileSha256,
+                invocation.indexSha256, invocation.regressionCorpusSha256, binary, sha256("rebuilt".toByteArray()),
+                sha256("runtime".toByteArray()), artifact.sha256, true, RepairValidationAssurance.STRICT_CONTAINED)
+            graph.recordValidationObservation(invocation, proof, RepairValidationObservedOutcome.BEHAVIOR_CHECKED, artifact, null)
+            assertNull(graph.capturePublication(run.id))
+            graph.acceptAssessedBaseline(proof, RepairEvidence("valid", "fixture baseline"))
+            graph.synchronizeRepairHistory()
+            assertNotNull(graph.capturePublication(run.id))
+        }
+
     @Test
     fun `explore enforces wall-clock, idle and output limits and stops its child before returning`() = withRoot { root ->
         val engines = FakeEngines()
@@ -313,6 +410,7 @@ class WebProductionWorkflowsTest {
     fun `agent reconstruction meters distinct tool calls and records only a canonical candidate`() = withRoot { root ->
         val engines = FakeEngines()
         val modes = mutableListOf<WebReconstructionMode>()
+        engines.modelBytes = "{}".toByteArray()
         engines.reconstructBody = { reports, mode, progress ->
             modes += mode
             val task = progress.beginTask("module", request(root))
@@ -326,13 +424,243 @@ class WebProductionWorkflowsTest {
         assertLimitExhausted(exhausted)
         assertEquals(baseCandidate(), (exhausted as DurableWebWorkflowOutcome.Failed).candidate, "candidate output is retained, not accepted")
         val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("agent"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
+        assertNull(completed.evidenceModel)
         assertEquals(baseCandidate(), completed.candidate); assertEquals(3uL, completed.usage?.toolCalls)
         val evidence = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
         assertFalse(checkNotNull(evidence.launch).contactsAgent); assertTrue(checkNotNull(agent.launch).contactsAgent)
         engines.reconstructBody = { reports, mode, _ -> modes += mode; Files.createDirectories(reports) }
+        engines.modelBytes = ByteArray(VerifiedWebCheckpoint.MAX_BYTES + 1)
         val missing = assertIs<DurableWebWorkflowOutcome.Completed>(evidence.execute(context(root, root.resolve("evidence"), WebWorkflowDefaults.RECONSTRUCT_EVIDENCE)))
+        assertNull(missing.evidenceModel)
         assertNull(missing.candidate, "no build contract, no candidate identity")
         assertEquals(listOf(WebReconstructionMode.AGENT, WebReconstructionMode.AGENT, WebReconstructionMode.EVIDENCE_ONLY), modes)
+    }
+
+    @Test
+    fun `model commitment checks the selected upload independently and survives a later output limit`() = withRoot { root ->
+        val bytes = elfFixture()
+        val job = JobStore(root).createFromUpload("model-input.elf", bytes)
+        val model = "{}".toByteArray()
+        val engines = FakeEngines().apply {
+            reconstructBody = { reports, _, _ -> Files.write(reports.resolve("output"), ByteArray(65_536)) }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        fun execute(name: String, limits: WorkflowExecutionLimits): DurableWebWorkflowOutcome {
+            val fixture = context(root, root.resolve(name), limits)
+            return adapter.execute(fixture.copy(job = job, attempt = fixture.attempt.copy(
+                jobId = job.id, workflow = WorkflowKind.RECONSTRUCT, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY)))
+        }
+        val limited = adapter.limits.copy(maxOutputBytes = 32_768uL)
+        val before = assertIs<DurableWebWorkflowOutcome.Failed>(execute("no-model", limited))
+        assertLimitExhausted(before)
+        assertNull(before.evidenceModel)
+
+        engines.modelBytes = model
+        val after = assertIs<DurableWebWorkflowOutcome.Failed>(execute("published-model", limited))
+        assertLimitExhausted(after)
+        val retained = assertNotNull(after.evidenceModel)
+        assertEquals(sha256(bytes), retained.inputSha256)
+        assertEquals(sha256(model), retained.modelSha256)
+
+        engines.modelInputDigest = sha256("another input".toByteArray())
+        val foreign = assertIs<DurableWebWorkflowOutcome.Completed>(execute("different-input", adapter.limits))
+        assertNull(foreign.evidenceModel)
+    }
+
+    @Test
+    fun `model commitment requires the imported Program digest to match the verified upload`() = withRoot { root ->
+        val bytes = elfFixture()
+        val job = JobStore(root).createFromUpload("imported-input.elf", bytes)
+        val engines = FakeEngines().apply { modelBytes = "{}".toByteArray() }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        fun execute(name: String): DurableWebWorkflowOutcome.Completed {
+            val fixture = context(root, root.resolve(name), adapter.limits)
+            return assertIs(adapter.execute(fixture.copy(job = job, attempt = fixture.attempt.copy(
+                jobId = job.id, workflow = WorkflowKind.RECONSTRUCT, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY))))
+        }
+
+        val matched = assertNotNull(execute("imported-match").evidenceModel)
+        assertEquals(sha256(bytes), matched.inputSha256)
+        assertEquals(sha256("{}".toByteArray()), matched.modelSha256)
+
+        // Both path reads agree with the upload, but Ghidra reports different imported bytes.
+        engines.importedProgramDigest = sha256("different imported bytes".toByteArray())
+        assertNull(execute("imported-mismatch").evidenceModel)
+
+        engines.importedProgramDigest = null
+        assertNull(execute("imported-missing").evidenceModel)
+    }
+
+    @Test
+    fun `evidence-only import consumes an owner snapshot that later upload replacement cannot reach`() = withRoot { root ->
+        val original = elfFixture()
+        val replacement = elfFixture().also { it[it.size - 1] = 0x55 }
+        val tampered = elfFixture().also { it[it.size - 1] = 0x66 }
+        val job = JobStore(root).createFromUpload("snapshot-input.elf", original)
+        val consumed = mutableListOf<Pair<Path, ByteArray>>()
+        var forgeAfterTamper = false
+        val engines = FakeEngines().apply {
+            importer = { binary, _, published ->
+                val directory = Files.readAttributes(binary.parent, java.nio.file.attribute.PosixFileAttributes::class.java,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                assertEquals("rwx------", java.nio.file.attribute.PosixFilePermissions.toString(directory.permissions()))
+                assertEquals("r--------", java.nio.file.attribute.PosixFilePermissions.toString(Files.getPosixFilePermissions(binary)))
+                // An untrusted writer replaces the original upload path after the snapshot, before the import reads.
+                replaceUpload(job.binaryPath, replacement)
+                if (forgeAfterTamper) {
+                    val owned = Files.readAllBytes(binary)
+                    Files.setPosixFilePermissions(binary, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
+                    Files.write(binary, tampered)
+                    Files.setPosixFilePermissions(binary, java.nio.file.attribute.PosixFilePermissions.fromString("r--------"))
+                    // The importer claims the snapshot's digest although the snapshot no longer holds those bytes.
+                    published(PublishedEvidenceModel(sha256(owned), sha256(owned), "{}".toByteArray(), "f".repeat(64)))
+                } else {
+                    val bytes = Files.readAllBytes(binary)
+                    consumed += binary to bytes
+                    published(PublishedEvidenceModel(sha256(bytes), sha256(bytes), "{}".toByteArray(), "f".repeat(64)))
+                }
+            }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        fun execute(name: String): DurableWebWorkflowOutcome.Completed {
+            val fixture = context(root, root.resolve(name), adapter.limits)
+            return assertIs(adapter.execute(fixture.copy(job = job, attempt = fixture.attempt.copy(
+                jobId = job.id, workflow = WorkflowKind.RECONSTRUCT, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY))))
+        }
+
+        val committed = assertNotNull(execute("snapshot").evidenceModel)
+        val (path, bytes) = consumed.single()
+        assertNotEquals(job.binaryPath, path)
+        assertEquals(root.resolve("snapshot"), path.parent.parent)
+        assertTrue(path.parent.fileName.toString().startsWith("input-snapshot-"))
+        assertContentEquals(original, bytes, "the importer consumed the owner's snapshot, not the replaced upload")
+        assertEquals(sha256(bytes), committed.inputSha256)
+        assertNotEquals(sha256(Files.readAllBytes(job.binaryPath)), committed.inputSha256)
+        assertFalse(Files.exists(path.parent, java.nio.file.LinkOption.NOFOLLOW_LINKS), "the snapshot is removed after import")
+
+        // The upload was replaced before this attempt's snapshot: the commitment binds what was imported.
+        val later = assertNotNull(execute("replaced-before-snapshot").evidenceModel)
+        assertContentEquals(replacement, consumed.last().second)
+        assertEquals(sha256(replacement), later.inputSha256)
+
+        forgeAfterTamper = true
+        assertNull(execute("snapshot-changed").evidenceModel, "a changed snapshot is refused even when the importer agrees")
+    }
+
+    @Test
+    fun `opt in real bundled Ghidra imports the owner snapshot while the upload path is replaced`() = withRoot { root ->
+        // The hosted bundled-ghidra job sets this, so a run that cannot import fails instead of passing or skipping.
+        val required = System.getenv("DECOMP_REQUIRE_REAL_GHIDRA_WEB_SNAPSHOT") == "true"
+        if (System.getenv("RUN_REAL_GHIDRA") != "true") {
+            assertFalse(required, "the required real snapshot import needs RUN_REAL_GHIDRA=true")
+            return@withRoot
+        }
+        // Ghidra refuses a project path with a dot-prefixed element, as in a local `.t3` worktree. Skip there,
+        // except where the import is required.
+        val hidden = root.toRealPath().firstOrNull { it.toString().startsWith(".") }
+        val incompatible = "Ghidra refuses project paths with a dot-prefixed element ($hidden in $root); run from a checkout without one"
+        if (hidden != null && required) fail(incompatible)
+        org.junit.jupiter.api.Assumptions.assumeTrue(hidden == null, incompatible)
+        // GCC writes intermediates under TMPDIR; keep them inside the fixture root.
+        val compilerTemporary = root.resolve("compiler-tmp").createDirectories()
+        fun compile(name: String, result: Int): ByteArray {
+            val source = root.resolve("$name.c").also { it.writeText("int main(void) { return $result; }\n") }
+            val binary = root.resolve(name)
+            val compiler = ProcessBuilder("gcc", "-O0", source.toString(), "-o", binary.toString()).redirectErrorStream(true)
+                .apply { environment()["TMPDIR"] = compilerTemporary.toString() }.start()
+            val output = compiler.inputStream.bufferedReader().readText()
+            check(compiler.waitFor() == 0) { output }
+            return Files.readAllBytes(binary)
+        }
+        val original = compile("original", 7)
+        val replacement = compile("replacement", 9)
+        check(!original.contentEquals(replacement))
+        val job = JobStore(root).createFromUpload("real-snapshot.elf", original)
+        val analyzer = decompengine.project.GhidraHeadlessProgramModelAnalyzer()
+        val reported = AtomicReference<PublishedEvidenceModel>()
+        val engines = FakeEngines().apply {
+            importer = { binary, reports, published ->
+                replaceUpload(job.binaryPath, replacement)
+                val stop = AtomicBoolean()
+                // Keep replacing the original upload path for the whole import.
+                val mutator = Thread {
+                    var flip = false
+                    while (!stop.get()) {
+                        replaceUpload(job.binaryPath, if (flip) original else replacement)
+                        flip = !flip
+                        Thread.sleep(5)
+                    }
+                }.apply { isDaemon = true; start() }
+                try {
+                    analyzer.analyzeWithPublishedModel(binary, reports.resolve("analysis")) { input, imported, model ->
+                        PublishedEvidenceModel(input, imported, model, "f".repeat(64)).also(reported::set).also(published)
+                    }
+                } finally {
+                    stop.set(true)
+                    mutator.join(5_000)
+                    replaceUpload(job.binaryPath, replacement)
+                }
+            }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        val fixture = context(root, root.resolve("reports"), adapter.limits)
+        val outcome = assertIs<DurableWebWorkflowOutcome.Completed>(adapter.execute(fixture.copy(job = job, attempt = fixture.attempt.copy(
+            jobId = job.id, workflow = WorkflowKind.RECONSTRUCT, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY))))
+        val published = assertNotNull(reported.get())
+        assertEquals(sha256(original), published.importedProgramSha256, "Ghidra's own Program digest names the snapshot bytes")
+        assertEquals(sha256(original), published.inputSha256)
+        val committed = assertNotNull(outcome.evidenceModel)
+        assertEquals(sha256(original), committed.inputSha256)
+        assertEquals(published.sha256, committed.modelSha256)
+        assertEquals(sha256(replacement), sha256(Files.readAllBytes(job.binaryPath)))
+    }
+
+    @Test
+    fun `a model candidate replaced after the worker attested it is never committed`() = withRoot { root ->
+        val job = JobStore(root).createFromUpload("replaced-candidate.elf", elfFixture())
+        fun model(name: String) = root.resolve("$name.json").also {
+            it.writeText(decompengine.project.RecoveredProgramModel(inputSha256 = sha256(elfFixture()), functions = listOf(
+                decompengine.project.RecoveredFunction(id = "fn_0000000000001000", name = name, address = 0x1000UL,
+                    prototype = "int $name(void)"))).toJson())
+        }
+        val written = model("written")
+        val replacement = model("replacement")
+        val replace = root.resolve("replace-after-attestation")
+        // The worker attests the digest of the bytes it wrote; another writer then replaces the published candidate.
+        val worker = root.resolve("fake-worker").also {
+            it.writeText("""
+                #!/bin/sh
+                for last do :; done
+                cp '$written' "${'$'}last"
+                imported=${'$'}(sha256sum "${'$'}4" | cut -d' ' -f1)
+                printf '\n${decompengine.project.IMPORTED_PROGRAM_FRAME} %s %s %s\n' "${'$'}{last##*/}" "${'$'}imported" '${sha256(Files.readAllBytes(written))}'
+                if [ -e '$replace' ]; then cp '$replacement' "${'$'}last.next" && mv -f "${'$'}last.next" "${'$'}last"; fi
+            """.trimIndent() + "\n")
+            it.toFile().setExecutable(true)
+        }
+        val engines = FakeEngines().apply {
+            importer = { binary, reports, published ->
+                decompengine.project.GhidraHeadlessProgramModelAnalyzer(decompengine.analysis.fakeGhidraCommand(worker))
+                    .analyzeWithPublishedModel(binary, reports.resolve("analysis")) { input, imported, bytes ->
+                        published(PublishedEvidenceModel(input, imported, bytes, "f".repeat(64)))
+                    }
+            }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        fun execute(name: String): DurableWebWorkflowOutcome.Completed {
+            val fixture = context(root, root.resolve(name), adapter.limits)
+            return assertIs(adapter.execute(fixture.copy(job = job, attempt = fixture.attempt.copy(
+                jobId = job.id, workflow = WorkflowKind.RECONSTRUCT, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY))))
+        }
+
+        val committed = assertNotNull(execute("attested").evidenceModel, "the unreplaced candidate is committed")
+        assertEquals(sha256(elfFixture()), committed.inputSha256)
+        assertEquals(sha256(Files.readAllBytes(written)), committed.modelSha256)
+
+        Files.createFile(replace)
+        assertNull(execute("replaced").evidenceModel, "a candidate replaced after attestation is refused")
+        assertContentEquals(Files.readAllBytes(replacement), Files.readAllBytes(root.resolve("replaced/analysis/reports/program_model.json")),
+            "the replacement was what the owner read")
     }
 
     @Test
@@ -357,7 +685,7 @@ class WebProductionWorkflowsTest {
     @Test
     fun `admission requires an explicit ready option, server-approved bounds and the declared input`() = withRoot { root ->
         val store = JobStore(root); val job = store.createFromUpload("admission.elf", elfFixture())
-        val engines = FakeEngines()
+        val engines = FakeEngines().apply { modelBytes = "{}".toByteArray() }
         service(store, adapters(engines)).use { service ->
             service.initializeExistingStorage()
             val agentMissing = WebWorkflowPrerequisites(WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."),
@@ -385,6 +713,8 @@ class WebProductionWorkflowsTest {
                 "evidence_only_reconstruction", agentMissing)
             assertEquals(WorkflowRunState.COMPLETED, evidence.attempt.state); assertEquals(lowered, evidence.attempt.limits)
             assertEquals(EVIDENCE_ONLY_CAPABILITY, evidence.attempt.harnessCapabilityId)
+            assertEquals(decompengine.jobs.WorkflowEvidenceModel(evidence.attempt.jobId, evidence.attempt.runId,
+                sha256(elfFixture()), sha256("{}".toByteArray()), 2, "f".repeat(64)), evidence.attempt.evidenceModel)
             assertEquals(listOf(WebReconstructionMode.EVIDENCE_ONLY), engines.modes)
             assertEquals(baseCandidate(), evidence.attempt.candidate); assertNull(evidence.attempt.acceptedRevision)
         }
@@ -803,16 +1133,32 @@ class WebProductionWorkflowsTest {
         var reconstructBody: (Path, WebReconstructionMode, AgentWorkflowProgress) -> Unit = { reports, mode, _ ->
             modes += mode; writeSourceTree(reports.resolve("source-tree"), "base")
         }
+        var ownedRepair: ((Path, RepairPublicationOwner) -> RepairPublicationCommitment)? = null
+        var lastPublication: RepairPublicationCommitment? = null
         var repairBody: (Path) -> Unit = { project -> acceptRepairGraph(project) }
+        var modelBytes: ByteArray? = null
+        var modelInputDigest = sha256(elfFixture())
+        var importedProgramDigest: String? = sha256(elfFixture())
+        /** Stands in for the bundled importer: receives the path it must import and the attempt's reports directory. */
+        var importer: ((Path, Path, (PublishedEvidenceModel) -> Unit) -> Unit)? = null
         var activity: () -> Unit = {}
         override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) {
             calls.incrementAndGet(); this.activity = activity; exploreBody(reportsDirectory)
         }
-        override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
+        override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
+            published: (PublishedEvidenceModel) -> Unit) {
+            importer?.invoke(binary, reportsDirectory, published)
+                ?: modelBytes?.let { published(PublishedEvidenceModel(modelInputDigest, importedProgramDigest, it, "f".repeat(64))) }
             calls.incrementAndGet(); reconstructBody(reportsDirectory, mode, progress)
         }
-        override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
-            calls.incrementAndGet(); check(harness == "acp"); repairBody(project); return RepairRunStatus.FULLY_ACCEPTED
+        override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,
+        owner: decompengine.repair.RepairPublicationOwner?): WebRepairResult {
+            calls.incrementAndGet()
+            check(harness == "acp")
+            val publication = ownedRepair?.invoke(project, requireNotNull(owner))
+            if (publication == null) repairBody(project)
+            lastPublication = publication
+            return WebRepairResult(RepairRunStatus.FULLY_ACCEPTED, publication)
         }
     }
 
@@ -839,6 +1185,11 @@ class WebProductionWorkflowsTest {
     private fun assertCode(code: String, operation: () -> Unit) = assertEquals(code, assertFailsWith<WebJobServiceException> { operation() }.code)
     private fun assertLimitExhausted(outcome: DurableWebWorkflowOutcome) =
         assertEquals(WorkflowTerminalReason.LIMIT_EXHAUSTED, assertIs<DurableWebWorkflowOutcome.Failed>(outcome).reason)
+    /** Atomically replaces an upload path, as another writer to the job directory could. */
+    private fun replaceUpload(upload: Path, bytes: ByteArray) {
+        val staged = Files.write(upload.resolveSibling(".replace-${java.util.UUID.randomUUID()}"), bytes)
+        Files.move(staged, upload, java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
     private fun withRoot(operation: (Path) -> Unit) {
         val root = createTempDirectory("production-workflows-")
         try { operation(root) } finally { root.toFile().deleteRecursively() }

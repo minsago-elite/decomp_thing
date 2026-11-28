@@ -705,10 +705,22 @@ data class RepairRunResult(
     val runState: RepairRunState? = null,
 )
 
-data class RepairRunOutcome(
+data class RepairRunOutcome @JvmOverloads constructor(
     val iterations: List<RepairIteration>,
     val validation: BehaviorComparisonReport?,
     val runState: RepairRunState,
+    val publication: RepairPublicationCommitment? = null,
+)
+
+/** Created from the lifecycle owner's durable attempt before dispatch. */
+data class RepairPublicationOwner(val jobId: String, val runId: String, val nonce: String)
+
+/** Captured under the graph writer's root lock before returning this execution's outcome. */
+class RepairPublicationCommitment internal constructor(
+    val owner: RepairPublicationOwner,
+    val graphSha256: String,
+    val invocation: RepairValidationInvocation,
+    val receiptSha256: String,
 )
 
 internal fun RepairIteration.deepFrozenCopy(): RepairIteration = RepairIteration(
@@ -1315,6 +1327,10 @@ class TraceGuidedRepairLoop private constructor(
         maxIterations: Int = 5,
     ): RepairRunOutcome = runRepairInternal(projectDir, originalBinary, inputs, reportsDir, maxIterations, null)
 
+    fun runOwnedRepair(projectDir: Path, originalBinary: Path, inputs: List<ProcessInput>, reportsDir: Path,
+        maxIterations: Int, owner: RepairPublicationOwner): RepairRunOutcome =
+        runRepairInternal(projectDir, originalBinary, inputs, reportsDir, maxIterations, null, owner)
+
     fun prepareExplorationSnapshot(projectDir: Path, originalBinary: Path): RepairExplorationSnapshotData {
         checkOpen()
         validationStrategy.requireAvailable()
@@ -1344,6 +1360,7 @@ class TraceGuidedRepairLoop private constructor(
         reportsDir: Path,
         maxIterations: Int,
         explorationSnapshot: RepairExplorationSnapshotData?,
+        publicationOwner: RepairPublicationOwner? = null,
     ): RepairRunOutcome {
         checkOpen()
         require(maxIterations > 0)
@@ -1371,7 +1388,7 @@ class TraceGuidedRepairLoop private constructor(
                     "original binary changed before the snapshot-bound repair run was admitted"
                 }
             }
-            val run = graph.beginRun(maxIterations, limits.wallClockTimeout.toMillis())
+            val run = graph.beginRun(maxIterations, limits.wallClockTimeout.toMillis(), publicationOwner)
             activeDeadlineNanos = System.nanoTime() + limits.wallClockTimeout.toNanos()
             var finalReport: BehaviorComparisonReport? = null
             try {
@@ -1441,7 +1458,7 @@ class TraceGuidedRepairLoop private constructor(
             }
             history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
             RepairRunOutcome(graph.derivedRepairIterations().filter { it.runId == run.id }, finalReport,
-                graph.snapshot.runs.single { it.id == run.id })
+                graph.snapshot.runs.single { it.id == run.id }, graph.capturePublication(run.id))
         } }
     }
 

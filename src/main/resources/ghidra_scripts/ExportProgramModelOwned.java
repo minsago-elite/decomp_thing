@@ -2455,7 +2455,8 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
     }
 
-    private static void assembleModel(
+    /** Returns the SHA-256 of the bytes this call wrote, computed as they were written; it never re-reads them. */
+    private static String assembleModel(
         Path outputPath,
         String inputSha256,
         List<BoundFragment> functions,
@@ -2487,8 +2488,10 @@ public class ExportProgramModelOwned extends GhidraScript {
         Files.deleteIfExists(temporary);
         try {
             for (BoundFragment binding : auxiliaryEvidence) verifyBoundFragment(binding);
+            MessageDigest written = MessageDigest.getInstance("SHA-256");
             BoundedOutput bounded = new BoundedOutput(
-                Files.newOutputStream(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE),
+                new java.security.DigestOutputStream(
+                    Files.newOutputStream(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE), written),
                 MAXIMUM_PROGRAM_MODEL_BYTES
             );
             try (OutputStream output = new BufferedOutputStream(bounded)) {
@@ -2512,6 +2515,7 @@ public class ExportProgramModelOwned extends GhidraScript {
                 Files.move(temporary, outputPath, StandardCopyOption.REPLACE_EXISTING);
             }
             forceDirectory(outputPath.getParent());
+            return hexDigest(written.digest());
         } finally {
             Files.deleteIfExists(temporary);
         }
@@ -2560,6 +2564,31 @@ public class ExportProgramModelOwned extends GhidraScript {
                     ",\"message\":" + json(exported.failure) + "}\n"
             );
         }
+    }
+
+    /**
+     * The owned-candidate protocol also reports the digest Ghidra recorded for the bytes it imported, and the
+     * digest of the model bytes this script wrote, computed while assembling them: the published candidate is
+     * never re-read, so a replaced candidate cannot be attested. The model's inputSha256 is a second read of the
+     * executable path, which need not be those bytes. The report is one frame on this worker's stdout, a pipe
+     * only the owner's child holds, never a file that another writer to the candidate directory could forge.
+     * The frame names its candidate and is written once, even when the Program has no well-formed digest
+     * ("none"), so a second frame (for example, imported text that Ghidra logs) makes the owner refuse the
+     * attestation. EXPORTER_VERSION is unchanged: resumable export state binds this script's SHA-256, so the
+     * source change already invalidates state written by the previous script.
+     */
+    private void attestImportedProgram(Path modelCandidate, String writtenModelSha256) throws Exception {
+        String imported = currentProgram.getExecutableSHA256();
+        String normalized = imported == null ? "" : imported.toLowerCase(java.util.Locale.ROOT);
+        if (!normalized.matches("[0-9a-f]{64}")) normalized = "none";
+        String frame = "\nDECOMP_IMPORTED_PROGRAM_V1 " + modelCandidate.getFileName() + " " + normalized + " " +
+            writtenModelSha256 + "\n";
+        // Flush buffered output first; the leading newline starts the frame on its own line regardless.
+        System.out.flush();
+        java.io.FileOutputStream stdout = new java.io.FileOutputStream(java.io.FileDescriptor.out);
+        // One write below PIPE_BUF is atomic on the pipe. Never close this stream: it would close fd 1.
+        stdout.write(frame.getBytes(StandardCharsets.US_ASCII));
+        stdout.flush();
     }
 
     private static boolean isRetryableDecompileTimeout(FunctionExport exported) {
@@ -3092,7 +3121,8 @@ public class ExportProgramModelOwned extends GhidraScript {
             }
         }
 
-        assembleModel(modelAssemblyPath, inputSha256, functionRecords, globalRecords, typeRecords, auxiliaryEvidence);
+        String modelSha256 = assembleModel(modelAssemblyPath, inputSha256, functionRecords, globalRecords, typeRecords, auxiliaryEvidence);
+        if (!modelAssemblyPath.equals(outputPath)) attestImportedProgram(modelAssemblyPath, modelSha256);
         observedProgress(progressPath, "complete", completed, total, recovered, partial, failed, reused, null);
         println(
             "program-model export complete functions=" + completed + " partial=" + partial +

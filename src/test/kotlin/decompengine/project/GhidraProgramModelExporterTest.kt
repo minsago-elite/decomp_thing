@@ -101,8 +101,17 @@ class GhidraProgramModelExporterTest {
         }
         val work = temp.resolve("analysis")
 
-        val model = GhidraHeadlessProgramModelAnalyzer(home).analyze(binary, work)
+        var observations = 0
+        val model = GhidraHeadlessProgramModelAnalyzer(home).analyzeWithPublishedModel(binary, work) { inputDigest, imported, bytes ->
+            assertEquals("fake-input", inputDigest)
+            assertEquals("ab".repeat(32), imported)
+            kotlin.test.assertContentEquals(work.resolve("reports/program_model.json").readBytes(), bytes)
+            observations++
+        }
 
+        assertEquals(1, observations)
+        assertTrue(work.resolve("reports").listDirectoryEntries("*.program-sha256").isEmpty(), "no file carries the attestation")
+        assertTrue(work.resolve("reports/ghidra_stdout.log").readText().contains("$IMPORTED_PROGRAM_FRAME "))
         assertEquals("fake-input", model.inputSha256)
         assertEquals(listOf("fn_0000000000001000"), model.functions.map { it.id })
         val invocation = work.resolve("invocation.txt").readText()
@@ -113,6 +122,10 @@ class GhidraProgramModelExporterTest {
         val exporter = work.resolve("scripts/ExportProgramModelOwned.java").readText()
         assertTrue(exporter.contains("program-model export complete"))
         assertTrue(exporter.contains("writeIfAbsentAtomic"))
+        // The attested model digest comes from the assembly stream, never from re-reading the published candidate.
+        assertTrue(exporter.contains("new java.security.DigestOutputStream("))
+        assertTrue(exporter.contains("attestImportedProgram(modelAssemblyPath, modelSha256)"))
+        assertFalse(exporter.contains("sha256(modelCandidate)"))
         assertTrue(exporter.contains("return isAcceptedRecord(record)"))
         assertTrue(exporter.contains("copyBoundFragment"))
         assertTrue(exporter.contains("DECOMPILE_TIMEOUT_SECONDS = 60"))
@@ -183,6 +196,39 @@ class GhidraProgramModelExporterTest {
         val batchReuse = exporter.lastIndexOf("discardPlanningPendingFiles(planningBatchesDirectory, total)")
         assertTrue(semanticPreflight >= 0 && semanticPreflight < stateAcceptance)
         assertTrue(stateAcceptance < batchReuse)
+    }
+
+    @Test
+    fun `imported Program attestation comes only from one worker pipe frame bound to the model it read`() = inControlTemporaryDirectory { temp ->
+        val binary = temp.resolve("input/program").also {
+            it.parent.createDirectories()
+            it.writeText("binary fixture")
+        }
+        for (kind in listOf(FakeAttestation.SIDECAR_ONLY, FakeAttestation.DUPLICATE_FRAME, FakeAttestation.REPLACED_MODEL)) {
+            val root = temp.resolve(kind.name.lowercase()).createDirectories()
+            val work = root.resolve("analysis")
+            var imported: String? = "unobserved"
+            val model = GhidraHeadlessProgramModelAnalyzer(fakeGhidraHome(root, complete = true, attestation = kind))
+                .analyzeWithPublishedModel(binary, work) { _, digest, _ -> imported = digest }
+            assertEquals(null, imported, "$kind must leave the import unattested")
+            assertEquals("fake-input", model.inputSha256, "$kind still publishes the validated model without a commitment")
+        }
+        val candidate = ".program_model.json-model-1-2.candidate"
+        val modelSha256 = "c".repeat(64)
+        val imported = "ab".repeat(32)
+        fun frame(name: String = candidate, digest: String = imported, model: String = modelSha256) =
+            "$IMPORTED_PROGRAM_FRAME $name $digest $model"
+        fun read(vararg lines: String) = importedProgramAttestation(lines.joinToString("\n", postfix = "\n").toByteArray(),
+            candidate, modelSha256)
+        assertEquals(imported, read("INFO analysis", frame(), "INFO complete"))
+        // Imported text that Ghidra logs inside a line is not a frame.
+        assertEquals(imported, read("WARN section ${frame()}", frame()))
+        assertEquals(null, read(frame(), frame()), "a logged frame beside the worker's refuses the attestation")
+        assertEquals(null, read(frame(name = ".program_model.json-model-1-3.candidate")))
+        assertEquals(null, read(frame(model = "d".repeat(64))))
+        assertEquals(null, read(frame(digest = "none")))
+        assertEquals(null, read(frame() + " trailing"))
+        assertEquals(null, read("INFO no frame"))
     }
 
     @Test
@@ -269,7 +315,9 @@ class GhidraProgramModelExporterTest {
         val work = temp.resolve("analysis")
         val analyzer = GhidraHeadlessProgramModelAnalyzer()
 
-        val first = analyzer.analyze(binary, work)
+        var imported: String? = null
+        val first = analyzer.analyzeWithPublishedModel(binary, work) { _, digest, _ -> imported = digest }
+        assertEquals(sha256(binary.readBytes()), imported, "the worker reports the imported Program digest")
         assertEquals(4, first.schemaVersion)
         assertTrue(first.globals.all { it.byteEvidence?.schemaVersion == 2 })
         val modelPath = work.resolve("reports/program_model.json")
@@ -317,7 +365,9 @@ class GhidraProgramModelExporterTest {
             recoveryMode = GhidraProgramModelRecoveryMode.PLANNING,
         )
 
-        val first = analyzer.analyze(binary, work)
+        var imported: String? = null
+        val first = analyzer.analyzeWithPublishedModel(binary, work) { _, digest, _ -> imported = digest }
+        assertEquals(sha256(binary.readBytes()), imported, "the worker reports the imported Program digest")
         assertEquals(4, first.schemaVersion)
         assertTrue(first.globals.all { it.byteEvidence?.schemaVersion == 2 })
         val modelPath = work.resolve("reports/program_model.json")
@@ -660,7 +710,10 @@ class GhidraProgramModelExporterTest {
             "failureSidecars=${afterSidecars.keys.count { it.startsWith("failures/") }} CBytes=${after.functions.sumOf { it.decompiledC?.toByteArray()?.size ?: 0 }}")
     }
 
-    private fun fakeGhidraHome(temp: Path, complete: Boolean): (GhidraInvocation) -> List<String> {
+    private enum class FakeAttestation { FRAME, DUPLICATE_FRAME, SIDECAR_ONLY, REPLACED_MODEL }
+
+    private fun fakeGhidraHome(temp: Path, complete: Boolean,
+        attestation: FakeAttestation = FakeAttestation.FRAME): (GhidraInvocation) -> List<String> {
         val home = temp.resolve(if (complete) "fake-ghidra" else "slow-ghidra")
         val executable = home.resolve("fake-worker")
         executable.parent.createDirectories()
@@ -687,6 +740,7 @@ class GhidraProgramModelExporterTest {
                 printf '%s\n' "${'$'}@" > "${'$'}PWD/invocation.txt"
                 for last do :; done
                 cp '${canonicalModel.pathString}' "${'$'}last"
+                ${fakeAttestation(attestation, sha256(canonicalModel.readBytes()))}
                 """.trimIndent() + "\n"
             } else {
                 """
@@ -700,5 +754,17 @@ class GhidraProgramModelExporterTest {
         )
         executable.toFile().setExecutable(true)
         return fakeGhidraCommand(executable)
+    }
+
+    private fun fakeAttestation(kind: FakeAttestation, modelSha256: String): String {
+        fun frame(model: String) = "printf '\\n$IMPORTED_PROGRAM_FRAME %s %s %s\\n' \"${'$'}{last##*/}\" '${"ab".repeat(32)}' '$model'"
+        return when (kind) {
+            FakeAttestation.FRAME -> frame(modelSha256)
+            FakeAttestation.DUPLICATE_FRAME -> frame(modelSha256) + "; " + frame(modelSha256)
+            // Another writer to the candidate directory forges a file report; the worker pipe carries none.
+            FakeAttestation.SIDECAR_ONLY -> "printf '%s\\n' '${"ab".repeat(32)}' > \"${'$'}last.program-sha256\""
+            // The worker attests the model it wrote; the owner then reads different candidate bytes.
+            FakeAttestation.REPLACED_MODEL -> frame("f".repeat(64))
+        }
     }
 }

@@ -97,10 +97,24 @@ public final class SecureRepairSession implements AutoCloseable {
         requireOpen();
         RepairRunOutcome result = loop.runRepair(Objects.requireNonNull(projectDirectory),
             Objects.requireNonNull(originalBinary), copyInputs(inputs), Objects.requireNonNull(reportsDirectory), maximumIterations);
+        return copyOutcome(result);
+    }
+
+    /** Carries the durable dispatch identity through the executing invocation. */
+    public synchronized RepairRunOutcome runOwnedRepair(
+        Path projectDirectory, Path originalBinary, List<ProcessInput> inputs, Path reportsDirectory,
+        int maximumIterations, RepairPublicationOwner owner
+    ) {
+        requireOpen();
+        return copyOutcome(loop.runOwnedRepair(Objects.requireNonNull(projectDirectory), Objects.requireNonNull(originalBinary),
+            copyInputs(inputs), Objects.requireNonNull(reportsDirectory), maximumIterations, Objects.requireNonNull(owner)));
+    }
+
+    private static RepairRunOutcome copyOutcome(RepairRunOutcome result) {
         ArrayList<RepairIteration> iterations = new ArrayList<>(result.getIterations().size());
         for (RepairIteration iteration : result.getIterations()) iterations.add(copyIteration(iteration));
         return new RepairRunOutcome(List.copyOf(iterations),
-            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState());
+            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState(), result.getPublication());
     }
 
     /** Read retained inputs through the graph authority without exposing the graph or its lock. */
@@ -129,10 +143,7 @@ public final class SecureRepairSession implements AutoCloseable {
             Objects.requireNonNull(projectDirectory), Objects.requireNonNull(originalBinary), copyInputs(inputs),
             Objects.requireNonNull(reportsDirectory), maximumIterations, snapshot.binding()
         );
-        ArrayList<RepairIteration> iterations = new ArrayList<>(result.getIterations().size());
-        for (RepairIteration iteration : result.getIterations()) iterations.add(copyIteration(iteration));
-        return new RepairRunOutcome(List.copyOf(iterations),
-            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState());
+        return copyOutcome(result);
     }
 
     @Override

@@ -66,6 +66,8 @@ internal class JobRecoveryCancelledException(val statusUpdatesStarted: Boolean) 
 )
 class InvalidUploadException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
+internal const val MAX_JOB_INPUT_BYTES = 32 * 1024 * 1024
+
 data class Job(
     val id: String,
     val filename: String,
@@ -123,7 +125,7 @@ class JobStore internal constructor(
 
     @Synchronized
     fun createFromUpload(filename: String, content: ByteArray): Job {
-        require(content.size <= MAX_INPUT_BYTES) { "upload exceeds the 32 MiB input limit" }
+        require(content.size <= MAX_JOB_INPUT_BYTES) { "upload exceeds the 32 MiB input limit" }
         val input = content.copyOf()
         val metadata = try {
             ElfMetadataReader.read(input)
@@ -204,7 +206,7 @@ class JobStore internal constructor(
         require(payload.keys.all { it in setOf("id", "filename", "status", "created_at", "updated_at",
             "status_message", "size_bytes", "binary_path", "metadata") }) { "job metadata has unsupported fields" }
         require(payload.string("status") in VALID_STATUSES) { "job metadata has an invalid status" }
-        require(payload.int("size_bytes") in 0..MAX_INPUT_BYTES) { "job metadata has an invalid input size" }
+        require(payload.int("size_bytes") in 0..MAX_JOB_INPUT_BYTES) { "job metadata has an invalid input size" }
         require(payload.string("id") == jobId &&
             Path.of(payload.string("binary_path")) == jobDir.resolve("input.elf")
         ) { "job metadata identity does not match its store location" }
@@ -446,7 +448,7 @@ class JobStore internal constructor(
     /** Inventory input reads retain the store's private upload ceiling, with the same admission accounting. */
     internal fun readArtifactInventoryInput(jobId: String, reserveBytes: (Long) -> Unit,
         cancellationCheck: () -> Unit): StableRegularFile =
-        readArtifactInventoryFile(jobId, "input.elf", MAX_INPUT_BYTES.toLong(), reserveBytes, cancellationCheck)
+        readArtifactInventoryFile(jobId, "input.elf", MAX_JOB_INPUT_BYTES.toLong(), reserveBytes, cancellationCheck)
 
     /** Catalog inventory reads use the same pinned streaming boundary, including input and failed-read accounting. */
     internal fun readArtifactInventoryFile(jobId: String, relativePath: String, maximumBytes: Long,
@@ -487,7 +489,7 @@ class JobStore internal constructor(
 
     internal fun readInput(jobId: String): StableRegularFile {
         jobDirectory(jobId)
-        return contained("job input") { readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong()) }
+        return contained("job input") { readStableRegularFile(root, "$jobId/input.elf", MAX_JOB_INPUT_BYTES.toLong()) }
     }
 
     /** Exact selected source namespace, using the same pinned-descriptor containment primitive. */
@@ -690,7 +692,6 @@ class JobStore internal constructor(
 
     internal companion object {
         const val MAX_STATUS_MESSAGE_CHARACTERS = 500
-        const val MAX_INPUT_BYTES = 32 * 1024 * 1024
         const val MAX_METADATA_BYTES = 256 * 1024
         val METADATA_LIMITS = StrictJsonLimits(
             maximumCanonicalBytes = MAX_METADATA_BYTES,
