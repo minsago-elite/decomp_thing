@@ -914,6 +914,7 @@ class LinuxFilesystemSyscallsTest {
     @Test
     fun `filesystem capacity is read through the pinned directory descriptor`() {
         withLinuxDirectory("linux-syscall-capacity-") { path, directory ->
+            requireInodeCounters(path)
             val capacity = LinuxFilesystemSyscalls.filesystemCapacity(directory)
             val store = Files.getFileStore(path)
 
@@ -1106,6 +1107,32 @@ class LinuxFilesystemSyscallsTest {
         } finally {
             path.toFile().deleteRecursively()
         }
+    }
+
+    private interface TestStatVfsLibrary : com.sun.jna.Library {
+        fun statvfs(path: String, statistics: LinuxFilesystemSyscalls.LinuxStatVfs): Int
+    }
+
+    private val testStatVfs: TestStatVfsLibrary by lazy {
+        com.sun.jna.Native.load(com.sun.jna.Platform.C_LIBRARY_NAME, TestStatVfsLibrary::class.java)
+    }
+
+    /**
+     * Production refuses filesystems without inode counters, so the capacity test needs a test root that has them.
+     * Some local filesystems (btrfs) report `statvfs` `f_files == 0`; skip there, but never in CI, where the
+     * repository-local test root must be on a filesystem that reports inodes.
+     */
+    private fun requireInodeCounters(path: Path) {
+        val statistics = LinuxFilesystemSyscalls.LinuxStatVfs()
+        assertEquals(0, testStatVfs.statvfs(path.toString(), statistics), "statvfs failed for the test root $path")
+        statistics.read()
+        if (statistics.totalInodes.toLong() != 0L) return
+        val message = "test root $path is on a filesystem that reports zero total inodes (statvfs f_files == 0, " +
+            "as btrfs does); production filesystem capacity reads refuse such counters"
+        if (System.getenv("CI") == "true" || System.getenv("GITHUB_ACTIONS") == "true") {
+            kotlin.test.fail("$message. CI must run this test on a filesystem that reports inode counters.")
+        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(false, "$message; skipped outside CI (CI=true fails instead).")
     }
 
     private fun withLinuxDirectory(prefix: String, action: (Path, LinuxDescriptor) -> Unit) {
