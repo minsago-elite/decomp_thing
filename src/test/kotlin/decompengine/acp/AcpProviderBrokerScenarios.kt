@@ -196,6 +196,12 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         val otherCapability = capability(other)
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(ByteArrayOutputStream()) }
 
+        // The reserved field has a fixed width: other lengths are refused when the frame is decoded.
+        listOf(ByteArray(0), ByteArray(31), ByteArray(33)).forEach { malformed ->
+            assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) {
+                AcpProviderChannelRequest(1, malformed, relayHead("POST", "/responses", listOf("Host" to "x")), ByteArray(0))
+            }
+        }
         listOf(otherCapability, ByteArray(32), capability.copyOf(31), capability + byteArrayOf(0)).forEach { wrong ->
             assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(1, wrong)) }
         }
