@@ -236,7 +236,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
       <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
-        <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
+        <WorkflowAvailability runtime={runtime} job={job} attemptHistory={`${jobPath(basePath, job.jobId)}/runs`} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       </PanelBoundary>
       <WorkflowLaunch key={job.jobId} job={job} runtime={runtime} basePath={basePath} session={session}
         onRefresh={() => { setRefresh(value => value + 1); }}

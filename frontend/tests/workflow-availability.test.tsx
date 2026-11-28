@@ -143,3 +143,35 @@ it('explains per workflow whether a launch option is ready and which prerequisit
   expect(status('Build').getByText('WORKFLOW_NOT_IMPLEMENTED')).toBeTruthy();
   expect(view.queryByRole('button')).toBeNull();
 });
+
+function launchSnapshot(): RuntimeSnapshot {
+  const { data } = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap-workflow-launch.json'), 'utf8')) as { data: Bootstrap };
+  const { applicationBuildId, uiBuildId, readiness, capabilities, limits, runtime } = data;
+  return { applicationBuildId, uiBuildId, readiness, capabilities, limits, runtime };
+}
+
+it('shows job input and tool requirements alongside each workflow option in the session report', () => {
+  const view = render(<WorkflowAvailability runtime={launchSnapshot()} job={{ acceptedRevisionId: null }} />);
+  const workflow = (name: string) => within(view.getByRole('heading', { name }).closest('li')!);
+  expect(workflow('Exploration').getByText('sandbox, angr')).toBeTruthy();
+  expect(workflow('Exploration').getByText('This workflow uses the uploaded binary directly.')).toBeTruthy();
+  expect(workflow('Reconstruction').getByText('HARNESS_NOT_CONFIGURED')).toBeTruthy();
+  expect(workflow('Repair').getByText(/names no accepted revision, so use the result of a completed attempt/)).toBeTruthy();
+  expect(workflow('Repair').getByText(/and use its Result revision\./)).toBeTruthy();
+  // Without a route, the panel names the attempt history in text but links nowhere of its own.
+  expect(workflow('Repair').queryByRole('link')).toBeNull();
+  expect(workflow('Build').getByText(/did not report the input or tools/)).toBeTruthy();
+  expect(workflow('Validation').getByText(/No capability for this workflow/)).toBeTruthy();
+  expect(view.queryByRole('button')).toBeNull();
+});
+
+it('reports an accepted revision without guaranteeing availability of its retained source', () => {
+  const view = render(<WorkflowAvailability runtime={launchSnapshot()} job={{ acceptedRevisionId: 'revision_accepted_1' }} />);
+  const repair = within(view.getByRole('heading', { name: 'Repair' }).closest('li')!);
+  const input = repair.getByText('revision_accepted_1').parentElement!.textContent;
+  expect(input).toContain('Source is unverified here.');
+  expect(input).toContain('Launch rechecks the revision and source.');
+  expect(input).not.toMatch(/only when work starts|until work starts/);
+  view.rerender(<WorkflowAvailability runtime={snapshot([])} job={{ acceptedRevisionId: 'revision_accepted_1' }} />);
+  expect(view.queryByText('revision_accepted_1')).toBeNull();
+});
