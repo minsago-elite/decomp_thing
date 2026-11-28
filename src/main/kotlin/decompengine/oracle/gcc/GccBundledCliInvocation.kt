@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
@@ -135,6 +136,14 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
                 require(current.identity.copy(linkCount = expected.linkCount) == expected) { "CLI directory identity changed" }
             }
         }
+    }
+
+    /** A separately opened output descriptor must denote the output directory recorded at invocation. */
+    fun requireOutputDescriptor(output: LinuxDescriptor) {
+        val expected = directories.getValue(options.output)
+        val current = LinuxFilesystemSyscalls.identity(output.fd)
+        require(output.identity.copy(linkCount = expected.linkCount) == expected &&
+            current.copy(linkCount = expected.linkCount) == expected) { "CLI output descriptor differs from its recorded identity" }
     }
 
     fun requireCheckpointSelection(minimumCompletedFunctions: Long) {

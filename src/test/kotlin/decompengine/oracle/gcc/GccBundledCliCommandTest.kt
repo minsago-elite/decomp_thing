@@ -105,6 +105,30 @@ class GccBundledCliCommandTest {
     }
 
     @Test
+    fun `bound invocation accepts only an output descriptor for its recorded directory`() = fixture { root ->
+        val args = arguments(root)
+        val options = GccBundledCliOptions.parse(args)
+        val children = listOf(options.output, privateDirectory(options.output.resolve("inputs")), privateDirectory(options.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val invocation = GccBundledCliInvocation(options, args, identities)
+        LinuxFilesystemSyscalls.openRoot(options.output).use(invocation::requireOutputDescriptor)
+        LinuxFilesystemSyscalls.openRoot(options.output.resolve("inputs")).use { other ->
+            assertFails { invocation.requireOutputDescriptor(other) }
+        }
+        val moved = root.resolve("moved-output")
+        Files.move(options.output, moved)
+        privateDirectory(options.output)
+        try {
+            LinuxFilesystemSyscalls.openRoot(options.output).use { replacement ->
+                assertFails { invocation.requireOutputDescriptor(replacement) }
+            }
+        } finally {
+            Files.delete(options.output)
+            Files.move(moved, options.output)
+        }
+    }
+
+    @Test
     fun `full recovery mode is fixed by the distinct invocation command`() = fixture { root ->
         val args = arguments(root)
         val options = GccBundledCliOptions.parse(args, fullRecoveryExport = true)

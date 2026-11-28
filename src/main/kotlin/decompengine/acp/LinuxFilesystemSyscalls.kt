@@ -684,22 +684,47 @@ internal object LinuxFilesystemSyscalls {
     /**
      * Names the pinned unnamed inode without replacement. Before Linux 6.10 an unprivileged
      * AT_EMPTY_PATH link fails with ENOENT (or EPERM) without CAP_DAC_READ_SEARCH, so the link
-     * then follows the descriptor's own /proc magic link, which denotes the same open inode
-     * while the descriptor is held. [attemptEmptyPath] false forces that path for controls.
+     * then follows the descriptor's own /proc/self/fd magic link, which denotes the same open
+     * inode while the descriptor is held. [beforeAttempt] runs before every syscall attempt,
+     * including EINTR retries and the fallback, and throws to stop further attempts.
+     * [attemptEmptyPath] false forces the fallback, and a non-null [emptyPathOverride] errno
+     * replaces one AT_EMPTY_PATH attempt's result; both exist for controls only.
      */
-    internal fun linkTemporaryAt(temporary: LinuxDescriptor, parentFd: Int, name: String, attemptEmptyPath: Boolean) {
+    internal fun linkTemporaryAt(
+        temporary: LinuxDescriptor,
+        parentFd: Int,
+        name: String,
+        attemptEmptyPath: Boolean,
+        beforeAttempt: () -> Unit = {},
+        emptyPathOverride: (() -> Int?)? = null,
+    ) {
         temporary.whileOpen { fd ->
+            var firstFailure: Int? = null
             if (attemptEmptyPath) {
                 while (true) {
-                    if (libc.linkat(fd, "", parentFd, name, AT_EMPTY_PATH) == 0) return@whileOpen
-                    val error = Native.getLastError()
+                    beforeAttempt()
+                    val error = emptyPathOverride?.invoke()
+                        ?: if (libc.linkat(fd, "", parentFd, name, AT_EMPTY_PATH) == 0) 0 else Native.getLastError()
+                    if (error == 0) return@whileOpen
                     if (error == EINTR) continue
                     if (error != ENOENT && error != EPERM) throw LinuxSyscallException("materialize secure temporary file", error)
+                    firstFailure = error
                     break
                 }
             }
-            call("materialize secure temporary file through its descriptor") {
-                libc.linkat(AT_FDCWD, "/proc/self/fd/$fd", parentFd, name, AT_SYMLINK_FOLLOW)
+            while (true) {
+                beforeAttempt()
+                if (libc.linkat(AT_FDCWD, "/proc/self/fd/$fd", parentFd, name, AT_SYMLINK_FOLLOW) == 0) return@whileOpen
+                val error = Native.getLastError()
+                if (error == EINTR) continue
+                throw LinuxSyscallException(
+                    "materialize secure temporary file through its /proc/self/fd magic link " +
+                        "(requires procfs mounted at /proc" +
+                        (firstFailure?.let { "; the AT_EMPTY_PATH link first failed with errno $it" } ?: "") + ")",
+                    error,
+                ).also { failure ->
+                    firstFailure?.let { failure.addSuppressed(LinuxSyscallException("materialize secure temporary file", it)) }
+                }
             }
         }
     }

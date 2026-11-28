@@ -1139,6 +1139,45 @@ class LinuxFilesystemSyscallsTest {
     }
 
     @Test
+    fun `AT_EMPTY_PATH errno dispatch re-admits every attempt and reports both failures`() {
+        val scratch = Files.createDirectories(Path.of("build/test-tmp").toAbsolutePath().normalize())
+        val path = Files.createTempDirectory(scratch, "linux-tmpfile-dispatch-").toRealPath()
+        try {
+            LinuxFilesystemSyscalls.openRoot(path).use { directory ->
+                fun link(name: String, results: List<Int>, admit: (Int) -> Unit = {}): Int {
+                    val remaining = ArrayDeque(results)
+                    var attempts = 0
+                    LinuxFilesystemSyscalls.createTemporaryAt(directory.fd).use { temporary ->
+                        LinuxFilesystemSyscalls.write(temporary, byteArrayOf(7)) {}
+                        LinuxFilesystemSyscalls.linkTemporaryAt(temporary, directory.fd, name, attemptEmptyPath = true,
+                            beforeAttempt = { admit(++attempts) }, emptyPathOverride = { remaining.removeFirstOrNull() })
+                    }
+                    return attempts
+                }
+                assertEquals(2, link("after-enoent", listOf(2)), "ENOENT enters the descriptor fallback")
+                assertEquals(2, link("after-eperm", listOf(1)), "EPERM enters the descriptor fallback")
+                assertEquals(3, link("after-eintr", listOf(4, 2)), "an EINTR retry is admitted before it starts")
+                listOf("after-enoent", "after-eperm", "after-eintr").forEach { assertContentEquals(byteArrayOf(7), Files.readAllBytes(path.resolve(it))) }
+                val other = assertFailsWith<LinuxSyscallException> { link("after-eacces", listOf(13)) }
+                assertEquals(13, other.errno, "other AT_EMPTY_PATH failures never fall back")
+                assertFailsWith<IllegalStateException> {
+                    link("refused-fallback", listOf(2)) { attempt -> check(attempt < 2) { "admission lapsed" } }
+                }
+                Files.write(path.resolve("taken"), byteArrayOf(9))
+                val both = assertFailsWith<LinuxSyscallException> { link("taken", listOf(2)) }
+                assertEquals(17, both.errno)
+                assertTrue(both.message.orEmpty().contains("/proc/self/fd") && both.message.orEmpty().contains("first failed with errno 2"),
+                    both.message)
+                assertEquals(listOf(2), both.suppressed.map { (it as LinuxSyscallException).errno })
+                assertFalse(Files.exists(path.resolve("after-eacces")) || Files.exists(path.resolve("refused-fallback")))
+                assertContentEquals(byteArrayOf(9), Files.readAllBytes(path.resolve("taken")))
+            }
+        } finally {
+            path.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `missing O_TMPFILE support names the filesystem requirement`() {
         for (errno in listOf(95, 21)) {
             val mapped = LinuxFilesystemSyscalls.unnamedTemporaryFailure(LinuxSyscallException("create secure unnamed temporary file", errno))

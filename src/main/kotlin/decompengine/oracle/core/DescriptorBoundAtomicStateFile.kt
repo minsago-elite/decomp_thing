@@ -31,10 +31,14 @@ internal enum class DescriptorBoundCommitFaultPoint {
     AFTER_COMMIT_DIRECTORY_SYNC,
     BEFORE_REVOCATION,
     BEFORE_REVOCATION_RESTORE,
+    BEFORE_REVOCATION_CONFLICT_SYNC,
 }
 
 internal fun interface DescriptorBoundCommitFaultInjector {
     fun hit(point: DescriptorBoundCommitFaultPoint)
+
+    /** A non-null errno replaces the result of one AT_EMPTY_PATH link attempt, for fallback controls. */
+    fun emptyPathLinkErrno(): Int? = null
 }
 
 /** One prepared immutable inode, named at most once, whose live descriptor proves what revocation removes. */
@@ -60,7 +64,11 @@ internal interface DescriptorBoundCommitGate {
     /** Throws to stop before the next preparation step. */
     fun requireStaging(stage: String)
 
-    /** Atomically claims the single link, or throws so that nothing is named. */
+    /**
+     * Called before every link syscall attempt, including EINTR retries and the descriptor
+     * fallback. The first call claims the single commit; every call must still be admitted, or
+     * throws so that no further attempt starts.
+     */
     fun beginCommit()
 
     /** Called once after the link returns; false revokes the committed name. */
@@ -141,9 +149,10 @@ internal object DescriptorBoundAtomicStateFile {
     /**
      * Prepares [bytes] in an unnamed owner-only inode and names it [name] with one no-replace link
      * of that inode, so no other writer's file can be published by this call. Every caller-side
-     * verification precedes the link. After it come only the durability sync of [parent] and a
-     * final check that [authenticatedParentPath] still reaches [parent] and that its [name] entry
-     * is the prepared inode with the exact bytes. A refused, failed or unconfirmed commit is
+     * verification precedes the link. After it come only the durability sync of [parent], the
+     * caller's [requireBindings], and, last, a check that [authenticatedParentPath] still reaches
+     * [parent] and that its [name] entry is the prepared inode with the exact bytes, read through
+     * the descriptor whose identity was checked. A refused, failed or unconfirmed commit is
      * revoked through [revokeCommitted] before rethrowing. The returned handle keeps the inode's
      * descriptor so that a later revocation can prove what it removes.
      */
@@ -155,6 +164,7 @@ internal object DescriptorBoundAtomicStateFile {
         maximumBytes: Int,
         gate: DescriptorBoundCommitGate,
         faultInjector: DescriptorBoundCommitFaultInjector? = null,
+        requireBindings: () -> Unit = {},
     ): DescriptorBoundPreparedCommit {
         requireName(name)
         require(maximumBytes in 1..MAXIMUM_STATE_FILE_BYTES)
@@ -178,13 +188,16 @@ internal object DescriptorBoundAtomicStateFile {
             gate.requireStaging("before committing $name")
             requireParent(parent)
             faultInjector?.hit(DescriptorBoundCommitFaultPoint.BEFORE_COMMIT)
-            gate.beginCommit()
-            LinuxFilesystemSyscalls.linkTemporaryAt(prepared, parent.fd, name)
+            // Every attempt, including EINTR retries and the descriptor fallback, is re-admitted by the gate.
+            LinuxFilesystemSyscalls.linkTemporaryAt(prepared, parent.fd, name, attemptEmptyPath = true,
+                beforeAttempt = gate::beginCommit, emptyPathOverride = faultInjector?.let { injector -> injector::emptyPathLinkErrno })
             commit.committed = true
             faultInjector?.hit(DescriptorBoundCommitFaultPoint.AFTER_COMMIT)
             if (!gate.completeCommit()) stateFail("immutable commit completed outside its admission and is revoked")
             LinuxFilesystemSyscalls.synchronize(parent)
             faultInjector?.hit(DescriptorBoundCommitFaultPoint.AFTER_COMMIT_DIRECTORY_SYNC)
+            requireBindings()
+            // Last before the caller's acceptance: nothing that can block runs between this check and it.
             requireCommittedAtPath(parent, authenticatedParentPath, commit, maximumBytes)
             return commit
         } catch (failure: Throwable) {
@@ -224,12 +237,16 @@ internal object DescriptorBoundAtomicStateFile {
                 LinuxFilesystemSyscalls.renameNoReplace(parent.fd, quarantine, commit.name)
             } catch (conflict: LinuxSyscallException) {
                 if (conflict.errno != LinuxFilesystemSyscalls.EEXIST) throw conflict
-                LinuxFilesystemSyscalls.synchronize(parent)
                 val preserved = runCatching {
                     Files.readSymbolicLink(LinuxFilesystemSyscalls.stableDescriptorPath(parent.fd)).resolve(quarantine).toString()
                 }.getOrDefault(quarantine)
-                stateFail("immutable commit revocation preserved another writer's entry at $preserved because " +
-                    "${commit.name} was recreated before it could be restored")
+                val report = IOException("immutable commit revocation preserved another writer's entry at $preserved because " +
+                    "${commit.name} was recreated before it could be restored", conflict)
+                runCatching {
+                    faultInjector?.hit(DescriptorBoundCommitFaultPoint.BEFORE_REVOCATION_CONFLICT_SYNC)
+                    LinuxFilesystemSyscalls.synchronize(parent)
+                }.exceptionOrNull()?.let(report::addSuppressed)
+                throw report
             }
             LinuxFilesystemSyscalls.synchronize(parent)
             stateFail("immutable commit revocation found another writer's entry and restored it")
@@ -247,11 +264,15 @@ internal object DescriptorBoundAtomicStateFile {
             if (!sameDirectory(named.identity, parent.identity)) {
                 stateFail("committed state directory no longer resolves at its authenticated path")
             }
-            val entry = LinuxFilesystemSyscalls.openPathAtOrNull(named.fd, commit.name) ?: stateFail("committed state entry disappeared")
-            if (entry.use { !sameFile(it.identity, commit.identity) }) stateFail("committed state entry was replaced")
-            val published = readRequiredWithMode(named, commit.name, maximumBytes, OWNER_READ_ONLY_MODE)
-            if (!sameFile(published.identity, commit.identity)) stateFail("committed state entry was replaced")
-            requireExactBytes(published.bytes, commit.snapshot.bytes, "committed immutable state")
+            val entry = LinuxFilesystemSyscalls.openRegularFileAtOrNull(named.fd, commit.name)
+                ?: stateFail("committed state entry disappeared")
+            entry.use { leaf ->
+                if (!sameFile(leaf.identity, commit.identity)) stateFail("committed state entry was replaced")
+                requireManagedFile(leaf.identity, named.identity, OWNER_READ_ONLY_MODE, "committed immutable state")
+                // The bytes are read through this identity-checked descriptor, never by reopening the name.
+                requireExactBytes(LinuxFilesystemSyscalls.readPrefix(leaf, maximumBytes + 1), commit.snapshot.bytes,
+                    "committed immutable state")
+            }
         }
     }
 

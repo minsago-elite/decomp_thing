@@ -35,9 +35,10 @@ internal class GccBundledDeadlineCommitGate(
         abandonOnFailure { deadline.requireCurrent() }
     }
 
+    /** Admits every link attempt: abandonment or a lapsed reserve stops the next attempt, including a fallback. */
     @Synchronized
     override fun beginCommit() {
-        check(state == State.STAGING) { "GCC result publication cannot begin its commit" }
+        check(state == State.STAGING || state == State.COMMITTING) { "GCC result publication cannot begin its commit" }
         abandonOnFailure {
             check(deadline.remainingMillis(Long.MAX_VALUE) >= commitReserveMillis) {
                 "GCC result commit requires $commitReserveMillis ms of its operation deadline"
@@ -95,11 +96,11 @@ internal class GccBundledDeadlineCommitGate(
 /**
  * Publishes one new result file so that a failed or expired operation reports no result.
  *
- * The caller completes every fallible verification first. Preparation and the gated link then
- * run as owned host work bounded by the operation deadline; the link is the last fallible step
- * apart from the directory sync it needs for durability. If that step fails, outlasts the owner's
- * wait or completes after expiry, the result is revoked: by the in-flight step when its syscall
- * returns, or by a bounded cleanup step when the owned step had already finished. A process that
+ * The caller completes its verification first. Preparation and the gated link then run as owned
+ * host work bounded by the operation deadline. After the link come only the durability sync, the
+ * caller's binding recheck and the final named-result check. If any of them fails, outlasts the
+ * owner's wait or completes after expiry, the result is revoked: by the in-flight step when its
+ * syscall returns, or by a bounded cleanup step when the owned step had already finished. A process that
  * exits while such a step is still blocked can leave an unaccepted result.json behind; consumers
  * must keep requiring a successful CLI exit before opening it.
  */
@@ -107,8 +108,9 @@ internal object GccBundledDeadlineBoundPublication {
     const val CLEANUP_ALLOWANCE_MILLIS = 5_000L
 
     /**
-     * [parentPath] is the authenticated pathname of [parent]; the owned step requires it to reach
-     * the committed inode after the durability sync, then runs [requireBindings] before [finish].
+     * [parentPath] is the authenticated pathname of [parent]. After the durability sync the owned
+     * step runs [requireBindings], then requires [parentPath] to reach the committed inode with its
+     * exact bytes, and only then calls [finish].
      */
     fun publish(
         work: GccBundledHostWorkTracker,
@@ -126,9 +128,8 @@ internal object GccBundledDeadlineBoundPublication {
         val commit = try {
             work.run("result publication", { deadline.remainingMillis(Long.MAX_VALUE) }, owned) {
                 val prepared = DescriptorBoundAtomicStateFile.commitNoReplace(owned, parentPath, name, bytes, maximumBytes,
-                    gate, faultInjector)
+                    gate, faultInjector, requireBindings)
                 try {
-                    requireBindings()
                     check(gate.finish(prepared)) { "GCC result publication was abandoned or expired after its commit and is revoked" }
                 } catch (failure: Throwable) {
                     runCatching { DescriptorBoundAtomicStateFile.revokeCommitted(owned, prepared, faultInjector) }

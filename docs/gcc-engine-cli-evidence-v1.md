@@ -101,21 +101,26 @@ unchanged. Allocation inside one library call is seen only at the next
 checkpoint, and the JVM heap limit remains the backstop. This is a host-phase
 budget, not a whole-process RSS measurement.
 
-`publishCliResult` completes every caller-side verification before publication.
-`GccBundledDeadlineBoundPublication` then writes, fsyncs and verifies
+`publishCliResult` completes every caller-side verification before publication,
+including that its separately opened output descriptor is the directory recorded
+in the invocation. `GccBundledDeadlineBoundPublication` then writes, fsyncs and verifies
 `result.json` in an unnamed O_TMPFILE inode, with each step gated by the
 deadline. It commits by linking that inode to `result.json` without replacement,
 so no other writer's file can be published by this call. The link first tries
 `AT_EMPTY_PATH`. Before Linux 6.10 an unprivileged process lacks
 `CAP_DAC_READ_SEARCH`, and that call fails with `ENOENT` or `EPERM`. The link
 then follows the held descriptor's own `/proc/self/fd/<n>` magic link with
-`AT_SYMLINK_FOLLOW`, which names the same open inode. The link may start only
-while at least one second remains. After the link come only the directory sync
-it needs for durability and, inside the same owned step, a final check. That
-check requires the authenticated output pathname to still reach the pinned
-directory, and its `result.json` to be the prepared inode with the exact bytes.
-The CLI's directory bindings are then rechecked. The commit counts only if the
-deadline is still current when the link returns and again after those checks.
+`AT_SYMLINK_FOLLOW`, which names the same open inode. If that also fails, the
+error names the procfs prerequisite and keeps the first errno. Every link
+attempt, including an `EINTR` retry and the fallback, must still be admitted:
+an abandoned step, or one with less than one second left, starts no further
+attempt. After the link come only the directory sync it needs for durability,
+the CLI's directory-binding recheck, and, last, a check inside the same owned
+step. That check requires the authenticated output pathname to still reach the
+pinned directory, and its `result.json` to be the prepared inode. It reads the
+bytes through the same descriptor whose identity it checked. The commit counts
+only if the deadline is still current when the link returns and again after
+these checks.
 If the link, sync or a check completes late, fails or outlasts the owner's wait,
 the result is revoked: by the in-flight step when its syscall returns, or by a
 bounded cleanup step when the step had already finished. Revocation keeps the
@@ -124,7 +129,8 @@ unique private name, compares that entry with the descriptor, and only then
 unlinks it. Another writer's entry is renamed back without replacement and left
 intact. If a third entry has meanwhile taken the name, that rename fails with
 `EEXIST`. The other writer's entry then stays at its private name, and the
-failure reports that path. An existing result is refused untouched.
+failure reports that path, with any later directory-sync failure attached. An
+existing result is refused untouched.
 
 The output directory's filesystem must support O_TMPFILE, as ext4, xfs, btrfs
 and tmpfs do. overlayfs gained support only in Linux 6.10. Where it is missing,
@@ -159,7 +165,10 @@ cover budget refusal before allocation and by measurement, model copying after
 admission, streamed logs, and a blocked owned capture. They also cover expiry or
 a stall at every preparation, commit and post-sync point, a renamed output
 directory, a replaced leaf, and competing writers before the commit and during
-revocation. `LinuxFilesystemSyscallsTest` forces the `/proc` link fallback.
+revocation, and a leaf replaced during the binding recheck. A late
+`AT_EMPTY_PATH` failure after the commit reserve lapses must not start the
+fallback. `LinuxFilesystemSyscallsTest` forces the `/proc` link fallback and
+covers the `ENOENT`/`EPERM`/`EINTR` dispatch.
 These are local-component
 controls. They do not qualify provisioned-host CLI wall time, peak RSS or real
 cc1/lto1 execution.

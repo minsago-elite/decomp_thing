@@ -671,8 +671,9 @@ internal class GccBundledPreparedOperation internal constructor(
             )))
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
-                // Every fallible verification precedes the commit; the commit link is the last fallible
-                // step apart from its durability sync, and any failure revokes the result.
+                cli.requireOutputDescriptor(output)
+                // Caller checks precede the commit. After its link only the durability sync, the CLI binding
+                // recheck and, last, the named-result check run inside the owned step; any failure revokes it.
                 GccBundledDeadlineBoundPublication.publish(hostWork, output, cli.options.output, "result.json", document,
                     256 * 1024, deadline, requireBindings = cli::requireCurrent)
             }

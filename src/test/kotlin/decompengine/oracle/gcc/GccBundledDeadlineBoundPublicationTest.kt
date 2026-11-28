@@ -163,6 +163,49 @@ class GccBundledDeadlineBoundPublicationTest {
     }
 
     @Test
+    fun `a leaf replaced while the CLI bindings are rechecked is never accepted`() = fixture { root ->
+        var checked = false
+        val failure = assertFailsWith<java.io.IOException> {
+            // The binding recheck replaces the leaf and then returns normally.
+            publish(root, Clock().deadline(), requireBindings = { replaceWithForeign(root, FOREIGN); checked = true })
+        }
+        assertTrue(checked)
+        assertTrue(failure.message.orEmpty().contains("entry was replaced"), failure.toString())
+        assertEquals(setOf(NAME), entries(root))
+        assertContentEquals(FOREIGN, Files.readAllBytes(root.resolve(NAME)))
+    }
+
+    @Test
+    fun `a late AT_EMPTY_PATH failure never starts the descriptor fallback without renewed admission`() = fixture { root ->
+        val clock = Clock()
+        var attempts = 0
+        val injector = object : DescriptorBoundCommitFaultInjector {
+            override fun hit(point: DescriptorBoundCommitFaultPoint) {}
+            // The first link attempt returns ENOENT only after the commit reserve has elapsed.
+            override fun emptyPathLinkErrno(): Int { attempts++; clock.leave(500); return 2 }
+        }
+        val failure = assertFailsWith<IllegalStateException> { publish(root, clock.deadline(), injector = injector) }
+        assertTrue(failure.message.orEmpty().contains("requires 1000 ms"), failure.toString())
+        assertEquals(1, attempts)
+        assertEquals(emptySet(), entries(root), "the procfs fallback must not have linked the result")
+    }
+
+    @Test
+    fun `an abandoned or lapsed commit admits no further link attempt`() {
+        val clock = Clock()
+        val abandoned = GccBundledDeadlineCommitGate(clock.deadline())
+        abandoned.beginCommit()
+        abandoned.beginCommit()
+        abandoned.abandon()
+        assertFailsWith<IllegalStateException> { abandoned.beginCommit() }
+        val lapsed = GccBundledDeadlineCommitGate(clock.deadline())
+        lapsed.beginCommit()
+        clock.leave(999)
+        assertFailsWith<IllegalStateException> { lapsed.beginCommit() }
+        assertEquals(GccBundledDeadlineCommitGate.State.ABANDONED, lapsed.state)
+    }
+
+    @Test
     fun `a name recreated during revocation keeps the other writer's entry at its reported private path`() = fixture { root ->
         val clock = Clock()
         val recreated = "{\"recreated\":true}\n".toByteArray()
@@ -172,14 +215,16 @@ class GccBundledDeadlineBoundPublicationTest {
                     DescriptorBoundCommitFaultPoint.AFTER_COMMIT -> clock.expire()
                     DescriptorBoundCommitFaultPoint.BEFORE_REVOCATION -> replaceWithForeign(root, FOREIGN)
                     DescriptorBoundCommitFaultPoint.BEFORE_REVOCATION_RESTORE -> Files.write(root.resolve(NAME), recreated)
+                    DescriptorBoundCommitFaultPoint.BEFORE_REVOCATION_CONFLICT_SYNC -> throw java.io.IOException("injected sync failure")
                     else -> {}
                 }
             })
         }
         val preserved = entries(root) - NAME
         assertEquals(1, preserved.size, entries(root).toString())
-        val message = (listOf(failure) + failure.suppressed).joinToString { it.message.orEmpty() }
-        assertTrue(message.contains("preserved another writer's entry at ${root.resolve(preserved.single())}"), message)
+        val report = failure.suppressed.single { it.message.orEmpty().contains("preserved another writer's entry") }
+        assertTrue(report.message.orEmpty().contains("at ${root.resolve(preserved.single())}"), report.toString())
+        assertEquals(listOf("injected sync failure"), report.suppressed.map { it.message }, "a later sync failure is attached")
         assertContentEquals(FOREIGN, Files.readAllBytes(root.resolve(preserved.single())))
         assertContentEquals(recreated, Files.readAllBytes(root.resolve(NAME)))
     }
@@ -206,9 +251,9 @@ class GccBundledDeadlineBoundPublicationTest {
         tracker: GccBundledHostWorkTracker = GccBundledHostWorkTracker(),
         requireBindings: () -> Unit = {},
         fault: (DescriptorBoundCommitFaultPoint) -> Unit = {},
+        injector: DescriptorBoundCommitFaultInjector = DescriptorBoundCommitFaultInjector { fault(it) },
     ) = LinuxFilesystemSyscalls.openRoot(root).use { parent ->
-        GccBundledDeadlineBoundPublication.publish(tracker, parent, root, NAME, BYTES, 1024, deadline,
-            DescriptorBoundCommitFaultInjector { fault(it) }, requireBindings)
+        GccBundledDeadlineBoundPublication.publish(tracker, parent, root, NAME, BYTES, 1024, deadline, injector, requireBindings)
     }.also { tracker.requireRetired(10_000) }
 
     private fun replaceWithForeign(root: Path, bytes: ByteArray) {
