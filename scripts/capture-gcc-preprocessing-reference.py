@@ -47,6 +47,7 @@ ENVIRONMENT = {"LC_ALL": "C", "SOURCE_DATE_EPOCH": "1786060800", "TZ": "UTC"}
 PROGRAM_ENVIRONMENT = {**ENVIRONMENT, "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 WORKDIR = "/w"
 TIMEOUT_SECONDS = 60
+CONTAINER_LAUNCH_FAILURES = frozenset({125, 126, 127})
 ANALYSIS_BOUNDARY = (
     "No Ghidra analysis is part of this record; bundled Ghidra isolation and the "
     "authenticated oracle boundary remain unchanged, and no GHIDRA_HOME fallback "
@@ -278,9 +279,11 @@ HELPER_S = b"\t.text\n\t.globl helper\n\t.type helper, @function\nhelper:\n\tlea
 EXIT_C = b"int main(void) { return 7; }\n"
 
 
-def orchestration(case_id, arguments, inputs, categories, program=None):
+def orchestration(case_id, arguments, inputs, categories, program=None, fails=False):
     spec = case(case_id, arguments, inputs, categories=categories, nostdinc=False)
     spec["program"] = program
+    # The expected outcome of `gcc -v` and the plain command; `gcc -###` must always plan successfully.
+    spec["fails"] = fails
     return spec
 
 
@@ -328,24 +331,28 @@ ORCHESTRATION_CASES = [
         ["-c", "bad.c"],
         {"bad.c": MALFORMED_C},
         ["compile", "failure-propagation"],
+        fails=True,
     ),
     orchestration(
         "failure-assemble-source",
         ["-c", "bad.s"],
         {"bad.s": b"\tbogus_instruction %eax\n"},
         ["assemble", "failure-propagation"],
+        fails=True,
     ),
     orchestration(
         "failure-assemble-after-compile",
         ["-c", "inline.c"],
         {"inline.c": b'void f(void) { __asm__("bogus_instruction"); }\n'},
         ["compile", "assemble", "failure-propagation"],
+        fails=True,
     ),
     orchestration(
         "failure-link-undefined-symbol",
         ["main.c", "-o", "prog"],
         {"main.c": MAIN_C},
         ["compile", "assemble", "link", "failure-propagation"],
+        fails=True,
     ),
 ]
 
@@ -452,18 +459,28 @@ def execute_reference_program(runtime: str, workspace: Path, path: str, closure:
                                        base64.b64decode(observed["stderrBase64"], validate=True))
 
 
+def check_outcome(spec: dict, mode: str, returncode: int) -> None:
+    if bool(returncode) != spec["fails"]:
+        expected = "fail" if spec["fails"] else "succeed"
+        raise SystemExit(f"{spec['id']}: {mode} exited {returncode}; the case is declared to {expected}")
+
+
 def orchestrate(runtime: str, scratch: Path, spec: dict, attempt: int, phase_tools: dict) -> dict:
     if spec not in ORCHESTRATION_CASES:
         raise SystemExit("orchestration invocation is outside the fixed reference inventory")
     _, plan = run_gcc(runtime, scratch, spec, f"plan-{attempt}", ["-###"])
     plan_stderr = normalize_temporaries(plan.stderr)
     planned = phase_commands(plan_stderr.decode("utf-8", "backslashreplace"), strict=True)
+    if plan.returncode or not planned:
+        raise SystemExit(f"{spec['id']}: driver plan did not succeed with at least one phase")
     validate_phase_tools(planned, phase_tools)
     _, trace = run_gcc(runtime, scratch, spec, f"trace-{attempt}", ["-v"])
+    check_outcome(spec, "verbose trace", trace.returncode)
     trace_stderr = normalize_temporaries(trace.stderr)
     traced = phase_commands(trace_stderr.decode("utf-8", "backslashreplace"))
     validate_phase_tools(traced, phase_tools)
     workspace, result = run_gcc(runtime, scratch, spec, f"run-{attempt}", [])
+    check_outcome(spec, "plain command", result.returncode)
     observed = {
         "plan": {
             "exitCode": plan.returncode,
@@ -696,7 +713,13 @@ def run_container(
     for key, value in sorted(ENVIRONMENT.items()):
         command += ["-e", f"{key}={value}"]
     command += [IMAGE, *arguments]
-    return subprocess.run(command, input=stdin, capture_output=True, timeout=TIMEOUT_SECONDS, check=False)
+    result = subprocess.run(command, input=stdin, capture_output=True, timeout=TIMEOUT_SECONDS, check=False)
+    if result.returncode in CONTAINER_LAUNCH_FAILURES:
+        # Docker and podman reserve these statuses for an engine error or a command that could
+        # not be started; they are never a reference observation, so nothing is recorded.
+        raise SystemExit(f"container launch failed with status {result.returncode}: "
+                         f"{result.stderr.decode(errors='replace')}")
+    return result
 
 
 def stage(workspace: Path, inputs: dict[str, bytes]) -> None:
