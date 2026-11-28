@@ -161,9 +161,24 @@ class WebLegacyMigrationTest {
     private fun sha256(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
-    /** Every regular file under the data directory, by relative path. */
+    /**
+     * Every regular file under the data directory, by relative path. The listener's append-only audit
+     * segment is kept as text so [assertStorageKept] can require that sessions only appended to it (#521).
+     */
     private fun storageDigest(base: Path = root): Map<String, String> = Files.walk(base).use { paths ->
-        paths.filter { Files.isRegularFile(it) }.toList().associate { base.relativize(it).toString() to sha256(Files.readAllBytes(it)) }
+        paths.filter { Files.isRegularFile(it) }.toList().associate {
+            val relative = base.relativize(it).toString()
+            relative to if (relative == AUDIT_SEGMENT) Files.readString(it) else sha256(Files.readAllBytes(it))
+        }
+    }
+
+    /** Authoritative bytes are unchanged; the listener's own audit may only gain appended entries and a clean marker. */
+    private fun assertStorageKept(expected: Map<String, String>, actual: Map<String, String>, message: String) {
+        val audit = setOf(AUDIT_SEGMENT, AUDIT_MARKER)
+        assertEquals(expected - audit, actual - audit, message)
+        expected[AUDIT_SEGMENT]?.let { assertTrue(actual[AUDIT_SEGMENT]?.startsWith(it) == true, "$message: audit history rewritten") }
+        actual[AUDIT_MARKER]?.let { assertEquals(sha256("0".toByteArray()), it, "$message: audit loss recorded") }
+        if (AUDIT_MARKER in expected) assertEquals(expected[AUDIT_MARKER], actual[AUDIT_MARKER], message)
     }
 
     private fun directories(base: Path = root): Set<String> = Files.walk(base).use { paths ->
@@ -254,7 +269,7 @@ class WebLegacyMigrationTest {
             start(mode).use { server ->
                 val upgraded = storageDigest()
                 sweep(server, mode, fixture)
-                assertEquals(upgraded, storageDigest(), "opening legacy links changed stored bytes in $mode")
+                assertStorageKept(upgraded, storageDigest(), "opening legacy links changed stored bytes in $mode")
             }
         }
     }
@@ -272,9 +287,10 @@ class WebLegacyMigrationTest {
                 start(mode).use { server -> sweep(server, mode, fixture) }
                 val after = storageDigest()
                 for ((path, digest) in original) assertEquals(digest, after[path], "$path changed after $mode lifecycle")
-                assertEquals(expectedAdditions(fixture), after.keys - original.keys, "unexpected files after $mode lifecycle")
+                // The listener's audit directory may appear with its session entries; nothing else is added.
+                assertEquals(expectedAdditions(fixture), after.keys - original.keys - setOf(AUDIT_SEGMENT, AUDIT_MARKER), "unexpected files after $mode lifecycle")
                 assertEquals(originalDirectories + setOf(".git-runtime", ".git-runtime/home", ".git-runtime/hooks", ".git-runtime/templates"),
-                    directories(), "the upgrade created or removed directories after $mode")
+                    directories() - ".web-audit", "the upgrade created or removed directories after $mode")
             }
             assertEquals(0L, Files.size(root.resolve(".git-runtime/empty-config")), "the isolated Git runtime config must remain empty")
             // The only job-scoped addition records the historical interruption without an invented attempt.
@@ -289,7 +305,7 @@ class WebLegacyMigrationTest {
             // Rollback to the pre-upgrade bytes is a stopped-server restore of the backup copy.
             root.toFile().deleteRecursively()
             backup.toFile().copyRecursively(root.toFile())
-            assertEquals(original, storageDigest())
+            assertStorageKept(original, storageDigest(), "storage changed")
             start(WebUiMode.LEGACY).use { server -> sweep(server, WebUiMode.LEGACY, fixture) }
         } finally {
             backup.toFile().deleteRecursively()
@@ -372,7 +388,7 @@ class WebLegacyMigrationTest {
                     if (process.isAlive) process.destroyForcibly().waitFor(10, TimeUnit.SECONDS)
                 }
             }
-            assertEquals(original, storageDigest(), "a refused contender changed storage")
+            assertStorageKept(original, storageDigest(), "a refused contender changed storage")
         }
     }
 
@@ -409,7 +425,7 @@ class WebLegacyMigrationTest {
             val guidance = assertNotNull(webStorageStartupGuidance(failure), "no guidance for ${failure::class.simpleName}: ${failure.message}")
             assertTrue(guidance.contains("UNSUPPORTED_WORKFLOW_SCHEMA"), guidance)
             assertTrue(guidance.contains("newer application"), guidance)
-            assertEquals(original, storageDigest(), "refused $mode startup rewrote storage")
+            assertStorageKept(original, storageDigest(), "refused $mode startup rewrote storage")
         }
     }
 
@@ -455,7 +471,8 @@ class WebLegacyMigrationTest {
             // The only status difference is the job store's own lock files, which the user's repository sees as untracked.
             val added = git("status", "--porcelain=v1", "--untracked-files=all").lines().toSet() - beforeStatus.lines().toSet()
             assertTrue(added.all {
-                it == "?? jobs/.git-runtime/empty-config" || (it.startsWith("?? jobs/") && it.endsWith("-owner.lock"))
+                it == "?? jobs/.git-runtime/empty-config" || (it.startsWith("?? jobs/") && it.endsWith("-owner.lock")) ||
+                    it == "?? jobs/$AUDIT_SEGMENT" || it == "?? jobs/$AUDIT_MARKER"
             }, "unexpected repository changes: $added")
             assertEquals(0L, Files.size(data.resolve(".git-runtime/empty-config")), "the isolated Git runtime config must remain empty")
             Files.walk(data).use { paths -> assertTrue(paths.noneMatch { it.fileName.toString() == ".git" }, "a .git entry appeared in the job store") }
@@ -474,5 +491,10 @@ class WebLegacyMigrationTest {
         assertEquals(matrix.map { it.id }.toSet(), rows.keys, "document and test matrix rows differ")
         for (route in matrix) assertEquals(listOf("`${route.method} ${route.path}`", route.legacy.toString(), route.spa.toString()),
             rows.getValue(route.id), "document row ${route.id}")
+    }
+
+    private companion object {
+        const val AUDIT_SEGMENT = ".web-audit/current.jsonl"
+        const val AUDIT_MARKER = ".web-audit/incomplete"
     }
 }

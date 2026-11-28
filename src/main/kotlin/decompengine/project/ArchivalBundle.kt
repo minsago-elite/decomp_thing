@@ -259,16 +259,18 @@ object ArchivalBundleVerifier {
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): List<Path> {
         hostSafetyLimits.requireAllows(profile.budgets)
+        val entries = SnapshotZipContainer(archiveBytes).validate(limits.constrainedTo(profile))
         return archiveBytes.inputStream().use { input ->
-        extractAndVerifyInternal(
-            input,
-            targetDir,
-            limits,
-            profile,
-            maximumPathDepth,
-            strictControlJson = true,
-            hostSafetyLimits = hostSafetyLimits,
-        ).paths
+            extractAndVerifyInternal(
+                input,
+                targetDir,
+                limits,
+                profile,
+                maximumPathDepth,
+                strictControlJson = true,
+                hostSafetyLimits = hostSafetyLimits,
+                snapshotEntries = entries,
+            ).paths
         }
     }
 
@@ -330,6 +332,7 @@ object ArchivalBundleVerifier {
         maximumPathDepth: Int = 2048,
         strictControlJson: Boolean = false,
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        snapshotEntries: List<SnapshotZipEntry>? = null,
     ): VerifiedArchiveExtraction {
         require(maximumPathDepth in 1..2048) { "archive path depth bound is invalid" }
         hostSafetyLimits.requireAllows(profile.budgets)
@@ -361,6 +364,9 @@ object ArchivalBundleVerifier {
                 var entryCount = 0
                 while (true) {
                     val entry = zip.nextEntry ?: break
+                    if (snapshotEntries != null) {
+                        require(snapshotEntries.getOrNull(entryCount)?.matches(entry) == true) { "snapshot ZIP entry mismatch" }
+                    }
                     entryCount++
                     require(entryCount <= effectiveLimits.maximumEntries) { "archive exceeds ${effectiveLimits.maximumEntries} entries" }
                     require(!entry.isDirectory) { "archive contains directory entries" }
@@ -399,6 +405,7 @@ object ArchivalBundleVerifier {
                     extractedRelative += normalizedName
                     zip.closeEntry()
                 }
+                require(snapshotEntries == null || entryCount == snapshotEntries.size) { "incomplete snapshot ZIP stream" }
             }
             val manifestPath = staging.resolve(HASH_MANIFEST)
             require(manifestPath.exists()) { "archive is missing $HASH_MANIFEST" }

@@ -52,7 +52,16 @@ it('an open job tab reconciles a deletion made in another tab into an explicit d
     expect(await screen.findByText(jobCopy.thisJobWasDeleted)).toBeTruthy();
     expect(screen.queryByRole('heading', { name: sample.displayFilename })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Review what would be deleted' })).toBeNull();
-    expect(transport.get).toHaveBeenCalledTimes(2);
+    // Witness delivery to another subscriber after the overview has removed its controls.
+    const received = vi.fn();
+    const stop = onLibraryChange('/nested', received);
+    try {
+      for (const count of [1, 2]) {
+        notifyLibraryChanged('/nested');
+        await waitFor(() => expect(received).toHaveBeenCalledTimes(count));
+        expect(transport.get).toHaveBeenCalledTimes(2);
+      }
+    } finally { stop(); }
   } finally { auth.dispose(); }
 });
 
@@ -116,7 +125,8 @@ it.each(['directory', 'file'] as const)('an open source %s clears metadata and p
     }
     transport.get.mockRejectedValue(gone());
     notifyLibraryChanged('/nested/');
-    expect(await screen.findByText(jobCopy.thisJobWasDeleted)).toBeTruthy();
+    expect(await screen.findByText(sourceCopy.jobDeleted, { exact: false })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: sourceCopy.returnAttempt })).toBeNull();
     expect(screen.queryByRole('heading', { name: sourceCopy.previewTitle })).toBeNull();
     expect(screen.queryByRole('link', { name: 'Makefile' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Makefile' })).toBeNull();
@@ -146,8 +156,8 @@ it.each([
   ['job', `/nested/jobs/${sample.jobId}`, jobCopy.thisJobWasDeleted],
   ['attempt', `/nested/jobs/${sample.jobId}/runs/run_fixture`, runCopy.thisJobWasDeleted],
   ['history', `/nested/jobs/${sample.jobId}/runs`, runHistoryCopy.thisJobWasDeleted],
-  ['source directory', sourceDirectoryPath('/nested', selectedSource), jobCopy.thisJobWasDeleted],
-  ['source file', sourceFilePath('/nested', selectedSource, sourceFile.item.fileId), jobCopy.thisJobWasDeleted],
+  ['source directory', sourceDirectoryPath('/nested', selectedSource), sourceCopy.jobDeleted],
+  ['source file', sourceFilePath('/nested', selectedSource, sourceFile.item.fileId), sourceCopy.jobDeleted],
 ])('a deep link to a deleted %s explains the deletion instead of a generic missing resource', async (_name, path, text) => {
   const auth = await session();
   transport.get.mockRejectedValue(gone());

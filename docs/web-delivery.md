@@ -134,18 +134,67 @@ is not evidence/activity readiness: those routes intentionally require explicit 
 each layout/contrast/focus pass, the audit activates the activity/exploration/history/receipt
 controls and requires populated content and successful reads. The source-search form and
 populated results each have independent route coverage, and visible input values and placeholders
-are included in contrast measurements. Each explicit action's
-elapsed time and expected reads are recorded separately in `interactions`, not folded into
-route timing or claimed as a qualified interaction p95. The navigation gate asserts p95 ≤1.5 s
-cold, ≤100 ms feedback and ≤500 ms first route data, the loopback budgets above, and keeps the
-raw navigation samples and median/p95 in `report.json`.
+are included in contrast measurements. Each explicit action's page, action, context, elapsed time
+and ordered fixture reads are validated against the trusted fixture contract. The finite,
+nonnegative raw interaction samples are tied to those records and their samples/median/p95 summary
+is recomputed into `report.json`; they have no interaction budget, so that summary is not a qualified
+interaction p95 threshold. The navigation gate asserts p95 ≤1.5 s cold, ≤100 ms feedback and ≤500 ms
+first route data. The audit also submits the job-library filename filter 50
+times, alternating between `audit-filter-match` and clearing that filter. Each timed action starts
+with focus on the submit button, so a previous sample's focus cannot satisfy the next one. It
+measures local feedback when the applied query and visible status survive a later animation-frame
+observation, then measures first data when the distinctive, in-viewport job row is visible and
+focus reaches the results heading on a later frame. Visibility requires a nonzero viewport box and
+no `display:none`, hidden/collapsed visibility, or zero-opacity ancestor. These are browser
+DOM/layout readiness timings, not a measurement of compositor presentation or pixel scanout. Each
+sample is bound to its exact successfully fulfilled `/jobs` query, the sole job ID in that response,
+and the job ID in the rendered link. The gate compares the raw p95
+against ≤100 ms filter feedback and ≤500 ms first data, using the documented loopback interaction
+budgets. These filter samples are
+reported independently from route timing in `report.json`.
+
+The audit also times opening a source file 50 times, alternating between two distinct files in
+the pinned loopback fixture revision. Each sample re-enters the pinned source directory untimed,
+then measures two phases. Phase A is the directory-link click into file metadata: the
+heading receives focus, the file's name, ID and digest render, the preview stays closed and no
+source chunk may be requested. Phase B is the explicit "Open source preview" action into the first
+bounded chunk (`offset=0`, `maxBytes=65536`, pinned `metadataVersion`; the runtime's absolute source
+view ceiling is 262,144 bytes): the preview heading takes focus, `aria-busy` is `false`, no alert is
+shown and the rendered rows and bytes hash to the file's digest. Each phase must contain exactly
+one successfully fulfilled request, bound to the
+contract's job, run, revision, file, source digest and metadata version. Each phase is gated on its
+raw p95 at exactly ≤100 ms feedback and ≤500 ms first data (metadata or chunk). The report keeps the
+raw samples and recomputed summaries, and compaction retains every request in the filter and
+source-open windows so an unexpected request is still rejected. Fixture API responses are
+loopback contract fixtures, so these timings exclude server latency and storage. Under the opt-in constrained profile they are recorded
+without budgets; they do not measure cross-engine source-open timing (Playwright
+engines opt out of this Chromium DevTools measurement) or compositor presentation and pixel
+scanout. A phase is "ready" when Chromium's DOM state is unchanged across two consecutive
+`requestAnimationFrame` observations (10 s hard deadline); that is DOM readiness, not a
+measured frame on screen. Other explicit actions remain recorded
+in `interactions` without qualified latency budgets. The report retains raw samples and recomputed
+median/p95 values.
 
 The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
 chunks and worker are real packaged responses. That isolates browser-side navigation and
-rendering work. It is not the constrained 4× CPU / 10 Mbit profile, a fresh browser process per
-cold load, a server-latency measurement or a cross-engine result. A local run on a development
-host measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI
-retains its own numbers.
+rendering work. The default `--profile reference` preserves browser defaults and applies the
+documented navigation budgets. An opt-in `--profile constrained` applies the constrained measurement profile above (4× CPU,
+10 Mbit/s download, 2 Mbit/s upload, 100 ms latency) to each audit page target. It records and validates the same timing
+evidence (navigation, filter and source-open) but does not apply the reference timing thresholds; it creates no new interaction budget
+or CI gate. The profile does not create a fresh browser process per cold load, measure server
+latency or establish a cross-engine result. A local reference-profile run on a development host
+measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI retains its
+own numbers.
+
+
+The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
+chunks and worker are real packaged responses. That isolates browser-side navigation and
+rendering work. The filter workload renders one fixture row, so it does not measure scanning a
+large server-side job library. It is not a fresh browser
+process per cold load, a server-latency measurement or a cross-engine filter result. Tabs and
+dialogs remain outside this timing qualification; constrained-profile filter and source-open samples are recorded
+but not gated. CI
+retains its own raw and summary timing evidence.
 
 Heavy browser work is bounded rather than deferred: source previews read at most one
 64 KiB chunk and mount at most 200 rows, and syntax highlighting is an explicit action that runs

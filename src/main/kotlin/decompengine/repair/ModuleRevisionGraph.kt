@@ -7288,6 +7288,8 @@ internal fun hashStableRegularFile(
     readBytes: (Int, Long) -> Unit,
     cancellationCheck: () -> Unit,
     validateMetadata: (LinuxDescriptor) -> Unit = {},
+    // Receives each chunk before final revalidation; callers must not treat it as verified until this returns.
+    consumeBytes: (ByteArray, Int) -> Unit = { _, _ -> },
 ): StableFileDigest {
     cancellationCheck()
     // Snapshot paths use Linux filename semantics, independently of repair manifest grammar.
@@ -7334,6 +7336,7 @@ internal fun hashStableRegularFile(
                 size = Math.addExact(size, count.toLong())
                 readBytes(count, size)
                 digest.update(buffer, 0, count)
+                consumeBytes(buffer, count)
                 utf8.accept(buffer, count)
             }
         }
@@ -7355,6 +7358,9 @@ internal fun hashStableRegularFile(
         directories.asReversed().forEach { it.close() }
     }
 }
+
+/** Proven ENOENT during initial traversal only; never used for failed revalidation after a read. */
+internal class StableRegularFileAbsentException : java.io.IOException("stable file-read target is absent")
 
 /** Incremental UTF-8 validation performed on the exact descriptor-bound bytes being hashed. */
 private class StrictUtf8ByteValidator {
@@ -7421,6 +7427,36 @@ internal fun readStableJobMetadataFile(
     )
 }
 
+internal fun readBudgetedStableRegularFile(
+    root: Path,
+    relative: String,
+    maximumBytes: Long,
+    cancellationCheck: () -> Unit,
+    admitSize: (Long) -> Unit,
+    chargeBytes: (Int) -> Unit,
+): StableRegularFile = readStableRegularFileInternal(
+    root, relative, maximumBytes, null, null, cancellationCheck, false,
+) { descriptorPath, size ->
+    admitSize(size.toLong())
+    cancellationCheck()
+    val bytes = ByteArray(size)
+    Files.newInputStream(descriptorPath).use { input ->
+        var offset = 0
+        while (offset < size) {
+            cancellationCheck()
+            val count = input.read(bytes, offset, minOf(size - offset, 16 * 1024))
+            requireUnchanged(count > 0) { "stable file-read target shrank: $relative" }
+            offset += count
+            chargeBytes(count)
+        }
+        // Each admitted entry permits one EOF probe in addition to its admitted payload.
+        // A mismatching descriptor can consume at most one extra byte, even at a zero limit.
+        cancellationCheck()
+        requireUnchanged(input.read() == -1) { "stable file-read target exceeds its reported size: $relative" }
+    }
+    bytes
+}
+
 private fun readStableRegularFileInternal(
     root: Path,
     relative: String,
@@ -7429,9 +7465,11 @@ private fun readStableRegularFileInternal(
     afterRead: (() -> Unit)?,
     cancellationCheck: () -> Unit,
     allowFinalDirectoryLinkCountChange: Boolean,
+    admittedRead: ((Path, Int) -> ByteArray)? = null,
 ): StableRegularFile {
     cancellationCheck()
-    require(maximumBytes in 1 until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
+    val minimumLimit = if (admittedRead == null) 1L else 0L
+    require(maximumBytes in minimumLimit until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
     val normalized = normalizedRelative(relative)
     val base = root.toAbsolutePath().normalize()
     RepairDescriptorReadSupport.requireSupported(base)
@@ -7439,17 +7477,45 @@ private fun readStableRegularFileInternal(
     val pinnedDirectories = mutableListOf<decompengine.acp.LinuxDescriptor>()
     var authorized: decompengine.acp.LinuxDescriptor? = null
     var readable: decompengine.acp.LinuxDescriptor? = null
+    fun initiallyAbsent(): Nothing {
+        cancellationCheck()
+        // ENOENT under a detached/replaced pinned directory does not prove absence at the
+        // selected path. Reopen and authenticate every traversed prefix before reporting it.
+        val opened = mutableListOf<LinuxDescriptor>()
+        var target: LinuxDescriptor? = null
+        try {
+            var parent = openRepairRootDirectory(base)
+            opened += parent
+            require(parent.identity == pinnedDirectories.first().identity) { "stable absent-read root binding changed" }
+            parts.take(pinnedDirectories.size - 1).forEachIndexed { index, segment ->
+                parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+                opened += parent
+                require(parent.identity == pinnedDirectories[index + 1].identity) { "stable absent-read directory binding changed" }
+            }
+            target = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts[pinnedDirectories.size - 1])
+            require(target == null) { "stable absent-read target appeared during revalidation" }
+            cancellationCheck()
+            throw StableRegularFileAbsentException()
+        } finally {
+            target?.close()
+            opened.asReversed().forEach { it.close() }
+        }
+    }
     try {
         var parent = openRepairRootDirectory(base)
         pinnedDirectories += parent
         parts.dropLast(1).forEach { segment ->
             cancellationCheck()
-            parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+            parent = try { LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment) }
+            catch (failure: decompengine.acp.LinuxSyscallException) {
+                if (failure.errno == LinuxFilesystemSyscalls.ENOENT) initiallyAbsent()
+                throw failure
+            }
             pinnedDirectories += parent
             cancellationCheck()
         }
         authorized = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())
-            ?: throw StableFileUnavailableException("stable file-read target disappeared: $relative")
+            ?: initiallyAbsent()
         if (!authorized.identity.isRegularFile || authorized.identity.isSymbolicLink) {
             throw StableFileUnavailableException("stable file-read target is not a regular non-symbolic-link file: $relative")
         }
@@ -7466,7 +7532,7 @@ private fun readStableRegularFileInternal(
                 "stable file-read target $relative has ${before.size()} bytes; limit=$maximumBytes",
             )
         }
-        val bytes = try {
+        val bytes = admittedRead?.invoke(descriptorPath, before.size().toInt()) ?: try {
             LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt(), cancellationCheck)
         } catch (_: LinuxResourceLimitException) {
             throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
