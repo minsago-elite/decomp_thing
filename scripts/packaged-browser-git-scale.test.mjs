@@ -132,3 +132,29 @@ test('keeps selected root diff IDs through compact paginated summaries and reads
   assert.equal('files' in report.diff.boundedTwoThousandOne, false);
   assert.ok(Buffer.byteLength(JSON.stringify(report), 'utf8') < 512 * 1024);
 });
+
+test('authenticated mutation allowlist admits Git-scale POSTs only in git-scale mode', async () => {
+  const { assertAuthenticatedMutations } = await import('./packaged-browser-git-scale.mjs');
+  const origin = 'http://127.0.0.1:1';
+  const jobId = 'a'.repeat(32);
+  const session = [
+    { method: 'GET', url: `${origin}/nested/api/v1/bootstrap` },
+    { method: 'POST', url: `${origin}/nested/api/v1/session` },
+    { method: 'DELETE', url: `${origin}/nested/api/v1/session` },
+    { method: 'POST', url: `${origin}/nested/api/v1/session` },
+  ];
+  const upload = { method: 'POST', url: `${origin}/nested/api/v1/jobs` };
+  const attach = { method: 'POST', url: `${origin}/nested/api/v1/jobs/${jobId}/repositories` };
+  assert.doesNotThrow(() => assertAuthenticatedMutations(session, { origin }));
+  // A stray job POST in a non-git-scale session mode fails, whether added or replacing a session POST.
+  assert.throws(() => assertAuthenticatedMutations([...session, upload], { origin }), /non-session mutation/);
+  assert.throws(() => assertAuthenticatedMutations([session[0], session[1], session[2], upload], { origin }), /two session POSTs/);
+  // git-scale accepts exactly its two POSTs, by method and exact URL.
+  assert.doesNotThrow(() => assertAuthenticatedMutations([...session, upload, attach], { origin, gitScaleJobId: jobId }));
+  for (const invalid of [
+    [...session, upload], [...session, attach], [...session, upload, attach, upload],
+    [...session, upload, { ...attach, method: 'PUT' }],
+    [...session, upload, { method: 'POST', url: `${origin}/nested/api/v1/jobs/${'b'.repeat(32)}/repositories` }],
+    [session[0], session[1], session[2], upload, attach, upload],
+  ]) assert.throws(() => assertAuthenticatedMutations(invalid, { origin, gitScaleJobId: jobId }), /session POSTs|non-session mutation/);
+});

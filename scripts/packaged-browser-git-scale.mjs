@@ -96,6 +96,24 @@ export function assertDiffPaths(files, expectedPaths, label) {
 }
 
 /** Retains a compact commitment after the full ordered path list has been checked. */
+/**
+ * Authenticated-tab mutation allowlist. Every session mode permits only the two session POSTs and one
+ * session DELETE; the git-scale mode additionally permits exactly its inert upload and attach POSTs.
+ */
+export function assertAuthenticatedMutations(requests, { origin, gitScaleJobId = null }) {
+  const session = `${origin}/nested/api/v1/session`;
+  const mutations = requests.filter(request => !['GET', 'HEAD'].includes(request.method));
+  const sessionMutations = mutations.filter(request => request.url === session);
+  assert.equal(sessionMutations.filter(request => request.method === 'POST').length, 2, 'Expected exactly two session POSTs');
+  assert.equal(sessionMutations.filter(request => request.method === 'DELETE').length, 1, 'Expected exactly one session DELETE');
+  const expected = gitScaleJobId === null ? [] : [
+    { method: 'POST', url: `${origin}/nested/api/v1/jobs` },
+    { method: 'POST', url: `${origin}/nested/api/v1/jobs/${gitScaleJobId}/repositories` },
+  ];
+  assert.deepEqual(mutations.filter(request => request.url !== session).map(({ method, url }) => ({ method, url })), expected,
+    'Unexpected non-session mutation on the authenticated tab');
+}
+
 export function summarizeDiffPaths(files) {
   const paths = files.map(file => file.path);
   return {

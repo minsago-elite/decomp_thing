@@ -18,7 +18,7 @@ import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, publishReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence } from './packaged-browser-audit.mjs';
-import { qualifyGitScale, seedGitScale } from './packaged-browser-git-scale.mjs';
+import { assertAuthenticatedMutations, qualifyGitScale, seedGitScale } from './packaged-browser-git-scale.mjs';
 import { TargetLifecycle, TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { createServerPhaseCollector, serverPhaseReport } from './packaged-browser-log-server-phases.mjs';
@@ -1156,16 +1156,11 @@ try {
     await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('This sign-in link is no longer available.')`, 'consumed link denial');
     await delay(5000);
-    assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, gitScaleFixture ? 4 : 2);
-    assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
+    assertAuthenticatedMutations(authenticated.requests, { origin: browserOrigin, gitScaleJobId: gitScaleFixture ? report.gitScale.jobId : null });
     assert.equal(await evaluate(authenticated, 'location.hash'), '');
     assert.deepEqual(authenticated.exceptions, []);
     assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
     assert.ok(authenticated.requests.every((request) => request.url.startsWith(browserOrigin + '/')));
-    assert.ok(authenticated.requests.every((request) => ['GET', 'HEAD'].includes(request.method) || [
-      browserOrigin + '/nested/api/v1/session', browserOrigin + '/nested/api/v1/jobs',
-      ...((report.gitScale ? [`${browserOrigin}/nested/api/v1/jobs/${report.gitScale.jobId}/repositories`] : [])),
-    ].includes(request.url)));
     assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'git-scale' || populated);
     report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'git-scale' || populated };
     report.requests.authenticated = authenticated.requests;
