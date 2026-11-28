@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { deletedNotice, deletionVerdict } from './packaged-browser-lifecycle.mjs';
+import vm from 'node:vm';
+import { deletedNotice, deletionVerdict, listed, listingBusyWaitsMs } from './packaged-browser-lifecycle.mjs';
 
 const { JSDOM } = createRequire(new URL('../frontend/package.json', import.meta.url))('jsdom');
 // Independent reviewed UI text fixtures: compare displayed values, not TypeScript formatting.
@@ -100,4 +101,63 @@ test('saved-window EVENT_GAP copy remains an expired window, not a deletion noti
   assert.equal(fixture.check(), false);
   fixture.dom.window.document.querySelector('section').setAttribute('aria-labelledby', 'attempt-title');
   assert.equal(fixture.eval(deletedNotice), false);
+});
+
+// Fake evaluate: run the generated browser function against a scripted fetch, recording every wait.
+function listingBrowser(responses) {
+  const requests = []; const waits = [];
+  const reply = ({ status, body, headers = {} }) => ({
+    status,
+    headers: { get: name => Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] ?? null },
+    text: async () => typeof body === 'string' ? body : JSON.stringify(body),
+    json: async () => typeof body === 'string' ? JSON.parse(body) : body,
+  });
+  const context = {
+    fetch: async url => { requests.push(url); assert.ok(responses.length, 'unexpected extra listing request'); return reply(responses.shift()); },
+    setTimeout: (resolve, ms) => { waits.push(ms); resolve(); },
+  };
+  return { requests, waits, evaluate: async (tab, expression) => { assert.equal(tab, 'tab'); return vm.runInNewContext(expression, context); } };
+}
+const envelope = (code, message = 'fixture') => ({ apiVersion: 1, kind: 'error', requestId: '9ea205a7-2652-4da6-9a84-47bef7611978',
+  error: { code, message, retryable: false, details: [], retryAfterMs: null } });
+const busy = { status: 503, body: envelope('LISTING_BUSY', 'Another job snapshot is being collected. Retry this read shortly.') };
+const page200 = ids => ({ status: 200, body: { data: { items: ids.map(jobId => ({ jobId })) } } });
+const id = 'a'.repeat(32);
+
+test('job listing retries LISTING_BUSY with increasing waits and returns the listed result', async () => {
+  const browser = listingBrowser([busy, busy, page200(['b'.repeat(32), id])]);
+  assert.equal(await listed('tab', browser.evaluate, id, 'only'), true);
+  assert.deepEqual(browser.requests, Array(3).fill('/nested/api/v1/jobs?limit=100&archived=only'));
+  assert.deepEqual(browser.waits, [100, 200]);
+  const absent = listingBrowser([busy, page200(['b'.repeat(32)])]);
+  assert.equal(await listed('tab', absent.evaluate, id, ''), false);
+  assert.deepEqual(absent.requests, Array(2).fill('/nested/api/v1/jobs?limit=100'));
+});
+
+test('job listing honours Retry-After only up to its own wait', async () => {
+  const browser = listingBrowser([{ ...busy, headers: { 'Retry-After': '0' } }, { ...busy, headers: { 'retry-after': '30' } }, page200([id])]);
+  assert.equal(await listed('tab', browser.evaluate, id, ''), true);
+  assert.deepEqual(browser.waits, [0, 200]);
+});
+
+test('job listing fails at once for any other status or 503 code', async () => {
+  for (const response of [{ status: 503, body: envelope('LISTING_LIMIT') }, { status: 503, body: envelope('JOB_RECORD_UNAVAILABLE') },
+    { status: 503, body: 'not json' }, { status: 503, body: { kind: 'other', error: { code: 'LISTING_BUSY' } } },
+    { status: 429, body: envelope('LISTING_BUSY') }, { status: 500, body: envelope('INTERNAL') }]) {
+    const browser = listingBrowser([response, page200([id])]);
+    const code = response.body?.kind === 'error' ? response.body.error.code : null;
+    await assert.rejects(async () => listed('tab', browser.evaluate, id, ''),
+      { message: `job listing failed after 1 attempt(s): status=${response.status} code=${code}` });
+    assert.equal(browser.requests.length, 1);
+    assert.deepEqual(browser.waits, []);
+  }
+});
+
+test('job listing gives up after five LISTING_BUSY responses in a row', async () => {
+  const browser = listingBrowser([busy, busy, busy, busy, busy, page200([id])]);
+  await assert.rejects(async () => listed('tab', browser.evaluate, id, ''),
+    { message: 'job listing failed after 5 attempt(s): status=503 code=LISTING_BUSY' });
+  assert.equal(browser.requests.length, 5);
+  assert.deepEqual(browser.waits, listingBusyWaitsMs);
+  assert.deepEqual(listingBusyWaitsMs, [100, 200, 400, 800]);
 });
