@@ -82,13 +82,15 @@ internal class WebProgramStructurePages(
         val ownership = query.fields["ownership"]?.also { if (it !in setOf("owned", "unowned", "ambiguous", "not-recorded")) invalidFilter() }
         if (sort !in setOf("address", "name", "id") || order !in setOf("asc", "desc")) invalidFilter()
         val search = query.fields["search"]
-        // A module filter is a selector: only one this policy publishes as its own selector is accepted and echoed.
-        val moduleFilter = query.fields["module"]?.also { selector ->
-            if (!addressable(selector)) invalidFilter()
-            if (!policy.preservesOpaque(selector)) moduleNotFound()
-        }
+        val moduleFilter = query.fields["module"]?.also { if (!addressable(it)) invalidFilter() }
         return read(jobId, runId, revisionId) { index, _ ->
             pinned(index, query)
+            // A module filter is a selector, resolved against the recorded plan before anything is echoed. One that is not
+            // recorded and one this policy would rewrite get the same denial, so a reply never reveals the difference.
+            val module = moduleFilter?.let { selector ->
+                index.moduleIndex[selector]?.takeIf { index.available && index.planOutcome.state == "available" && selectable(selector, policy) }
+                    ?: moduleNotFound()
+            }
             val route = listOf("functions", jobId, runId, revisionId).joinToString("/")
             header(index).apply {
                 put("query", buildJsonObject {
@@ -105,7 +107,6 @@ internal class WebProgramStructurePages(
                     return@apply
                 }
                 val table = index.table(WebStructureKind.FUNCTION)
-                val module = moduleFilter?.let { selector -> index.moduleIndex[selector] ?: -100 }
                 val orderRows = when (sort) { "name" -> table.byName; "id" -> table.byId; else -> table.byAddress }
                 val addressPrefix = search?.lowercase(Locale.ROOT)?.takeIf { it.matches(Regex("0x[0-9a-f]{1,16}")) }
                 val unfiltered = status == null && evidence == null && ownership == null && module == null && search == null
@@ -163,7 +164,6 @@ internal class WebProgramStructurePages(
     fun module(owner: String, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?,
         policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, setOf("kind"))
-        if (!selectable(selector, policy)) moduleNotFound()
         val kind = when (query.fields["kind"] ?: "functions") {
             "functions" -> WebStructureKind.FUNCTION; "globals" -> WebStructureKind.GLOBAL; "types" -> WebStructureKind.TYPE
             else -> invalidFilter()
@@ -177,7 +177,8 @@ internal class WebProgramStructurePages(
                     put("module", JsonNull); put("owned", JsonNull)
                     return@apply
                 }
-                val moduleRow = index.moduleIndex[selector] ?: moduleNotFound()
+                // A module this policy would rewrite is never offered as a selector; it is denied exactly as an unrecorded one.
+                val moduleRow = index.moduleIndex[selector]?.takeIf { selectable(selector, policy) } ?: moduleNotFound()
                 val module = index.modules[moduleRow]
                 put("module", moduleItem(index, moduleRow, policy).toMutableMap().apply {
                     put("implementationPath", JsonPrimitive(module.sourcePath))
@@ -223,14 +224,13 @@ internal class WebProgramStructurePages(
     fun entity(kind: WebStructureKind, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?,
         policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, emptySet(), paged = false)
-        if (!selectable(selector, policy)) entityNotFound(kind.wire)
         return read(jobId, runId, revisionId) { index, records ->
             pinned(index, query)
             header(index).apply {
                 if (!index.available) { put("entity", JsonNull); return@apply }
                 val table = index.table(kind)
-                val row = table.index[selector] ?: throw WebAccessDenied(404,
-                    "ENTITY_NOT_FOUND", "The requested ${kind.wire} is not recorded in this revision's program model.")
+                // An entity this policy would rewrite is never offered as a selector; it is denied exactly as an unrecorded one.
+                val row = table.index[selector]?.takeIf { selectable(selector, policy) } ?: entityNotFound(kind.wire)
                 val fields = records.entity(checkNotNull(index.model), WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES,
                     table.offsets[row], policy)
                 put("entity", fitDetail(JsonObject(entityItem(index, table, row, policy) + detail(index, table, row, fields, policy))))
@@ -257,29 +257,29 @@ internal class WebProgramStructurePages(
         val focus = query.fields["focus"]?.takeIf(::addressable) ?: invalidFilter()
         if (view !in setOf("calls", "modules") || direction !in setOf("outgoing", "incoming", "both") ||
             unresolved !in setOf("show", "omit") || (view == "modules" && "unresolved" in query.fields)) invalidFilter()
-        // Checked before any read: an unavailable graph still echoes its focus. A focus this policy would not publish
-        // as its own selector is never offered, so it is not recorded here either.
-        if (!policy.preservesOpaque(focus)) { if (view == "calls") entityNotFound("function") else moduleNotFound() }
         return read(jobId, runId, revisionId) { index, _ ->
             pinned(index, query)
+            // The focus is resolved against the recorded population before it is echoed. Without the model (calls) or the
+            // plan (modules) nothing is recorded, so every focus is denied; a focus this policy would rewrite is never
+            // offered and is denied the same way. The denial never depends on how the supplied focus redacts.
+            val start = when {
+                !index.available -> null
+                view == "calls" -> index.table(WebStructureKind.FUNCTION).index[focus]
+                index.planOutcome.state == "available" -> index.moduleIndex[focus]
+                else -> null
+            }?.takeIf { selectable(focus, policy) } ?: throw WebAccessDenied(404, if (view == "calls") "ENTITY_NOT_FOUND" else "MODULE_NOT_FOUND",
+                "The requested focus is not recorded in this revision's ${if (view == "calls") "program model" else "module plan"}.")
             header(index).apply {
                 put("query", buildJsonObject {
                     put("view", view); put("focus", focus); put("direction", direction); put("depth", depth)
                     put("nodeLimit", nodeLimit); put("edgeLimit", edgeLimit)
                     put("unresolved", if (view == "calls") JsonPrimitive(unresolved) else JsonNull)
                 })
-                val graphOutcome = when {
-                    !index.available -> index.outcome
-                    view == "modules" && index.planOutcome.state != "available" -> index.planOutcome
-                    else -> WebStructureOutcome.AVAILABLE
-                }
-                put("graphState", JsonPrimitive(graphOutcome.state)); put("graphReason", graphOutcome.reason?.let(::JsonPrimitive) ?: JsonNull)
+                // A resolved focus means the records the view draws from are available.
+                val graphOutcome = WebStructureOutcome.AVAILABLE
+                put("graphState", JsonPrimitive(graphOutcome.state)); put("graphReason", JsonNull)
                 put("relationships", relationships(index, view, graphOutcome))
-                if (graphOutcome.state != "available") { put("neighborhood", JsonNull); return@apply }
                 val graph = if (view == "calls") index.callGraph else index.moduleGraph
-                val start = if (view == "calls") index.table(WebStructureKind.FUNCTION).index[focus] else index.moduleIndex[focus]
-                if (start == null) throw WebAccessDenied(404, if (view == "calls") "ENTITY_NOT_FOUND" else "MODULE_NOT_FOUND",
-                    "The requested focus is not recorded in this revision's ${if (view == "calls") "program model" else "module plan"}.")
                 val result = WebGraphNeighborhood.of(graph, start, depth, direction != "incoming", direction != "outgoing",
                     nodeLimit, edgeLimit, admit = { it < graph.recorded || unresolved == "show" })
                 // Node and edge limits bound counts; long recorded identities could still exceed the browser's byte limit.

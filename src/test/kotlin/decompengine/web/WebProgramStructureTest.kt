@@ -464,7 +464,6 @@ class WebProgramStructureTest {
             "evidence=unresolved&sort=id&limit=1" to listOf("fn_0000000000401100", "fn_0000000000402000", "fn_ffffffffffffffff"),
             "module=core&ownership=owned&limit=1" to listOf("fn_0000000000401000", "fn_0000000000401100"),
             "status=failed" to listOf("fn_0000000000402000"),
-            "module=absent" to emptyList(),
         )) {
             val seen = mutableListOf<String>()
             var cursor: String? = null
@@ -487,9 +486,13 @@ class WebProgramStructureTest {
                 revision.pages.functions(owner, jobId, runId, revisionId, "$query&cursor=$cursor")
             }.code)
         }
-        for (query in listOf("sort=size", "order=up", "status=verified", "evidence=verified", "limit=201", "unknown=1", "search=")) {
+        for (query in listOf("sort=size", "order=up", "status=verified", "evidence=verified", "limit=201", "unknown=1", "search=", "module=../x")) {
             assertEquals(422, assertFailsWith<WebAccessDenied> { revision.pages.functions("owner", jobId, runId, revisionId, query) }.status, query)
         }
+        // A module filter is a selector: an unrecorded module is not found rather than an empty result.
+        assertEquals("MODULE_NOT_FOUND", assertFailsWith<WebAccessDenied> {
+            revision.pages.functions("owner", jobId, runId, revisionId, "module=absent")
+        }.code)
     }
 
     @Test fun `changed structure records expire cursors and pinned reads`() {

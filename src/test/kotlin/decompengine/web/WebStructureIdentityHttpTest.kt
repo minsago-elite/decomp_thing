@@ -33,7 +33,7 @@ class WebStructureIdentityHttpTest {
     private fun function(id: String, name: String, address: ULong, calls: Set<String> = emptySet()) =
         RecoveredFunction(id, name, address, "void $name(void)", null, calls = calls)
 
-    /** A listener over two revisions (`run_2` has no module plan) whose policy configures [credentials]. */
+    /** A listener over three revisions (`run_2` has no module plan, `run_3` no model) whose policy configures [credentials]. */
     private fun <T> listener(credentials: Map<String, String> = mapOf("API_TOKEN" to literal), block: (String) -> T): T {
         val model = fixture.model(listOf(
             function(main, "main", 0x401000u, setOf(syntax, secret, other)), function(syntax, "shaped", 0x401010u),
@@ -42,6 +42,7 @@ class WebStructureIdentityHttpTest {
             ModulePlan(modules = listOf(fixture.planned("core", listOf(main, syntax)), fixture.planned(syntaxModule, listOf(other)),
                 fixture.planned(secretModule, listOf(secret)))))
         fixture.revision("run_2", "revision_2", model, null)
+        fixture.revision("run_3", "revision_3", null, null)
         val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val worker = Executors.newFixedThreadPool(2)
         http.executor = worker
@@ -52,9 +53,12 @@ class WebStructureIdentityHttpTest {
             val job = fixture.jobId
             try {
                 val raw = exchange.requestURI.rawPath
-                val unplanned = raw.startsWith("/unplanned/")
-                val (run, revision) = if (unplanned) "run_2" to "revision_2" else "run_1" to "revision_1"
-                val path = raw.removePrefix("/unplanned")
+                val (run, revision) = when {
+                    raw.startsWith("/unplanned/") -> "run_2" to "revision_2"
+                    raw.startsWith("/unmodeled/") -> "run_3" to "revision_3"
+                    else -> "run_1" to "revision_1"
+                }
+                val path = raw.removePrefix("/unplanned").removePrefix("/unmodeled")
                 val (kind, data) = when {
                     path == "/graph" -> "structureNeighborhood" to pages.neighborhood(job, run, revision, query, policy)
                     path == "/scorecard" -> "structureScorecard" to pages.scorecard("owner", job, run, revision, query, policy)
@@ -67,7 +71,8 @@ class WebStructureIdentityHttpTest {
                 }
                 sendWebApiResponse(exchange, 200, kind, data)
             } catch (failure: WebAccessDenied) {
-                val body = buildJsonObject { put("code", failure.code) }.toString().toByteArray()
+                // The fields the production error envelope carries, besides its per-request ID.
+                val body = buildJsonObject { put("code", failure.code); put("message", failure.message) }.toString().toByteArray()
                 exchange.sendResponseHeaders(failure.status, body.size.toLong())
                 exchange.responseBody.use { it.write(body) }
             }
@@ -211,8 +216,7 @@ class WebStructureIdentityHttpTest {
         else -> emptyList()
     }
 
-    @Test fun `a module filter is a selector - concealed it is not found, credential-shaped it echoes exactly`() = listener { origin ->
-        assertEquals(404, get(origin, "/functions?module=${encode(secretModule)}").statusCode())
+    @Test fun `a module filter is a selector and a credential-shaped one echoes exactly`() = listener { origin ->
         val filtered = data(get(origin, "/functions?module=${encode(syntaxModule)}"), "functionInventory")
         assertEquals(syntaxModule, filtered.getValue("query").jsonObject.text("module"))
         val rows = filtered.getValue("items").jsonArray.map { it.jsonObject }
@@ -220,12 +224,34 @@ class WebStructureIdentityHttpTest {
         assertTrue(rows.all { it.text("moduleSelector") == syntaxModule })
     }
 
-    @Test fun `an unavailable graph checks its focus before echoing it`() = listener { origin ->
-        val concealed = get(origin, "/unplanned/graph?view=modules&focus=${encode(secretModule)}")
-        assertEquals(404, concealed.statusCode()); assertFalse(concealed.body().contains(literal))
-        val unavailable = data(get(origin, "/unplanned/graph?view=modules&focus=${encode(syntaxModule)}"), "structureNeighborhood")
-        assertNotEquals("available", unavailable.text("graphState"))
-        assertEquals(JsonNull, unavailable.getValue("neighborhood"))
-        assertEquals(syntaxModule, unavailable.getValue("query").jsonObject.text("focus"))
+    /** Status and body without the per-request ID, which is the only part allowed to differ between two requests. */
+    private fun reply(origin: String, path: String): Pair<Int, String> {
+        val response = get(origin, path)
+        val body = Json.parseToJsonElement(response.body()).jsonObject
+        return response.statusCode() to JsonObject(body - "requestId").toString()
+    }
+
+    @Test fun `a concealed selector is denied exactly as an unknown one on every path`() = listener { origin ->
+        val unknownFunction = "fn_unrecorded"
+        val unknownModule = "mod_unrecorded"
+        val paths = listOf(
+            "inventory module filter" to { selector: String -> "/functions?module=${encode(selector)}" } to (secretModule to unknownModule),
+            "inventory module filter without a plan" to { selector: String -> "/unplanned/functions?module=${encode(selector)}" } to (secretModule to unknownModule),
+            "module detail" to { selector: String -> "/modules/${encode(selector)}" } to (secretModule to unknownModule),
+            "module detail without a plan" to { selector: String -> "/unplanned/modules/${encode(selector)}" } to (secretModule to unknownModule),
+            "entity detail" to { selector: String -> "/functions/${encode(selector)}" } to (secret to unknownFunction),
+            "entity detail without a model" to { selector: String -> "/unmodeled/functions/${encode(selector)}" } to (secret to unknownFunction),
+            "call graph focus" to { selector: String -> "/graph?view=calls&focus=${encode(selector)}" } to (secret to unknownFunction),
+            "module graph focus" to { selector: String -> "/graph?view=modules&focus=${encode(selector)}" } to (secretModule to unknownModule),
+            "unavailable module graph focus" to { selector: String -> "/unplanned/graph?view=modules&focus=${encode(selector)}" } to (secretModule to unknownModule),
+            "unavailable call graph focus" to { selector: String -> "/unmodeled/graph?view=calls&focus=${encode(selector)}" } to (secret to unknownFunction),
+        )
+        for ((route, values) in paths) {
+            val (name, path) = route
+            val (concealed, unknown) = values
+            val denied = reply(origin, path(concealed))
+            assertEquals(reply(origin, path(unknown)), denied, name)
+            assertFalse(denied.second.contains(literal), name)
+        }
     }
 }

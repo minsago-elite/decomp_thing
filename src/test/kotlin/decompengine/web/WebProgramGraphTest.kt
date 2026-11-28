@@ -143,14 +143,15 @@ class WebProgramGraphTest {
     }
 
     @Test fun `unavailable records never yield an empty successful graph`() {
+        // Without the records a view draws from, no focus is recorded: the read is denied as for an unrecorded focus.
         fixture.revision(run, revision, null, null)
-        val missing = read("view=calls&focus=${id(0)}")
-        assertEquals("not-recorded", missing.text("graphState")); assertEquals(JsonNull, missing.getValue("neighborhood"))
+        assertEquals("ENTITY_NOT_FOUND", assertFailsWith<WebAccessDenied> { read("view=calls&focus=${id(0)}") }.code)
         val model = fixture.model(listOf(function(0)))
         fixture.revision("run_2", "revision_2", model, null)
-        val unplanned = fixture.pages.neighborhood(fixture.jobId, "run_2", "revision_2", "view=modules&focus=core")
-        fixture.assertContract("structureNeighborhood", unplanned)
-        assertEquals("not-recorded", unplanned.text("graphState")); assertEquals("PLAN_NOT_RECORDED", unplanned.text("graphReason"))
+        val unplanned = assertFailsWith<WebAccessDenied> {
+            fixture.pages.neighborhood(fixture.jobId, "run_2", "revision_2", "view=modules&focus=core")
+        }
+        assertEquals(404, unplanned.status); assertEquals("MODULE_NOT_FOUND", unplanned.code)
     }
 
     @Test fun `graph query validation is reported on a cold fixture`() {

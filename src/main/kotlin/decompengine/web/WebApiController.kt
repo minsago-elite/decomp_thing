@@ -767,18 +767,26 @@ internal fun sendWebAttachment(exchange: HttpExchange, size: Long, fileName: Str
     exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
     exchange.responseHeaders.set("Content-Length", size.toString())
     headers.forEach { (key, value) -> exchange.responseHeaders.set(key, value) }
+    var aborted = false
     try {
         if (exchange.requestMethod == "HEAD" || size == 0L) exchange.sendResponseHeaders(200, -1)
         else {
             exchange.sendResponseHeaders(200, size)
-            abortAfterHeaders { exchange.responseBody.use { output -> write(output); output.flush() } }
+            try { abortAfterHeaders { val output = exchange.responseBody; write(output); output.flush() } }
+            catch (failure: WebResponseAborted) { aborted = true; throw failure }
         }
-    } finally { exchange.close() }
+    } finally {
+        // An aborted body is never closed here: closing the stream or exchange can block draining an unread request
+        // body while the delivery guards are still held. The listener drops the connection once they unwind.
+        if (!aborted) exchange.close()
+    }
 }
 
 /**
- * A failure after the status line and part of a fixed-length body were sent. The controller rethrows it so the listener
- * closes the connection; closing the exchange alone can leave the connection open with the declared length unmet.
+ * A failure after the status line and part of a fixed-length body were sent. Writers neither close the response nor the
+ * exchange for it, and the controller rethrows it, so the delivery guards unwind first and the listener then drops the
+ * connection. Closing the exchange instead can leave the connection open with the declared length unmet, or block
+ * draining an unread request body.
  */
 internal class WebResponseAborted(cause: Throwable) : RuntimeException("response aborted after its headers were sent", cause)
 

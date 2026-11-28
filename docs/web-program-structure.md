@@ -170,8 +170,11 @@ is `complete` only when nothing reachable is left out; otherwise it is `truncate
 `NODE_LIMIT`, `EDGE_LIMIT`, `VISIT_LIMIT` or `BYTE_LIMIT` (long recorded identities halved the
 nodes until the response fits 1 MB), and `omittedNodes`/`omittedEdges` are exact.
 Past the visit bound every total is `null` (unknown), never a guess. Each node states
-its recorded outgoing and incoming totals and how many of them are shown. Model or plan
-states other than `available` return `graphState` with no neighborhood.
+its recorded outgoing and incoming totals and how many of them are shown. The focus is
+resolved against the recorded population before anything is echoed: when the model
+(calls) or the plan (modules) is not available, no focus is recorded and the read is
+`404 ENTITY_NOT_FOUND` or `404 MODULE_NOT_FOUND`, the same denial as an unrecorded focus.
+A successful neighborhood is therefore always `graphState: available`.
 
 The browser route `…/revisions/{revisionId}/graph?view=…&focus=…` is linked from
 function detail ("Explore its recorded call neighborhood") and module detail. Graph
@@ -236,8 +239,10 @@ manifest-committed digest before any header is sent; the second pass streams thr
 held-back final chunk that is released only after that pass reproduces the digest too, so
 memory stays at one read chunk and a record that changes mid-response is closed short of
 its declared length. A failure after the headers (here and for artifact content) is
-rethrown to the listener, which drops the connection; closing the exchange alone could
-leave it open with the declared length unmet.
+rethrown to the listener without closing the response or the exchange, so the delivery
+guards unwind first and the listener then drops the connection. Closing the exchange
+could leave the connection open with the declared length unmet, or block draining an
+unread request body while the lease and admission are held.
 
 Recorded identities share one public projection under the listener's redaction policy. An
 addressable entity or module ID that the policy publishes unchanged in an identity field
@@ -247,10 +252,14 @@ selector: `function:`, `global:` or `type:` plus a SHA-256 for entities, and
 `_withheld.` plus a SHA-256 for modules, which keeps the module-ID grammar. An alias is
 itself published unchanged: when a configured value would overlap it, the digest is
 re-derived with a salt, and when no safe alias exists the read fails with
-`409 STRUCTURE_IDENTITY_WITHHELD`. A request that selects an ID the policy would rewrite,
-as a path selector, a neighborhood focus or a function-inventory `module` filter, finds no
-record (`404`), checked before any other response is built; an accepted `module` filter is
-echoed with the same identity semantics as its selector.
+`409 STRUCTURE_IDENTITY_WITHHELD`. Every selector (a path selector, a neighborhood focus or
+a function-inventory `module` filter) is resolved against the recorded population before it
+is echoed. An ID that the policy would rewrite is denied exactly as an unrecorded one: same
+status, code and message, so no reply reveals whether a selector overlaps a configured
+value. A `module` filter that names no recorded module (including when no plan is
+available) is `404 MODULE_NOT_FOUND` rather than an empty page; an accepted filter is
+echoed with the same identity semantics as its selector. Entity and module detail of an
+unavailable model or plan stay a recorded-state reply with no record, for every selector.
 
 ## Comparing attempts
 

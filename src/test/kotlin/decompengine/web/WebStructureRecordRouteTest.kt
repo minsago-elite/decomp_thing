@@ -32,7 +32,7 @@ class WebStructureRecordRouteTest {
     /** Larger than any loopback socket buffering, so the second pass is still reading when the record changes. */
     private val padding = 24 * 1024 * 1024
 
-    @Test fun `a record that changes mid-stream is truncated promptly and its delivery released`() {
+    @Test fun `a record that changes mid-stream is truncated promptly and its delivery released, even with an unread request body`() {
         val parent = Files.createDirectories(Path.of("build/test-tmp/web-structure-records").toAbsolutePath())
         val root = createTempDirectory(parent, "records-")
         val input = elfFixture()
@@ -78,46 +78,64 @@ class WebStructureRecordRouteTest {
             val version = Json.parseToJsonElement(functions.body()).jsonObject.getValue("data").jsonObject.getValue("structureVersion").jsonPrimitive.content
             val path = "$revision/records/program-model?structureVersion=$version"
 
-            Socket().use { socket ->
-                // A small fixed receive buffer keeps the in-flight bytes far below the record size.
-                socket.receiveBufferSize = 64 * 1024
-                socket.connect(InetSocketAddress("127.0.0.1", server.serverPort), 5_000)
-                socket.soTimeout = 15_000
-                socket.getOutputStream().write(("GET $path HTTP/1.1\r\nHost: 127.0.0.1:${server.serverPort}\r\n" +
-                    "Accept: application/octet-stream\r\nCookie: $cookie\r\nConnection: close\r\n\r\n").toByteArray())
-                val stream = socket.getInputStream()
-                val headers = readHeaders(stream)
-                assertTrue(headers.first().startsWith("HTTP/1.1 200"), headers.toString())
-                val length = headers.single { it.startsWith("Content-Length:", ignoreCase = true) }.substringAfter(':').trim().toLong()
-                assertEquals(padded.size.toLong(), length)
-                var received = readSome(stream, 256 * 1024)
-                // The listener is now blocked writing the second pass. Change the final byte in place.
-                Thread.sleep(1_000)
-                RandomAccessFile(model.toFile(), "rw").use { it.seek(padded.size - 1L); it.write('\n'.code) }
-                val started = System.nanoTime()
-                // A timeout here is a failure: the connection must be dropped, not left open with the length unmet.
-                val buffer = ByteArray(64 * 1024)
-                while (true) { val count = stream.read(buffer); if (count < 0) break; received += count }
-                val elapsedMs = (System.nanoTime() - started) / 1_000_000
-                assertTrue(received < length, "the changed final chunk must be withheld: $received of $length")
-                assertTrue(elapsedMs < 10_000, "truncation took $elapsedMs ms")
+            // Once with no request body, once with a declared body the client never finishes sending: aborting must not
+            // wait to drain it while the delivery lease and download admission are held.
+            for (unreadBody in listOf(false, true)) {
+                abortMidStream(server, path, cookie, job.id, model, padded.size, unreadBody)
+                RandomAccessFile(model.toFile(), "rw").use { it.seek(padded.size - 1L); it.write(' '.code) }
             }
-            val deadline = System.nanoTime() + 5_000_000_000L
-            while (server.activeDownloads(job.id) != (0 to 0) && System.nanoTime() < deadline) Thread.sleep(20)
-            assertEquals(0 to 0, server.activeDownloads(job.id), "the delivery lease and download admission are released")
 
             // With the committed bytes back, the same route serves the record in full.
-            RandomAccessFile(model.toFile(), "rw").use { it.seek(padded.size - 1L); it.write(' '.code) }
             val complete = client.send(HttpRequest.newBuilder(URI("$origin$path")).timeout(Duration.ofSeconds(60))
                 .header("Accept", "application/octet-stream").header("Cookie", cookie).build(), HttpResponse.BodyHandlers.ofByteArray())
             assertEquals(200, complete.statusCode())
             assertEquals(sha256(padded), sha256(complete.body()))
             assertEquals(sha256(padded), complete.headers().firstValue("X-Decomp-Content-SHA256").orElseThrow())
-            assertEquals(0 to 0, server.activeDownloads(job.id))
+            awaitReleased(server, job.id)
         } finally {
             server.stop()
             root.toFile().deleteRecursively()
         }
+    }
+
+    /** Pause a delivery mid-body, change the record's final byte, then require a prompt short body and released guards. */
+    private fun abortMidStream(server: UploadServer, path: String, cookie: String, jobId: String, model: Path, size: Int, unreadBody: Boolean) {
+        Socket().use { socket ->
+            // A small fixed receive buffer keeps the in-flight bytes far below the record size.
+            socket.receiveBufferSize = 64 * 1024
+            socket.connect(InetSocketAddress("127.0.0.1", server.serverPort), 5_000)
+            socket.soTimeout = 15_000
+            val body = if (unreadBody) "Content-Type: application/octet-stream\r\nContent-Length: 1048576\r\n" else ""
+            socket.getOutputStream().write(("GET $path HTTP/1.1\r\nHost: 127.0.0.1:${server.serverPort}\r\n" +
+                "Accept: application/octet-stream\r\nCookie: $cookie\r\n${body}Connection: close\r\n\r\n").toByteArray())
+            // Part of the declared body is sent and the rest withheld; the stream stays open.
+            if (unreadBody) { socket.getOutputStream().write(ByteArray(1024)); socket.getOutputStream().flush() }
+            val stream = socket.getInputStream()
+            val headers = readHeaders(stream)
+            assertTrue(headers.first().startsWith("HTTP/1.1 200"), headers.toString())
+            val length = headers.single { it.startsWith("Content-Length:", ignoreCase = true) }.substringAfter(':').trim().toLong()
+            assertEquals(size.toLong(), length)
+            var received = readSome(stream, 256 * 1024)
+            // The listener is now blocked writing the second pass, holding the job lease and one download admission.
+            Thread.sleep(1_000)
+            assertEquals(1 to 1, server.activeDownloads(jobId), "a paused delivery holds its lease and admission")
+            RandomAccessFile(model.toFile(), "rw").use { it.seek(size - 1L); it.write('\n'.code) }
+            val started = System.nanoTime()
+            // A timeout here is a failure: the connection must be dropped, not left open with the length unmet.
+            val buffer = ByteArray(64 * 1024)
+            while (true) { val count = stream.read(buffer); if (count < 0) break; received += count }
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000
+            assertTrue(received < length, "the changed final chunk must be withheld: $received of $length")
+            assertTrue(elapsedMs < 10_000, "truncation took $elapsedMs ms")
+            // Released while this client still holds its unfinished request body open.
+            awaitReleased(server, jobId)
+        }
+    }
+
+    private fun awaitReleased(server: UploadServer, jobId: String) {
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (server.activeDownloads(jobId) != (0 to 0) && System.nanoTime() < deadline) Thread.sleep(20)
+        assertEquals(0 to 0, server.activeDownloads(jobId), "the delivery lease and download admission are released")
     }
 
     private fun readHeaders(stream: InputStream): List<String> {
