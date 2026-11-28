@@ -15,7 +15,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 // The installed launcher's JVM must not write /tmp/hsperfdata_* and keeps temporary files under the test root (#2001).
-private val INSTALLED_CLI_JAVA_OPTS: String get() = (listOf("-Xmx8g") + ChildJvm.options()).joinToString(" ")
+private val INSTALLED_CLI_JAVA_OPTS: String get() = ChildJvm.launcherJavaOpts(listOf("-Xmx8g") + ChildJvm.options())
 
 private val INSTALLED_GCC_CLI_COMMANDS = setOf(
     "gcc-engine-plan", "gcc-engine-full-export", "gcc-engine-runtime-diagnostic", "gcc-engine-native-calls",
