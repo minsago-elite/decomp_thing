@@ -67,11 +67,17 @@ type Selection = { request: number; revisionOnly: boolean; cursor: string | null
  * Forward and reload restore them (#495). Opening, filtering and paging push history; Refresh replaces it. The legacy
  * embedding has no router and keeps the same selection in component state.
  */
-function useCatalogSelection(revisionId: string | null): { selection: Selection; invalid: boolean; select: (next: Selection, replace?: boolean) => void } {
+function useCatalogSelection(revisionId: string | null): {
+  selection: Selection; invalid: boolean; tooLong: boolean; select: (next: Selection, replace?: boolean) => void;
+  /** Set by an explicit control so the next completed read moves focus with scrolling; restores keep the browser's scroll. */
+  activated: { current: boolean };
+} {
   const route = useLocation();
   const [local, setLocal] = useState<Selection>({ request: 0, revisionOnly: false, cursor: null });
   const [refresh, setRefresh] = useState(0);
-  if (!route.url) return { selection: local, invalid: false, select: next => { setLocal(next); } };
+  const [overflow, setOverflow] = useState<string | null>(null);
+  const activated = useRef(false);
+  if (!route.url) return { selection: local, invalid: false, tooLong: false, activated, select: next => { activated.current = true; setLocal(next); } };
   const address = new URL(route.url, window.location.origin);
   let saved: ArtifactLocation = null, invalid = false;
   try {
@@ -80,12 +86,20 @@ function useCatalogSelection(revisionId: string | null): { selection: Selection;
   } catch { invalid = true; }
   const selection = saved === null ? { request: 0, revisionOnly: false, cursor: null }
     : { request: 1 + refresh, revisionOnly: saved.scope === 'revision', cursor: saved.cursor };
-  return { selection, invalid, select: (next, replace = false) => {
+  return { selection, invalid, tooLong: overflow === address.search, activated, select: (next, replace = false) => {
     // A late click from a view the user already left must not rewrite another address.
     if (window.location.pathname !== address.pathname) return;
-    const search = artifactRouteSearch(window.location.search,
-      { scope: next.revisionOnly && revisionId !== null ? 'revision' : 'run', cursor: next.cursor });
-    if (search === window.location.search) { setRefresh(value => value + 1); return; }
+    const current = window.location.search;
+    const target = { scope: next.revisionOnly && revisionId !== null ? 'revision' : 'run', cursor: next.cursor } as const;
+    let search: string;
+    // Other attempt query state can leave no room for the catalog keys; explain it rather than drop that state.
+    try { search = artifactRouteSearch(current, target); } catch { setOverflow(current); return; }
+    setOverflow(null);
+    activated.current = true;
+    let saved: ArtifactLocation = null;
+    try { saved = artifactLocation(current); } catch { /* an invalid saved selection is replaced below */ }
+    // Compare the parsed selection, not the raw query, whose key order other owners may change.
+    if (saved !== null && saved.scope === target.scope && saved.cursor === target.cursor) { setRefresh(value => value + 1); return; }
     route.route(`${address.pathname}${search}`, replace || invalid);
   } };
 }
@@ -108,18 +122,19 @@ export function ArtifactCatalog({ jobId, runId, revisionId, basePath, onDeleted 
   const { client } = usePrivateTransport(basePath);
   const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const heading = useRef<HTMLHeadingElement>(null);
-  const { selection, invalid, select } = useCatalogSelection(revisionId);
+  const { selection, invalid, tooLong, select, activated } = useCatalogSelection(revisionId);
   const [state, setState] = useState<{ key: string; loading: boolean; data: Artifacts | null; error: string }>({ key: '', loading: false, data: null, error: '' });
   const filter = selection.revisionOnly ? revisionId : null;
   const key = [jobId, runId, filter, selection.cursor, selection.request].join('/');
   useEffect(() => {
     if (!selection.request) return undefined;
-    const controller = new AbortController();
+    const controller = new AbortController(), explicit = activated.current;
+    activated.current = false;
     setState({ key, loading: true, data: null, error: '' });
     void client.get('artifacts', artifactCatalogRoute(jobId, runId, filter, selection.cursor), { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
       setState({ key, loading: false, data: bindArtifactCatalog(response.data, jobId, runId, filter), error: '' });
-      heading.current?.focus();
+      heading.current?.focus(explicit ? undefined : { preventScroll: true });
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       if (isDeletedJob(failure) && deletedHandler.current) { deletedHandler.current(failure); return; }
@@ -133,6 +148,7 @@ export function ArtifactCatalog({ jobId, runId, revisionId, basePath, onDeleted 
     <h2 id="artifact-catalog-title" ref={heading} tabIndex={-1}>{copy.title}</h2>
     <p>{copy.boundary}</p>
     {invalid && <p role="alert">{copy.invalidSaved}</p>}
+    {tooLong && <p role="alert">{copy.addressTooLong}</p>}
     {revisionId !== null && <label><input type="checkbox" checked={selection.revisionOnly} disabled={current.loading}
       onChange={event => { select({ request: selection.request || 1, revisionOnly: (event.target as HTMLInputElement).checked, cursor: null }); }} /> {copy.revisionOnly}</label>}
     <button type="button" disabled={current.loading} onClick={() => { select({ ...selection, request: selection.request + 1, cursor: null }, selection.request > 0); }}>

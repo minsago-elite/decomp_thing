@@ -148,6 +148,55 @@ it('explains an invalid saved catalog selection, reads nothing for it and replac
   } finally { auth.dispose(); cleanup(); }
 });
 
+it('refreshes in place when other owners have reordered the attempt query after the catalog keys', async () => {
+  const auth = await session();
+  history.replaceState(null, '', `${overview}?artifacts=run&${validation}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('Showing 3 artifacts on this page.')).toBeTruthy();
+    const entries = history.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh artifact list from its first page' }));
+    await waitFor(() => expect(artifactReads()).toEqual([catalog(''), catalog('')]));
+    expect(location.search).toBe(`?artifacts=run&${validation}`);
+    expect(history.length).toBe(entries);
+  } finally { auth.dispose(); cleanup(); }
+});
+
+it('explains when other attempt query state leaves no room for the catalog in the address and keeps that state', async () => {
+  const auth = await session();
+  const search = `?note=${'a'.repeat(4089)}`;
+  expect(search).toHaveLength(4095);
+  history.replaceState(null, '', `${overview}${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const entries = history.length;
+    fireEvent.click(await screen.findByRole('button', { name: 'List retained artifacts' }));
+    expect(await screen.findByText(/^The address is too long to also save the artifact list\./u)).toBeTruthy();
+    expect(artifactReads()).toEqual([]);
+    expect(location.search).toBe(search);
+    expect(history.length).toBe(entries);
+  } finally { auth.dispose(); cleanup(); }
+});
+
+it('keeps the browser scroll position when a restored list takes focus, but not after an explicit read', async () => {
+  const auth = await session();
+  const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+  const headingFocus = () => focus.mock.contexts.flatMap((element, index) =>
+    (element as HTMLElement).id === 'artifact-catalog-title' ? [focus.mock.calls[index]![0]] : []);
+  history.replaceState(null, '', `${overview}?${validation}&artifacts=run`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('Showing 3 artifacts on this page.')).toBeTruthy();
+    await waitFor(() => expect(headingFocus()).toEqual([{ preventScroll: true }]));
+    fireEvent.click(screen.getByRole('button', { name: 'Next artifact page' }));
+    expect(await screen.findByText('Showing 1 artifacts on this page.')).toBeTruthy();
+    await waitFor(() => expect(headingFocus()).toEqual([{ preventScroll: true }, undefined]));
+    await traverse('back', `${overview}?${validation}&artifacts=run`);
+    expect(await screen.findByText('Showing 3 artifacts on this page.')).toBeTruthy();
+    await waitFor(() => expect(headingFocus()).toEqual([{ preventScroll: true }, undefined, { preventScroll: true }]));
+  } finally { focus.mockRestore(); auth.dispose(); cleanup(); }
+});
+
 it('parses only the closed catalog keys and preserves other attempt query state', () => {
   expect(artifactLocation('')).toBeNull();
   expect(artifactLocation(`?${validation}`)).toBeNull();
