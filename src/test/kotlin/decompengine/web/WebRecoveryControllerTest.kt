@@ -35,6 +35,7 @@ class WebRecoveryControllerTest {
         val captureBytes: (DurableWebWorkflowCheckpointRequest) -> ByteArray = { CONTINUATION_BYTES },
         val afterCapture: (DurableWebWorkflowCheckpointRequest) -> Unit = {},
         val beforeLaunch: () -> Unit = {},
+        val duringLaunch: () -> Unit = {},
         seed: ((WorkflowAttemptStore, String) -> Unit)? = null,
         private val deleteRoot: Boolean = true,
     ) : AutoCloseable {
@@ -77,9 +78,10 @@ class WebRecoveryControllerTest {
                         override fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint,
                             fence: DurableWebWorkflowContinuationFence): DurableWebWorkflowOutcome {
                             beforeLaunch()
-                            fence.launch {
+                            fence.launch({ checkpoint.bytes() }) { bytes ->
                                 contexts += context
-                                restored += checkpoint.bytes()
+                                restored += bytes
+                                duringLaunch()
                             }
                             return outcomes.poll() ?: DurableWebWorkflowOutcome.Failed()
                         }
@@ -449,6 +451,89 @@ class WebRecoveryControllerTest {
             assertEquals("RECOVERY_REQUIRED", failure.code)
             assertTrue(f.restored.isEmpty())
             assertEquals(1, f.contexts.size)
+        }
+    }
+
+    @Test
+    fun `an independent shutdown signal between the fence check and launch refuses the start`() {
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) }).use { f ->
+            val predecessor = f.start()
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            val signalled = java.util.concurrent.atomic.AtomicBoolean()
+            f.service.continuationLaunchObserver = {
+                // The shutdown path never takes the service monitor this check holds, so the signal completes here.
+                val signaller = Thread({ f.service.signalShutdown(); signalled.set(true) }, "independent-shutdown-signal")
+                signaller.start()
+                signaller.join(TimeUnit.SECONDS.toMillis(5))
+                check(signalled.get()) { "the shutdown signal did not complete" }
+            }
+            try { f.pending.remove().run() } finally { Thread.interrupted() }
+            assertTrue(signalled.get())
+            assertTrue(f.restored.isEmpty(), "no continuation may start after the shutdown signal")
+            assertEquals(1, f.contexts.size)
+            assertEquals(WorkflowRunState.INTERRUPTED, f.attempt(successor).state)
+            assertEquals(WorkflowTerminalReason.PROCESS_INTERRUPTED, f.attempt(successor).terminalReason)
+            assertNull(f.attempt(successor).candidate)
+        }
+    }
+
+    @Test
+    fun `a shutdown signal after the launch permit interrupts the started continuation`() {
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean()
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            duringLaunch = {
+                val signaller = Thread({ fixture.service.signalShutdown() }, "post-launch-shutdown-signal")
+                signaller.start()
+                signaller.join(TimeUnit.SECONDS.toMillis(5))
+                check(!signaller.isAlive) { "the shutdown signal waited on the launched work" }
+                try { Thread.sleep(TimeUnit.SECONDS.toMillis(5)) } catch (cancelled: InterruptedException) {
+                    interrupted.set(true)
+                    throw cancelled
+                }
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            try { f.pending.remove().run() } finally { Thread.interrupted() }
+            assertTrue(interrupted.get(), "shutdown must observe the granted permit and interrupt its holder")
+            assertContentEquals(CONTINUATION_BYTES, f.restored.single())
+            assertEquals(WorkflowRunState.INTERRUPTED, f.attempt(successor).state)
+            assertNull(f.attempt(successor).candidate)
+        }
+    }
+
+    @Test
+    fun `a launched continuation that waits for cancellation does not hold the service monitor`() {
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean()
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            duringLaunch = {
+                val running = fixture.snapshot().latestRun!!
+                val cancel = java.util.concurrent.FutureTask {
+                    fixture.service.cancelDurable(fixture.job.id, running.runId, running.version)
+                }
+                Thread(cancel, "launched-continuation-cancel").start()
+                assertEquals(WorkflowRunState.CANCELLING, cancel.get(5, TimeUnit.SECONDS).state)
+                try { Thread.sleep(TimeUnit.SECONDS.toMillis(5)) } catch (cancelled: InterruptedException) {
+                    interrupted.set(true)
+                    throw cancelled
+                }
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            try { f.pending.remove().run() } finally { Thread.interrupted() }
+            assertTrue(interrupted.get())
+            assertEquals(WorkflowRunState.CANCELLED, f.attempt(successor).state)
+            assertEquals(WorkflowTerminalReason.CANCELLED, f.attempt(successor).terminalReason)
+            assertNull(f.attempt(successor).candidate)
         }
     }
 
