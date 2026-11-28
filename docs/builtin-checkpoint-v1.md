@@ -8,9 +8,16 @@ content-hash manifests distinguish source contents, namespace and file identity 
 source text in the checkpoint store.
 
 The loop checkpoints immediately before its first model request and between fully completed tool
-batches. The record binds the conversation and tool schemas, source/context hashes, original journal
-identities, loop-limit fingerprint, usage, remaining wall-clock allowance and absolute expiry,
-event sequence, prior state trace, used call IDs and canonical-action repetition counts. A digest of
+batches. Checkpoint state schema 3 binds the configured provider and model to the identity exposed by
+the actual provider instance, the logical stage digest (the stage's content lineage, not a temporary
+directory or process identity), and the accepted-revision digest. Resume requires the caller to
+supply the expected accepted-revision digest independently; it must match
+both the checkpoint and the trusted journal identity. This is a continuation precondition, not proof
+that a workflow accepted or published a revision. Checkpoint-enabled execution rejects providers
+without an explicit stable identity. The record also binds the conversation and tool schemas,
+source/context hashes, original journal identities, loop-limit fingerprint, usage, remaining
+wall-clock allowance and absolute expiry, event sequence, prior state trace, used call IDs and
+canonical-action repetition counts. A digest of
 the original checkpoint state detects redaction: altered text remains evidence and cannot silently
 become restored model context. Remaining turns/tools/tokens/output bytes are derived from the bound
 request/loop limits and restored usage; they do not reset.
@@ -32,7 +39,13 @@ On explicit `resumeReceipt`, the loop:
 1. Reads the private commitment and validates the complete journal against the expected immutable
    request and workflow identities. The journal must end at that exact checkpoint.
 2. Acquires exclusive append authority and rechecks all inspected bytes under the retained lock.
-   An active writer or intervening append is rejected; no source/model work is replayed.
+   An active writer or intervening append is rejected; no source/model work is replayed. A
+   JVM-wide lease per journal path is taken before any channel on the journal opens. A same-JVM
+   contender is refused without opening one, because closing its channel would also drop the
+   holder's process-owned POSIX lock. Every exit path, including an `Error` from tool-session
+   teardown, closes the journal and releases its lease. The lease is keyed by path: workflow
+   maintenance must keep the journal file and its parent at a fixed path until every holder closes.
+   Live relocation is unsupported; binding the lease to the opened file's identity is future work.
 3. Validates the checkpoint state digest, schema, limit fingerprint, correlated history and counters.
    Both remaining duration and absolute expiry constrain the original deadline, including downtime.
 4. Opens the workflow-supplied stage and compares its actual source hash and registered tools with
@@ -70,6 +83,7 @@ zero failures/errors. The hosted v5 result must be qualified separately.
 
 The subsequent [captured-repair integration](builtin-captured-recovery-v1.md) now rehydrates supplied
 candidate bytes through the shared bounded callbacks while preserving the original accepted base.
-Checkpoint state schema 2 binds the trusted tool session's additional authority digest, including
-captured repair quotas and effective sink paths. Schema-1 checkpoint states lack this binding and
-are rejected. Durable archived source retrieval and workflow acceptance remain separate requirements.
+Checkpoint state schema 3 binds the trusted tool session's additional authority digest, including
+captured repair quotas and effective sink paths. Schema-1 and schema-2 checkpoint states are rejected;
+they do not bind the provider instance identity and independent accepted-revision precondition.
+Durable archived source retrieval and workflow acceptance remain separate requirements.

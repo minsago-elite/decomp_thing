@@ -39,9 +39,10 @@ class BuiltinCapturedResumeTest {
     private fun execute(config: Pair<BuiltinJournalConfiguration, BuiltinCheckpointConfiguration>, provider: ModelProvider,
         initial: Map<String, ByteArray> = initial(), budget: RepairResourceBudget = RepairResourceBudget(),
         resume: BuiltinCapturedResume? = null, cancellation: AgentCancellation = AgentCancellation.NONE,
-        writablePaths: Set<String> = initial.keys - "oracle.txt"): RepairStagingExecution =
-        CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider, journalConfiguration = config.first,
-            checkpointConfiguration = config.second, resume = resume), initial, writablePaths, budget,
+        writablePaths: Set<String> = initial.keys - "oracle.txt",
+        expectedAcceptedRevisionSha256: String = config.first.identity.acceptedRevisionSha256): RepairStagingExecution =
+        CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider.withBuiltinTestIdentity(), journalConfiguration = config.first,
+            checkpointConfiguration = config.second, resume = resume, expectedAcceptedRevisionSha256 = expectedAcceptedRevisionSha256), initial, writablePaths, budget,
             { root -> request(root, initial, cancellation) }) {}
     private fun evidence(execution: RepairStagingExecution) = assertIs<BuiltinCapturedExecutionEvidence>(execution.receipt.providerEvidence)
     private fun paused(config: Pair<BuiltinJournalConfiguration, BuiltinCheckpointConfiguration>, initial: Map<String, ByteArray> = initial(),

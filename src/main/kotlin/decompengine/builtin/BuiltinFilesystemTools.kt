@@ -113,6 +113,7 @@ class BuiltinCapturedRepairHarness(
     private val resume: BuiltinCapturedResume? = null,
     secrets: Collection<String> = emptyList(),
     private val sourceStoreConfiguration: BuiltinSourceStoreConfiguration? = null,
+    private val expectedAcceptedRevisionSha256: String? = null,
 ) : CapturedRepairAgentHarness {
     private val secrets = secrets.toList()
     init {
@@ -120,6 +121,7 @@ class BuiltinCapturedRepairHarness(
         require(resume == null || checkpointConfiguration != null)
         require(sourceStoreConfiguration == null || checkpointConfiguration != null)
         require(resume == null || !resume.requiresSourceStore || sourceStoreConfiguration != null)
+        require(resume == null || expectedAcceptedRevisionSha256?.matches(Regex("[a-f0-9]{64}")) == true)
     }
     override fun implementationIdentifier() = "builtin-captured-repair-v1"
     override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) =
@@ -233,7 +235,7 @@ class BuiltinCapturedRepairHarness(
             }
         }, limits, secrets, journalConfiguration, checkpointConfiguration)
         val receipt = if (resume == null) harness.executeReceipt(request, onEvent)
-            else harness.resumeReceipt(request, resume.checkpoint, onEvent)
+            else harness.resumeReceipt(request, resume.checkpoint, checkNotNull(expectedAcceptedRevisionSha256), onEvent)
         val changes = openedCapture?.changes() ?: emptyList()
         // Interrupted or refused turns can still have staged edits. Retain them without accepting them.
         val outcome = when (val terminal = receipt.outcome) {

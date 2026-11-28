@@ -146,9 +146,11 @@ class BuiltinSourceStoreTest {
             }, BuiltinSourceStoreConfiguration(privateDirectory("$name-sources")), initial)
     }
     private fun execute(fixture: Fixture, provider: ModelProvider, resume: BuiltinCapturedResume? = null,
-        cancellation: AgentCancellation = AgentCancellation.NONE) =
-        CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider, journalConfiguration = fixture.journal,
-            checkpointConfiguration = fixture.checkpoint, resume = resume, secrets = listOf("runtime-credential"), sourceStoreConfiguration = fixture.sources),
+        cancellation: AgentCancellation = AgentCancellation.NONE,
+        expectedAcceptedRevisionSha256: String = fixture.journal.identity.acceptedRevisionSha256) =
+        CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider.withBuiltinTestIdentity(), journalConfiguration = fixture.journal,
+            checkpointConfiguration = fixture.checkpoint, resume = resume, secrets = listOf("runtime-credential"), sourceStoreConfiguration = fixture.sources,
+            expectedAcceptedRevisionSha256 = expectedAcceptedRevisionSha256),
             fixture.initial, setOf("source.c"), RepairResourceBudget(), { root -> request(root, cancellation) }) {}
     private fun response(calls: List<ModelToolCall> = emptyList()) = ModelResponse("", calls,
         if (calls.isEmpty()) ModelFinishReason.STOP else ModelFinishReason.TOOL_CALLS, ModelUsage(100, 10, false), 1)
@@ -191,6 +193,25 @@ class BuiltinSourceStoreTest {
         val recovered = execute(valid, ModelProvider { _, _ -> calls++; response() }, BuiltinCapturedResume.fromStore(reference))
         assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinCapturedExecutionEvidence>(recovered.receipt.providerEvidence).loop.stop)
         assertEquals(1, calls)
+        val externalRevisionFixture = fixture("external-revision")
+        val externalRevisionFirst = execute(externalRevisionFixture, ModelProvider { _, _ -> response(listOf(write())) })
+        val externalRevisionReference = assertNotNull(assertIs<BuiltinCapturedExecutionEvidence>(externalRevisionFirst.receipt.providerEvidence).loop.checkpoint)
+        val journalBefore = Files.readAllBytes(externalRevisionFixture.journal.path)
+        val storeBefore = entries(externalRevisionFixture.sources.directory).associate { it.fileName.toString() to Files.readAllBytes(it) }
+        var externalRevisionCalls = 0
+        val wrongRevision = execute(externalRevisionFixture, ModelProvider { _, _ -> externalRevisionCalls++; response() },
+            BuiltinCapturedResume.fromStore(externalRevisionReference),
+            expectedAcceptedRevisionSha256 = "d".repeat(64))
+        assertIs<AgentExecutionOutcome.Failed>(wrongRevision.receipt.outcome)
+        assertEquals(AgentFailureKind.CONFIGURATION, assertIs<AgentExecutionOutcome.Failed>(wrongRevision.receipt.outcome).failure.kind)
+        assertEquals(0, externalRevisionCalls)
+        assertContentEquals(journalBefore, Files.readAllBytes(externalRevisionFixture.journal.path))
+        val storeAfter = entries(externalRevisionFixture.sources.directory).associate { it.fileName.toString() to Files.readAllBytes(it) }
+        assertEquals(storeBefore.keys, storeAfter.keys)
+        storeBefore.forEach { (name, bytes) -> assertContentEquals(bytes, storeAfter.getValue(name)) }
+        val evidence = assertIs<BuiltinCapturedExecutionEvidence>(wrongRevision.receipt.providerEvidence)
+        assertTrue(evidence.restorationAudit.isEmpty())
+        assertTrue(evidence.filesystemAudit.isEmpty())
     }
 
     @Test fun `cancellation inside source capture stays cancelled and publishes no checkpoint`() {
