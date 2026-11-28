@@ -13,8 +13,9 @@ limits that apply. The later issues in the chain enforce it: the credential brok
 The policy is implemented in
 [`AcpProviderTransportPolicy.kt`](../src/main/kotlin/decompengine/acp/AcpProviderTransportPolicy.kt), the
 routing decisions in [`AcpProviderRouting.kt`](../src/main/kotlin/decompengine/acp/AcpProviderRouting.kt),
-and the upstream TLS client in
-[`AcpProviderUpstreamTls.kt`](../src/main/kotlin/decompengine/acp/AcpProviderUpstreamTls.kt).
+the address classes in
+[`AcpProviderAddressRegistry.kt`](../src/main/kotlin/decompengine/acp/AcpProviderAddressRegistry.kt), and the
+upstream TLS client in [`AcpProviderUpstreamTls.kt`](../src/main/kotlin/decompengine/acp/AcpProviderUpstreamTls.kt).
 
 These are building blocks. Their guarantees take effect only once the #959 broker consumes them.
 No production path issues or consumes an approved policy yet. The ACP factory still has no provider
@@ -101,7 +102,11 @@ below run in order, and the relay must send nothing upstream unless the request 
 3. `CONNECT` with any target: `CONNECT_REFUSED`. Absolute-form (any scheme), authority-form and
    asterisk-form targets: `PROXY_REQUEST_REFUSED`. Any query: `QUERY_REFUSED`.
 4. Zero or several `Host` fields, or several `Content-Length` fields: `MALFORMED_REQUEST`. The single
-   `Host` value is otherwise ignored.
+   `Host` value must match RFC 9112 `uri-host [ ":" port ]` with the RFC 3986 grammar, or the request
+   is `MALFORMED_REQUEST`. This check is stricter than the grammar: the host must be nonempty, a
+   port must be 1 to 5 digits no greater than 65535, and an IP-literal must be an IPv6 address
+   (IPvFuture and zone identifiers are refused). The validated value is then discarded; the
+   upstream `Host` always comes from the policy.
 5. `Transfer-Encoding` (any coding, including `chunked` and `identity`), `TE`, `Trailer`, `Expect` or
    `Content-Encoding`: `REQUEST_FRAMING_UNSUPPORTED`. The only supported body is identity-encoded
    and delimited by one Content-Length.
@@ -135,39 +140,44 @@ destinations, so every 3xx response is refused unfollowed with `REDIRECT_UNDECLA
 If one address is refused, the whole set is refused, so an adapter cannot fall back onto a
 host-local destination.
 
-- Public IPv4 addresses are admitted. Public IPv6 means an IANA global unicast block delegated to a
-  regional registry (2001::/16, 2003::/18, 2400::/12, 2600::/12, 2610::/23, 2620::/23, 2630::/12,
-  2800::/12, 2a00::/12, 2a10::/12, 2c00::/12), minus special-purpose entries.
-- Private addresses (10/8, 172.16/12, 192.168/16, 100.64/10 and IPv6 unique-local fc00::/7) are
-  admitted only when the operator sets `privateDestinations` to `PERMITTED`. This covers deployments
-  where split-horizon DNS resolves the provider host to a private address. The permission is never
-  inferred from the endpoint, the agent request or the resolved address.
-- IPv4-mapped addresses are classified as the IPv4 address they carry.
-- The well-known NAT64 prefix 64:ff9b::/96 is refused unless the operator sets
-  `addressTranslation` to `WELL_KNOWN_NAT64`. Even then, only an embedded public IPv4 address is
-  admitted: an embedded private or special-purpose address is refused even when private
-  destinations are permitted. Network-specific translation prefixes are not recognized and are
-  never inferred. A deployment that synthesizes them cannot use this transport until an explicit
-  policy field exists for them.
-- Everything else is always refused:
-  - IPv4 special-purpose entries: this-network, loopback, link-local (including 169.254.169.254),
-    IETF protocol assignments, the three TEST-NETs, benchmarking, the 6to4 relay anycast, AS112,
-    AMT, multicast, reserved and broadcast;
-  - IPv6 unspecified, loopback, IPv4-compatible, link-local, site-local, multicast, discard-only
-    and dummy prefixes;
-  - transition ranges: 6to4 (2002::/16), Teredo and the rest of 2001::/23 (including ORCHID,
-    benchmarking, AMT and anycast assignments), and local-use NAT64 (64:ff9b:1::/48);
-  - documentation (2001:db8::/32, 3fff::/20), AS112 direct delegation (2620:4f:8000::/48), segment
-    routing (5f00::/16), and reserved or unallocated space inside or outside 2000::/3.
+The address classes are pinned to dated IANA registry snapshots, transcribed into
+`AcpProviderAddressRegistry.kt` with their source URL and the SHA-256 of the transcribed XML:
 
-Resolution itself is not part of this policy. The resolver and its runtime profile are tracked
-separately in #1510.
+- IPv6 Global Unicast Address Space, last updated 2025-10-10 (the ALLOCATED rows);
+- IPv6 Special-Purpose Address Space, last updated 2025-10-09 (every row);
+- IPv4 Special-Purpose Address Space, last updated 2025-10-09 (every row).
+
+Nothing is fetched at build, test or run time. Updating a snapshot is a reviewed source change.
+
+- **Public IPv4:** any address outside the IPv4 special-purpose registry and multicast (224.0.0.0/4).
+- **Public IPv6:** an address inside an ALLOCATED global unicast block and outside every IPv6
+  special-purpose row. Gaps between allocations, for example 2001:1000::/23 or 2001:6000::/19, and
+  RESERVED space such as 2d00::/8 or 3fff::/20 are refused.
+- **Private:** the Private-Use and Shared Address Space rows (10/8, 172.16/12, 192.168/16, 100.64/10)
+  and Unique-Local fc00::/7 are admitted only when the operator sets `privateDestinations` to
+  `PERMITTED`. This covers deployments where split-horizon DNS resolves the provider host to a
+  private address. The permission is never inferred from the endpoint, the agent request or the
+  resolved address.
+- **IPv4-mapped** addresses are classified as the IPv4 address they carry.
+- **Well-known NAT64:** 64:ff9b::/96 is refused unless the operator sets `addressTranslation` to
+  `WELL_KNOWN_NAT64`. Even then, only an embedded public IPv4 address is admitted. An embedded
+  private or special-purpose address is refused, even when private destinations are permitted.
+- **Everything else is refused**, including every other special-purpose row: those that are globally
+  reachable (anycast, AS112, AMT, ORCHIDv2) as well as 6to4, Teredo, local-use NAT64,
+  documentation, benchmarking, discard and segment routing.
+
+The `addressTranslation` guarantee covers only the well-known prefix. An address synthesized from a
+network-specific NAT64 prefix falls inside an allocated global block and cannot be told apart from
+native IPv6 by its bytes. The classifier treats it like any other address in that block. Preventing
+or classifying network-specific synthesis belongs to the resolver contract (#1510), which also
+covers resolution itself.
 
 ## TLS and proxies
 
-`AcpProviderUpstreamTls` is the only upstream TLS client. It builds its own `SSLContext` from a PKIX
-trust manager initialized with the JVM platform trust store. Callers cannot supply a trust manager,
-key manager, hostname verifier, TLS context or TLS parameters. Every socket:
+`AcpProviderUpstreamTls` is the only upstream TLS client, and `connect` is its only entry point. It
+builds its own `SSLContext` from a PKIX trust manager initialized with the JVM platform trust store,
+which is the standard `javax.net.ssl.trustStore` configuration. No member accepts a trust store,
+trust manager, key manager, hostname verifier, TLS context or TLS parameters. Every socket:
 
 - verifies the policy hostname with HTTPS endpoint identification;
 - sends the policy hostname as SNI;
@@ -176,15 +186,20 @@ key manager, hostname verifier, TLS context or TLS parameters. Every socket:
 `connect` first applies `destinationRefusal` to the given numeric address. It then opens a direct
 connection (`Proxy.NO_PROXY`) to port 443 of that address and completes the handshake. The policy
 hostname, never the address, stays the TLS identity, so ambient proxy settings and DNS never apply
-at this step. `handshake` layers the same verified TLS over an already connected socket. A failed
-check closes the socket.
+at this step. A failed check closes the socket.
 
-Credential-free loopback handshakes prove three cases. An untrusted chain that names the policy host
-is rejected by platform trust. A certificate trusted only through a test anchor but naming another
-host is rejected. A trusted certificate for the policy host completes a modern handshake, and the
-server observes the policy SNI. The test identities are throwaway key pairs generated at runtime
-under `build/test-tmp` and deleted afterwards. `withTestTrustAnchors` replaces only the anchor set;
-validation is still PKIX with hostname verification.
+The handshake tests are credential-free. Throwaway self-signed identities are generated by keytool
+at runtime under `build/test-tmp` and deleted afterwards. A loopback server is started in the test
+JVM. The client runs in a forked JVM whose only trust customization is the standard
+`javax.net.ssl.trustStore` properties. Loopback is not an admissible destination for `connect`, so
+the forked probe reaches the private TLS layer by reflection. The production code has no
+test-specific trust path. The tests prove four cases:
+
+- platform trust rejects an untrusted chain that names the policy host;
+- a configured root does not trust a different chain for the policy host;
+- a certificate trusted through the configured root but naming another host is rejected;
+- a trusted certificate for the policy host completes a modern handshake, and the server observes
+  the policy SNI.
 
 ## Not covered here
 

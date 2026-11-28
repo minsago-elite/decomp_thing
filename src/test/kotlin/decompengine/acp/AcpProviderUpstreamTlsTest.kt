@@ -1,9 +1,6 @@
 package decompengine.acp
 
 import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.Proxy
-import java.net.Socket
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.KeyStore
@@ -16,7 +13,6 @@ import javax.net.ssl.KeyManager
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLParameters
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
@@ -33,7 +29,8 @@ import kotlin.test.assertTrue
 
 /**
  * Credential-free loopback handshakes. Each identity is a throwaway self-signed key pair generated
- * by the JDK keytool under build/test-tmp at runtime and deleted afterwards.
+ * by the JDK keytool under build/test-tmp at runtime and deleted afterwards. The client runs in a
+ * forked JVM whose only trust customization is the standard `javax.net.ssl.trustStore` properties.
  */
 class AcpProviderUpstreamTlsTest {
     private val roots = mutableListOf<Path>()
@@ -49,25 +46,29 @@ class AcpProviderUpstreamTlsTest {
     @Test
     fun `platform trust rejects an untrusted chain that names the policy host`() {
         TlsServer(identity("chatgpt.com")).use { server ->
-            val plain = server.connectPlain()
-            val failure = assertFailsWith<SSLHandshakeException> {
-                AcpProviderUpstreamTls.platform(policy).handshake(plain, Duration.ofSeconds(15))
-            }
-            assertTrue(failure.causes().any { "PKIX path" in it.message.orEmpty() }, failure.toString())
-            assertTrue(plain.isClosed)
+            val result = probe(server.port, trustStore = null)
+            assertTrue(result.startsWith("HANDSHAKE_FAILED type=javax.net.ssl.SSLHandshakeException closed=true "), result)
+            assertTrue("PKIX path" in result, result)
         }
     }
 
     @Test
-    fun `a trusted certificate that names another host is rejected`() {
+    fun `a configured root does not trust a different chain for the policy host`() {
+        val trusted = identity("chatgpt.com")
+        TlsServer(identity("chatgpt.com")).use { server ->
+            val result = probe(server.port, trustStore = trustStore(trusted))
+            assertTrue(result.startsWith("HANDSHAKE_FAILED type=javax.net.ssl.SSLHandshakeException closed=true "), result)
+            assertTrue("PKIX path" in result, result)
+        }
+    }
+
+    @Test
+    fun `a certificate trusted through the configured root but naming another host is rejected`() {
         val wrongHost = identity("wrong.example")
         TlsServer(wrongHost).use { server ->
-            val plain = server.connectPlain()
-            val failure = assertFailsWith<SSLHandshakeException> {
-                AcpProviderUpstreamTls.withTestTrustAnchors(policy, wrongHost.anchors()).handshake(plain, Duration.ofSeconds(15))
-            }
-            assertTrue(failure.causes().any { "subject alternative" in it.message.orEmpty().lowercase() }, failure.toString())
-            assertTrue(plain.isClosed)
+            val result = probe(server.port, trustStore = trustStore(wrongHost))
+            assertTrue(result.startsWith("HANDSHAKE_FAILED type=javax.net.ssl.SSLHandshakeException closed=true "), result)
+            assertTrue("subject alternative" in result.lowercase(), result)
         }
     }
 
@@ -75,11 +76,8 @@ class AcpProviderUpstreamTlsTest {
     fun `a trusted certificate for the policy host completes a modern handshake with policy SNI`() {
         val rightHost = identity("chatgpt.com")
         TlsServer(rightHost).use { server ->
-            AcpProviderUpstreamTls.withTestTrustAnchors(policy, rightHost.anchors()).handshake(server.connectPlain(), Duration.ofSeconds(15)).use { socket ->
-                assertTrue(socket.session.protocol in setOf("TLSv1.3", "TLSv1.2"), socket.session.protocol)
-                assertEquals("HTTPS", socket.sslParameters.endpointIdentificationAlgorithm)
-                assertEquals(1, socket.inputStream.read())
-            }
+            val result = probe(server.port, trustStore = trustStore(rightHost))
+            assertTrue(Regex("HANDSHAKE_OK protocol=TLSv1\\.[23] identification=HTTPS byte=1").matches(result), result)
             assertEquals(listOf("chatgpt.com"), server.awaitServerNames())
         }
     }
@@ -101,58 +99,96 @@ class AcpProviderUpstreamTlsTest {
     }
 
     @Test
-    fun `the factory accepts no caller trust manager hostname verifier or TLS context`() {
+    fun `connect is the only entry point and no member accepts trust material or a TLS context`() {
         val forbidden = listOf(
-            TrustManager::class.java, KeyManager::class.java, HostnameVerifier::class.java, SSLContext::class.java,
-            SSLSocketFactory::class.java, SSLParameters::class.java,
+            KeyStore::class.java, TrustManager::class.java, KeyManager::class.java, HostnameVerifier::class.java,
+            SSLContext::class.java, SSLSocketFactory::class.java, SSLParameters::class.java,
         )
         val owners = listOf(AcpProviderUpstreamTls::class.java, AcpProviderUpstreamTls.Companion::class.java)
         val parameterTypes = owners.flatMap { owner ->
             owner.declaredMethods.flatMap { it.parameterTypes.toList() } + owner.declaredConstructors.flatMap { it.parameterTypes.toList() }
         }
-        parameterTypes.forEach { type -> assertTrue(forbidden.none { it.isAssignableFrom(type) || type.isArray && it.isAssignableFrom(type.componentType) }, type.name) }
+        parameterTypes.forEach { type ->
+            val element = if (type.isArray) type.componentType else type
+            assertTrue(forbidden.none { it.isAssignableFrom(element) }, type.name)
+        }
+        val publicMembers = AcpProviderUpstreamTls::class.java.declaredMethods
+            .filter { java.lang.reflect.Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+            .map { it.name }
+        assertEquals(listOf("connect"), publicMembers)
+        // Kotlin adds a synthetic accessor constructor for the companion; it takes only the policy.
+        assertTrue(AcpProviderUpstreamTls::class.java.declaredConstructors.none { java.lang.reflect.Modifier.isPublic(it.modifiers) && !it.isSynthetic })
     }
 
-    private class Identity(val keyStore: KeyStore, val password: CharArray) {
-        fun anchors(): KeyStore = KeyStore.getInstance("PKCS12").apply {
-            load(null, null)
-            setCertificateEntry("anchor", keyStore.getCertificate("server"))
-        }
-    }
+    private class Identity(val keyStore: KeyStore, val password: CharArray, val root: Path)
 
     private fun identity(host: String): Identity {
         val parent = Files.createDirectories(Path.of("build", "test-tmp", "acp-provider-tls").toAbsolutePath())
         val root = Files.createTempDirectory(parent, "identity-").also(roots::add)
         val store = root.resolve("identity.p12")
-        val password = ByteArray(18).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
-        val keytool = Path.of(System.getProperty("java.home"), "bin", "keytool")
+        val password = randomPassword()
+        val log = root.resolve("keytool.log")
         val process = ProcessBuilder(
-            keytool.toString(), "-genkeypair", "-alias", "server", "-keyalg", "EC", "-groupname", "secp256r1",
-            "-sigalg", "SHA256withECDSA", "-dname", "CN=$host", "-ext", "SAN=dns:$host", "-validity", "2",
-            "-storetype", "PKCS12", "-keystore", store.toString(), "-storepass", password, "-keypass", password, "-noprompt",
-        ).redirectErrorStream(true).redirectOutput(root.resolve("keytool.log").toFile())
-            .also { it.environment().clear() }
-            .start()
+            Path.of(System.getProperty("java.home"), "bin", "keytool").toString(), "-genkeypair", "-alias", "server",
+            "-keyalg", "EC", "-groupname", "secp256r1", "-sigalg", "SHA256withECDSA", "-dname", "CN=$host",
+            "-ext", "SAN=dns:$host", "-validity", "2", "-storetype", "PKCS12", "-keystore", store.toString(),
+            "-storepass", password, "-keypass", password, "-noprompt",
+        ).redirectErrorStream(true).redirectOutput(log.toFile()).also { it.environment().clear() }.start()
         assertTrue(process.waitFor(60, TimeUnit.SECONDS), "keytool did not finish")
-        assertEquals(0, process.exitValue(), Files.readString(root.resolve("keytool.log")))
+        assertEquals(0, process.exitValue(), Files.readString(log))
         val keyStore = KeyStore.getInstance("PKCS12").apply { Files.newInputStream(store).use { load(it, password.toCharArray()) } }
-        return Identity(keyStore, password.toCharArray())
+        return Identity(keyStore, password.toCharArray(), root)
     }
+
+    private class TrustStoreFile(val path: Path, val password: String)
+
+    private fun trustStore(anchor: Identity): TrustStoreFile {
+        val password = randomPassword()
+        val path = anchor.root.resolve("roots.p12")
+        val store = KeyStore.getInstance("PKCS12").apply {
+            load(null, null)
+            setCertificateEntry("anchor", anchor.keyStore.getCertificate("server"))
+        }
+        Files.newOutputStream(path).use { store.store(it, password.toCharArray()) }
+        return TrustStoreFile(path, password)
+    }
+
+    /** Runs [AcpProviderUpstreamTlsProbe] in a fresh JVM and returns its single result line. */
+    private fun probe(port: Int, trustStore: TrustStoreFile?): String {
+        val log = Files.createTempFile(roots.first(), "probe-", ".log")
+        val trustProperties = trustStore?.let {
+            listOf(
+                "-Djavax.net.ssl.trustStore=${it.path}", "-Djavax.net.ssl.trustStoreType=PKCS12",
+                "-Djavax.net.ssl.trustStorePassword=${it.password}",
+            )
+        }.orEmpty()
+        val process = ProcessBuilder(
+            listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString()) + trustProperties +
+                listOf("-cp", System.getProperty("java.class.path"), AcpProviderUpstreamTlsProbe::class.java.name, port.toString()),
+        ).redirectErrorStream(true).redirectOutput(log.toFile()).also { it.environment().clear() }.start()
+        assertTrue(process.waitFor(60, TimeUnit.SECONDS), "TLS probe JVM did not finish")
+        val output = Files.readAllLines(log)
+        assertEquals(0, process.exitValue(), output.joinToString("\n"))
+        return output.single { it.startsWith("HANDSHAKE_") }
+    }
+
+    private fun randomPassword(): String = ByteArray(18).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
 
     private class TlsServer(identity: Identity) : AutoCloseable {
         private val listener: SSLServerSocket
         @Volatile private var serverNames: List<String>? = null
         private val worker: Thread
+        val port: Int get() = listener.localPort
 
         init {
             val keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(identity.keyStore, identity.password) }
             val context = SSLContext.getInstance("TLS").apply { init(keys.keyManagers, null, null) }
             listener = context.serverSocketFactory.createServerSocket(0, 1, InetAddress.getLoopbackAddress()) as SSLServerSocket
-            listener.soTimeout = 15_000
+            listener.soTimeout = 60_000
             worker = thread(isDaemon = true, name = "provider-tls-fixture") {
                 runCatching {
                     (listener.accept() as SSLSocket).use { socket ->
-                        socket.soTimeout = 15_000
+                        socket.soTimeout = 30_000
                         socket.startHandshake()
                         serverNames = (socket.session as ExtendedSSLSession).requestedServerNames.map { (it as SNIHostName).asciiName }
                         socket.outputStream.write(1)
@@ -163,21 +199,14 @@ class AcpProviderUpstreamTlsTest {
             }
         }
 
-        fun connectPlain(): Socket = Socket(Proxy.NO_PROXY).apply {
-            connect(InetSocketAddress(InetAddress.getLoopbackAddress(), listener.localPort), 5_000)
-        }
-
         fun awaitServerNames(): List<String>? {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
-            while (serverNames == null && System.nanoTime() < deadline) Thread.onSpinWait()
+            worker.join(30_000)
             return serverNames
         }
 
         override fun close() {
             listener.close()
-            worker.join(15_000)
+            worker.join(30_000)
         }
     }
-
-    private fun Throwable.causes(): Sequence<Throwable> = generateSequence(this) { it.cause }
 }
