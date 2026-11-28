@@ -671,6 +671,9 @@ class UploadServer(
         }
     }
 
+    /** Download leases held for [jobId] and admitted artifact reads; for delivery checks. */
+    internal fun activeDownloads(jobId: String): Pair<Int, Int> = jobs.activeDownloadLeases(jobId) to (api?.artifactDownloads?.activeCount() ?: 0)
+
     private fun route(exchange: HttpExchange) {
         if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
     }

@@ -587,6 +587,10 @@ internal class WebApiController(
                     } else sendWebApiResponse(exchange, 200, "job", value)
                 }
             }
+        } catch (failure: WebResponseAborted) {
+            // Headers and part of the body were sent: no denial can follow. Let the listener drop the connection, so the
+            // client sees a body short of its declared length promptly instead of waiting on an open connection.
+            throw failure
         } catch (failure: WebAccessDenied) {
             access.sendDenied(exchange, withResourceMethods(failure, resource))
         } catch (_: decompengine.jobs.UploadIdempotencyConflict) {
@@ -767,9 +771,22 @@ internal fun sendWebAttachment(exchange: HttpExchange, size: Long, fileName: Str
         if (exchange.requestMethod == "HEAD" || size == 0L) exchange.sendResponseHeaders(200, -1)
         else {
             exchange.sendResponseHeaders(200, size)
-            exchange.responseBody.use { output -> write(output); output.flush() }
+            abortAfterHeaders { exchange.responseBody.use { output -> write(output); output.flush() } }
         }
     } finally { exchange.close() }
+}
+
+/**
+ * A failure after the status line and part of a fixed-length body were sent. The controller rethrows it so the listener
+ * closes the connection; closing the exchange alone can leave the connection open with the declared length unmet.
+ */
+internal class WebResponseAborted(cause: Throwable) : RuntimeException("response aborted after its headers were sent", cause)
+
+/** Runs a post-header body writer, turning any failure into [WebResponseAborted]; interruption is kept. */
+internal inline fun <T> abortAfterHeaders(write: () -> T): T = try { write() } catch (failure: Throwable) {
+    if (failure is InterruptedException) Thread.currentThread().interrupt()
+    if (failure is WebResponseAborted) throw failure
+    throw WebResponseAborted(failure)
 }
 
 /** Strict bounded `archiveVerificationRequest` body: the one archive digest the caller displayed. */

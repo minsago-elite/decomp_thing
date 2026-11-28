@@ -170,10 +170,13 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
             if (exchange.requestMethod == "HEAD" || length == 0L) { exchange.sendResponseHeaders(status, -1); return }
             exchange.sendResponseHeaders(status, length)
             val slice = range ?: WebByteRange(0, servedSize - 1)
-            if (projected != null) {
-                exchange.responseBody.write(projected, slice.start.toInt(), slice.length.toInt())
-                exchange.responseBody.flush()
-            } else stream(exchange, selection, size, slice, cancellation)
+            // After the headers, a failure (including a changed artifact) must drop the connection short of its length.
+            abortAfterHeaders {
+                if (projected != null) {
+                    exchange.responseBody.write(projected, slice.start.toInt(), slice.length.toInt())
+                    exchange.responseBody.flush()
+                } else stream(exchange, selection, size, slice, cancellation)
+            }
         } finally { exchange.close() }
     }
 

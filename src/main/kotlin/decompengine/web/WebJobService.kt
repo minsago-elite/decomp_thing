@@ -1720,6 +1720,9 @@ class WebJobService(
         return AutoCloseable { holds.remove(hold) }
     }
 
+    /** Leases currently held for [jobId]; for delivery checks. */
+    internal fun activeDownloadLeases(jobId: String): Int = synchronized(this) { downloadLeases[jobId] ?: 0 }
+
     /** Download delivery keeps a lease so deletion cannot remove bytes a response is still sending. */
     internal fun downloadLease(jobId: String): AutoCloseable = synchronized(this) {
         requireInitializedRead()

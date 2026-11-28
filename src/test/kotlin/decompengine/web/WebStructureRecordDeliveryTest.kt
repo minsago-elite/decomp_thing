@@ -109,6 +109,7 @@ class WebStructureRecordDeliveryTest {
             if (received != null) assertTrue(received.size < bytes.size)
         }
         assertEquals(2, reads.passes)
-        assertTrue(reads.failure is IllegalStateException, reads.failure.toString())
+        // The failure after the headers is an abort the listener sees, wrapping the digest mismatch.
+        assertTrue(reads.failure is WebResponseAborted && reads.failure?.cause is IllegalStateException, reads.failure.toString())
     }
 }

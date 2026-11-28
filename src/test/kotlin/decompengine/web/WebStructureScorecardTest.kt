@@ -180,6 +180,23 @@ class WebStructureScorecardTest {
         assertTrue(comparison.getValue("metrics").jsonArray.all { it.jsonObject.getValue("delta").jsonObject.text("state") == "withheld" })
     }
 
+    @Test fun `replacing an unpaired surrogate identity with another is a population change`() {
+        val original = model()
+        val json = original.toJson()
+        // The model reader keeps distinct lone surrogates distinct; UTF-8 encoding would turn both into '?'.
+        for ((run, surrogate) in listOf(1 to "\\ud800", 2 to "\\udbff")) {
+            val bytes = json.replace(id(5), "fn_$surrogate").toByteArray()
+            val confidence = fixture.confidence(original, plan(), emptySet()).decodeToString()
+                .replace(fixture.sha(json.toByteArray()), fixture.sha(bytes))
+            fixture.revision("run_$run", "revision_$run", original, plan(), confidence = confidence.toByteArray(), modelBytes = bytes)
+        }
+        val comparison = compare("run_1", "revision_1")
+        assertEquals("differs", comparison.populationCheck().text("state"))
+        assertNotEquals(comparison.populationCheck().text("current"), comparison.populationCheck().text("baseline"))
+        assertEquals("incompatible", comparison.getValue("compatibility").jsonObject.text("state"))
+        assertTrue(comparison.getValue("metrics").jsonArray.all { it.jsonObject.getValue("delta").jsonObject.text("state") == "withheld" })
+    }
+
     @Test fun `reordering committed function records preserves the population match`() {
         val original = model()
         fixture.revision("run_1", "revision_1", original, plan())

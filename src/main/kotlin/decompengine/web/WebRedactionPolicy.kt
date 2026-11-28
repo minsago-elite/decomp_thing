@@ -467,5 +467,5 @@ private fun routingKey(key: String): Boolean = key == "basePath" || key.endsWith
 
 /** Closed-syntax protocol fields whose exact bytes are load-bearing. */
 private fun opaqueKey(key: String): Boolean = key == "id" || key == "version" ||
-    // A structure neighborhood's focus is the selector of its center node and must publish identically.
-    key == "selector" || key == "moduleSelector" || key == "focus" || opaqueKeySuffixes.any(key::endsWith)
+    // A neighborhood's focus and an inventory's module filter are selectors and must publish identically to them.
+    key == "selector" || key == "moduleSelector" || key == "focus" || key == "module" || opaqueKeySuffixes.any(key::endsWith)

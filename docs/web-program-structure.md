@@ -235,16 +235,22 @@ reads in all, two per session) for the whole response. A first pinned pass repro
 manifest-committed digest before any header is sent; the second pass streams through a
 held-back final chunk that is released only after that pass reproduces the digest too, so
 memory stays at one read chunk and a record that changes mid-response is closed short of
-its declared length.
+its declared length. A failure after the headers (here and for artifact content) is
+rethrown to the listener, which drops the connection; closing the exchange alone could
+leave it open with the declared length unmet.
 
 Recorded identities share one public projection under the listener's redaction policy. An
 addressable entity or module ID that the policy publishes unchanged in an identity field
 is its own selector, in inventories, details, neighborhoods (including the echoed
 `focus`), scorecard rows and comparisons. Any other ID becomes a stable alias with no
 selector: `function:`, `global:` or `type:` plus a SHA-256 for entities, and
-`_withheld.` plus a SHA-256 for modules, which keeps the module-ID grammar. A request that
-selects such an ID, as a path selector, a neighborhood focus or a module filter, finds no
-record.
+`_withheld.` plus a SHA-256 for modules, which keeps the module-ID grammar. An alias is
+itself published unchanged: when a configured value would overlap it, the digest is
+re-derived with a salt, and when no safe alias exists the read fails with
+`409 STRUCTURE_IDENTITY_WITHHELD`. A request that selects an ID the policy would rewrite,
+as a path selector, a neighborhood focus or a function-inventory `module` filter, finds no
+record (`404`), checked before any other response is built; an accepted `module` filter is
+echoed with the same identity semantics as its selector.
 
 ## Comparing attempts
 

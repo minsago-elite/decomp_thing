@@ -82,6 +82,11 @@ internal class WebProgramStructurePages(
         val ownership = query.fields["ownership"]?.also { if (it !in setOf("owned", "unowned", "ambiguous", "not-recorded")) invalidFilter() }
         if (sort !in setOf("address", "name", "id") || order !in setOf("asc", "desc")) invalidFilter()
         val search = query.fields["search"]
+        // A module filter is a selector: only one this policy publishes as its own selector is accepted and echoed.
+        val moduleFilter = query.fields["module"]?.also { selector ->
+            if (!addressable(selector)) invalidFilter()
+            if (!policy.preservesOpaque(selector)) moduleNotFound()
+        }
         return read(jobId, runId, revisionId) { index, _ ->
             pinned(index, query)
             val route = listOf("functions", jobId, runId, revisionId).joinToString("/")
@@ -100,7 +105,7 @@ internal class WebProgramStructurePages(
                     return@apply
                 }
                 val table = index.table(WebStructureKind.FUNCTION)
-                val module = query.fields["module"]?.let { selector -> index.moduleIndex[selector]?.takeIf { selectable(selector, policy) } ?: -100 }
+                val module = moduleFilter?.let { selector -> index.moduleIndex[selector] ?: -100 }
                 val orderRows = when (sort) { "name" -> table.byName; "id" -> table.byId; else -> table.byAddress }
                 val addressPrefix = search?.lowercase(Locale.ROOT)?.takeIf { it.matches(Regex("0x[0-9a-f]{1,16}")) }
                 val unfiltered = status == null && evidence == null && ownership == null && module == null && search == null
@@ -158,6 +163,7 @@ internal class WebProgramStructurePages(
     fun module(owner: String, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?,
         policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, setOf("kind"))
+        if (!selectable(selector, policy)) moduleNotFound()
         val kind = when (query.fields["kind"] ?: "functions") {
             "functions" -> WebStructureKind.FUNCTION; "globals" -> WebStructureKind.GLOBAL; "types" -> WebStructureKind.TYPE
             else -> invalidFilter()
@@ -171,8 +177,7 @@ internal class WebProgramStructurePages(
                     put("module", JsonNull); put("owned", JsonNull)
                     return@apply
                 }
-                val moduleRow = index.moduleIndex[selector]?.takeIf { selectable(selector, policy) } ?: throw WebAccessDenied(404,
-                    "MODULE_NOT_FOUND", "The requested module is not recorded in this revision's module plan.")
+                val moduleRow = index.moduleIndex[selector] ?: moduleNotFound()
                 val module = index.modules[moduleRow]
                 put("module", moduleItem(index, moduleRow, policy).toMutableMap().apply {
                     put("implementationPath", JsonPrimitive(module.sourcePath))
@@ -218,12 +223,13 @@ internal class WebProgramStructurePages(
     fun entity(kind: WebStructureKind, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?,
         policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, emptySet(), paged = false)
+        if (!selectable(selector, policy)) entityNotFound(kind.wire)
         return read(jobId, runId, revisionId) { index, records ->
             pinned(index, query)
             header(index).apply {
                 if (!index.available) { put("entity", JsonNull); return@apply }
                 val table = index.table(kind)
-                val row = table.index[selector]?.takeIf { selectable(selector, policy) } ?: throw WebAccessDenied(404,
+                val row = table.index[selector] ?: throw WebAccessDenied(404,
                     "ENTITY_NOT_FOUND", "The requested ${kind.wire} is not recorded in this revision's program model.")
                 val fields = records.entity(checkNotNull(index.model), WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES,
                     table.offsets[row], policy)
@@ -251,6 +257,9 @@ internal class WebProgramStructurePages(
         val focus = query.fields["focus"]?.takeIf(::addressable) ?: invalidFilter()
         if (view !in setOf("calls", "modules") || direction !in setOf("outgoing", "incoming", "both") ||
             unresolved !in setOf("show", "omit") || (view == "modules" && "unresolved" in query.fields)) invalidFilter()
+        // Checked before any read: an unavailable graph still echoes its focus. A focus this policy would not publish
+        // as its own selector is never offered, so it is not recorded here either.
+        if (!policy.preservesOpaque(focus)) { if (view == "calls") entityNotFound("function") else moduleNotFound() }
         return read(jobId, runId, revisionId) { index, _ ->
             pinned(index, query)
             header(index).apply {
@@ -268,9 +277,7 @@ internal class WebProgramStructurePages(
                 put("relationships", relationships(index, view, graphOutcome))
                 if (graphOutcome.state != "available") { put("neighborhood", JsonNull); return@apply }
                 val graph = if (view == "calls") index.callGraph else index.moduleGraph
-                // A focus this policy would not publish as its own selector is never offered, so it is not recorded here either.
-                val start = if (!selectable(focus, policy)) null
-                    else if (view == "calls") index.table(WebStructureKind.FUNCTION).index[focus] else index.moduleIndex[focus]
+                val start = if (view == "calls") index.table(WebStructureKind.FUNCTION).index[focus] else index.moduleIndex[focus]
                 if (start == null) throw WebAccessDenied(404, if (view == "calls") "ENTITY_NOT_FOUND" else "MODULE_NOT_FOUND",
                     "The requested focus is not recorded in this revision's ${if (view == "calls") "program model" else "module plan"}.")
                 val result = WebGraphNeighborhood.of(graph, start, depth, direction != "incoming", direction != "outgoing",
@@ -723,7 +730,7 @@ internal class WebProgramStructurePages(
         // Reserve the emitted format so a recorded ID cannot impersonate another row's alias.
         else if (!PUBLIC_ID_ALIAS.matches(id) && !policy.leaks(id)) return id
         // ':' is outside the selector grammar.
-        return "${kind.wire}:${identityDigest(id)}"
+        return alias("${kind.wire}:", id, policy)
     }
 
     private fun entitySelector(id: String, policy: WebRedactionPolicy): JsonElement =
@@ -731,7 +738,7 @@ internal class WebProgramStructurePages(
 
     /** Module IDs follow the same rule. Their alias keeps the module-ID wire grammar and is never a selector. */
     private fun publicModuleId(id: String, policy: WebRedactionPolicy): String =
-        if (!MODULE_ALIAS.matches(id) && policy.preservesOpaque(id)) id else "_withheld.${identityDigest(id)}"
+        if (!MODULE_ALIAS.matches(id) && policy.preservesOpaque(id)) id else alias("_withheld.", id, policy)
 
     private fun moduleSelector(id: String, policy: WebRedactionPolicy): JsonElement =
         id.takeIf { selectable(it, policy) }?.let(::JsonPrimitive) ?: JsonNull
@@ -739,9 +746,28 @@ internal class WebProgramStructurePages(
     /** A request may select only an identity that this policy publishes as its own selector. */
     private fun selectable(selector: String, policy: WebRedactionPolicy): Boolean = addressable(selector) && policy.preservesOpaque(selector)
 
-    /** Hash the original UTF-16 code units, so even distinct unpaired surrogates keep distinct aliases. */
-    private fun identityDigest(id: String): String {
-        val bytes = ByteBuffer.allocate(id.length * Char.SIZE_BYTES)
+    /**
+     * A deterministic alias that the final redaction pass publishes unchanged: the first of a bounded series of salted
+     * digests that no configured value overlaps, so aliases never collapse into one marker or leave the module grammar.
+     * Distinct identities and salts always hash distinct input, so aliases stay distinct. Without a safe candidate the
+     * projection fails rather than publish one.
+     */
+    private fun alias(prefix: String, id: String, policy: WebRedactionPolicy): String {
+        for (salt in 0 until MAXIMUM_ALIAS_ROUNDS) {
+            val candidate = prefix + identityDigest(id, salt)
+            if (policy.preservesOpaque(candidate)) return candidate
+        }
+        throw WebAccessDenied(409, "STRUCTURE_IDENTITY_WITHHELD",
+            "A recorded identity of this revision cannot be shown under this listener's redaction policy.")
+    }
+
+    /**
+     * Hash the original UTF-16 code units, so even distinct unpaired surrogates keep distinct aliases. The first round
+     * hashes the code units alone (an even length); later rounds add a marker byte and the salt (an odd length).
+     */
+    private fun identityDigest(id: String, salt: Int): String {
+        val bytes = ByteBuffer.allocate((if (salt == 0) 0 else 1 + Int.SIZE_BYTES) + id.length * Char.SIZE_BYTES)
+        if (salt != 0) { bytes.put(1); bytes.putInt(salt) }
         for (character in id) bytes.putChar(character)
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes.array()))
     }
@@ -864,6 +890,12 @@ internal class WebProgramStructurePages(
         return mac.doFinal(fields.joinToString("\u0000").toByteArray(Charsets.UTF_8)).take(16).joinToString("") { "%02x".format(it) }
     }
 
+    private fun moduleNotFound(): Nothing =
+        throw WebAccessDenied(404, "MODULE_NOT_FOUND", "The requested module is not recorded in this revision's module plan.")
+
+    private fun entityNotFound(kind: String): Nothing =
+        throw WebAccessDenied(404, "ENTITY_NOT_FOUND", "The requested $kind is not recorded in this revision's program model.")
+
     private fun invalidFilter(): Nothing = throw WebAccessDenied(422, "VALIDATION_FAILED", "Use known structure filters and a page limit between 1 and 200.")
 
     private fun invalidCursor(): Nothing = throw WebAccessDenied(400, "INVALID_CURSOR",
@@ -878,6 +910,7 @@ internal class WebProgramStructurePages(
         private const val MAXIMUM_PUBLIC_SEARCH_CHARACTERS = 256
         private val PUBLIC_ID_ALIAS = Regex("(?:function|global|type):[0-9a-f]{64}")
         private val MODULE_ALIAS = Regex("_withheld\\.[0-9a-f]{64}")
+        private const val MAXIMUM_ALIAS_ROUNDS = 16
         private val SELECTOR = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
         /** Only identifiers that match the URL selector grammar are addressable; others remain listed without a link. */
         fun addressable(value: String): Boolean = SELECTOR.matches(value)

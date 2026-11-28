@@ -257,7 +257,10 @@ internal class WebProgramStructureIndex(
     val callGraph: WebProgramGraph get() = derived("call-graph", WebProgramGraph::retainedBytes) { WebProgramGraph.calls(this) }
     val moduleGraph: WebProgramGraph get() = derived("module-graph", WebProgramGraph::retainedBytes) { WebProgramGraph.modules(this) }
 
-    /** Digest of the recorded population: each kind's identities in sorted order, length-prefixed, so order is irrelevant. */
+    /**
+     * Digest of the recorded population: each kind's identities in sorted order as length-prefixed UTF-16 code units,
+     * so order is irrelevant and distinct unpaired surrogates, which UTF-8 encoding would merge, stay distinct.
+     */
     fun populationDigest(): String = derived("population-digest", { 256L }) {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         val thread = Thread.currentThread()
@@ -265,8 +268,9 @@ internal class WebProgramStructureIndex(
             digest.update("${table.kind.route}\n${table.size}\n".toByteArray(Charsets.UTF_8))
             for (id in table.ids.sortedArray()) {
                 if (thread.isInterrupted) throw CancellationException("Population digest was cancelled.")
-                val bytes = id.toByteArray(Charsets.UTF_8)
-                digest.update("${bytes.size}:".toByteArray(Charsets.UTF_8)); digest.update(bytes)
+                val units = java.nio.ByteBuffer.allocate(Int.SIZE_BYTES + id.length * Char.SIZE_BYTES).putInt(id.length)
+                for (character in id) units.putChar(character)
+                digest.update(units.array())
             }
         }
         java.util.HexFormat.of().formatHex(digest.digest())
