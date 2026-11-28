@@ -8,6 +8,7 @@ import decompengine.oracle.core.DescriptorBoundCommitGate
 import decompengine.oracle.core.DescriptorBoundPreparedCommit
 import decompengine.oracle.core.DescriptorBoundStateSnapshot
 import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
+import java.nio.file.Path
 
 /**
  * Single-commit admission under the operation deadline. The link may start only while at least
@@ -105,27 +106,35 @@ internal class GccBundledDeadlineCommitGate(
 internal object GccBundledDeadlineBoundPublication {
     const val CLEANUP_ALLOWANCE_MILLIS = 5_000L
 
+    /**
+     * [parentPath] is the authenticated pathname of [parent]; the owned step requires it to reach
+     * the committed inode after the durability sync, then runs [requireBindings] before [finish].
+     */
     fun publish(
         work: GccBundledHostWorkTracker,
         parent: LinuxDescriptor,
+        parentPath: Path,
         name: String,
         bytes: ByteArray,
         maximumBytes: Int,
         deadline: ContainedCommandOperationDeadline,
         faultInjector: DescriptorBoundCommitFaultInjector? = null,
+        requireBindings: () -> Unit = {},
     ): DescriptorBoundStateSnapshot {
         val gate = GccBundledDeadlineCommitGate(deadline)
         val owned = LinuxFilesystemSyscalls.duplicate(parent)
         val commit = try {
             work.run("result publication", { deadline.remainingMillis(Long.MAX_VALUE) }, owned) {
-                val prepared = DescriptorBoundAtomicStateFile.commitNoReplace(owned, name, bytes, maximumBytes, gate, faultInjector)
-                if (!gate.finish(prepared)) {
-                    try {
-                        DescriptorBoundAtomicStateFile.revokeCommitted(owned, prepared, faultInjector)
-                    } finally {
-                        prepared.close()
-                    }
-                    error("GCC result publication was abandoned after its commit and was revoked")
+                val prepared = DescriptorBoundAtomicStateFile.commitNoReplace(owned, parentPath, name, bytes, maximumBytes,
+                    gate, faultInjector)
+                try {
+                    requireBindings()
+                    check(gate.finish(prepared)) { "GCC result publication was abandoned or expired after its commit and is revoked" }
+                } catch (failure: Throwable) {
+                    runCatching { DescriptorBoundAtomicStateFile.revokeCommitted(owned, prepared, faultInjector) }
+                        .exceptionOrNull()?.let(failure::addSuppressed)
+                    prepared.close()
+                    throw failure
                 }
                 prepared
             }

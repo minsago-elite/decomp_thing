@@ -101,20 +101,34 @@ unchanged. Allocation inside one library call is seen only at the next
 checkpoint, and the JVM heap limit remains the backstop. This is a host-phase
 budget, not a whole-process RSS measurement.
 
-`publishCliResult` completes every fallible verification before publication.
+`publishCliResult` completes every caller-side verification before publication.
 `GccBundledDeadlineBoundPublication` then writes, fsyncs and verifies
 `result.json` in an unnamed O_TMPFILE inode, with each step gated by the
 deadline. It commits by linking that inode to `result.json` without replacement,
-so no other writer's file can be published by this call. The link may start only
-while at least one second remains. The commit counts only if the deadline is
-still current when the link returns and again after the directory sync it needs
-for durability. No verification follows the link. If the link or sync completes
-late, fails or outlasts the owner's wait, the result is revoked: by the in-flight
-step when its syscall returns, or by a bounded cleanup step when the step had
-already finished. Revocation keeps the prepared inode's descriptor open. It moves
-the name without replacement to a unique private name, compares that entry with
-the descriptor, and only then unlinks it. Another writer's entry is renamed back
-without replacement and left intact. An existing result is refused untouched.
+so no other writer's file can be published by this call. The link first tries
+`AT_EMPTY_PATH`. Before Linux 6.10 an unprivileged process lacks
+`CAP_DAC_READ_SEARCH`, and that call fails with `ENOENT` or `EPERM`. The link
+then follows the held descriptor's own `/proc/self/fd/<n>` magic link with
+`AT_SYMLINK_FOLLOW`, which names the same open inode. The link may start only
+while at least one second remains. After the link come only the directory sync
+it needs for durability and, inside the same owned step, a final check. That
+check requires the authenticated output pathname to still reach the pinned
+directory, and its `result.json` to be the prepared inode with the exact bytes.
+The CLI's directory bindings are then rechecked. The commit counts only if the
+deadline is still current when the link returns and again after those checks.
+If the link, sync or a check completes late, fails or outlasts the owner's wait,
+the result is revoked: by the in-flight step when its syscall returns, or by a
+bounded cleanup step when the step had already finished. Revocation keeps the
+prepared inode's descriptor open. It moves the name without replacement to a
+unique private name, compares that entry with the descriptor, and only then
+unlinks it. Another writer's entry is renamed back without replacement and left
+intact. If a third entry has meanwhile taken the name, that rename fails with
+`EEXIST`. The other writer's entry then stays at its private name, and the
+failure reports that path. An existing result is refused untouched.
+
+The output directory's filesystem must support O_TMPFILE, as ext4, xfs, btrfs
+and tmpfs do. overlayfs gained support only in Linux 6.10. Where it is missing,
+publication fails before writing anything, and the error names that requirement.
 
 Limits:
 
@@ -126,6 +140,8 @@ Limits:
   the consumer contract. Recording in-flight publication in the operation
   journal, so that recovery removes an unaccepted result first, is a follow-up.
   It would change the journal chain that cold recovery (#981) is also editing.
+- A revocation that meets a recreated name leaves the other writer's entry at
+  the reported private `.result.json.revoked-<random>` path for an operator.
 - Revocation's private name narrows the replacement race to a deliberately
   targeted random name between its identity check and unlink. That residual is
   outside the directory's cooperative exclusive-owner contract.
@@ -138,10 +154,13 @@ Limits:
 Focused JVM controls are in `GccBundledHostWorkTest`,
 `GccBundledPlannerOutputCaptureTest` and `GccBundledDeadlineBoundPublicationTest`.
 They cover a blocked NIO FIFO read, a channel close that waits on its blocked
-operation, budget refusal before allocation and by measurement, model copying
-after admission, streamed logs, and a blocked owned capture. They also cover
-expiry or blocking at every preparation, commit and sync point, and competing
-writers before the commit and before revocation. These are local-component
+operation, and a duplicate closed when its pinned scope's exit check fails. They
+cover budget refusal before allocation and by measurement, model copying after
+admission, streamed logs, and a blocked owned capture. They also cover expiry or
+a stall at every preparation, commit and post-sync point, a renamed output
+directory, a replaced leaf, and competing writers before the commit and during
+revocation. `LinuxFilesystemSyscallsTest` forces the `/proc` link fallback.
+These are local-component
 controls. They do not qualify provisioned-host CLI wall time, peak RSS or real
 cc1/lto1 execution.
 

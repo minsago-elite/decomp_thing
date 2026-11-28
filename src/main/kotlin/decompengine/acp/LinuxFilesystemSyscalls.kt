@@ -636,13 +636,26 @@ internal object LinuxFilesystemSyscalls {
     )
 
     /** Creates an unnamed inode, so every failure before [linkTemporaryAt] is residue-free. */
-    fun createTemporaryAt(parentFd: Int): LinuxDescriptor = openDescriptor(
-        parentFd,
-        ".",
-        O_WRONLY or O_TMPFILE or O_CLOEXEC,
-        OWNER_READ_WRITE,
-        "create secure unnamed temporary file",
-    )
+    fun createTemporaryAt(parentFd: Int): LinuxDescriptor = try {
+        openDescriptor(
+            parentFd,
+            ".",
+            O_WRONLY or O_TMPFILE or O_CLOEXEC,
+            OWNER_READ_WRITE,
+            "create secure unnamed temporary file",
+        )
+    } catch (failure: LinuxSyscallException) {
+        throw unnamedTemporaryFailure(failure)
+    }
+
+    /** Without O_TMPFILE support (EOPNOTSUPP, or EISDIR from kernels that predate it) the failure names the requirement. */
+    internal fun unnamedTemporaryFailure(failure: LinuxSyscallException): LinuxSyscallException =
+        if (failure.errno != EOPNOTSUPP && failure.errno != EISDIR) failure
+        else LinuxSyscallException(
+            "create secure unnamed temporary file: the directory's filesystem must support O_TMPFILE " +
+                "(for example ext4, xfs, btrfs or tmpfs; overlayfs needs Linux 6.10 or later)",
+            failure.errno,
+        )
 
     /** Creates one named regular file below an already-pinned private directory. */
     fun createRegularFile(parentFd: Int, name: String, mode: Int): LinuxDescriptor {
@@ -665,9 +678,29 @@ internal object LinuxFilesystemSyscalls {
         LinuxDescriptor(duplicate, descriptor.identity)
     }
 
-    fun linkTemporaryAt(temporary: LinuxDescriptor, parentFd: Int, name: String) {
-        call("materialize secure temporary file") {
-            libc.linkat(temporary.fd, "", parentFd, name, AT_EMPTY_PATH)
+    fun linkTemporaryAt(temporary: LinuxDescriptor, parentFd: Int, name: String) =
+        linkTemporaryAt(temporary, parentFd, name, attemptEmptyPath = true)
+
+    /**
+     * Names the pinned unnamed inode without replacement. Before Linux 6.10 an unprivileged
+     * AT_EMPTY_PATH link fails with ENOENT (or EPERM) without CAP_DAC_READ_SEARCH, so the link
+     * then follows the descriptor's own /proc magic link, which denotes the same open inode
+     * while the descriptor is held. [attemptEmptyPath] false forces that path for controls.
+     */
+    internal fun linkTemporaryAt(temporary: LinuxDescriptor, parentFd: Int, name: String, attemptEmptyPath: Boolean) {
+        temporary.whileOpen { fd ->
+            if (attemptEmptyPath) {
+                while (true) {
+                    if (libc.linkat(fd, "", parentFd, name, AT_EMPTY_PATH) == 0) return@whileOpen
+                    val error = Native.getLastError()
+                    if (error == EINTR) continue
+                    if (error != ENOENT && error != EPERM) throw LinuxSyscallException("materialize secure temporary file", error)
+                    break
+                }
+            }
+            call("materialize secure temporary file through its descriptor") {
+                libc.linkat(AT_FDCWD, "/proc/self/fd/$fd", parentFd, name, AT_SYMLINK_FOLLOW)
+            }
         }
     }
 
@@ -1472,6 +1505,7 @@ internal object LinuxFilesystemSyscalls {
     }
 
     private const val AT_FDCWD = -100
+    private const val AT_SYMLINK_FOLLOW = 0x400
     private const val O_RDONLY = 0
     private const val O_WRONLY = 1
     private const val O_RDWR = 2
@@ -1499,6 +1533,7 @@ internal object LinuxFilesystemSyscalls {
     private const val EPERM = 1
     private const val ENOSYS = 38
     private const val EOPNOTSUPP = 95
+    private const val EISDIR = 21
     private const val EWOULDBLOCK = 11
     private const val LOCK_EX = 2
     private const val LOCK_NB = 4

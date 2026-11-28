@@ -605,7 +605,7 @@ internal class GccBundledPreparedOperation internal constructor(
                     val control = checkNotNull(execution.controlDirectoryIdentity)
                     // The capture step receives a kernel duplicate of the pinned run root after this borrow is
                     // revalidated, so no lexical revalidation runs on its timeout path.
-                    runDuplicate = borrowed.withPinnedDescriptor(LinuxFilesystemSyscalls::duplicate)
+                    runDuplicate = duplicateWithinPinnedScope { action -> borrowed.withPinnedDescriptor(action) }
                     Triple(receipt, control, minOf(maximumFileBytes, 64L * 1024 * 1024).toInt())
                 }
             } catch (failure: Throwable) {
@@ -673,7 +673,8 @@ internal class GccBundledPreparedOperation internal constructor(
                 cli.requireCurrent()
                 // Every fallible verification precedes the commit; the commit link is the last fallible
                 // step apart from its durability sync, and any failure revokes the result.
-                GccBundledDeadlineBoundPublication.publish(hostWork, output, "result.json", document, 256 * 1024, deadline)
+                GccBundledDeadlineBoundPublication.publish(hostWork, output, cli.options.output, "result.json", document,
+                    256 * 1024, deadline, requireBindings = cli::requireCurrent)
             }
             return cli.options.output.resolve("result.json")
         } catch (failure: Throwable) {

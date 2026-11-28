@@ -30,6 +30,7 @@ internal enum class DescriptorBoundCommitFaultPoint {
     AFTER_COMMIT,
     AFTER_COMMIT_DIRECTORY_SYNC,
     BEFORE_REVOCATION,
+    BEFORE_REVOCATION_RESTORE,
 }
 
 internal fun interface DescriptorBoundCommitFaultInjector {
@@ -139,13 +140,16 @@ internal object DescriptorBoundAtomicStateFile {
 
     /**
      * Prepares [bytes] in an unnamed owner-only inode and names it [name] with one no-replace link
-     * of that inode, so no other writer's file can be published by this call. Every verification
-     * precedes the link; only the durability sync of [parent] follows it. A refused, failed or
-     * unconfirmed commit is revoked through [revokeCommitted] before rethrowing. The returned handle
-     * keeps the inode's descriptor so that a later revocation can prove what it removes.
+     * of that inode, so no other writer's file can be published by this call. Every caller-side
+     * verification precedes the link. After it come only the durability sync of [parent] and a
+     * final check that [authenticatedParentPath] still reaches [parent] and that its [name] entry
+     * is the prepared inode with the exact bytes. A refused, failed or unconfirmed commit is
+     * revoked through [revokeCommitted] before rethrowing. The returned handle keeps the inode's
+     * descriptor so that a later revocation can prove what it removes.
      */
     fun commitNoReplace(
         parent: LinuxDescriptor,
+        authenticatedParentPath: Path,
         name: String,
         bytes: ByteArray,
         maximumBytes: Int,
@@ -181,6 +185,7 @@ internal object DescriptorBoundAtomicStateFile {
             if (!gate.completeCommit()) stateFail("immutable commit completed outside its admission and is revoked")
             LinuxFilesystemSyscalls.synchronize(parent)
             faultInjector?.hit(DescriptorBoundCommitFaultPoint.AFTER_COMMIT_DIRECTORY_SYNC)
+            requireCommittedAtPath(parent, authenticatedParentPath, commit, maximumBytes)
             return commit
         } catch (failure: Throwable) {
             if (commit?.committed == true) {
@@ -214,13 +219,40 @@ internal object DescriptorBoundAtomicStateFile {
         val moved = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, quarantine)
             ?: stateFail("revoked immutable entry disappeared from its private name")
         if (moved.use { !sameFile(it.identity, commit.identity) }) {
-            LinuxFilesystemSyscalls.renameNoReplace(parent.fd, quarantine, commit.name)
+            faultInjector?.hit(DescriptorBoundCommitFaultPoint.BEFORE_REVOCATION_RESTORE)
+            try {
+                LinuxFilesystemSyscalls.renameNoReplace(parent.fd, quarantine, commit.name)
+            } catch (conflict: LinuxSyscallException) {
+                if (conflict.errno != LinuxFilesystemSyscalls.EEXIST) throw conflict
+                LinuxFilesystemSyscalls.synchronize(parent)
+                val preserved = runCatching {
+                    Files.readSymbolicLink(LinuxFilesystemSyscalls.stableDescriptorPath(parent.fd)).resolve(quarantine).toString()
+                }.getOrDefault(quarantine)
+                stateFail("immutable commit revocation preserved another writer's entry at $preserved because " +
+                    "${commit.name} was recreated before it could be restored")
+            }
             LinuxFilesystemSyscalls.synchronize(parent)
             stateFail("immutable commit revocation found another writer's entry and restored it")
         }
         LinuxFilesystemSyscalls.unlink(parent.fd, quarantine)
         LinuxFilesystemSyscalls.synchronize(parent)
         requireUnnamed(commit)
+    }
+
+    /** The authenticated pathname must still reach the pinned directory, and its leaf the prepared inode and bytes. */
+    private fun requireCommittedAtPath(parent: LinuxDescriptor, path: Path, commit: DescriptorBoundPreparedCommit, maximumBytes: Int) {
+        requireParent(parent)
+        if (path.toRealPath() != path) stateFail("committed state directory no longer resolves at its authenticated path")
+        LinuxFilesystemSyscalls.openRoot(path).use { named ->
+            if (!sameDirectory(named.identity, parent.identity)) {
+                stateFail("committed state directory no longer resolves at its authenticated path")
+            }
+            val entry = LinuxFilesystemSyscalls.openPathAtOrNull(named.fd, commit.name) ?: stateFail("committed state entry disappeared")
+            if (entry.use { !sameFile(it.identity, commit.identity) }) stateFail("committed state entry was replaced")
+            val published = readRequiredWithMode(named, commit.name, maximumBytes, OWNER_READ_ONLY_MODE)
+            if (!sameFile(published.identity, commit.identity)) stateFail("committed state entry was replaced")
+            requireExactBytes(published.bytes, commit.snapshot.bytes, "committed immutable state")
+        }
     }
 
     private fun requireUnnamed(commit: DescriptorBoundPreparedCommit) {

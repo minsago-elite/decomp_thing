@@ -1108,6 +1108,47 @@ class LinuxFilesystemSyscallsTest {
         }
     }
 
+    @Test
+    fun `unnamed temporary links through its own descriptor when AT_EMPTY_PATH is unavailable`() {
+        val scratch = Files.createDirectories(Path.of("build/test-tmp").toAbsolutePath().normalize())
+        val path = Files.createTempDirectory(scratch, "linux-tmpfile-link-").toRealPath()
+        try {
+            LinuxFilesystemSyscalls.openRoot(path).use { directory ->
+                LinuxFilesystemSyscalls.createTemporaryAt(directory.fd).use { temporary ->
+                    LinuxFilesystemSyscalls.write(temporary, byteArrayOf(1, 2, 3)) {}
+                    val unnamed = LinuxFilesystemSyscalls.identity(temporary.fd)
+                    assertEquals(0, unnamed.linkCount)
+                    // Forces the pre-6.10 path: the fd's /proc magic link with AT_SYMLINK_FOLLOW.
+                    LinuxFilesystemSyscalls.linkTemporaryAt(temporary, directory.fd, "linked", attemptEmptyPath = false)
+                    LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, "linked")!!.use { named ->
+                        assertEquals(unnamed.key, named.identity.key)
+                    }
+                    assertEquals(1, LinuxFilesystemSyscalls.identity(temporary.fd).linkCount)
+                    assertContentEquals(byteArrayOf(1, 2, 3), Files.readAllBytes(path.resolve("linked")))
+                    Files.write(path.resolve("taken"), byteArrayOf(9))
+                    val conflict = assertFailsWith<LinuxSyscallException> {
+                        LinuxFilesystemSyscalls.linkTemporaryAt(temporary, directory.fd, "taken", attemptEmptyPath = false)
+                    }
+                    assertEquals(17, conflict.errno, "the fallback link must never replace an existing name")
+                    assertContentEquals(byteArrayOf(9), Files.readAllBytes(path.resolve("taken")))
+                }
+            }
+        } finally {
+            path.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `missing O_TMPFILE support names the filesystem requirement`() {
+        for (errno in listOf(95, 21)) {
+            val mapped = LinuxFilesystemSyscalls.unnamedTemporaryFailure(LinuxSyscallException("create secure unnamed temporary file", errno))
+            assertEquals(errno, mapped.errno)
+            assertTrue(mapped.message.orEmpty().contains("must support O_TMPFILE"), mapped.message)
+        }
+        val other = LinuxSyscallException("create secure unnamed temporary file", 13)
+        assertTrue(LinuxFilesystemSyscalls.unnamedTemporaryFailure(other) === other)
+    }
+
     private fun withLinuxDirectory(prefix: String, action: (Path, LinuxDescriptor) -> Unit) {
         val path = createTempDirectory(prefix).toAbsolutePath().normalize()
         try {

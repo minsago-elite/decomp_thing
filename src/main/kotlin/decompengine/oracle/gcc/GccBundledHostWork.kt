@@ -1,5 +1,7 @@
 package decompengine.oracle.gcc
 
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFilesystemSyscalls
 import java.lang.management.ManagementFactory
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -154,6 +156,21 @@ internal class GccBundledHostMemoryBudget(
     companion object {
         const val WORKING_RESERVATION_BYTES = 16L * 1024 * 1024
     }
+}
+
+/**
+ * Kernel-duplicates the pinned descriptor inside [withPinnedDescriptor] and closes the duplicate if
+ * that scope's exit check fails, so the handoff never leaks a descriptor.
+ */
+internal fun duplicateWithinPinnedScope(withPinnedDescriptor: (action: (LinuxDescriptor) -> Unit) -> Unit): LinuxDescriptor {
+    var duplicate: LinuxDescriptor? = null
+    try {
+        withPinnedDescriptor { pinned -> duplicate = LinuxFilesystemSyscalls.duplicate(pinned) }
+    } catch (failure: Throwable) {
+        duplicate?.close()
+        throw failure
+    }
+    return checkNotNull(duplicate) { "pinned scope did not run its duplication" }
 }
 
 private val THREADS = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean

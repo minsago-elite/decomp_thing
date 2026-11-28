@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.acp.LinuxFilesystemSyscalls
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.channels.spi.AbstractInterruptibleChannel
@@ -107,6 +108,28 @@ class GccBundledHostWorkTest {
         assertFailsWith<GccBundledHostWorkTimeoutException> { tracker.run("no allowance", 0, AutoCloseable { closes++ }) { 1 } }
         tracker.requireRetired(5_000)
         assertEquals(3, closes)
+    }
+
+    @Test
+    fun `a pinned-scope exit failure after duplication closes the handed-off duplicate`() {
+        val scratch = Files.createDirectories(Path.of("build/test-tmp").toAbsolutePath().normalize())
+        val path = Files.createTempDirectory(scratch, "gcc-host-duplicate-").toRealPath()
+        fun descriptorsOnPath() = Files.list(Path.of("/proc/self/fd")).use { fds -> fds.toList() }
+            .count { fd -> runCatching { Files.readSymbolicLink(fd) == path }.getOrDefault(false) }
+        try {
+            LinuxFilesystemSyscalls.openRoot(path).use { pinned ->
+                val before = descriptorsOnPath()
+                val failure = assertFailsWith<IllegalStateException> {
+                    duplicateWithinPinnedScope { action -> action(pinned); throw IllegalStateException("exit check failed") }
+                }
+                assertEquals("exit check failed", failure.message)
+                assertEquals(before, descriptorsOnPath(), "the duplicate must be closed when the scope's exit check fails")
+                duplicateWithinPinnedScope { action -> action(pinned) }.use { assertEquals(before + 1, descriptorsOnPath()) }
+                assertEquals(before, descriptorsOnPath())
+            }
+        } finally {
+            Files.delete(path)
+        }
     }
 
     @Test

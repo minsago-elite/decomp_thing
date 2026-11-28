@@ -247,22 +247,33 @@ class GccBundledPlannerOutputCaptureTest {
                 val blocked = CountDownLatch(1)
                 val release = CountDownLatch(1)
                 val stages = java.util.Collections.synchronizedList(mutableListOf<String>())
+                val failure = arrayOfNulls<Throwable>(1)
                 val started = System.nanoTime()
-                assertFailsWith<GccBundledHostWorkTimeoutException> {
-                    GccBundledPlannerOutputCapture.captureOwned(tracker, LinuxFilesystemSyscalls.duplicate(run), CONTROL,
-                        control.identity, request, { model }, 4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(5_000) { 0L }) { stage ->
-                        stages += stage
-                        if (stage == "reading planner output file" && blocked.count != 0L) {
-                            blocked.countDown()
-                            while (true) try { if (release.await(10, TimeUnit.SECONDS)) break } catch (_: InterruptedException) { }
-                        }
-                    }
+                try {
+                    // A separate caller thread lets a regression that waits unboundedly fail instead of hanging the suite.
+                    val caller = Thread {
+                        failure[0] = runCatching {
+                            GccBundledPlannerOutputCapture.captureOwned(tracker, LinuxFilesystemSyscalls.duplicate(run), CONTROL,
+                                control.identity, request, { model }, 4, 0, 1024L * 1024 * 1024,
+                                ContainedCommandOperationDeadline(5_000) { 0L }) { stage ->
+                                stages += stage
+                                if (stage == "reading planner output file" && blocked.count != 0L) {
+                                    blocked.countDown()
+                                    while (true) try { if (release.await(10, TimeUnit.SECONDS)) break } catch (_: InterruptedException) { }
+                                }
+                            }
+                        }.exceptionOrNull()
+                    }.apply { isDaemon = true; start() }
+                    caller.join(25_000)
+                    val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                    assertFalse(caller.isAlive, "the caller must return while the capture read is blocked")
+                    assertTrue(failure[0] is GccBundledHostWorkTimeoutException, failure[0].toString())
+                    assertTrue(blocked.count == 0L && elapsedMillis in 5_000..15_000, "elapsed $elapsedMillis ms")
+                    assertEquals(listOf("planner output capture"), tracker.inFlightStages)
+                    assertFailsWith<IllegalStateException> { tracker.requireRetired(50) }
+                } finally {
+                    release.countDown()
                 }
-                val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-                assertTrue(blocked.count == 0L && elapsedMillis in 5_000..15_000, "elapsed $elapsedMillis ms")
-                assertEquals(listOf("planner output capture"), tracker.inFlightStages)
-                assertFailsWith<IllegalStateException> { tracker.requireRetired(50) }
-                release.countDown()
                 tracker.requireRetired(10_000)
                 assertTrue("before planner assessment" !in stages, "an abandoned capture stops at its next checkpoint")
             }
