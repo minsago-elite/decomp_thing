@@ -28,47 +28,86 @@ execution (#984).
 ## Later-invocation recovery of an interrupted plan
 
 A later process recovers an interrupted `gcc-engine-plan` by repeating the original argv exactly
-and adding `--recover-operation <operation-id>`. `GccBundledCliCommand.recoveryIntent` rebuilds
-the retained `invocation.json` from that argv and the current output, inputs and journal
-directory identities. The bytes must match. It then re-derives the production intent from the
-current inputs and the two staged controls, which it reuses but never rewrites.
+and adding `--recover-operation <operation-id>`. It must run from the same working directory.
+`GccBundledCliCommand.recoveryIntent` rebuilds the retained `invocation.json` (v2) and requires
+byte equality. The rebuild uses that argv, the launcher working directory's canonical path and
+identity (checked against `/proc/self/cwd`), and the current output, inputs and journal
+directory identities. It then re-derives the production intent from the current inputs and the
+two staged controls, which it reuses but never rewrites.
 `GccBundledOperationCoordinator.recoverInterrupted` then takes the journal-root,
 operation-journal and scratch-mount locks without blocking, in `prepareNew`'s order. A lock that
 is still held means the earlier owner is live, and recovery is refused before any record is
 reused.
 
-Only an exactly stopped history is accepted: the journal must end at
-`analysis-state-captured.json`. Every record is rebuilt from its own payload and must match
-byte for byte, and the journal intent must equal the re-derived intent. The interrupted-execution
-record must carry its unit, cgroup and process absence. The definition must be the one derived
-from the reacquired run root, and the fresh control directory must keep its recorded identity.
-The stopped prefix and analysis state must match their durable assessment and manifest, and the
-interrupted unit must have no cgroup. After those checks the coordinator publishes
-`recovery-adopted.json`. That record holds the later argv, the absence basis and the run-root
-identity, and `resume-prepared.json` links to it. Resume, planning and `result.json` stay on the
-original operation ID and intent digest. `result.json` reports `executionOwnership` as
+The journal must end at `analysis-state-captured.json`. Exactly one `recovery-adopted.json`, or
+its complete atomic temporary, may follow it; any other residue is refused.
+
+- **Record lineage:** every record is rebuilt from its own payload and must match byte for byte,
+  and the journal intent must equal the re-derived intent.
+- **Absence receipt:** the interrupted-execution record must carry unit, cgroup and process
+  absence. The absence receipt must belong to this operation's own command:
+  - the attachment names the definition's unit, cgroup, nonce and deployment closure;
+  - the execution, interrupt authorization and HMAC-checked outcome all name that attachment's
+    request and keeper;
+  - the outcome is `INTERRUPTED`;
+  - every receipt self-hash holds.
+- **Output lineage:** the definition must be the one derived from the reacquired run root, and
+  the fresh control directory must keep its recorded identity.
+- **Checkpoint:** the stopped prefix and analysis state must match their durable assessment and
+  manifest, and the interrupted unit must have no cgroup.
+
+After those checks the coordinator publishes `recovery-adopted.json`, which `resume-prepared.json`
+links to. It records:
+
+- the later argv;
+- the absence basis;
+- the run-root identity;
+- the resume allowance.
+
+A later owner can crash after adopting but before any resume record. The next owner then
+revalidates and reuses that single adoption, or renames its complete temporary into place
+without writing new bytes, under all three locks. Its recorded allowance stays the cap.
+Histories that reached any resume record are refused. Resume, planning and `result.json` stay on
+the original operation ID and intent digest. `result.json` reports `executionOwnership` as
 `fresh-single-owner`, `same-owner-checkpoint-resume` or `later-invocation-recovery`.
 
-The resume wall budget is a fresh deadline. It is capped by the remaining budget the stopped
-execution recorded, and idle time between invocations is not charged (#982). The locks
+The stopped commit samples the operation deadline immediately before
+`analysis-state-captured.json` and records that snapshot. An operation whose deadline expired
+first never commits a recoverable state. The resume allowance is a fresh deadline capped at that
+snapshot's whole remaining seconds. Recovery validates the snapshot: it must come from the same
+deadline as the execution receipt, and no earlier than it. Prefix and state capture after worker
+exit are therefore charged. Idle time between invocations is not charged (#982). The locks
 coordinate cooperating same-UID processes only. A same-owner `--resume-after-checkpoint` run is
 still not cold recovery.
 
 Evidence and limits:
 
-- Local journal and CLI tests cover the refusals. A live owner is refused, and so is a changed
-  intent, deployment or operation. Tampered or residual records and an unproved worker absence
-  are refused. Prepared, fresh, completed and resume-started histories are refused, and so is a
-  changed or reordered argv or a finished output.
-- The ext4 lease test reacquires a crashed child process's active run, and refuses while any
-  other holder has the mount.
-- The hosted admission test shows two things with genuine cc1 bytes. A later invocation
-  re-derives the identical intent. That invocation is refused while the admitted owner is live,
-  and again once that owner has closed without starting.
-- The ci-live authored-ELF test stops one owner at a checkpoint and refuses recovery while that
-  owner is live. After that owner closes, a new owner resumes the checkpoint and passes
-  completed-run byte validation.
-- No genuine cc1 or lto1 checkpoint has been recovered through the installed CLI (#984).
+- **Local journal and CLI tests** refuse each of these:
+  - a live owner;
+  - a changed intent, deployment, operation or working directory;
+  - tampered or residual records;
+  - an unproved worker absence;
+  - an absence receipt for another command;
+  - a commit snapshot from another deadline, or one earlier than the execution receipt;
+  - an allowance above the commit cap;
+  - prepared, fresh, completed and resume-started histories;
+  - a changed or reordered argv, or a finished output.
+
+  They also reuse a published adoption, and complete an adoption temporary, with the original
+  allowance.
+- **`kotlin-oracle`, ext4 lease test:** it reacquires a crashed child process's active run, and
+  refuses while any other holder has the mount. It fails, rather than skips, when
+  `DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH` is set.
+- **`kotlin-oracle`, admission test, genuine cc1:** a later invocation re-derives the identical
+  intent. It is refused while the admitted owner is live, and again once that owner has closed
+  without starting.
+- **`kotlin-live`, authored-ELF test:**
+  - one owner stops at a checkpoint, and recovery is refused while that owner is live;
+  - a second owner adopts and closes before resuming;
+  - a third owner reuses that adoption, resumes within the committed allowance and passes
+    completed-run byte validation.
+- No genuine cc1 or lto1 checkpoint has been recovered through the installed CLI (#984). A crash
+  after a resume definition is staged but before its attachment still fails closed.
 
 ## Full-export policy consistency before worker admission
 

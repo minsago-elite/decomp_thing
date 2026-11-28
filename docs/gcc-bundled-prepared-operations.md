@@ -676,12 +676,19 @@ receipts and a comparison record linking both evidence directories and receipt
 hashes. Control logs are read from the execution's actual control directory.
 Failures preserve bounded compiler, journal and control-log diagnostics.
 
-The later-owner fixture stops one owner at a checkpoint. It checks that
-`recoverInterrupted` is refused while that owner is live, with no record or run-root change.
-The first owner then closes, leaving residue but no locks. A second owner then recovers,
-resumes, records `recovery-adopted.json` ahead of the resume chain and passes completed-run byte
-validation. A second adoption is refused. The earlier owner closes in-process rather than
-crashing; the separate crashed-process case is covered at the lease layer.
+The later-owner fixture stops one owner at a checkpoint, then runs these steps:
+
+1. It checks that `recoverInterrupted` is refused while the stopped owner is live, with no record
+   or run-root change.
+2. The stopped owner closes, leaving residue but no locks.
+3. A second owner adopts, recording `recovery-adopted.json`, then closes before any resume
+   record. This models a crash in the adoption window.
+4. A third owner reuses that exact adoption and its allowance, resumes within the allowance
+   committed with the stopped state, and passes completed-run byte validation.
+5. Another adoption of the completed history is refused.
+
+The owners close in-process rather than crashing; the separate crashed-process case is covered at
+the lease layer. This fixture runs on the `kotlin-live` shard.
 
 This is an authored integration gate, not cc1/lto1 benchmark acceptance. It has
 been compiled but requires the hosted runtime, user-systemd and dedicated-ext4

@@ -1522,8 +1522,7 @@ internal object GccBundledOperationCoordinator {
             // state capture. A retained adoption keeps its own recorded allowance, so a crash never refreshes it.
             // Idle time between owners is not charged; whole-operation accounting across invocations remains #982.
             val retainedAdoption = stopped.retainedAdoptionPayloadBytes?.let { OracleJson.parseCanonical(it) as JsonObject }
-            val remainingMillis = retainedAdoption?.let { (it.getValue("resumeWallBudgetMillis") as JsonPrimitive).content.toLong() }
-                ?: stopped.recoveryWallCapMillis
+            val remainingMillis = stopped.resumeAllowanceMillis
             require(remainingMillis in 2_000L..stopped.recoveryWallCapMillis) {
                 "GCC stopped operation has no remaining wall budget to resume"
             }

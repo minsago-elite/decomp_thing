@@ -184,6 +184,7 @@ class GccBundledOperationJournalTest {
             // The allowance is the stopped commit's remaining budget, not the earlier execution receipt's.
             assertEquals(STOPPED_REMAINING_NANOS, stopped.stoppedRemainingNanos)
             assertEquals(RECOVERY_CAP_MILLIS, stopped.recoveryWallCapMillis)
+            assertEquals(RECOVERY_CAP_MILLIS, stopped.resumeAllowanceMillis)
             // While this later owner holds the journal, a third invocation is refused in turn.
             val third = assertFails { GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256) }
             assertTrue(third.message.orEmpty().contains("held by a live owner"), third.toString())
@@ -220,6 +221,9 @@ class GccBundledOperationJournalTest {
         GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { second ->
             assertContentEquals(adopted, second.recoveryRecordBytes)
             assertContentEquals(payload, second.recoveredStoppedEvidence.retainedAdoptionPayloadBytes)
+            // The recorded allowance is kept, not refreshed to the commit cap.
+            assertEquals(40_000L, second.recoveredStoppedEvidence.resumeAllowanceMillis)
+            assertEquals(RECOVERY_CAP_MILLIS, second.recoveredStoppedEvidence.recoveryWallCapMillis)
             // A second, possibly larger, allowance can never be published over the retained one.
             assertFails { second.recordRecoveryAdopted(recoveryPayload(intent, stateRecord)) }
         }

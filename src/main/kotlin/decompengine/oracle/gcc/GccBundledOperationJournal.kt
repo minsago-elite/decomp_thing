@@ -812,6 +812,10 @@ internal class GccBundledStoppedJournalEvidence(
     val stateRecordBytes: ByteArray get() = stateRecord.copyOf()
     /** The single adoption a crashed later owner already recorded (published or complete temporary), if any. */
     val retainedAdoptionPayloadBytes: ByteArray? get() = retainedAdoption?.copyOf()
+    /** The allowance a later owner must resume with: a retained adoption's recorded budget, never a refreshed one. */
+    val resumeAllowanceMillis: Long = retainedAdoption?.let { payload ->
+        ((OracleJson.parseCanonical(payload, JOURNAL_JSON_LIMITS) as JsonObject)["resumeWallBudgetMillis"] as JsonPrimitive).content.toLong()
+    } ?: recoveryWallCapMillis
 }
 
 private class GccOperationWallSnapshot(
