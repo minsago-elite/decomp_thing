@@ -425,6 +425,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "verifyLlvmBehaviorQualificationTiers",
+    taskDescription = "Authenticates bounded CI smoke and full LLVM behavior qualification tiers; --args='--event <github event> --tier <tier>'",
+    entryPoint = "decompengine.oracle.behavior.LlvmBehaviorQualificationTiersCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "generateLlvmBehaviorReferenceInputPlanV2",
     taskDescription = "Generates the Python-free LLVM behavior reference input plan with Kotlin/JVM authority",
     entryPoint = "decompengine.oracle.behavior.LlvmBehaviorReferenceInputPlanV2GeneratorCli",
