@@ -35,7 +35,11 @@ interface DurableWebWorkflowAdapter {
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
 }
 
-/** Only detached bytes from the admitted checkpoint may reach the execution adapter. */
+/**
+ * Only detached bytes from the admitted checkpoint may reach the execution adapter. [MAX_BYTES] is checked
+ * after the adapter has read the payload, so it does not bound that read: the first production
+ * continuation must capture through a shared bounded reader, tested at exactly [MAX_BYTES] and one byte over.
+ */
 class VerifiedWebCheckpoint(bytes: ByteArray, val restores: WorkflowResumeRestoration) {
     init { require(bytes.size <= MAX_BYTES) }
     private val content = bytes.copyOf()
@@ -50,7 +54,23 @@ class VerifiedWebCheckpoint(bytes: ByteArray, val restores: WorkflowResumeRestor
 interface DurableWebWorkflowContinuation {
     /** Read only the workflow's fixed, bounded checkpoint files and return a detached capture. */
     fun capture(request: DurableWebWorkflowCheckpointRequest): VerifiedWebCheckpoint?
-    fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint): DurableWebWorkflowOutcome
+    /**
+     * Cancellation can arrive after the service's last ownership check and before this call begins. An
+     * implementation must therefore perform no side effect (process, session, network or file write)
+     * except inside [DurableWebWorkflowContinuationFence.launch], and must not catch what that call throws.
+     */
+    fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint,
+        fence: DurableWebWorkflowContinuationFence): DurableWebWorkflowOutcome
+}
+
+/**
+ * Atomically rechecks the continuation's ownership, cancellation and publication state and, only if it still
+ * holds, runs [start] under the same service lock. Cancellation therefore either refuses the launch (the
+ * call throws and [start] never runs) or is delivered afterwards as an interrupt to the launched work.
+ * [start] must only begin bounded work, such as starting and registering a process, and must not block.
+ */
+interface DurableWebWorkflowContinuationFence {
+    fun <T> launch(start: () -> T): T
 }
 
 /**
