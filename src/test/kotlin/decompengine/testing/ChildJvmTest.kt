@@ -94,20 +94,39 @@ class ChildJvmTest {
         assertEquals(listOf(direct), kinds("""val p = ProcessBuilder(javaBin.resolve("java").toString(), "-version")"""))
         assertEquals(listOf(direct), kinds("""val p = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString())"""))
         assertEquals(listOf(direct), kinds("""val p = ProcessExecutor(listOf("${'$'}{home}/bin/java", "-version"))"""))
-        // A wrapper executable can still start a JVM.
-        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds(
+        // A wrapper executable can still start a JVM; its later arguments are resolved like an executable.
+        assertEquals(listOf(direct), kinds(
             "val java = Path.of(System.getProperty(\"java.home\"), \"bin\", \"java\")\n" +
                 "val p = ProcessBuilder(\"unshare\", \"--user\", \"--\", java.toString(), \"-version\")"))
-        // A command assembled elsewhere in a JDK-referencing file is not trusted without review.
-        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds(
+        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds("fun run(vararg tool: String) =\n" +
+            "  ProcessBuilder(\"timeout\", \"5\", *tool)\nval home = System.getProperty(\"java.home\")"))
+        // A command assembled in a same-file variable is resolved to its executable.
+        assertEquals(listOf(direct), kinds(
             "val command = listOf(Path.of(System.getProperty(\"java.home\"), \"bin\", \"java\").toString())\n" +
                 "val p = ProcessBuilder(command)"))
+        assertEquals(listOf(JdkLaunchScan.Kind.NON_JDK_LITERAL), kinds(
+            "val SETFACL = Path.of(\"/usr/bin/setfacl\")\nval p = ProcessBuilder(SETFACL.toString(), \"-m\")\n" +
+                "val home = System.getProperty(\"java.home\")"))
+        // A command passed in from elsewhere in a JDK-referencing file is not trusted without review.
+        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds("fun start(command: List<String>) = ProcessBuilder(command)\n" +
+            "val home = System.getProperty(\"java.home\")"))
         // An unrelated ChildJvm mention next to a raw launch does not satisfy the check.
         assertEquals(listOf(direct), kinds("val flag = ChildJvm.NO_PERF_DATA\n" +
             "val p = ProcessBuilder(Path.of(System.getProperty(\"java.home\"), \"bin\", \"java\").toString())"))
         assertEquals(listOf(JdkLaunchScan.Kind.CHILD_JVM), kinds("val p = ProcessBuilder(ChildJvm.command(\"-cp\", cp))"))
         assertEquals(listOf(JdkLaunchScan.Kind.CHILD_JVM), kinds("val p = ProcessBuilder(*ChildJvm.toolCommand(\"javap\").toTypedArray())"))
         assertEquals(listOf(JdkLaunchScan.Kind.NON_JDK_LITERAL), kinds("val p = ProcessBuilder(\"mkfifo\", path.toString())"))
+        // Only the executable expression decides: a JDK name in a later argument is data.
+        assertEquals(listOf(JdkLaunchScan.Kind.NON_JDK_LITERAL), kinds("val p = ProcessBuilder(\"printf\", \"%s\", \"java\")"))
+        // The exec(String) overload runs the first word of its command line.
+        assertEquals(listOf(direct), kinds("val p = Runtime.getRuntime().exec(\"java -version\")"))
+        assertEquals(listOf(JdkLaunchScan.Kind.NON_JDK_LITERAL), kinds("val p = Runtime.getRuntime().exec(\"printf java\")"))
+        assertEquals(listOf(JdkLaunchScan.Kind.CHILD_JVM), kinds(
+            "val p = ProcessBuilder(\"prlimit\", \"--nofile=64:64\", \"--\", *ChildJvm.command().toTypedArray(), \"-cp\", cp)"))
+        // Anchors name the enclosing function and the executable, not the line.
+        val anchored = JdkLaunchScan.scan("fun `launches a probe`() {\n  val p = ProcessBuilder(command)\n}\n" +
+            "val home = System.getProperty(\"java.home\")").sites.single()
+        assertEquals("F.kt :: `launches a probe` :: command", anchored.anchor("F.kt"))
         // Comments and string fixture data are not launches.
         assertEquals(emptyList(), kinds("// ProcessBuilder(Path.of(System.getProperty(\"java.home\"), \"bin\", \"java\").toString())\n" +
             "/* Runtime.getRuntime().exec(\"java\") /* nested */ */"))
@@ -117,65 +136,94 @@ class ChildJvmTest {
     }
 
     /**
-     * Every launch in src/test that can start a JDK executable must take its command from [ChildJvm]. Files listed
-     * here were reviewed: their remaining launches either start a JVM with an explicit `-XX:-UsePerfData` and a
-     * private repository-local temporary root, start a Gradle start script through `withLauncherJavaOpts`, or run a
-     * non-JDK tool whose command the scan cannot see. Counts are exact, so a new launch in one of them needs review.
+     * Every launch in src/test that can start a JDK executable must take its command from [ChildJvm]. The sites
+     * listed here were reviewed one by one, keyed by file, enclosing function and executable expression: they start
+     * a JVM with an explicit `-XX:-UsePerfData` and a private repository-local temporary root, start a Gradle start
+     * script through `withLauncherJavaOpts`, or run a non-JDK tool whose command the scan cannot see. Unrelated
+     * non-JDK launches never need an entry; a new JDK-capable site cannot take over a reviewed one.
      */
     @Test
     fun `every test-launched JDK child takes its command from ChildJvm unless reviewed`() {
-        val privateRoot = "explicit -XX:-UsePerfData with a private temporary root"
-        val startScript = "Gradle start script with withLauncherJavaOpts"
-        val nonJdk = "non-JDK tool command built in a variable"
-        val reviewed = mapOf(
-            "InstalledReconstructionCliTest.kt" to (1 to startScript),
-            "oracle/gcc/GccInstalledCliInvocation.kt" to (1 to startScript),
-            "acp/LinuxBubblewrapBoundaryTest.kt" to (8 to privateRoot),
-            "analysis/BoundedProgramModelAcquisitionProcessTest.kt" to (2 to privateRoot),
-            "analysis/BundledGhidraTest.kt" to (4 to privateRoot),
-            "oracle/behavior/LlvmBehaviorNativeHelperBuildV2Test.kt" to (1 to privateRoot),
-            "oracle/behavior/LlvmBehaviorNativeHelperDeploymentReferenceV1Test.kt" to (1 to privateRoot),
-            "oracle/behavior/LlvmBehaviorNativeRuntimeMeasurementV2Test.kt" to (2 to privateRoot),
-            "oracle/externalcalls/IndependentExternalCallWorkerV1Test.kt" to (1 to privateRoot),
-            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt" to (4 to privateRoot),
-            "oracle/fulltree/FullTreeWorkerFailureOwnershipTest.kt" to (1 to privateRoot),
-            "oracle/fulltree/KotlinContainedCommandKeeperTest.kt" to (1 to privateRoot),
-            "oracle/fulltree/OracleNativeLibrariesTest.kt" to (2 to privateRoot),
-            "oracle/gcc/GccBundledGhidraDeploymentReferenceTest.kt" to (1 to privateRoot),
-            "oracle/machinecalls/IndependentMachineCallWorkerV1Test.kt" to (1 to privateRoot),
-            "project/GhidraReferencedBytesExporterTest.kt" to (1 to privateRoot),
-            "project/NativeCallCollectorRealTest.kt" to (1 to privateRoot),
-            "project/NativeInferredInterfaceCollectorRealTest.kt" to (1 to privateRoot),
-            "project/NativeInterfaceCollectorRealTest.kt" to (1 to privateRoot),
-            "oracle/behavior/LlvmBehaviorHostedWorkerImageLiveIntegrationTest.kt" to (1 to nonJdk),
-            "oracle/gcc/GccBundledContainedExecutionTest.kt" to (1 to nonJdk),
-            "oracle/gcc/GccCompilerEngineLiveContainmentControllerTest.kt" to (1 to nonJdk),
+        val reviewed: Map<String, Pair<Int, String>> = mapOf(
+            "InstalledReconstructionCliTest.kt :: `installed CLI validates profile selection before creating reconstruction output` :: launcher.toString()" to (1 to START_SCRIPT),
+            "oracle/gcc/GccInstalledCliInvocation.kt :: invokeInstalledGccCli :: selectedCommand" to (1 to START_SCRIPT),
+            "acp/LinuxBubblewrapBoundaryTest.kt :: `private controls reject native bind aliases and late callback exposure without denying disjoint grants` :: \"unshare\"" to (1 to PRIVATE_ROOT),
+            "acp/LinuxBubblewrapBoundaryTest.kt :: `private controls reject native bind aliases and late callback exposure without denying disjoint grants` :: java.toString()" to (1 to PRIVATE_ROOT),
+            "acp/LinuxBubblewrapBoundaryTest.kt :: `unproved partial control creation poisons all later authority admission without descriptor leaks` :: Path.of(System.getProperty(\"java.home\"),\"bin\",\"java\").toStri…" to (1 to PRIVATE_ROOT),
+            "acp/LinuxBubblewrapBoundaryTest.kt :: command :: argv" to (1 to NON_JDK),
+            "acp/LinuxBubblewrapBoundaryTest.kt :: runDirectGate :: GATE_HELPER.toString()" to (1 to NON_JDK),
+            "analysis/BoundedProgramModelAcquisitionProcessTest.kt :: main :: workerCommand(root,\"fifo\")" to (1 to PRIVATE_ROOT),
+            "analysis/BoundedProgramModelAcquisitionProcessTest.kt :: start :: command" to (1 to PRIVATE_ROOT),
+            "analysis/BundledGhidraTest.kt :: `installed native collector source and complete compiled closure match the production reference` :: command" to (1 to PRIVATE_ROOT),
+            "analysis/BundledGhidraTest.kt :: `installed worker initializes outside the application directory without an external installation` :: bundle.probeCommand()" to (1 to PRODUCTION),
+            "analysis/BundledGhidraTest.kt :: `installed worker requires the exact parent permit before Ghidra initialization` :: command" to (1 to PRIVATE_ROOT),
+            "analysis/BundledGhidraTest.kt :: `passive JVM sampler bounds transport and preserves blocked or failed worker outcomes` :: Path.of(System.getProperty(\"java.home\"),\"bin\",\"java\").toStri…" to (1 to PRIVATE_ROOT),
+            "oracle/behavior/LlvmBehaviorHostedWorkerImageLiveIntegrationTest.kt :: execute :: command" to (1 to NON_JDK),
+            "oracle/behavior/LlvmBehaviorNativeHelperBuildV2Test.kt :: `compiler child environment clears inherited include and tool redirection` :: command" to (1 to PRIVATE_ROOT),
+            "oracle/behavior/LlvmBehaviorNativeHelperDeploymentReferenceV1Test.kt :: probe :: command" to (1 to PRIVATE_ROOT),
+            "oracle/behavior/LlvmBehaviorNativeRuntimeMeasurementV2Test.kt :: run :: command" to (1 to PRIVATE_ROOT),
+            "oracle/behavior/LlvmBehaviorNativeRuntimeMeasurementV2Test.kt :: runChild :: command" to (1 to PRIVATE_ROOT),
+            "oracle/externalcalls/IndependentExternalCallWorkerV1Test.kt :: freshWorker :: Path.of(System.getProperty(\"java.home\"),\"bin/java\").toString…" to (1 to PRIVATE_ROOT),
+            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: `fresh JNA bootstrap stays inside exact temporary directory without creating home caches` :: javaExecutable.toString()" to (1 to PRIVATE_ROOT),
+            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: availableConfiguration :: systemctl.toString()" to (1 to NON_JDK),
+            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: runTestSystemctl :: configuration.scopeInspectorExecutable.toString()" to (1 to NON_JDK),
+            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: startOccupiedObservationUnit :: configuration.scopeSupervisorExecutable.toString()" to (1 to NON_JDK),
+            "oracle/fulltree/FullTreeWorkerFailureOwnershipTest.kt :: publishStart :: command" to (1 to PRIVATE_ROOT),
+            "oracle/fulltree/KotlinContainedCommandKeeperTest.kt :: withLocalKeeper :: arguments" to (1 to PRIVATE_ROOT),
+            "oracle/fulltree/OracleNativeLibrariesTest.kt :: noexecNamespace :: prefix + listOf(tools[2].toString(),\"--noheadings\",\"--output…" to (1 to NON_JDK),
+            "oracle/fulltree/OracleNativeLibrariesTest.kt :: runJava :: prefix + listOf(Path.of(System.getProperty(\"java.home\"),\"bin…" to (1 to PRIVATE_ROOT),
+            "oracle/gcc/GccBundledGhidraDeploymentReferenceTest.kt :: runInstalledProbe :: command" to (1 to PRIVATE_ROOT),
+            "oracle/machinecalls/IndependentMachineCallWorkerV1Test.kt :: `pinned bundled runtime initializes and decodes bytes in a fresh worker JVM` :: Path.of(System.getProperty(\"java.home\"),\"bin/java\").toString…" to (1 to PRIVATE_ROOT),
+            "project/GhidraReferencedBytesExporterTest.kt :: run :: arguments" to (1 to PRIVATE_ROOT),
+            "project/NativeCallCollectorRealTest.kt :: run :: arguments" to (1 to PRIVATE_ROOT),
+            "project/NativeInferredInterfaceCollectorRealTest.kt :: run :: arguments" to (1 to PRIVATE_ROOT),
+            "project/NativeInterfaceCollectorRealTest.kt :: run :: arguments" to (1 to PRIVATE_ROOT),
         )
         val sources = repositoryRoot.resolve("src/test/kotlin/decompengine")
-        val unreviewed = mutableMapOf<String, Pair<List<Int>, Boolean>>()
+        val found = mutableMapOf<String, MutableList<String>>()
         val kinds = mutableMapOf<JdkLaunchScan.Kind, Int>()
+        val fileFacts = mutableMapOf<String, JdkLaunchScan.Scan>()
         Files.walk(sources).use { paths ->
             paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) && it.toString().endsWith(".kt") }
                 .filter { it.fileName.toString() !in setOf("ChildJvm.kt", "ChildJvmTest.kt", "JdkLaunchScan.kt") }
                 .sorted().forEach { file ->
+                    val relative = sources.relativize(file).toString()
                     val scan = JdkLaunchScan.scan(Files.readString(file))
-                    scan.sites.forEach { kinds.merge(it.kind, 1, Int::plus) }
-                    val open = scan.sites.filter {
-                        it.kind == JdkLaunchScan.Kind.DIRECT_JDK || it.kind == JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE
+                    fileFacts[relative] = scan
+                    scan.sites.forEach { site ->
+                        kinds.merge(site.kind, 1, Int::plus)
+                        if (site.kind == JdkLaunchScan.Kind.DIRECT_JDK || site.kind == JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE) {
+                            found.getOrPut(site.anchor(relative)) { mutableListOf() } += "$relative:${site.line} (${site.kind})"
+                        }
                     }
-                    if (open.isNotEmpty()) unreviewed[sources.relativize(file).toString()] = open.map { it.line } to
-                        (scan.namesPerfFlag || "withLauncherJavaOpts" in scan.code)
                 }
         }
         assertTrue((kinds[JdkLaunchScan.Kind.CHILD_JVM] ?: 0) >= 20, "launch scan found too few ChildJvm launches: $kinds")
-        val mismatched = (reviewed.keys + unreviewed.keys).sorted().mapNotNull { file ->
-            val expected = reviewed[file]?.first ?: 0
-            val actual = unreviewed[file]?.first.orEmpty()
-            if (expected == actual.size) null else "$file: expected $expected reviewed launch(es), found ${actual.size} at lines $actual"
+        val problems = mutableListOf<String>()
+        found.toSortedMap().forEach { (anchor, sites) ->
+            val expected = reviewed[anchor]?.first ?: 0
+            if (sites.size > expected) problems += "unreviewed JDK-capable launch at ${sites.joinToString()}: build its command " +
+                "with ChildJvm.command/toolCommand, or after review add  \"$anchor\" to (${sites.size} to <reason>)"
         }
-        assertTrue(mismatched.isEmpty(), "JDK-capable launches must use ChildJvm or be reviewed here:\n" + mismatched.joinToString("\n"))
-        val flagless = reviewed.filter { (file, entry) -> entry.second != nonJdk && unreviewed[file]?.second != true }.keys
-        assertTrue(flagless.isEmpty(), "reviewed JVM launch files no longer name -XX:-UsePerfData: $flagless")
+        reviewed.forEach { (anchor, entry) ->
+            val actual = found[anchor].orEmpty().size
+            if (actual != entry.first) problems += "reviewed launch \"$anchor\" expects ${entry.first} site(s) but found $actual; " +
+                "update or remove its entry"
+            val file = anchor.substringBefore(" :: ")
+            val facts = fileFacts[file]
+            if (entry.second == PRIVATE_ROOT && facts?.namesPerfFlag != true) problems += "$file no longer names -XX:-UsePerfData"
+            if (entry.second == START_SCRIPT && facts?.code?.contains("withLauncherJavaOpts") != true) {
+                problems += "$file no longer uses withLauncherJavaOpts"
+            }
+        }
+        assertTrue(problems.isEmpty(), problems.joinToString("\n"))
+    }
+
+    private companion object {
+        const val PRIVATE_ROOT = "explicit -XX:-UsePerfData with a private temporary root"
+        const val START_SCRIPT = "Gradle start script with withLauncherJavaOpts"
+        const val NON_JDK = "non-JDK tool command built in a variable"
+        const val PRODUCTION = "JVM command built by production code, which owns its options"
     }
 }
 

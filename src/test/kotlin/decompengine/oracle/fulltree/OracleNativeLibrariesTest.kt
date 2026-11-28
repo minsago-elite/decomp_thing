@@ -132,13 +132,14 @@ class OracleNativeLibrariesTest {
             "/bin/sh", "-c",
             "set -e; \"\$1\" --no-mtab --bind \"\$0\" \"\$0\"; \"\$1\" --no-mtab -o remount,bind,noexec \"\$0\"; shift; exec \"\$@\"",
             target, tools[1].toString())
-        val process = ProcessBuilder(prefix + listOf(tools[2].toString(), "--noheadings", "--output", "TARGET,OPTIONS",
-            "--target", target)).redirectErrorStream(true).start()
+        // Ask for the options of the exact mountpoint only, so whitespace in the checkout path cannot split fields.
+        val process = ProcessBuilder(prefix + listOf(tools[2].toString(), "--noheadings", "--output", "OPTIONS",
+            "--mountpoint", target)).redirectErrorStream(true).start()
         try {
             process.outputStream.close()
             if (!process.waitFor(5, TimeUnit.SECONDS) || process.exitValue() != 0) return null
-            val fields = process.inputStream.readNBytes(4096).toString(Charsets.UTF_8).trim().split(Regex("\\s+"))
-            return prefix.takeIf { fields.size == 2 && fields[0] == target && "noexec" in fields[1].split(',') }
+            val options = process.inputStream.readNBytes(4096).toString(Charsets.UTF_8).trim()
+            return prefix.takeIf { options.isNotEmpty() && '\n' !in options && "noexec" in options.split(',') }
         } finally {
             if (process.isAlive) process.destroyForcibly().waitFor()
         }
