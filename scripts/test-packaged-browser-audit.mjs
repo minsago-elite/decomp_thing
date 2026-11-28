@@ -4,12 +4,14 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, compactJobFilterAuditEvidence, compactTimedAuditEvidence, focusTrajectoryFrames, focusTrajectoryMs, fileOpenChunkQuery, fileOpenContract, fileOpenEvidenceContract, fileOpenFailures, fileOpenMetadataPhase, fileOpenPin, fileOpenPreviewPhase, renderedPreviewDigest, sourceResponseIdentity, timedPhaseScript, filterElementVisible, focusFilterSubmitForTiming, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, applyAuditProfile, auditProfileEvidence, chromiumSupplementalInteractionContexts, engineSupplementalInteractionContexts, preparedFocusInteractionContexts,
+  captureOutputSignatureChart, chartCaptureFailures, chartCaptureSets, measureChartCaptureTile, measureOutputSignatureChart, pngDimensions, prepareChartCaptureTile } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const origin = 'http://127.0.0.1:1';
+const interactionPages = auditFixtures(repo, 'b'.repeat(64)).pages;
 const base = `${origin}/nested/assets/ui/`;
 const manifest = { buildId: 'b'.repeat(64), files: [{ path: 'index.html' }, { path: 'assets/index-a.js' }, { path: 'assets/index-a.css' },
   { path: 'assets/Home-a.js' }, { path: 'assets/highlight.worker-a.js' }, { path: 'assets/mark-a.svg' }] };
@@ -17,13 +19,120 @@ const responses = ['assets/index-a.js', 'assets/index-a.css', 'assets/Home-a.js'
 const stop = { key: 1, heading: false, target: 'button "Refresh"', focusVisible: true, outlineStyle: 'solid', outlineWidth: 3, contrast: 5.1, inViewport: true, unobscured: true };
 function timingEvidence(cold = 400, feedback = 40, data = 90) {
   return { coldLoad: { samples: 20, median: cold, p95: cold }, routeFeedback: { samples: 50, median: feedback, p95: feedback },
-    routeData: { samples: 50, median: data, p95: data }, raw: { cold: Array(20).fill(cold), feedback: Array(50).fill(feedback), data: Array(50).fill(data) } };
+    routeData: { samples: 50, median: data, p95: data }, filterFeedback: { samples: 50, median: 35, p95: 35 },
+    filterData: { samples: 50, median: 80, p95: 80 },
+    fileOpenFeedback: { samples: 50, median: 30, p95: 30 }, fileOpenData: { samples: 50, median: 70, p95: 70 },
+    filePreviewFeedback: { samples: 50, median: 32, p95: 32 }, filePreviewData: { samples: 50, median: 90, p95: 90 },
+    raw: { cold: Array(20).fill(cold), feedback: Array(50).fill(feedback),
+      data: Array(50).fill(data), filterFeedback: Array(50).fill(35), filterData: Array(50).fill(80),
+      fileOpenFeedback: Array(50).fill(30), fileOpenData: Array(50).fill(70),
+      filePreviewFeedback: Array(50).fill(32), filePreviewData: Array(50).fill(90) } };
 }
-function clean() {
+
+// A modeled page whose figure (300 x height CSS px) scrolls under a viewport of viewHeight CSS px.
+function pngBytes(width, height) {
+  const buffer = Buffer.alloc(33);
+  Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').copy(buffer);
+  buffer.writeUInt32BE(width, 16); buffer.writeUInt32BE(height, 20);
+  return buffer;
+}
+function tileState({ offset, height = 383, viewHeight = 200, viewWidth = 305, scroll, docTop = 0, left = 2, width = 300 }) {
+  const figureTop = docTop - scroll;
+  const top = Math.max(0, figureTop + offset), bottom = Math.min(viewHeight, figureTop + height);
+  const x0 = Math.max(0, Math.floor(left)), x1 = Math.min(viewWidth, Math.ceil(left + width));
+  const y0 = Math.max(0, Math.floor(top)), y1 = Math.min(viewHeight, Math.ceil(bottom));
+  const hit = { inFigure: true, hit: 'figure.output-signature-chart' };
+  return { figure: { x: left, y: figureTop, width, height }, rootClientWidth: viewWidth, rootClientHeight: viewHeight,
+    seriesHeights: [40, 40], activeElement: 'body', skipFocused: false, skipVisible: false,
+    segment: { start: top - figureTop, end: bottom - figureTop },
+    viewportClip: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
+    pageClip: { x: x0, y: y0 + scroll, width: x1 - x0, height: y1 - y0 }, hits: [hit, hit, hit, hit].map(value => ({ ...value })) };
+}
+// This model floors scroll requests; a separate VM control also covers nearest-integer rounding.
+async function modeledCapture(set, { height = 383, viewHeight = 200, docTop = 0, left, width, mutate = () => {}, png, shots } = {}) {
+  let scroll = 0;
+  const documentHeight = docTop + height + 50;
+  return captureOutputSignatureChart({ set,
+    evaluate: async expression => {
+      const offset = Number([...expression.matchAll(/\}\)\((\d+(?:\.\d+)?(?:e-?\d+)?)\)/g)].at(-1)?.[1]);
+      if (expression.startsWith('/*chart-capture-tile*/')) scroll = Math.min(Math.floor(docTop + offset), Math.max(0, docTop ? documentHeight - viewHeight : height - viewHeight));
+      const state = tileState({ offset, height, viewHeight, scroll, docTop, left, width });
+      mutate(state, expression.startsWith('/*chart-capture-tile*/') ? 'before' : 'after', offset);
+      return state;
+    },
+    shoot: async ({ viewportClip, pageClip }) => { shots?.push({ viewportClip, pageClip });
+      return png ? png(viewportClip) : pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor); } });
+}
+async function intactCaptures() {
+  return [await modeledCapture(chartCaptureSets[0], { viewHeight: 900 }), await modeledCapture(chartCaptureSets[1])];
+}
+const fileApi = fileId => `/jobs/${fileOpenContract.jobId}/runs/${fileOpenContract.runId}/revisions/${fileOpenContract.revisionId}/source-files/${fileId}`;
+/** Fulfilled metadata/chunk entries built from the real fixture responses, starting at `offset`. */
+function fileOpenEvidence(offset) {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const fulfilled = []; const samples = [];
+  for (let sample = 0; sample < 50; sample += 1) {
+    const file = fileOpenContract.files[sample % 2];
+    const read = (path, query) => {
+      const response = fixtures.respond('GET', path, 'application/json');
+      fulfilled.push({ method: 'GET', path, status: response.status, query, response: sourceResponseIdentity(response.document.data),
+        fulfillmentSucceeded: true });
+      return offset + fulfilled.length - 1;
+    };
+    const openIndex = read(fileApi(file.fileId), '');
+    const previewIndex = read(`${fileApi(file.fileId)}/chunk`, fileOpenChunkQuery);
+    samples.push({ sample, fileId: file.fileId,
+      open: { feedbackMs: 30, dataMs: 70, feedbackSignal: 'loading', renderedFileId: file.fileId, pageSearch: fileOpenPin,
+        renderedName: file.displayName, renderedSha256: file.sha256, focus: 'main-heading', previewOpen: false,
+        requestStartIndex: openIndex, requestEndIndex: openIndex + 1, requestIndex: openIndex },
+      preview: { feedbackMs: 32, dataMs: 90, feedbackSignal: 'loading', ariaBusy: 'false', focus: 'source-preview-title',
+        renderedRows: file.rows, renderedBytes: Number(file.sizeBytes), renderedTextSha256: file.sha256,
+        requestStartIndex: previewIndex, requestEndIndex: previewIndex + 1, requestIndex: previewIndex } });
+  }
+  return { fulfilled, fileOpen: { contract: fileOpenEvidenceContract(), samples } };
+}
+function jobFilterEvidence() {
+  return { ...jobFilterContract, samples: Array.from({ length: 50 }, (_, sample) => {
+    const filtered = sample % 2 === 0;
+    const query = filtered ? jobFilterContract.filteredQuery : jobFilterContract.unfilteredQuery;
+    const expectedJobId = filtered ? jobFilterContract.filteredJobId : jobFilterContract.unfilteredJobId;
+    const pageSearch = filtered ? `?search=${jobFilterContract.value}` : '';
+    return { sample, direction: filtered ? 'filtered' : 'cleared', query, pageSearch, feedbackMs: 35, dataMs: 80,
+      expectedJobId, renderedJobId: expectedJobId, feedbackSignal: 'loading', requestStartIndex: sample,
+      requestEndIndex: sample + 1, requestIndex: sample };
+  }) };
+}
+const fileBinding = () => ({ jobId: fileOpenContract.jobId, runId: fileOpenContract.runId, revisionId: fileOpenContract.revisionId });
+function clean(captures = cleanCaptures) {
   const fixtures = auditFixtures(repo, manifest.buildId);
   const matrix = fixtures.pages.flatMap(({ name: page }) => auditViewports.flatMap(viewport =>
     ['light', 'dark'].map(scheme => ({ page, viewport: viewport.name, scheme }))));
+  const chart = auditViewports.flatMap(viewport => ['light', 'dark'].map(scheme => ({
+    page: 'attempt evidence', viewport: viewport.name, scheme, viewportWidth: viewport.width,
+    chartPresent: true, chartRole: 'img', chartVisible: true, figurePresent: true, figureVisible: true, chartName: fixtures.chartExpected.chartName,
+    chartBounds: { x: 0, y: 0, width: 300, height: 100, right: 300, bottom: 100 },
+    chartSeries: fixtures.chartExpected.labels.map((label, index) => ({ label, bounds: { x: 0, y: 0, width: 300, height: 30, right: 300, bottom: 30 },
+      svgBounds: { x: 0, y: 0, width: 300, height: 14, right: 300, bottom: 14 }, barWidth: index === 0 ? '100' : '50' })),
+    binding: `${fixtures.chartExpected.reportId} ${fixtures.chartExpected.jobId} ${fixtures.chartExpected.runId} ${fixtures.chartExpected.revisionId}`,
+    chartDescription: [`${fixtures.chartExpected.reportId} ${fixtures.chartExpected.jobId} ${fixtures.chartExpected.runId} ${fixtures.chartExpected.revisionId}`,
+      `Expanded distinct exit/output signatures: ${fixtures.chartExpected.counts.expanded}. New distinct exit/output signatures: ${fixtures.chartExpected.counts.added}.`,
+      fixtures.chartExpected.tableName, fixtures.chartExpected.approximation],
+    region: { name: fixtures.chartExpected.tableName, focusable: true, visible: true, bounds: { x: 0, y: 0, width: 300, height: 100, right: 300, bottom: 100 }, clientWidth: 300, scrollWidth: 300 },
+    caption: fixtures.chartExpected.tableName, headers: fixtures.chartExpected.headers,
+    rows: [[fixtures.chartExpected.labels[0], fixtures.chartExpected.counts.expanded, fixtures.chartExpected.sample],
+      [fixtures.chartExpected.labels[1], fixtures.chartExpected.counts.added, fixtures.chartExpected.counts.denominator]],
+  })));
+  const interactions = auditViewports.flatMap(viewport => fixtures.pages.flatMap(page =>
+    (page.preparation ?? []).map((step, stepIndex) => ({ page: page.name, action: step.action, stepIndex,
+      elapsedMs: 20, reads: [...step.reads], context: viewport.name }))));
+  const timing = timingEvidence();
+  const filterRequests = jobFilterEvidence().samples.map(sample => ({ method: 'GET', path: '/jobs', status: 200,
+    query: sample.query, responseJobIds: [sample.expectedJobId], fulfillmentSucceeded: true }));
+  const opened = fileOpenEvidence(filterRequests.length);
   return {
+    chartExpected: fixtures.chartExpected, chart,
+    chartCaptures: captures, chartScreenshots: captures.flatMap(capture => capture.tiles.map(tile => tile.file)),
+    profile: auditProfileEvidence('reference'),
     layout: matrix.map(identity => ({ ...identity, pageOverflowPx: 0, overflow: [], overflowCount: 0, clippedActions: [], smallTargets: [],
       headingWithinWidth: true, navigation: { narrow: true, toggleShown: true, linksShown: false }, animations: 0,
       scrollRegions: [{ fits: true, scrolls: true, focusable: true, named: true }] })),
@@ -31,9 +140,14 @@ function clean() {
       measured: 40, minimum: 4.8, failures: [], failureCount: 0, unsupported: [], tokens: Object.fromEntries(auditTokenKinds.map(kind => [kind, 1])) })),
     focus: fixtures.pages.flatMap(({ name: page }) => ['light', 'dark'].map(scheme => ({ page, scheme,
       stops: [{ ...stop }, { ...stop, key: 2 }, { ...stop, key: 3 }] }))),
+    interactions,
     unmapped: [],
+    fulfilled: [...filterRequests, ...opened.fulfilled],
+    jobFilter: jobFilterEvidence(),
+    fileOpen: opened.fileOpen,
     workers: { highlightedTokens: 12, targets: [{ url: `${base}assets/highlight.worker-a.js`, responses: [{ url: `${base}assets/highlight.worker-a.js`, status: 200 }] }] },
-    timing: timingEvidence(),
+    timing: { ...timing, interactions: { samples: interactions.length, median: 20, p95: 20 },
+      raw: { ...timing.raw, interactions: interactions.map(entry => entry.elapsedMs) } },
     connectionNotice: connectionEvidence(),
   };
 }
@@ -50,17 +164,19 @@ function connectionEvidence() {
       listenersRemoved: true, accessibilityDisabled: true, failed: [] },
   };
 }
-const verdict = (audit, served = responses) => assertAudit(audit, manifest, served, origin).failures;
+const cleanCaptures = await intactCaptures();
+const verdict = (audit, served = responses) => assertAudit(audit, manifest, served, origin, undefined,
+  { interactionPages }).failures;
 
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
-  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [120, 48, 24]);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length, audit.chart.length], [130, 52, 26, 10]);
   assert.deepEqual(verdict(audit), []);
 });
 
 test('rejects absent, empty, partial, duplicate and unexpected measurement matrices', () => {
-  for (const kind of ['layout', 'contrast', 'focus']) {
+  for (const kind of ['layout', 'contrast', 'focus', 'chart']) {
     for (const missing of [undefined, null, []]) {
       const audit = clean(); audit[kind] = missing;
       assert.match(verdict(audit).join('\n'), new RegExp(`${kind}: missing`));
@@ -78,9 +194,198 @@ test('rejects absent, empty, partial, duplicate and unexpected measurement matri
       assert.match(verdict(unexpected).join('\n'), new RegExp(`${kind}: unexpected coverage`));
     }
   }
-  const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = [];
+  const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = []; empty.chart = [];
   empty.timing = { coldLoad: { p95: null }, routeFeedback: { p95: null }, routeData: { p95: null } };
-  assert.equal(verdict(empty).length, 6, 'the independently reproduced empty/null report must fail');
+  const emptyFailures = verdict(empty).join('\n');
+  for (const timing of ['cold dashboard', 'route feedback', 'route data', 'job filter feedback', 'job filter first data'])
+    assert.match(emptyFailures, new RegExp(`${timing}: invalid timing evidence`));
+  assert.match(emptyFailures, /job filter: feedback: requires 50 finite nonnegative raw samples/);
+  assert.match(emptyFailures, /chart: missing/);
+  assert.match(emptyFailures, /interaction timing: invalid evidence/);
+});
+
+test('requires the rendered chart identity, exact table and geometry at every viewport and theme', () => {
+  const audit = clean();
+  assert.equal(audit.chart.length, auditViewports.length * 2);
+  for (const [field, value, pattern] of [
+    ['chartName', 'Unlabeled', /misnamed accessible signature chart/],
+    ['binding', 'wrong report', /not bound to the expected report/],
+    ['caption', 'Wrong caption', /accessible table does not preserve/],
+    ['headers', [], /accessible table does not preserve/],
+    ['rows', [], /accessible table does not preserve/],
+  ]) {
+    const changed = clean(); changed.chart[0][field] = value;
+    assert.match(verdict(changed).join('\n'), pattern);
+  }
+  for (const change of [
+    { chartPresent: false }, { chartVisible: false }, { chartRole: 'presentation' },
+    { chartBounds: { x: -3, y: 0, width: 20, height: 10, right: 17, bottom: 10 } },
+    { chartDescription: [] }, { region: { name: 'Unnamed', focusable: false, bounds: null, clientWidth: 0, scrollWidth: 0 } },
+    { chartSeries: [] },
+  ]) {
+    const changed = clean(); Object.assign(changed.chart[0], change);
+    assert.ok(verdict(changed).length > 0, JSON.stringify(change));
+  }
+  const missing = clean(); missing.chart.pop();
+  assert.match(verdict(missing).join('\n'), /chart: missing 1 coverage/);
+  const screenshots = clean([]);
+  assert.match(verdict(screenshots).join('\n'), /missing desktop or 400% packaged screenshot evidence/);
+  const emptyBars = clean();
+  for (const series of emptyBars.chart[0].chartSeries) series.barWidth = '0';
+  assert.match(verdict(emptyBars).join('\n'), /visual bar widths do not represent the reported counts/);
+  const misleadingBars = clean();
+  misleadingBars.chart[0].chartSeries[1].barWidth = '100';
+  assert.match(verdict(misleadingBars).join('\n'), /visual bar widths do not represent the reported counts/);
+});
+
+test('chart capture keeps an intact, unobscured figure in contiguous viewport-only tiles', async () => {
+  const [desktop, zoom] = cleanCaptures;
+  assert.deepEqual(desktop.tiles.map(tile => tile.file), ['attempt-evidence-output-signature-chart-desktop-tile-1.png']);
+  assert.deepEqual(zoom.tiles.map(tile => [tile.file, tile.before.segment, tile.png]), [
+    ['attempt-evidence-output-signature-chart-zoom-400-tile-1.png', { start: 0, end: 200 }, { width: 1200, height: 800 }],
+    ['attempt-evidence-output-signature-chart-zoom-400-tile-2.png', { start: 200, end: 383 }, { width: 1200, height: 732 }],
+  ]);
+  for (const [index, capture] of cleanCaptures.entries()) assert.deepEqual(chartCaptureFailures(capture, chartCaptureSets[index]), []);
+  assert.deepEqual(verdict(clean()), []);
+});
+
+test('chart capture controls reject reflow, overlays, wrong PNG sizes and bad coverage', async () => {
+  const set = chartCaptureSets[1];
+  const fails = async (options, pattern) => {
+    const failures = chartCaptureFailures(await modeledCapture(set, options), set);
+    assert.match(failures.join('\n'), pattern, JSON.stringify(failures));
+  };
+  // Reflow: the second label wraps differently after capture, or the scrollbar disappears.
+  await fails({ mutate: (state, phase) => { if (phase === 'after') state.seriesHeights[1] = 62; } }, /series rows reflowed/);
+  await fails({ mutate: (state, phase) => { if (phase === 'after') { state.rootClientWidth = 320; state.figure.width = 315; } } },
+    /figure width changed|viewport client size changed/);
+  await fails({ mutate: (state, phase) => { if (phase === 'after') state.figure.height = 340; } }, /figure height changed/);
+  // A focused skip link painted over the heading/top of the figure.
+  await fails({ mutate: state => { state.skipFocused = true; state.skipVisible = true; } }, /skip link is focused or visible/);
+  await fails({ mutate: state => { state.hits[0] = { inFigure: false, hit: 'a.skip-link' }; } }, /occluded at a clip corner/);
+  // Wrong PNG dimensions, including a tight clip that cut off the right edge.
+  await fails({ png: clip => pngBytes(Math.round(clip.width * 4) - 60, Math.round(clip.height * 4)) }, /does not match clip\*DPR/);
+  await fails({ png: () => Buffer.from('not a png') }, /PNG null/);
+  await fails({ mutate: state => { state.viewportClip.width = 273; state.pageClip.width = 273; } }, /does not span the figure width/);
+  // Clip escaping the viewport (beyond-viewport capture).
+  await fails({ mutate: state => { state.viewportClip.height = 383; state.pageClip.height = 383; } }, /not an integer rectangle inside the rendered viewport/);
+  // Missing tiles, gaps and overlaps.
+  const missing = await modeledCapture(set); missing.tiles.pop();
+  assert.match(chartCaptureFailures(missing, set).join('\n'), /tiles cover 200 of 383/);
+  const gap = await modeledCapture(set); gap.tiles[1].before.segment.start = 210;
+  assert.match(chartCaptureFailures(gap, set).join('\n'), /gap or overlap/);
+  const overlap = await modeledCapture(set); overlap.tiles[1].before.segment.start = 190;
+  assert.match(chartCaptureFailures(overlap, set).join('\n'), /gap or overlap/);
+  const renamed = await modeledCapture(set); renamed.tiles[0].file = 'chart.png';
+  assert.match(chartCaptureFailures(renamed, set).join('\n'), /unexpected file/);
+  assert.match(chartCaptureFailures(await modeledCapture(chartCaptureSets[0]), set).join('\n'), /mislabelled capture manifest/);
+  // The audit verdict requires both manifests and a matching screenshot list.
+  const noZoom = clean([cleanCaptures[0]]);
+  assert.match(verdict(noZoom).join('\n'), /missing desktop or 400%/);
+  const listed = clean(); listed.chartScreenshots.pop();
+  assert.match(verdict(listed).join('\n'), /screenshot list does not match/);
+});
+
+test('fractional figure geometry is covered by outward integer clips with exact contiguous segments', async () => {
+  const set = chartCaptureSets[1];
+  const shots = [];
+  const capture = await modeledCapture(set, { docTop: 100.25, viewHeight: 200, height: 383.156, left: 2.4, width: 299.3, shots });
+  assert.deepEqual(chartCaptureFailures(capture, set), []);
+  assert.equal(capture.tiles.length, 2);
+  const [first, second] = capture.tiles;
+  // Tile 1: scroll floor(100.25) = 100, figure top at 0.25; clip pads 0.25 CSS px above the figure.
+  assert.equal(first.before.figure.y, 0.25);
+  assert.deepEqual(first.before.segment, { start: 0, end: 199.75 });
+  assert.deepEqual(first.before.viewportClip, { x: 2, y: 0, width: 300, height: 200 });
+  assert.deepEqual(first.png, { width: 1200, height: 800 });
+  // Tile 2 starts at the actual end of tile 1 and ends at the fractional figure bottom.
+  assert.equal(second.offset, 199.75);
+  assert.equal(second.before.segment.start, 199.75);
+  assert.ok(Math.abs(second.before.segment.end - 383.156) < 1e-9);
+  const segBottom = second.before.figure.y + second.before.segment.end;
+  assert.ok(second.before.viewportClip.y + second.before.viewportClip.height > segBottom, 'outward padded bottom');
+  assert.deepEqual(second.before.viewportClip, { x: 2, y: 0, width: 300, height: Math.ceil(segBottom) });
+  assert.deepEqual(second.png, { width: 300 * 4, height: Math.ceil(segBottom) * 4 });
+  for (const { viewportClip, pageClip } of shots)
+    for (const key of ['x', 'y', 'width', 'height']) { assert.ok(Number.isInteger(viewportClip[key])); assert.ok(Number.isInteger(pageClip[key])); }
+  // The former hosted failure: browser-snapped PNGs 3 or 2 device px short are rejected, not tolerated.
+  const short = await modeledCapture(set, { docTop: 100.25, height: 383.156, png: clip => pngBytes(clip.width * 4, clip.height * 4 - 2) });
+  assert.match(chartCaptureFailures(short, set).join('\n'), /does not match clip\*DPR/);
+  // A fractional (snappable) clip, a sub-pixel gap and an inward clip all fail strict coverage.
+  const fractional = await modeledCapture(set, { docTop: 100.25, height: 383.156,
+    mutate: state => { state.viewportClip.height -= 0.25; state.pageClip.height -= 0.25; } });
+  assert.match(chartCaptureFailures(fractional, set).join('\n'), /not an integer rectangle/);
+  const gap = await modeledCapture(set, { docTop: 100.25, height: 383.156 }); gap.tiles[1].before.segment.start += 0.1;
+  assert.match(chartCaptureFailures(gap, set).join('\n'), /gap or overlap/);
+  const inward = await modeledCapture(set, { docTop: 100.25, height: 383.156 });
+  inward.tiles[1].before.viewportClip.height -= 1; inward.tiles[1].before.pageClip.height -= 1;
+  assert.match(chartCaptureFailures(inward, set).join('\n'), /clip does not match its figure segment/);
+  const short2 = await modeledCapture(set, { docTop: 100.25, height: 383.156 }); short2.tiles[1].before.segment.end -= 0.2;
+  assert.match(chartCaptureFailures(short2, set).join('\n'), /not the figure\/viewport intersection/);
+});
+
+test('in-page capture expressions emit outward integer clips for fractional figure geometry (VM)', async () => {
+  const docTop = 100.25, height = 383.156, left = 2.4, width = 299.3;
+  let scrollY = 0; const probes = [];
+  const series = { getBoundingClientRect: () => ({ height: 40 }) };
+  const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+    getBoundingClientRect: () => ({ left, right: left + width, top: docTop - scrollY, bottom: docTop - scrollY + height, width, height }),
+    querySelectorAll: () => [series, series], contains: () => true };
+  const document = { body: {}, activeElement: null, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+    querySelector: selector => selector === '.output-signature-chart' ? figure : null,
+    elementFromPoint: (x, y) => { probes.push([x, y]); return figure; } };
+  // Browsers land fractional scroll requests on an integer offset; model floor.
+  const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrollY; }, visualViewport: undefined,
+    scrollTo: ({ top }) => { scrollY = Math.min(Math.floor(top), 1000); }, getComputedStyle: () => ({ visibility: 'visible' }) };
+  const set = chartCaptureSets[1];
+  const shots = [];
+  const capture = await captureOutputSignatureChart({ set, evaluate: async expression => JSON.parse(JSON.stringify(runInNewContext(expression, context))),
+    shoot: async ({ viewportClip, pageClip }) => { shots.push({ viewportClip, pageClip });
+      return pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor); } });
+  assert.deepEqual(chartCaptureFailures(capture, set), []);
+  const [first, second, extra] = capture.tiles;
+  assert.equal(extra, undefined);
+  assert.deepEqual(first.before.segment, { start: 0, end: 199.75 });
+  assert.deepEqual(first.before.viewportClip, { x: 2, y: 0, width: 300, height: 200 });
+  assert.deepEqual(first.before.pageClip, { x: 2, y: 100, width: 300, height: 200 });
+  assert.deepEqual(first.png, { width: 1200, height: 800 });
+  assert.equal(second.offset, 199.75);
+  assert.equal(second.before.segment.start, 199.75);
+  assert.ok(Math.abs(second.before.segment.end - height) < 1e-9);
+  // scroll floor(300) = 300, figure bottom at 183.406 viewport px; clip ceil = 184 (0.594 px outward padding).
+  assert.deepEqual(second.before.viewportClip, { x: 2, y: 0, width: 300, height: 184 });
+  assert.deepEqual(second.before.pageClip, { x: 2, y: 300, width: 300, height: 184 });
+  assert.deepEqual(second.png, { width: 1200, height: 736 });
+  // Probes stay inside figure/clip intersection: x within [2.4, 301.7], y within the segment.
+  for (const [x, y] of probes) { assert.ok(x > left && x < left + width); assert.ok(y >= 0 && y < 200); }
+  assert.ok(probes.some(([, y]) => Math.abs(y - (1.25)) < 1e-9), 'tile 1 top probe starts inside the figure, not the padding');
+  assert.equal(shots.length, 2);
+});
+
+test('chart capture expressions blur focus, scroll within the viewport and probe inside the clip', () => {
+  const probes = []; let scrolled = null; let blurred = false;
+  const skip = { checkVisibility: () => false, getBoundingClientRect: () => ({ left: 0, top: -40, right: 100, bottom: -10, width: 100, height: 30 }) };
+  const active = { blur: () => { blurred = true; }, tagName: 'A', id: '', classList: ['skip-link'] };
+  const series = { getBoundingClientRect: () => ({ height: 40 }) };
+  const top = () => (scrolled ? 1400 - scrolled.top : 1400) + 0;
+  const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+    getBoundingClientRect: () => ({ left: 2, right: 302, top: top(), bottom: top() + 383, width: 300, height: 383 }),
+    querySelectorAll: () => [series, series], contains: () => true };
+  const document = { body: {}, activeElement: active, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+    querySelector: selector => selector === '.output-signature-chart' ? figure : selector === '.skip-link' ? skip : null,
+    elementFromPoint: (x, y) => { probes.push([x, y]); return figure; } };
+  const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrolled?.top ?? 0; }, visualViewport: undefined,
+    scrollTo: options => { scrolled = options; }, getComputedStyle: () => ({ visibility: 'visible' }) };
+  const state = runInNewContext(prepareChartCaptureTile(200), context);
+  assert.ok(blurred);
+  assert.equal(scrolled.top, 1600);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.segment)), { start: 200, end: 383 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.viewportClip)), { x: 2, y: 0, width: 300, height: 183 });
+  assert.equal(state.skipVisible, false);
+  assert.deepEqual(probes, [[3, 1], [301, 1], [3, 182], [301, 182]]);
+  const after = runInNewContext(measureChartCaptureTile(200), context);
+  assert.deepEqual(JSON.parse(JSON.stringify(after.viewportClip)), JSON.parse(JSON.stringify(state.viewportClip)));
+  assert.deepEqual(pngDimensions(pngBytes(7, 9)), { width: 7, height: 9 });
 });
 
 test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
@@ -111,10 +416,204 @@ test('requires finite, complete timing samples and consistent summaries before b
   }
   for (const timing of [undefined, null, {}]) {
     const audit = clean(); audit.timing = timing;
-    assert.equal(verdict(audit).length, 3);
+    assert.equal(verdict(audit).length, 16);
   }
   const noRaw = clean(); delete noRaw.timing.raw;
-  assert.equal(verdict(noRaw).length, 3);
+  assert.equal(verdict(noRaw).length, 16);
+});
+
+test('interaction records match each fixture action and are summarized without a new budget', () => {
+  assert.deepEqual(verdict(clean()), []);
+
+  const chromiumAudit = clean();
+  const chromiumContexts = chromiumSupplementalInteractionContexts(interactionPages);
+  for (const { page: pageName, context } of chromiumContexts) {
+    const page = interactionPages.find(entry => entry.name === pageName);
+    for (const [stepIndex, step] of page.preparation.entries()) {
+      chromiumAudit.interactions.push({ page: page.name, action: step.action, stepIndex,
+        elapsedMs: 11, reads: [...step.reads], context });
+      chromiumAudit.timing.raw.interactions.push(11);
+    }
+  }
+  chromiumAudit.timing.interactions.samples = chromiumAudit.interactions.length;
+  assert.deepEqual(assertAudit(chromiumAudit, manifest, responses, origin, undefined, {
+    interactionPages,
+    extraInteractionContexts: chromiumContexts,
+  }).failures, [], 'Chromium focus and operational preparation records are accepted');
+  assert.match(verdict(chromiumAudit).join('\n'), /unexpected action/,
+    'the same supplemental records fail closed without the Chromium context contract');
+
+  const missing = clean();
+  missing.interactions.pop();
+  missing.timing.interactions.samples -= 1;
+  missing.timing.raw.interactions.pop();
+  assert.match(verdict(missing).join('\n'), /interactions: missing action/);
+
+  for (const elapsedMs of [NaN, Infinity, -1]) {
+    const invalid = clean();
+    invalid.interactions[0].elapsedMs = elapsedMs;
+    invalid.timing.raw.interactions[0] = elapsedMs;
+    assert.match(verdict(invalid).join('\n'), /invalid elapsed time/);
+  }
+
+  const mismatchedReads = clean();
+  mismatchedReads.interactions[0].reads = [];
+  assert.match(verdict(mismatchedReads).join('\n'), /reads do not match fixture/);
+
+  for (const field of ['page', 'action', 'context']) {
+    const foreign = clean();
+    foreign.interactions[0][field] = 'unqualified';
+    assert.match(verdict(foreign).join('\n'), /unexpected action/);
+  }
+
+  const duplicate = clean();
+  duplicate.interactions[1] = structuredClone(duplicate.interactions[0]);
+  assert.match(verdict(duplicate).join('\n'), /duplicate action/);
+
+  const mismatchedRaw = clean();
+  mismatchedRaw.timing.raw.interactions[0] += 1;
+  assert.match(verdict(mismatchedRaw).join('\n'), /raw samples do not match interaction records/);
+
+  const sparseRaw = clean();
+  delete sparseRaw.timing.raw.interactions[0];
+  assert.match(verdict(sparseRaw).join('\n'), /interaction timing: invalid evidence/);
+
+  const mismatchedSummary = clean();
+  mismatchedSummary.timing.interactions.p95 += 1;
+  assert.match(verdict(mismatchedSummary).join('\n'), /summary does not match raw samples/);
+
+  const slow = clean();
+  for (const interaction of slow.interactions) interaction.elapsedMs = 10_000;
+  slow.timing.raw.interactions = slow.interactions.map(entry => entry.elapsedMs);
+  slow.timing.interactions = { samples: slow.interactions.length, median: 10_000, p95: 10_000 };
+  assert.deepEqual(verdict(slow), [], 'interaction timings are summarized but have no unapproved threshold');
+
+  const engineContexts = engineSupplementalInteractionContexts(interactionPages);
+  const crossEngine = clean();
+  for (const { page: pageName, context } of engineContexts) {
+    const page = interactionPages.find(entry => entry.name === pageName);
+    for (const [stepIndex, step] of page.preparation.entries()) {
+      crossEngine.interactions.push({ page: page.name, action: step.action, stepIndex,
+        elapsedMs: 7, reads: [...step.reads], context });
+      crossEngine.timing.raw.interactions.push(7);
+    }
+  }
+  crossEngine.timing.interactions.samples = crossEngine.interactions.length;
+  assert.deepEqual(assertAudit(crossEngine, manifest, responses, origin, undefined, {
+    interactionPages,
+    extraInteractionContexts: engineContexts,
+  }).failures, []);
+  assert.match(verdict(crossEngine).join('\n'), /unexpected action/);
+});
+
+test('Firefox/WebKit focus contexts derive from every prepared fixture page (#1805 hosted 91 vs 89)', () => {
+  const engineVerdict = (audit, extra) => assertAudit(audit, manifest, responses, origin, undefined, {
+    connectionNotice: false, jobFilter: false, fileOpen: false, interactionPages, extraInteractionContexts: extra }).failures;
+  const preparedNames = interactionPages.filter(page => (page.preparation ?? []).length > 0).map(page => page.name);
+  assert.ok(preparedNames.includes('structure functions'), 'structure functions declares a Refresh preparation step');
+  const focusContexts = preparedFocusInteractionContexts(interactionPages);
+  assert.deepEqual(focusContexts, preparedNames.flatMap(page => ['focus light', 'focus dark'].map(context => ({ page, context }))));
+  assert.deepEqual(chromiumSupplementalInteractionContexts(interactionPages).filter(entry => entry.context.startsWith('focus ')), focusContexts,
+    'Chromium and engine runners share one focus derivation');
+  const engineContexts = engineSupplementalInteractionContexts(interactionPages);
+  assert.deepEqual(engineContexts.filter(entry => !entry.context.startsWith('focus ')), [
+    { page: 'attempt overview', context: 'keyboard commands' },
+    { page: 'source file', context: 'keyboard download' },
+    { page: 'source file', context: 'worker/CSP qualification' }]);
+
+  // Replay the hosted shape: the Playwright runner prepares every page in each focus scheme.
+  const hosted = clean();
+  const push = (audit, pageName, context) => {
+    const page = interactionPages.find(entry => entry.name === pageName);
+    for (const [stepIndex, step] of page.preparation.entries()) {
+      audit.interactions.push({ page: page.name, action: step.action, stepIndex, elapsedMs: 5, reads: [...step.reads], context });
+      audit.timing.raw.interactions.push(5);
+    }
+  };
+  // Summary values are unchanged by these rows (clean() timings already bracket them); only the count moves.
+  const seal = audit => { audit.timing.interactions.samples = audit.interactions.length; return audit; };
+  for (const { page, context } of engineContexts) push(hosted, page, context);
+  seal(hosted);
+  assert.equal(hosted.interactions.filter(entry => entry.page === 'structure functions' && entry.context.startsWith('focus ')).length, 2);
+  assert.deepEqual(engineVerdict(hosted, engineContexts), [], 'hosted Firefox/WebKit interaction set is accepted');
+
+  // Regression control: the old hand-kept engine list omitted structure functions.
+  const legacy = [...['attempt overview', 'attempt activity', 'attempt evidence', 'source file'].flatMap(page =>
+    ['focus light', 'focus dark'].map(context => ({ page, context }))),
+  { page: 'attempt overview', context: 'keyboard commands' }, { page: 'source file', context: 'keyboard download' },
+  { page: 'source file', context: 'worker/CSP qualification' }];
+  const legacyFailures = engineVerdict(hosted, legacy).join('\n');
+  assert.match(legacyFailures, /unexpected action \["structure functions",0,"Refresh from the first page","focus light"\]/);
+  assert.match(legacyFailures, /requires 89 finite/);
+
+  // Missing focus record for structure functions fails closed.
+  const missing = structuredClone(hosted);
+  const drop = missing.interactions.findIndex(entry => entry.page === 'structure functions' && entry.context === 'focus dark');
+  missing.interactions.splice(drop, 1); missing.timing.raw.interactions.splice(drop, 1); seal(missing);
+  assert.match(engineVerdict(missing, engineContexts).join('\n'), /missing action \["structure functions",0,"Refresh from the first page","focus dark"\]/);
+
+  // Duplicate and unexpected rows still fail.
+  const duplicated = structuredClone(hosted);
+  duplicated.interactions.push(structuredClone(duplicated.interactions.at(-1))); duplicated.timing.raw.interactions.push(5); seal(duplicated);
+  assert.match(engineVerdict(duplicated, engineContexts).join('\n'), /duplicate action/);
+  const wrongRead = structuredClone(hosted);
+  wrongRead.interactions.find(entry => entry.page === 'structure functions' && entry.context === 'focus light').reads = [];
+  assert.match(engineVerdict(wrongRead, engineContexts).join('\n'), /structure functions \/ Refresh from the first page \(focus light\) reads do not match fixture/);
+  const wrongStep = structuredClone(hosted);
+  wrongStep.interactions.find(entry => entry.page === 'structure functions' && entry.context === 'focus light').stepIndex = 1;
+  assert.match(engineVerdict(wrongStep, engineContexts).join('\n'), /unexpected action \["structure functions",1,/);
+
+  // Forged or unprepared pages and undeclared contexts are rejected by the derivation and the verdict.
+  assert.throws(() => preparedFocusInteractionContexts([...interactionPages, { name: 'forged', preparation: [{ action: 'x', reads: [] }] }]), /undeclared fixture page/);
+  assert.throws(() => preparedFocusInteractionContexts([{ name: 'structure functions', preparation: 'Refresh' }]), /invalid preparation/);
+  assert.throws(() => preparedFocusInteractionContexts(undefined), /fixture page contract/);
+  assert.ok(!preparedFocusInteractionContexts(interactionPages).some(entry => entry.page === 'workspace'), 'unprepared pages get no focus context');
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'workspace', context: 'focus light' }]).join('\n'), /extra context for unprepared page \["workspace","focus light"\]/);
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'forged', context: 'focus light' }]).join('\n'), /invalid extra context contract/);
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'source file', context: 'focus sepia' }]).join('\n'), /undeclared extra context \["source file","focus sepia"\]/);
+  assert.match(engineVerdict(hosted, [...engineContexts, engineContexts[0]]).join('\n'), /duplicate extra context/);
+  assert.match(engineVerdict(hosted, 'focus light').join('\n'), /invalid extra context contract/);
+  const forgedRow = structuredClone(hosted);
+  forgedRow.interactions.push({ page: 'workspace', action: 'Refresh from the first page', stepIndex: 0, elapsedMs: 5, reads: [], context: 'focus light' });
+  forgedRow.timing.raw.interactions.push(5); seal(forgedRow);
+  assert.match(engineVerdict(forgedRow, engineContexts).join('\n'), /unexpected action \["workspace",0/);
+});
+
+test('the constrained profile is explicit, matches the documented 4x CPU, 10/2 Mbit/s, 100 ms contract, and does not apply reference budgets', async () => {
+  const calls = [];
+  const cdp = { call: async (...args) => { calls.push(args); return {}; } };
+  assert.deepEqual(await applyAuditProfile(cdp, 'target-session', 'reference'), auditProfileEvidence('reference'));
+  assert.deepEqual(calls, [], 'the default reference profile must not alter browser conditions');
+  const profile = await applyAuditProfile(cdp, 'target-session', 'constrained');
+  assert.deepEqual(profile, auditProfileEvidence('constrained'));
+  assert.deepEqual(calls, [
+    ['Emulation.setCPUThrottlingRate', { rate: 4 }, 'target-session'],
+    ['Network.emulateNetworkConditions', { offline: false, latency: 100,
+      downloadThroughput: 1_250_000, uploadThroughput: 250_000 }, 'target-session'],
+  ]);
+  await assert.rejects(applyAuditProfile(cdp, 'target-session', 'unknown'), /Unknown packaged audit profile/);
+
+  const missingProfile = clean(); delete missingProfile.profile;
+  assert.match(verdict(missingProfile).join('\n'), /audit profile: report does not match requested reference profile/);
+
+  const constrained = clean();
+  constrained.profile = auditProfileEvidence('constrained');
+  const interactions = constrained.timing.interactions;
+  const rawInteractions = constrained.timing.raw.interactions;
+  constrained.timing = timingEvidence(5000, 500, 501);
+  constrained.timing.interactions = interactions;
+  constrained.timing.raw.interactions = rawInteractions;
+  const verdictForConstrained = assertAudit(constrained, manifest, responses, origin, undefined, {
+    interactionPages, profile: 'constrained',
+  });
+  assert.deepEqual(verdictForConstrained.failures, []);
+  const symmetric = structuredClone(constrained);
+  Object.assign(symmetric.profile.network, { latency: 0, uploadThroughput: 1_250_000 });
+  assert.match(assertAudit(symmetric, manifest, responses, origin, undefined, { interactionPages, profile: 'constrained' })
+    .failures.join('\n'), /audit profile: report does not match requested constrained profile/,
+  'evidence from the superseded symmetric zero-latency profile must not qualify as constrained');
+  assert.equal(verdictForConstrained.profile, 'constrained');
+  assert.equal(verdictForConstrained.timingBudgetsEnforced, false);
 });
 
 test('reports page-wide horizontal scrolling, clipped actions and small targets', () => {
@@ -164,8 +663,339 @@ test('requires every declared script/style and the worker to resolve under the b
 
 test('enforces the documented loopback timing budgets', () => {
   const audit = clean();
+  const interactions = audit.timing.interactions;
+  const rawInteractions = audit.timing.raw.interactions;
   audit.timing = timingEvidence(1600, 101, 501);
-  assert.equal(verdict(audit).length, 3);
+  audit.timing.interactions = interactions;
+  audit.timing.raw.interactions = rawInteractions;
+  audit.timing.filterFeedback = { samples: 50, median: 101, p95: 101 };
+  audit.timing.filterData = { samples: 50, median: 501, p95: 501 };
+  audit.timing.raw.filterFeedback.fill(101);
+  audit.timing.raw.filterData.fill(501);
+  audit.jobFilter.samples.forEach(sample => { sample.feedbackMs = 101; sample.dataMs = 501; });
+  assert.equal(verdict(audit).length, 5);
+  const fractionalOver = clean();
+  fractionalOver.timing.raw.filterFeedback.fill(100.04);
+  fractionalOver.timing.filterFeedback = { samples: 50, median: 100, p95: 100 };
+  fractionalOver.timing.raw.filterData.fill(100.05);
+  fractionalOver.timing.filterData = { samples: 50, median: 100.1, p95: 100.1 };
+  fractionalOver.jobFilter.samples.forEach(sample => { sample.feedbackMs = 100.04; sample.dataMs = 100.05; });
+  assert.match(verdict(fractionalOver).join('\n'), /job filter feedback p95 100\.04ms exceeds 100ms/,
+    'rounded summaries must not hide raw samples just over the budget');
+});
+
+test('job filter evidence binds 50 alternating actions to fulfilled requests and raw summaries', () => {
+  const valid = clean();
+  assert.deepEqual(verdict(valid), []);
+  assert.ok(valid.jobFilter.samples.every(sample => !Object.hasOwn(sample, 'request')),
+    'samples must reference the canonical fulfilled-request table by index without duplicating request objects');
+  assert.deepEqual(valid.jobFilter.samples.map(sample => valid.fulfilled[sample.requestIndex].query),
+    valid.jobFilter.samples.map(sample => sample.query));
+  for (const mutate of [
+    audit => { audit.jobFilter = undefined; },
+    audit => { delete audit.jobFilter.samples; },
+    audit => { audit.jobFilter.samples.pop(); },
+    audit => { audit.jobFilter.samples.push(structuredClone(audit.jobFilter.samples.at(-1))); },
+    audit => { audit.jobFilter.samples[0].direction = 'cleared'; },
+    audit => { audit.jobFilter.samples[1].query = jobFilterContract.filteredQuery; },
+    audit => { audit.jobFilter.samples[0].pageSearch = '?search=wrong'; },
+    audit => { audit.jobFilter.samples[0].feedbackMs = NaN; },
+    audit => { audit.jobFilter.samples[0].dataMs = Infinity; },
+    audit => { audit.jobFilter.samples[0].dataMs = 20; },
+    audit => { audit.jobFilter.samples[0].feedbackSignal = 'unknown'; },
+    audit => { audit.jobFilter.samples[0].feedbackSignal = 'data'; },
+    audit => { audit.jobFilter.samples[0].renderedJobId = jobFilterContract.unfilteredJobId; },
+    audit => { audit.jobFilter.samples[0].expectedJobId = jobFilterContract.unfilteredJobId; },
+    audit => { audit.jobFilter.samples[0].requestIndex = 1; },
+    audit => { audit.jobFilter.samples[0].requestStartIndex = -1; },
+    audit => { audit.jobFilter.samples[0].requestEndIndex = 0; },
+    audit => { audit.fulfilled[0].status = 404; },
+    audit => { audit.fulfilled[0].query = jobFilterContract.unfilteredQuery; },
+    audit => { audit.fulfilled[0].responseJobIds = [jobFilterContract.unfilteredJobId]; },
+    audit => { audit.fulfilled[0].fulfillmentSucceeded = false; },
+    audit => { audit.timing.raw.filterFeedback[0] = 99; },
+    audit => { audit.jobFilter.filteredQuery = 'search=forged&limit=50'; },
+  ]) {
+    const audit = clean(); mutate(audit);
+    assert.match(verdict(audit).join('\n'), /job filter:/);
+  }
+  for (const [field, value] of [['samples', 49], ['p95', null], ['median', Infinity]]) {
+    const audit = clean(); audit.timing.filterData[field] = value;
+    assert.match(verdict(audit).join('\n'), /job filter first data: invalid timing evidence/);
+  }
+  const forgedSummary = clean(); forgedSummary.timing.filterFeedback.p95 = 36;
+  assert.match(verdict(forgedSummary).join('\n'), /job filter feedback: timing summary does not match raw samples/);
+  const coincidentDataFeedback = clean();
+  coincidentDataFeedback.jobFilter.samples[0].feedbackSignal = 'data';
+  coincidentDataFeedback.jobFilter.samples[0].feedbackMs = 80;
+  coincidentDataFeedback.timing.raw.filterFeedback[0] = 80;
+  coincidentDataFeedback.timing.raw.filterData[0] = 80;
+  assert.deepEqual(verdict(coincidentDataFeedback), [], 'rendered data can serve as feedback when it arrives in the first observed frame');
+  const invalidBudget = assertAudit(clean(), manifest, responses, origin, { filterFeedbackP95: null }).failures.join('\n');
+  assert.match(invalidBudget, /job filter feedback: invalid timing budget/);
+});
+
+test('retained filter report keeps sampled requests while compacting unrelated route reads', () => {
+  const audit = clean();
+  const unrelated = Array.from({ length: 17 }, (_, index) => ({ method: 'GET', path: `/route/${index}`, status: 200,
+    fixtureRead: { digest: 'a'.repeat(64), details: 'unselected route response'.repeat(4) } }));
+  audit.fulfilled = [...unrelated, ...audit.fulfilled];
+  for (const sample of audit.jobFilter.samples) {
+    sample.requestStartIndex += unrelated.length;
+    sample.requestEndIndex += unrelated.length;
+    sample.requestIndex += unrelated.length;
+  }
+  for (const sample of audit.fileOpen.samples) for (const phase of [sample.open, sample.preview]) {
+    phase.requestStartIndex += unrelated.length; phase.requestEndIndex += unrelated.length; phase.requestIndex += unrelated.length;
+  }
+  const compact = compactJobFilterAuditEvidence(audit);
+  assert.deepEqual(verdict(compact), []);
+  assert.equal(compact.fulfilled.length, 150);
+  assert.deepEqual(compact.fulfilledRequestSummary, { observed: 167, retained: 150, scope: 'timed-request-windows' });
+  assert.ok(Buffer.byteLength(JSON.stringify(compact), 'utf8') < Buffer.byteLength(JSON.stringify(audit), 'utf8'));
+});
+
+test('retained filter report preserves unexpected jobs in a measured request window for rejection', () => {
+  const audit = clean();
+  audit.fulfilled.splice(1, 0, { method: 'GET', path: '/jobs', status: 200, query: 'search=unexpected',
+    responseJobIds: ['job_unexpected'], fulfillmentSucceeded: true });
+  for (const [index, sample] of audit.jobFilter.samples.entries()) {
+    if (index === 0) sample.requestEndIndex += 1;
+    else {
+      sample.requestStartIndex += 1;
+      sample.requestEndIndex += 1;
+      sample.requestIndex += 1;
+    }
+  }
+  for (const sample of audit.fileOpen.samples) for (const phase of [sample.open, sample.preview]) {
+    phase.requestStartIndex += 1; phase.requestEndIndex += 1; phase.requestIndex += 1;
+  }
+  const compact = compactJobFilterAuditEvidence(audit);
+  assert.equal(compact.fulfilled.length, 151);
+  assert.match(verdict(compact).join('\n'), /not bound to its fulfilled/);
+});
+
+const fileOpenVerdict = audit => fileOpenFailures(audit.fileOpen, audit.timing.raw, audit.fulfilled);
+const phases = ['open', 'preview'];
+
+test('file open accepts 50 clean paired metadata and preview phases over alternating files', () => {
+  const audit = clean();
+  assert.deepEqual(verdict(audit), []);
+  assert.deepEqual(fileOpenVerdict(audit), []);
+  assert.equal(new Set(audit.fileOpen.samples.map(sample => sample.fileId)).size, 2);
+  assert.ok(audit.fileOpen.samples.every((sample, index) => sample.fileId === fileOpenContract.files[index % 2].fileId));
+  assert.deepEqual(audit.fileOpen.samples[0].open.requestEndIndex - audit.fileOpen.samples[0].open.requestStartIndex, 1);
+});
+
+test('file open rejects identity, request, content and state defects', () => {
+  const phaseReq = (audit, sample, name) => audit.fulfilled[audit.fileOpen.samples[sample][name].requestIndex];
+  const mutations = [
+    ['unrotated file', a => { a.fileOpen.samples[1].fileId = fileOpenContract.files[0].fileId; }],
+    ['sample count', a => { a.fileOpen.samples.pop(); }],
+    ['extra sample', a => { a.fileOpen.samples.push(structuredClone(a.fileOpen.samples.at(-1))); }],
+    ['no evidence', a => { a.fileOpen = undefined; }],
+    ['forged contract', a => { a.fileOpen.contract.maxBytes = '1'; }],
+    ['forged contract files', a => { a.fileOpen.contract.files.pop(); }],
+    ['missing metadata request', a => { a.fileOpen.samples[2].open.requestIndex = null; }],
+    ['missing chunk request', a => { a.fileOpen.samples[2].preview.requestIndex = null; }],
+    ['duplicate metadata request', a => { a.fileOpen.samples[3].open.requestIndex = a.fileOpen.samples[2].open.requestIndex; }],
+    ['extra metadata request', a => { const w = a.fileOpen.samples[4].open; a.fulfilled.splice(w.requestEndIndex, 0, structuredClone(a.fulfilled[w.requestIndex])); w.requestEndIndex += 1; }],
+    ['extra chunk request', a => { const w = a.fileOpen.samples[4].preview; a.fulfilled.splice(w.requestEndIndex, 0, structuredClone(a.fulfilled[w.requestIndex])); w.requestEndIndex += 1; }],
+    ['unrelated request in window', a => { const w = a.fileOpen.samples[4].preview; a.fulfilled.splice(w.requestEndIndex, 0, { method: 'GET', path: '/jobs', status: 200, query: '', fulfillmentSucceeded: true }); w.requestEndIndex += 1; }],
+    ['chunk in phase A', a => { const w = a.fileOpen.samples[5].open; const chunk = a.fulfilled[a.fileOpen.samples[5].preview.requestIndex];
+      a.fulfilled.splice(w.requestEndIndex, 0, structuredClone(chunk)); w.requestEndIndex += 1; }],
+    ['chunk replaces metadata in phase A', a => { Object.assign(phaseReq(a, 5, 'open'), { path: `${fileApi(a.fileOpen.samples[5].fileId)}/chunk` }); }],
+    ['wrong job', a => { phaseReq(a, 6, 'open').response.binding.jobId = 'f'.repeat(32); }],
+    ['wrong run', a => { phaseReq(a, 6, 'preview').response.binding.runId = 'run_other'; }],
+    ['wrong revision', a => { phaseReq(a, 6, 'open').response.binding.revisionId = 'revision_2'; }],
+    ['wrong file', a => { phaseReq(a, 6, 'open').response.fileId = fileOpenContract.files[1].fileId; }],
+    ['wrong request path file', a => { phaseReq(a, 6, 'preview').path = `${fileApi(fileOpenContract.files[1].fileId)}/chunk`; }],
+    ['wrong source digest', a => { phaseReq(a, 7, 'open').response.sourceSha256 = '0'.repeat(64); }],
+    ['wrong metadataVersion', a => { phaseReq(a, 7, 'preview').response.metadataVersion = '0'.repeat(64); }],
+    ['wrong file digest', a => { phaseReq(a, 7, 'preview').response.sha256 = '0'.repeat(64); }],
+    ['wrong response kind', a => { phaseReq(a, 7, 'preview').response.kind = 'file'; }],
+    ['incomplete chunk', a => { phaseReq(a, 7, 'preview').response.completeFile = false; }],
+    ['wrong chunk offset field', a => { phaseReq(a, 7, 'preview').response.offsetBytes = '10'; }],
+    ['missing pin', a => { a.fileOpen.samples[8].open.pageSearch = ''; }],
+    ['wrong pin', a => { a.fileOpen.samples[8].open.pageSearch = '?sourceSha256=x&metadataVersion=y'; }],
+    ['wrong query offset', a => { phaseReq(a, 8, 'preview').query = new URLSearchParams({ offset: '10', maxBytes: fileOpenContract.maxBytes, metadataVersion: fileOpenContract.metadataVersion }).toString(); }],
+    ['wrong maxBytes', a => { phaseReq(a, 8, 'preview').query = new URLSearchParams({ offset: '0', maxBytes: '32768', metadataVersion: fileOpenContract.metadataVersion }).toString(); }],
+    ['metadata with query', a => { phaseReq(a, 8, 'open').query = fileOpenChunkQuery; }],
+    ['failed fulfillment', a => { phaseReq(a, 9, 'open').fulfillmentSucceeded = false; }],
+    ['bad status', a => { phaseReq(a, 9, 'preview').status = 404; }],
+    ['wrong rendered file', a => { a.fileOpen.samples[10].open.renderedFileId = fileOpenContract.files[1].fileId; }],
+    ['wrong rendered name', a => { a.fileOpen.samples[10].open.renderedName = 'other.c'; }],
+    ['wrong rendered sha', a => { a.fileOpen.samples[10].open.renderedSha256 = '0'.repeat(64); }],
+    ['wrong preview text digest', a => { a.fileOpen.samples[11].preview.renderedTextSha256 = '0'.repeat(64); }],
+    ['null preview text digest', a => { a.fileOpen.samples[11].preview.renderedTextSha256 = null; }],
+    ['wrong preview rows', a => { a.fileOpen.samples[11].preview.renderedRows -= 1; }],
+    ['wrong preview bytes', a => { a.fileOpen.samples[11].preview.renderedBytes += 1; }],
+    ['wrong heading focus', a => { a.fileOpen.samples[12].open.focus = 'body'; }],
+    ['wrong preview focus', a => { a.fileOpen.samples[12].preview.focus = 'main-heading'; }],
+    ['preview already open', a => { a.fileOpen.samples[12].open.previewOpen = true; }],
+    ['missing visible preview', a => { delete a.fileOpen.samples[13].preview.renderedRows; }],
+    ['busy preview', a => { a.fileOpen.samples[13].preview.ariaBusy = 'true'; }],
+    ['alert state', a => { a.fileOpen.samples[13].preview.ariaBusy = 'alert'; }],
+    ['missing busy state', a => { delete a.fileOpen.samples[13].preview.ariaBusy; }],
+    ['bad feedback signal', a => { a.fileOpen.samples[14].open.feedbackSignal = 'unknown'; }],
+    ['non-coincident data feedback', a => { Object.assign(a.fileOpen.samples[14].preview, { feedbackSignal: 'data', feedbackMs: 40 }); a.timing.raw.filePreviewFeedback[14] = 40; }],
+    ['feedback after data', a => { a.fileOpen.samples[14].open.feedbackMs = 71; a.timing.raw.fileOpenFeedback[14] = 71; }],
+    ['NaN timing', a => { a.fileOpen.samples[14].open.dataMs = NaN; }],
+    ['negative timing', a => { a.fileOpen.samples[14].preview.feedbackMs = -1; }],
+    ['over deadline', a => { Object.assign(a.fileOpen.samples[14].preview, { dataMs: 10001 }); a.timing.raw.filePreviewData[14] = 10001; }],
+    ['raw/record mismatch open feedback', a => { a.timing.raw.fileOpenFeedback[0] = 29; }],
+    ['raw/record mismatch open data', a => { a.timing.raw.fileOpenData[1] = 69; }],
+    ['raw/record mismatch preview feedback', a => { a.timing.raw.filePreviewFeedback[2] = 31; }],
+    ['raw/record mismatch preview data', a => { a.timing.raw.filePreviewData[3] = 89; }],
+    ['short raw', a => { a.timing.raw.filePreviewData.pop(); }],
+    ['missing raw', a => { delete a.timing.raw.fileOpenData; }],
+    ['window out of range', a => { a.fileOpen.samples[15].open.requestEndIndex = a.fulfilled.length + 1; }],
+    ['window before request', a => { a.fileOpen.samples[15].preview.requestIndex = a.fileOpen.samples[15].preview.requestStartIndex - 1; }],
+    ['windows out of order', a => { const [x, y] = [a.fileOpen.samples[16], a.fileOpen.samples[17]]; [x.open, y.open] = [y.open, x.open]; }],
+    ['overlapping windows', a => { a.fileOpen.samples[18].preview.requestStartIndex = a.fileOpen.samples[18].open.requestStartIndex; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    const audit = clean(); mutate(audit);
+    assert.match(verdict(audit).join('\n'), /source (?:file open|preview)|source file open/, `${name} must be rejected`);
+    assert.notDeepEqual(fileOpenVerdict(audit).concat(verdict(audit)), [], name);
+  }
+});
+
+test('file open summaries and p95 budgets use raw samples at exactly 100ms and 500ms', () => {
+  const fields = [['fileOpenFeedback', 'open', 'feedbackMs'], ['fileOpenData', 'open', 'dataMs'],
+    ['filePreviewFeedback', 'preview', 'feedbackMs'], ['filePreviewData', 'preview', 'dataMs']];
+  const set = (audit, name, value) => {
+    const [, phase, field] = fields.find(([key]) => key === name);
+    audit.timing.raw[name].fill(value);
+    audit.timing[name] = { samples: 50, median: value, p95: value };
+    audit.fileOpen.samples.forEach(sample => { sample[phase][field] = value; });
+  };
+  for (const [name, limit, label] of [['fileOpenFeedback', 100, /source file open feedback/], ['fileOpenData', 500, /source file open first data/],
+    ['filePreviewFeedback', 100, /source preview feedback/], ['filePreviewData', 500, /source preview first chunk/]]) {
+    const atLimit = clean();
+    if (name === 'fileOpenFeedback' || name === 'filePreviewFeedback') {
+      // keep feedback <= data while moving only the measured field
+      set(atLimit, name === 'fileOpenFeedback' ? 'fileOpenData' : 'filePreviewData', 500);
+    }
+    set(atLimit, name, limit);
+    assert.deepEqual(verdict(atLimit), [], `${name} at ${limit}ms passes`);
+    const over = clean();
+    if (name === 'fileOpenFeedback' || name === 'filePreviewFeedback') set(over, name === 'fileOpenFeedback' ? 'fileOpenData' : 'filePreviewData', 500);
+    set(over, name, limit + 0.01);
+    assert.match(verdict(over).join('\n'), new RegExp(`${label.source} p95 ${limit + 0.01}ms exceeds ${limit}ms`));
+  }
+  const tail = clean();
+  // 3 slow samples out of 50 moves the exact p95 past the budget even though the median is fine.
+  for (const index of [1, 2, 3]) { tail.timing.raw.filePreviewData[index] = 700; tail.fileOpen.samples[index].preview.dataMs = 700; }
+  tail.timing.filePreviewData = { samples: 50, median: 90, p95: 700 };
+  assert.match(verdict(tail).join('\n'), /source preview first chunk p95 700ms exceeds 500ms/);
+  const forged = clean(); forged.timing.fileOpenData.p95 = 71;
+  assert.match(verdict(forged).join('\n'), /source file open first data: timing summary does not match raw samples/);
+  const forgedMedian = clean(); forgedMedian.timing.filePreviewFeedback.median = 1;
+  assert.match(verdict(forgedMedian).join('\n'), /source preview feedback: timing summary does not match raw samples/);
+  const short = clean(); short.timing.filePreviewData.samples = 49;
+  assert.match(verdict(short).join('\n'), /source preview first chunk: invalid timing evidence/);
+  const noBudget = assertAudit(clean(), manifest, responses, origin, { fileOpenDataP95: null }).failures.join('\n');
+  assert.match(noBudget, /source file open first data: invalid timing budget/);
+});
+
+test('timed compaction retains the union of filter and file-open windows and keeps unexpected requests', () => {
+  const unrelated = index => ({ method: 'GET', path: `/route/${index}`, status: 200, fixtureRead: { digest: 'a'.repeat(64) } });
+  const audit = clean();
+  const shift = 17;
+  audit.fulfilled = [...Array.from({ length: shift }, (_, i) => unrelated(i)), ...audit.fulfilled,
+    ...Array.from({ length: 9 }, (_, i) => unrelated(100 + i))];
+  for (const sample of audit.jobFilter.samples) for (const key of ['requestStartIndex', 'requestEndIndex', 'requestIndex']) sample[key] += shift;
+  for (const sample of audit.fileOpen.samples) for (const name of phases) for (const key of ['requestStartIndex', 'requestEndIndex', 'requestIndex']) sample[name][key] += shift;
+  const compact = compactTimedAuditEvidence(audit);
+  assert.equal(compact.fulfilled.length, 150, '50 filter + 100 file-open requests, no unrelated reads');
+  assert.deepEqual(compact.fulfilledRequestSummary, { observed: 176, retained: 150, scope: 'timed-request-windows' });
+  assert.deepEqual(verdict(compact), []);
+  assert.equal(compactJobFilterAuditEvidence, compactTimedAuditEvidence);
+  assert.ok(Buffer.byteLength(JSON.stringify(compact)) < Buffer.byteLength(JSON.stringify(audit)));
+  // Unexpected requests inside either kind of window survive compaction and are still rejected.
+  const extra = clean();
+  const w = extra.fileOpen.samples[3].open;
+  extra.fulfilled.splice(w.requestEndIndex, 0, { method: 'GET', path: `${fileApi(extra.fileOpen.samples[3].fileId)}/chunk`, status: 200,
+    query: fileOpenChunkQuery, fulfillmentSucceeded: true });
+  w.requestEndIndex += 1;
+  for (let i = 3; i < 50; i += 1) for (const name of phases) {
+    const phase = extra.fileOpen.samples[i][name];
+    if (i === 3 && name === 'open') continue;
+    for (const key of ['requestStartIndex', 'requestEndIndex', 'requestIndex']) phase[key] += 1;
+  }
+  extra.fileOpen.samples[3].preview.requestStartIndex -= 0;
+  const compactExtra = compactTimedAuditEvidence(extra);
+  assert.equal(compactExtra.fulfilled.length, 151);
+  assert.match(verdict(compactExtra).join('\n'), /metadata open requested a source chunk/);
+  const unexpectedFilter = clean();
+  unexpectedFilter.fulfilled.splice(1, 0, { method: 'GET', path: '/jobs', status: 200, query: 'search=x', responseJobIds: ['j'], fulfillmentSucceeded: true });
+  unexpectedFilter.jobFilter.samples[0].requestEndIndex += 1;
+  unexpectedFilter.jobFilter.samples.slice(1).forEach(sample => { sample.requestStartIndex += 1; sample.requestEndIndex += 1; sample.requestIndex += 1; });
+  unexpectedFilter.fileOpen.samples.forEach(sample => phases.forEach(name => ['requestStartIndex', 'requestEndIndex', 'requestIndex'].forEach(key => { sample[name][key] += 1; })));
+  assert.match(verdict(compactTimedAuditEvidence(unexpectedFilter)).join('\n'), /not bound to its fulfilled/);
+  // Malformed windows leave the report untouched for the validator.
+  const malformed = clean(); malformed.fileOpen.samples[0].open.requestEndIndex = 10_000;
+  assert.equal(compactTimedAuditEvidence(malformed), malformed);
+  // Without file-open evidence the filter-only behaviour is unchanged.
+  const filterOnly = clean(); delete filterOnly.fileOpen;
+  assert.equal(compactTimedAuditEvidence(filterOnly).fulfilled.length, 50);
+});
+
+test('max-like compacted report with source-open evidence stays well under 512 KiB', () => {
+  const audit = clean();
+  const shift = 400;
+  const heavy = index => ({ method: 'GET', path: `/route/${index}`, status: 200, query: 'x=1'.repeat(8),
+    fixtureRead: { digest: 'a'.repeat(64), details: 'unselected route response '.repeat(40) },
+    response: { binding: fileBinding(), body: 'z'.repeat(2000) } });
+  audit.fulfilled = [...Array.from({ length: shift }, (_, i) => heavy(i)), ...audit.fulfilled];
+  for (const sample of audit.jobFilter.samples) for (const key of ['requestStartIndex', 'requestEndIndex', 'requestIndex']) sample[key] += shift;
+  for (const sample of audit.fileOpen.samples) for (const name of phases) for (const key of ['requestStartIndex', 'requestEndIndex', 'requestIndex']) sample[name][key] += shift;
+  const raw = Buffer.byteLength(JSON.stringify(audit));
+  const compact = compactTimedAuditEvidence(audit);
+  const bytes = Buffer.byteLength(JSON.stringify(compact));
+  assert.deepEqual(verdict(compact), []);
+  assert.ok(raw > 512 * 1024, `uncompacted report (${raw}) models a report over the limit`);
+  assert.ok(bytes < 256 * 1024, `compacted max-like report is ${bytes} bytes; need clear headroom under 512 KiB`);
+});
+
+test('filter timing requires a fresh submit focus and a visible rendered box', () => {
+  const heading = {};
+  const button = { focus() { document.activeElement = button; } };
+  const document = { activeElement: heading };
+  assert.equal(focusFilterSubmitForTiming(document, button), true);
+  assert.equal(document.activeElement, button);
+  assert.equal(focusFilterSubmitForTiming(document, { focus() {} }), false,
+    'a stale heading focus must not satisfy the next sample');
+  assert.equal(focusFilterSubmitForTiming(document, {}), false);
+
+  const parent = {};
+  const view = { innerWidth: 100, innerHeight: 100 };
+  const ownerDocument = { defaultView: view };
+  const element = { ownerDocument, parentElement: parent, getClientRects: () => [{ left: 4, right: 16, top: 5, bottom: 13, width: 12, height: 8 }] };
+  const styles = new Map([
+    [element, { display: 'block', visibility: 'visible', opacity: '1' }],
+    [parent, { display: 'block', visibility: 'visible', opacity: '1' }],
+  ]);
+  const style = node => styles.get(node);
+  assert.equal(filterElementVisible(element, style), true);
+  for (const [node, change] of [
+    [element, { visibility: 'hidden' }],
+    [element, { opacity: '0' }],
+    [parent, { display: 'none' }],
+    [parent, { opacity: '0' }],
+  ]) {
+    const original = styles.get(node);
+    styles.set(node, { ...original, ...change });
+    assert.equal(filterElementVisible(element, style), false, JSON.stringify(change));
+    styles.set(node, original);
+  }
+  assert.equal(filterElementVisible({ ...element, getClientRects: () => [] }, style), false);
+  assert.equal(filterElementVisible({ ...element, getClientRects: () => [{ width: 0, height: 8 }] }, style), false);
+  assert.equal(filterElementVisible({ ...element, getClientRects: () => [{ left: 110, right: 122, top: 5, bottom: 13, width: 12, height: 8 }] }, style), false,
+    'an element outside the viewport is not visible feedback');
+  assert.equal(filterElementVisible({ getClientRects: element.getClientRects }, style), false,
+    'visibility cannot be inferred without an owning viewport');
 });
 
 test('reports API reads the fixture set does not cover', () => {
@@ -179,6 +1009,16 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   assert.equal(new Set(fixtures.pages.map((page) => page.path)).size, fixtures.pages.length);
   const job = fixtures.respond('GET', `/jobs/${fixtures.pages[3].path.split('/').at(-1)}`, 'application/json').document;
   assert.equal(job.data.displayFilename.length, 255);
+  const allJobs = fixtures.respond('GET', '/jobs', 'application/json', fixtures.jobFilter.unfilteredQuery);
+  const filteredJobs = fixtures.respond('GET', '/jobs', 'application/json', fixtures.jobFilter.filteredQuery);
+  assert.equal(allJobs.status, 200);
+  assert.equal(filteredJobs.status, 200);
+  assert.deepEqual(allJobs.document.data.items.map(item => item.displayFilename), [fixtures.jobFilter.unfilteredRendered]);
+  assert.deepEqual(filteredJobs.document.data.items.map(item => item.displayFilename), [fixtures.jobFilter.filteredRendered]);
+  assert.notEqual(allJobs.document.data.items[0].jobId, filteredJobs.document.data.items[0].jobId);
+  assert.equal(filteredJobs.document.data.items[0].jobId, fixtures.jobFilter.filteredJobId);
+  assert.notDeepEqual(allJobs.document.data.items, filteredJobs.document.data.items);
+  assert.equal(fixtures.respond('GET', '/jobs', 'application/json', 'search=unexpected&limit=50').status, 404);
   const searchForm = fixtures.pages.find((page) => page.name === 'source search form');
   const searchResults = fixtures.pages.find((page) => page.name === 'source search results');
   assert.ok(searchForm && searchResults);
@@ -267,11 +1107,14 @@ test('preparation refuses missing rendered content or unused read fixtures', asy
 test('qualifyAudit prepares every fresh layout/contrast/focus navigation before measuring', async () => {
   const fixtures = auditFixtures(repo, manifest.buildId);
   let current, page, onRequest;
-  const counts = { layout: 0, contrast: 0, focus: 0, navigations: 0 };
+  const calls = [];
+  const counts = { layout: 0, contrast: 0, focus: 0, chart: 0, navigations: 0, chartCaptureEvaluations: 0 };
+  const screenshots = [];
   const completed = new Error('stop before worker/browser qualification');
   const cdp = {
     on(event, callback) { if (event === 'Fetch.requestPaused') onRequest = callback; },
     async call(method, params) {
+      calls.push([method, params]);
       if (method === 'Target.setAutoAttach') throw completed;
       if (method === 'Page.navigate') {
         page = fixtures.pages.find(candidate => origin + candidate.path === params.url);
@@ -285,13 +1128,20 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
     },
   };
   await assert.rejects(qualifyAudit({ origin, repo, manifest, evidenceDirectory: repo, cdp,
-    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => {},
+    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {},
+    capture: async (_tab, name, phase, expectedSize) => { screenshots.push({ name, phase, expectedSize }); return pngBytes(300, 150); },
+    profile: 'constrained',
     ready: async (tab, expression, label) => current.ready(tab, expression, label),
     evaluate: async (tab, expression) => {
       let kind = null;
       if (expression === measurePage) kind = 'layout';
       else if (expression === measureContrast) kind = 'contrast';
       else if (expression === measureFocus) kind = 'focus';
+      else if (expression === measureOutputSignatureChart) kind = 'chart';
+      else if (expression.startsWith('/*chart-capture-')) {
+        counts.chartCaptureEvaluations++;
+        return tileState({ offset: 0, height: 150, viewHeight: 200, scroll: 0 });
+      }
       if (kind) {
         assert.equal(await current.evaluate(tab, auditPageReady(page, true)), true, `${kind} measured an empty ${page.name}`);
         assert.deepEqual(current.actions, (page.preparation ?? []).map(step => step.action));
@@ -301,7 +1151,31 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
+  assert.deepEqual(counts, { layout: 130, contrast: 52, focus: 52, chart: 10, navigations: 91, chartCaptureEvaluations: 4 });
+  assert.deepEqual(calls.filter(([method]) => ['Emulation.setCPUThrottlingRate', 'Network.emulateNetworkConditions'].includes(method)), [
+    ['Emulation.setCPUThrottlingRate', { rate: 4 }],
+    ['Network.emulateNetworkConditions', { offline: false, latency: 100,
+      downloadThroughput: 1_250_000, uploadThroughput: 250_000 }],
+  ], 'the active audit path applies the constrained profile before navigation');
+  const expectedPixels = new Map([
+    ['desktop 1440x900', { width: 1440, height: 900 }],
+    ['narrow 390x844', { width: 390, height: 844 }],
+    ['reflow 320', { width: 320, height: 640 }],
+    ['zoom 200% of 1280x800', { width: 1280, height: 800 }],
+    ['zoom 400% of 1280x800', { width: 1280, height: 800 }],
+  ]);
+  const expectedScreenshots = auditViewports.flatMap(viewport => fixtures.pages
+    .filter(page => (viewport.width === 320 && viewport.deviceScaleFactor === 4)
+      || ['workspace', 'job detail', 'source directory', 'source file'].includes(page.name))
+    .map(page => ({ name: `audit-${viewport.name.split(' ')[0]}-${viewport.width}-${page.name.replaceAll(' ', '-')}.png`,
+      phase: `audit:${viewport.name}:${page.name}`,
+      expectedSize: expectedPixels.get(viewport.name) })));
+  assert.deepEqual(screenshots.filter(shot => shot.name.startsWith('audit-')), expectedScreenshots,
+    'every audit capture carries its exact device-pixel viewport size');
+  const chartShots = screenshots.filter(shot => !shot.name.startsWith('audit-'));
+  assert.equal(chartShots.length, 2, 'one chart tile per captured chart viewport');
+  assert.ok(chartShots.every(shot => shot.phase && typeof shot.phase === 'object' && shot.phase.scale === 1 && shot.expectedSize === undefined),
+    'chart captures pass a unit-scale page clip, routed to the clipped capture path');
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
@@ -311,6 +1185,21 @@ test('content checks require visible, distinctive rows rather than an empty or h
     const document = { querySelectorAll: () => [{ textContent, getClientRects: () => visible ? [{}] : [] }] };
     assert.equal(runInNewContext(auditContentReady(checks), { document }), expected);
   }
+});
+
+test('structure fixture is the bound function-inventory contract fixture behind the lazy Structure route', () => {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const page = fixtures.pages.find(page => page.name === 'structure functions');
+  assert.ok(page && page.path.endsWith('/functions'));
+  const [step] = page.preparation;
+  assert.deepEqual(step.reads, [page.path.slice('/nested'.length)]);
+  const document = fixtures.respond('GET', step.reads[0], 'application/json').document;
+  assert.equal(document.kind, 'functionInventory');
+  const [, jobId, runId, revisionId] = /^\/jobs\/([^/]+)\/runs\/([^/]+)\/revisions\/([^/]+)\/functions$/.exec(step.reads[0]);
+  assert.deepEqual(document.data.binding, { jobId, runId, revisionId });
+  assert.equal(runId, fixtures.runId);
+  assert.ok(step.content.some(check => check.text === page.rendered));
+  assert.ok(step.content.some(check => document.data.items.some(item => item.address === check.text)));
 });
 
 test('evidence fixtures preserve attempt identity, validation owner commitments and deployment path', () => {
@@ -481,6 +1370,64 @@ test('covers the documented desktop, narrow, 320px and 200%/400% zoom profiles',
     [[1440, 900, 1], [390, 844, 1], [320, 640, 1], [640, 400, 2], [320, 200, 4]]);
 });
 
+// Runs the real focus probe against a scripted page. `tops` gives the box top per frame; frames
+// past the end keep the last value. `ticks` caps how many frames the page renders.
+async function runFocusProbe({ tops, ticks = Infinity, blur = null, text = 'secret-token https://example.invalid/x' }) {
+  let frame = 0; let now = 0; let rendered = 0;
+  const element = { tagName: 'INPUT', id: '', textContent: text, getAttribute: () => null, parentElement: null,
+    matches: selector => selector === ':focus-visible', contains: other => other === element,
+    getBoundingClientRect: () => { const top = tops[Math.min(frame, tops.length - 1)]; return { left: 311, right: 328.6, top, bottom: top + 17.6, width: 17.6, height: 17.6 }; } };
+  const document = { activeElement: element, body: {}, elementFromPoint: () => element };
+  const context = { document, innerWidth: 1440, innerHeight: 900, scrollX: 0, get scrollY() { return 794 - (tops[Math.min(frame, tops.length - 1)] - tops[0]); },
+    performance: { now: () => now },
+    // A timer fires only after a frame would have rendered, and jumps the clock to the bound.
+    setTimeout: (fn) => { const t = { cleared: false }; setImmediate(() => { if (!t.cleared) { now += 1000; fn(); } }); return t; },
+    clearTimeout: t => { t.cleared = true; },
+    requestAnimationFrame: fn => { if (rendered >= ticks) return; rendered += 1; queueMicrotask(() => { frame += 1; now += 16; if (frame === blur) document.activeElement = {}; fn(); }); },
+    getComputedStyle: () => ({ backgroundColor: 'rgb(255, 255, 255)', outlineColor: 'rgb(163, 92, 0)', outlineStyle: 'solid', outlineWidth: '3px' }),
+    WeakMap, Number, Math, JSON, Promise };
+  context.window = context;
+  return runInNewContext(measureFocus, context);
+}
+
+test('focus trajectory is failure-only, bounded, numeric and does not change the verdict', async () => {
+  // Visible stop: original sample only, no trajectory or extra frames.
+  const visible = await runFocusProbe({ tops: [400, 400, 400] });
+  assert.equal(visible.inViewport, true); assert.equal('trajectory' in visible, false);
+  // Persistent: off-screen in every later frame; bounded by the frame cap.
+  const persistent = await runFocusProbe({ tops: [900, 900, 900] });
+  assert.equal(persistent.inViewport, false);
+  assert.equal(persistent.geometry.top, 900, 'original sample is preserved');
+  assert.ok(persistent.trajectory.length > 0 && persistent.trajectory.length <= focusTrajectoryFrames);
+  assert.ok(persistent.trajectory.every(entry => entry.top >= entry.viewportHeight && entry.sameTarget === true));
+  assert.ok(persistent.trajectory.at(-1).ms <= focusTrajectoryMs + 16);
+  // Delayed: comes into view later; the original verdict field still reports the failure.
+  const delayed = await runFocusProbe({ tops: [900, 900, 900, 900, 500] });
+  assert.equal(delayed.inViewport, false);
+  assert.ok(delayed.trajectory.some(entry => entry.top < entry.viewportHeight));
+  assert.ok(delayed.trajectory.some(entry => entry.top >= entry.viewportHeight));
+  // Focus moving away is recorded only as the fixed flag.
+  const moved = await runFocusProbe({ tops: [900], blur: 4 });
+  assert.equal(moved.trajectory.find(entry => entry.frame === 2).sameTarget, false);
+  // A page that stops rendering frames ends the trajectory through the time bound, not a hang.
+  const stalled = await runFocusProbe({ tops: [900], ticks: 4 });
+  assert.equal(stalled.trajectory.length, 2);
+  // Privacy: trajectory entries carry only fixed numeric/boolean keys, never text, URLs or tokens.
+  const keys = ['frame', 'ms', 'top', 'bottom', 'left', 'right', 'viewportWidth', 'viewportHeight', 'scrollX', 'scrollY', 'sameTarget'];
+  for (const entry of [...persistent.trajectory, ...delayed.trajectory]) {
+    assert.deepEqual(Object.keys(entry), keys);
+    assert.ok(Object.values(entry).every(value => typeof value === 'number' || typeof value === 'boolean'));
+  }
+  assert.doesNotMatch(JSON.stringify(persistent.trajectory), /secret|https?:|example/);
+  // Negative control: the verdict still fails a delayed stop and passes a visible one.
+  const audit = clean();
+  audit.focus[0].stops[0] = { ...audit.focus[0].stops[0], ...delayed };
+  assert.match(verdict(audit).join('\n'), /focus/);
+  const passing = clean();
+  passing.focus[0].stops[0] = { ...passing.focus[0].stops[0], ...visible };
+  assert.deepEqual(verdict(passing).filter(line => /focus \{/.test(line)), []);
+});
+
 
 test('connection notice evidence fails closed when missing, misbound, mis-ordered, untrusted, mutating or not restored', () => {
   const fails = (mutate, pattern) => {
@@ -535,10 +1482,14 @@ test('connection notice evidence fails closed when missing, misbound, mis-ordere
   fails(c => { c.restoration.failed = ['Accessibility.disable failed']; }, /cleanup/);
   fails(c => { delete c.restoration; }, /cleanup/);
   assert.deepEqual(connectionNoticeFailures(connectionEvidence()), []);
-  const engine = clean(); delete engine.connectionNotice;
-  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined, { connectionNotice: false }).failures, [],
-    'only the explicit cross-engine opt-out skips Chrome connection evidence');
-  assert.match(assertAudit(engine, manifest, responses, origin, undefined, {}).failures.join('\n'), /missing evidence/);
+  const engine = clean(); delete engine.connectionNotice; delete engine.jobFilter; delete engine.fileOpen;
+  delete engine.timing.raw.fileOpenData; delete engine.timing.filePreviewFeedback;
+  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined,
+    { connectionNotice: false, jobFilter: false, fileOpen: false, interactionPages }).failures, [],
+    'cross-engine audits explicitly opt out of Chrome-only connection, filter and source-open evidence');
+  assert.match(assertAudit(engine, manifest, responses, origin, undefined, { interactionPages }).failures.join('\n'), /missing evidence/);
+  assert.match(assertAudit(engine, manifest, responses, origin, undefined, { connectionNotice: false, jobFilter: false, fileOpen: false }).failures.join('\n'),
+    /interactions: missing expected fixture contract/, 'opting out of Chrome-only evidence does not skip the trusted interaction contract');
 });
 
 test('connection accessibility summary keeps only exposed region and status names', () => {
@@ -559,12 +1510,12 @@ test('connection DOM check ignores legacy status asides outside the notice secti
   const h1 = { tagName: 'H1', id: '', textContent: 'Workspace' };
   const document = {
     activeElement: h1,
-    querySelector: selector => selector === 'aside.session-notice.is-connected' ? connectedSession : null,
+    querySelector: selector => selector === '.session-notice.is-connected' ? connectedSession : null,
     querySelectorAll(selector) {
       if (selector === 'section.connection-notice') return [section];
       if (selector === '[role="status"]') return [status];
       if (selector === 'aside[role="status"]') return [{ tagName: 'ASIDE' }]; // unrelated session notice
-      if (selector === 'aside.session-notice.is-connected') return connectedSession;
+      if (selector === '.session-notice.is-connected') return [connectedSession];
       throw new Error(`unexpected selector ${selector}`);
     },
     getElementById: () => ({ textContent: connectionNoticeNames.offline }),
@@ -647,4 +1598,305 @@ test('connection scenario restores the tab even when a step fails mid-way', asyn
     const last = model.calls.filter(([method]) => method === 'Network.emulateNetworkConditions').at(-1);
     if (last) assert.deepEqual(last[1], { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
   }
+});
+
+test('capture keeps the first figure pixel when the browser rounds fractional scrolls upward (VM)', async () => {
+  for (const set of chartCaptureSets) {
+    const docTop = 100.6875, height = 383.156, left = 2.4, width = 299.3;
+    let scrollY = 0;
+    const requested = [];
+    const series = { getBoundingClientRect: () => ({ height: 40 }) };
+    const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+      getBoundingClientRect: () => ({ left, right: left + width, top: docTop - scrollY,
+        bottom: docTop - scrollY + height, width, height }),
+      querySelectorAll: () => [series, series], contains: () => true };
+    const document = { body: {}, activeElement: null, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+      querySelector: selector => selector === '.output-signature-chart' ? figure : null,
+      elementFromPoint: () => figure };
+    const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrollY; }, visualViewport: undefined,
+      scrollTo: ({ top }) => { requested.push(top); scrollY = Math.min(Math.round(top), 1000); },
+      getComputedStyle: () => ({ visibility: 'visible' }) };
+    const capture = await captureOutputSignatureChart({ set,
+      evaluate: async expression => JSON.parse(JSON.stringify(runInNewContext(expression, context))),
+      shoot: async ({ viewportClip }) => pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor) });
+    assert.deepEqual(chartCaptureFailures(capture, set), []);
+    assert.ok(requested.every(Number.isInteger), 'capture chooses integer scroll targets before browser rounding');
+    assert.equal(capture.tiles[0].before.figure.y, 0.6875);
+    assert.equal(capture.tiles[0].before.segment.start, 0);
+    assert.equal(capture.tiles[1].before.segment.start, capture.tiles[0].before.segment.end);
+    assert.ok(Math.abs(capture.tiles.at(-1).before.segment.end - height) < 1e-9);
+  }
+});
+
+test('file open fixtures rotate two distinct files with their own metadata, chunk and bytes', () => {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const bootstrap = fixtures.respond('GET', '/bootstrap', 'application/json').document.data;
+  const advertisedMaximum = bootstrap.runtime?.limits?.maxSourceChunkBytes ?? bootstrap.limits?.maxSourceChunkBytes;
+  assert.equal(advertisedMaximum, '262144');
+  assert.ok(Number(fileOpenContract.maxBytes) <= Number(advertisedMaximum), 'the requested chunk respects the advertised runtime ceiling');
+  assert.equal(new Set(fileOpenContract.files.map(file => file.fileId)).size, 2);
+  assert.notEqual(fileOpenContract.files[0].sha256, fileOpenContract.files[1].sha256);
+  const directoryRoute = fixtures.fileOpen.directoryPath.slice('/nested'.length).replace('/sources/', '/source-directories/');
+  const directory = fixtures.respond('GET', directoryRoute, 'application/json').document.data;
+  for (const file of fileOpenContract.files) {
+    const listed = directory.items.find(item => item.fileId === file.fileId);
+    assert.deepEqual([listed.displayName, listed.sha256, listed.sizeBytes, listed.declaredViewable], [file.displayName, file.sha256, file.sizeBytes, true]);
+    const metadata = fixtures.respond('GET', fileApi(file.fileId), 'application/json').document.data;
+    const chunk = fixtures.respond('GET', `${fileApi(file.fileId)}/chunk`, 'application/json').document.data;
+    assert.deepEqual(sourceResponseIdentity(metadata), { kind: 'file', binding: { jobId: fileOpenContract.jobId, runId: fileOpenContract.runId,
+      revisionId: fileOpenContract.revisionId }, fileId: file.fileId, sourceSha256: fileOpenContract.sourceSha256,
+      metadataVersion: fileOpenContract.metadataVersion, sha256: file.sha256, sizeBytes: file.sizeBytes });
+    assert.equal(createHash('sha256').update(chunk.text).digest('hex'), file.sha256);
+    assert.equal(chunk.text.split('\n').length - 1, file.rows);
+    assert.equal(sourceResponseIdentity(chunk).textSha256, file.sha256);
+    assert.ok(!Object.hasOwn(sourceResponseIdentity(chunk), 'text'), 'source text must not enter the report');
+    const content = fixtures.respond('GET', `${fileApi(file.fileId)}/content`, '');
+    assert.equal(createHash('sha256').update(content.bytes).digest('hex'), file.sha256);
+  }
+  assert.equal(fixtures.respond('GET', fileApi(`file_9_${'c'.repeat(64)}`), 'application/json').status, 404);
+  assert.equal(fixtures.respond('GET', `${fileApi(`file_9_${'c'.repeat(64)}`)}/chunk`, 'application/json').status, 404);
+  assert.equal(fixtures.fileOpen.directoryPath, fixtures.pages.find(page => page.name === 'source directory').path);
+});
+
+test('file open evidence binds both phases to identity, exact requests, content, focus and pin', () => {
+  assert.deepEqual(fileOpenFailures(clean().fileOpen, clean().timing.raw, clean().fulfilled), []);
+  const chunkIn = audit => ({ ...structuredClone(audit.fulfilled[audit.fileOpen.samples[0].preview.requestIndex]) });
+  const opening = (audit, index = 0) => audit.fulfilled[audit.fileOpen.samples[index].open.requestIndex];
+  const previewing = (audit, index = 0) => audit.fulfilled[audit.fileOpen.samples[index].preview.requestIndex];
+  const first = fileOpenContract.files[0]; const second = fileOpenContract.files[1];
+  for (const [label, mutate, pattern] of [
+    ['missing evidence', audit => { audit.fileOpen = undefined; }, /missing workload evidence/],
+    ['forged contract', audit => { audit.fileOpen.contract.maxBytes = '32768'; }, /unexpected workload contract/],
+    ['forged file digest in contract', audit => { audit.fileOpen.contract.files[0].sha256 = 'c'.repeat(64); }, /unexpected workload contract/],
+    ['too few samples', audit => { audit.fileOpen.samples.pop(); }, /requires 50 samples/],
+    ['rotation', audit => { audit.fileOpen.samples[1].fileId = first.fileId; }, /rotation binding/],
+    ['sample order', audit => { audit.fileOpen.samples[2].sample = 3; }, /rotation binding/],
+    ['missing phase', audit => { delete audit.fileOpen.samples[0].preview; }, /missing phase record/],
+    ['NaN feedback', audit => { audit.fileOpen.samples[0].open.feedbackMs = NaN; }, /invalid feedback\/data timing/],
+    ['feedback after data', audit => { audit.fileOpen.samples[0].preview.feedbackMs = 95; }, /invalid feedback\/data timing/],
+    ['beyond deadline', audit => { Object.assign(audit.fileOpen.samples[0].open, { feedbackMs: 10001, dataMs: 10001 }); }, /invalid feedback\/data timing/],
+    ['unknown signal', audit => { audit.fileOpen.samples[0].open.feedbackSignal = 'pending'; }, /invalid feedback signal/],
+    ['late data feedback', audit => { audit.fileOpen.samples[0].open.feedbackSignal = 'data'; }, /not coincident/],
+    ['raw mismatch', audit => { audit.timing.raw.filePreviewData[0] = 91; }, /preview first chunk: raw samples do not match/],
+    ['raw missing', audit => { delete audit.timing.raw.fileOpenFeedback; }, /open feedback: requires 50/],
+    ['request index outside window', audit => { audit.fileOpen.samples[0].open.requestIndex = audit.fileOpen.samples[0].preview.requestIndex; }, /missing or duplicate fulfilled request index/],
+    ['window before previous', audit => { audit.fileOpen.samples[1].open.requestStartIndex = 0; }, /missing or duplicate fulfilled request index/],
+    ['window beyond table', audit => { audit.fileOpen.samples[49].preview.requestEndIndex = audit.fulfilled.length + 1; }, /missing or duplicate fulfilled request index/],
+    ['metadata status', audit => { opening(audit).status = 404; }, /not bound to its fulfilled metadata request/],
+    ['metadata path for other file', audit => { opening(audit).path = fileApi(second.fileId); }, /not bound to its fulfilled metadata request/],
+    ['metadata fulfillment', audit => { opening(audit).fulfillmentSucceeded = false; }, /not bound to its fulfilled metadata request/],
+    ['metadata response file', audit => { opening(audit).response.fileId = second.fileId; }, /not bound to its fulfilled metadata request/],
+    ['metadata job binding', audit => { opening(audit).response.binding.jobId = 'fedcba9876543210fedcba9876543210'; }, /not bound to its fulfilled metadata request/],
+    ['metadata run binding', audit => { opening(audit).response.binding.runId = 'run_other'; }, /not bound to its fulfilled metadata request/],
+    ['metadata revision binding', audit => { opening(audit).response.binding.revisionId = 'revision_2'; }, /not bound to its fulfilled metadata request/],
+    ['metadata source digest', audit => { opening(audit).response.sourceSha256 = 'd'.repeat(64); }, /not bound to its fulfilled metadata request/],
+    ['metadata version', audit => { opening(audit).response.metadataVersion = 'd'.repeat(64); }, /not bound to its fulfilled metadata request/],
+    ['metadata file digest', audit => { opening(audit).response.sha256 = second.sha256; }, /not bound to its fulfilled metadata request/],
+    ['metadata query', audit => { opening(audit).query = 'byte=0'; }, /not bound to its fulfilled metadata request/],
+    ['chunk offset query', audit => { previewing(audit).query = fileOpenChunkQuery.replace('offset=0', 'offset=4'); }, /not bound to its fulfilled chunk request/],
+    ['chunk maxBytes query', audit => { previewing(audit).query = fileOpenChunkQuery.replace('65536', '32768'); }, /not bound to its fulfilled chunk request/],
+    ['chunk response offset', audit => { previewing(audit).response.offsetBytes = '4'; }, /not bound to its fulfilled chunk request/],
+    ['chunk partial', audit => { previewing(audit).response.completeFile = false; }, /not bound to its fulfilled chunk request/],
+    ['chunk text digest', audit => { previewing(audit).response.textSha256 = second.sha256; }, /not bound to its fulfilled chunk request/],
+    ['chunk metadata version', audit => { previewing(audit).response.metadataVersion = 'd'.repeat(64); }, /not bound to its fulfilled chunk request/],
+    ['chunk kind', audit => { previewing(audit).response.kind = 'file'; }, /not bound to its fulfilled chunk request/],
+    ['rendered file id', audit => { audit.fileOpen.samples[0].open.renderedFileId = second.fileId; }, /rendered metadata does not match/],
+    ['rendered name', audit => { audit.fileOpen.samples[0].open.renderedName = second.displayName; }, /rendered metadata does not match/],
+    ['rendered digest', audit => { audit.fileOpen.samples[0].open.renderedSha256 = second.sha256; }, /rendered metadata does not match/],
+    ['pin', audit => { audit.fileOpen.samples[0].open.pageSearch = ''; }, /snapshot pin/],
+    ['forged pin', audit => { audit.fileOpen.samples[0].open.pageSearch = fileOpenPin.replace('e'.repeat(64), 'd'.repeat(64)); }, /snapshot pin/],
+    ['open focus', audit => { audit.fileOpen.samples[0].open.focus = 'link'; }, /unexpected focus or preview state/],
+    ['preview auto-opened', audit => { audit.fileOpen.samples[0].open.previewOpen = true; }, /unexpected focus or preview state/],
+    ['rendered rows', audit => { audit.fileOpen.samples[0].preview.renderedRows -= 1; }, /rendered chunk content/],
+    ['rendered bytes', audit => { audit.fileOpen.samples[0].preview.renderedBytes += 1; }, /rendered chunk content/],
+    ['rendered text digest', audit => { audit.fileOpen.samples[0].preview.renderedTextSha256 = null; }, /rendered chunk content/],
+    ['busy', audit => { audit.fileOpen.samples[0].preview.ariaBusy = 'true'; }, /busy state or focus/],
+    ['preview focus', audit => { audit.fileOpen.samples[0].preview.focus = 'main-heading'; }, /busy state or focus/],
+  ]) {
+    const audit = clean(); mutate(audit);
+    assert.match(verdict(audit).join('\n'), pattern, label);
+  }
+  // A chunk read during the metadata phase, or any extra read, is rejected even when the bound request is correct.
+  const chunkDuringOpen = clean();
+  chunkDuringOpen.fulfilled.push(chunkIn(chunkDuringOpen));
+  const lastOpen = chunkDuringOpen.fileOpen.samples.at(-1);
+  const moved = chunkDuringOpen.fulfilled.splice(lastOpen.preview.requestIndex, 1)[0];
+  chunkDuringOpen.fulfilled.push(moved);
+  lastOpen.open.requestEndIndex += 1; lastOpen.preview.requestStartIndex += 1; lastOpen.preview.requestEndIndex += 1; lastOpen.preview.requestIndex += 1;
+  const chunkFailures = verdict(chunkDuringOpen).join('\n');
+  assert.match(chunkFailures, /sample 49 open: metadata open requested a source chunk/);
+  assert.match(chunkFailures, /sample 49 open: unexpected requests in the measured window/);
+  const extra = clean();
+  extra.fulfilled.push({ method: 'GET', path: '/bootstrap', status: 200 });
+  extra.fileOpen.samples.at(-1).preview.requestEndIndex += 1;
+  assert.match(verdict(extra).join('\n'), /sample 49 preview: unexpected requests in the measured window/);
+  // Budgets apply to each phase from raw samples.
+  const slow = clean();
+  slow.timing.raw.filePreviewData.fill(501); slow.timing.filePreviewData = { samples: 50, median: 501, p95: 501 };
+  slow.fileOpen.samples.forEach(sample => { sample.preview.dataMs = 501; });
+  assert.deepEqual(verdict(slow), ['source preview first chunk p95 501ms exceeds 500ms']);
+  const slowFeedback = clean();
+  slowFeedback.timing.raw.fileOpenFeedback.fill(100.04); slowFeedback.timing.fileOpenFeedback = { samples: 50, median: 100, p95: 100 };
+  slowFeedback.timing.raw.fileOpenData.fill(120); slowFeedback.timing.fileOpenData = { samples: 50, median: 120, p95: 120 };
+  slowFeedback.fileOpen.samples.forEach(sample => { sample.open.feedbackMs = 100.04; sample.open.dataMs = 120; });
+  assert.deepEqual(verdict(slowFeedback), ['source file open feedback p95 100.04ms exceeds 100ms']);
+  // The default verdict requires file-open evidence; only an explicit opt-out omits it.
+  const missing = clean(); delete missing.fileOpen; delete missing.timing.fileOpenData;
+  assert.match(verdict(missing).join('\n'), /source file open: missing workload evidence/);
+  assert.match(verdict(missing).join('\n'), /source file open first data: invalid timing evidence/);
+  assert.deepEqual(assertAudit(missing, manifest, responses, origin, undefined, { fileOpen: false, interactionPages }).failures, []);
+});
+
+test('compaction keeps both timed windows, remaps safely and preserves unexpected window requests', () => {
+  const audit = clean();
+  // Unrelated route reads before, between and after the timed windows.
+  const unrelated = index => ({ method: 'GET', path: `/route/${index}`, status: 200 });
+  const insertAt = (position, entry) => {
+    audit.fulfilled.splice(position, 0, entry);
+    const shift = record => {
+      if (record.requestStartIndex >= position) record.requestStartIndex += 1;
+      if (record.requestEndIndex > position || (record.requestEndIndex === position && record.requestStartIndex > position)) record.requestEndIndex += 1;
+      if (record.requestIndex >= position) record.requestIndex += 1;
+    };
+    audit.jobFilter.samples.forEach(shift);
+    audit.fileOpen.samples.forEach(sample => { shift(sample.open); shift(sample.preview); });
+  };
+  insertAt(0, unrelated(0));
+  insertAt(51, unrelated(1));
+  insertAt(80, unrelated(2));
+  audit.fulfilled.push(unrelated(3));
+  assert.deepEqual(verdict(audit), []);
+  const compact = compactTimedAuditEvidence(audit);
+  assert.deepEqual(verdict(compact), []);
+  assert.equal(compact.fulfilled.length, 150);
+  assert.ok(compact.fulfilled.every(entry => !entry.path?.startsWith('/route/')));
+  assert.deepEqual(compact.fileOpen.samples.map(tuple => [compact.fulfilled[tuple[2]].source, compact.fulfilled[tuple[6]].source]),
+    Array(50).fill(['file', 'chunk']));
+  // An unexpected chunk inside a metadata window survives compaction and is still rejected.
+  const leaked = clean();
+  const sample = leaked.fileOpen.samples[10];
+  leaked.fulfilled.splice(sample.open.requestEndIndex, 0, { ...structuredClone(leaked.fulfilled[sample.preview.requestIndex]) });
+  sample.open.requestEndIndex += 1;
+  for (const later of leaked.fileOpen.samples.slice(10)) for (const phase of later === sample ? [later.preview] : [later.open, later.preview]) {
+    phase.requestStartIndex += 1; phase.requestEndIndex += 1; phase.requestIndex += 1;
+  }
+  const leakedCompact = compactTimedAuditEvidence(leaked);
+  assert.equal(leakedCompact.fulfilled.length, 151);
+  assert.match(verdict(leakedCompact).join('\n'), /sample 10 open: metadata open requested a source chunk/);
+  // A request index that points outside every retained window becomes null rather than aliasing another entry.
+  const dangling = clean();
+  dangling.fulfilled.unshift(unrelated(9));
+  dangling.jobFilter.samples.forEach(record => { record.requestStartIndex += 1; record.requestEndIndex += 1; record.requestIndex += 1; });
+  dangling.fileOpen.samples.forEach(record => { for (const phase of [record.open, record.preview]) {
+    phase.requestStartIndex += 1; phase.requestEndIndex += 1; phase.requestIndex += 1; } });
+  dangling.fileOpen.samples[0].open.requestIndex = 0;
+  const danglingCompact = compactTimedAuditEvidence(dangling);
+  assert.equal(danglingCompact.fileOpen.samples[0][2], null);
+  assert.match(verdict(danglingCompact).join('\n'), /sample 0 open: missing or duplicate fulfilled request index/);
+  // The compact form binds requests and rendered details by contract-derived digests.
+  const digested = compactTimedAuditEvidence(clean());
+  assert.equal(digested.fileOpen.form, 'compact-v1');
+  assert.match(digested.fileOpen.renderedSha256, /^sha256:[0-9a-f]{64}$/);
+  for (const [label, mutate, pattern] of [
+    ['marker', a => { a.fulfilled[a.fileOpen.samples[0][2]].source = 'chunk'; }, /sample 0 open: not bound to its fulfilled metadata request/],
+    ['same-kind marker from another file', a => {
+      const first = a.fileOpen.samples[0][2]; const second = a.fileOpen.samples[1][2];
+      [a.fulfilled[first].readCommitment, a.fulfilled[second].readCommitment] = [a.fulfilled[second].readCommitment, a.fulfilled[first].readCommitment];
+    }, /sample 0 open: not bound to its fulfilled metadata request identity/],
+    ['sample window rebound to another file', a => {
+      const first = a.fileOpen.samples[0]; const second = a.fileOpen.samples[1];
+      first[0] = second[0]; first[1] = second[1]; first[2] = second[2];
+    }, /source request windows are not bound to their sample and phase identities/],
+    ['signal', a => { a.fileOpen.samples[1][7] = 'idle'; }, /sample 1 preview: invalid feedback signal/],
+    ['tuple', a => { a.fileOpen.samples[2] = a.fileOpen.samples[2].slice(0, 4); }, /sample 2: invalid compact record/],
+    ['index', a => { a.fileOpen.samples[3][2] = a.fileOpen.samples[3][6]; }, /sample 3 open: missing or duplicate/],
+    ['rendered digest', a => { a.fileOpen.renderedSha256 = `sha256:${'0'.repeat(64)}`; }, /rendered metadata, chunk content, focus or pin/],
+    ['requests digest', a => { a.fileOpen.sourceRequestsSha256 = `sha256:${'0'.repeat(64)}`; }, /source request windows are not bound/],
+    ['raw order', a => { a.timing.raw.fileOpenFeedback[0] = 80; }, /sample 0 open: invalid feedback\/data timing/],
+    ['contract', a => { a.fileOpen.contract.offset = '4'; }, /unexpected workload contract/],
+  ]) { const audit = structuredClone(digested); mutate(audit); assert.match(verdict(audit).join('\n'), pattern, label); }
+  for (const [label, mutate, pattern] of [
+    ['chunk offset', a => { a.fulfilled[a.fileOpen.samples[4].preview.requestIndex].response.offsetBytes = '4'; }, /not bound to its fulfilled chunk request identity/],
+    ['chunk query', a => { a.fulfilled[a.fileOpen.samples[4].preview.requestIndex].query = 'offset=0'; }, /not bound to its fulfilled chunk request identity/],
+    ['rendered rows', a => { a.fileOpen.samples[5].preview.renderedRows = 1; }, /rendered metadata, chunk content/],
+    ['pin', a => { a.fileOpen.samples[5].open.pageSearch = ''; }, /rendered metadata, chunk content, focus or pin/],
+    ['focus', a => { a.fileOpen.samples[5].preview.focus = 'body'; }, /rendered metadata, chunk content, focus or pin/],
+  ]) { const audit = clean(); mutate(audit); assert.match(verdict(compactTimedAuditEvidence(audit)).join('\n'), pattern, label); }
+  // A malformed window leaves the full report for the validator instead of guessing.
+  const malformed = clean(); malformed.fileOpen.samples[3].preview.requestEndIndex = -1;
+  assert.equal(compactTimedAuditEvidence(malformed), malformed);
+  assert.equal(compactJobFilterAuditEvidence, compactTimedAuditEvidence);
+});
+
+test('a max-like compact report with 50 file-open samples stays within 512 KiB without source text', () => {
+  const audit = clean();
+  // Thousands of route reads with verbose evidence, as a long qualification run produces.
+  const unrelated = Array.from({ length: 6000 }, (_, index) => ({ method: 'GET', path: `/jobs/${'x'.repeat(32)}/route/${index}`, status: 200,
+    query: 'q'.repeat(64), response: { digest: 'a'.repeat(64), details: 'unselected route response '.repeat(6) } }));
+  audit.fulfilled = [...unrelated, ...audit.fulfilled];
+  audit.jobFilter.samples.forEach(record => { record.requestStartIndex += unrelated.length; record.requestEndIndex += unrelated.length; record.requestIndex += unrelated.length; });
+  audit.fileOpen.samples.forEach(record => { for (const phase of [record.open, record.preview]) {
+    phase.requestStartIndex += unrelated.length; phase.requestEndIndex += unrelated.length; phase.requestIndex += unrelated.length; } });
+  assert.ok(Buffer.byteLength(JSON.stringify(audit)) > 512 * 1024, 'the uncompacted control must exceed the bound');
+  const compact = compactTimedAuditEvidence(audit);
+  assert.deepEqual(verdict(compact), []);
+  const report = JSON.stringify({ audit: compact, auditVerdict: assertAudit(compact, manifest, responses, origin, undefined, { interactionPages }) });
+  assert.ok(Buffer.byteLength(report) <= 512 * 1024, `compact report is ${Buffer.byteLength(report)} bytes`);
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const longText = fixtures.respond('GET', `${fileApi(fileOpenContract.files[0].fileId)}/chunk`, 'application/json').document.data.text;
+  assert.ok(!report.includes(longText.slice(100, 400)), 'source text must not leak into the report');
+  assert.ok(!report.includes(fileOpenContract.files[0].firstRow), 'row text must not leak into the report');
+  const allowed = new Set(['feedbackMs', 'dataMs', 'feedbackSignal', 'requestStartIndex', 'requestEndIndex', 'requestIndex', 'renderedFileId',
+    'pageSearch', 'renderedName', 'renderedSha256', 'focus', 'previewOpen', 'ariaBusy', 'renderedRows', 'renderedBytes', 'renderedTextSha256']);
+  assert.ok(allowed.size > 0);
+  for (const tuple of compact.fileOpen.samples) assert.ok(tuple.length === 8 && tuple.every(value => Number.isInteger(value) || value === 'loading' || value === 'data'));
+  const compactWindowBytes = Buffer.byteLength(JSON.stringify(compact.fileOpen)) + Buffer.byteLength(JSON.stringify(compact.fulfilled));
+  assert.ok(compactWindowBytes < 20 * 1024,
+    `timed request windows use ${compactWindowBytes} bytes; they must fit the headroom left by the existing audit report`);
+});
+
+// Minimal frame model for the in-page timing harness: each animation frame advances 5ms.
+async function runPhase(script, frames) {
+  let now = 0; let frame = 0; const queue = [];
+  const context = {
+    performance: { now: () => now },
+    requestAnimationFrame: callback => { queue.push(callback); },
+    URL, JSON, Error, Promise,
+    state: { clicked: false, frame: () => frame, frames },
+    document: { querySelectorAll: () => [] },
+  };
+  context.globalThis = context;
+  const promise = runInNewContext(script, context);
+  for (let step = 0; step < 4000 && queue.length; step += 1) {
+    await Promise.resolve();
+    now += 5; frame += 1;
+    const pending = queue.splice(0);
+    for (const callback of pending) callback();
+    await Promise.resolve();
+  }
+  return promise;
+}
+test('timed phases require the same signal and details on consecutive frames and a hard deadline', async () => {
+  const script = (deadlineMs = 10000) => timedPhaseScript({ deadlineMs,
+    control: `() => ({ click() { state.clicked = true; } })`,
+    observe: `() => state.frames(state.frame())` });
+  // A one-frame transient data state is not timed; loading then stable data is.
+  const measured = await runPhase(script(), frame => frame === 2 ? { signal: 'data', details: { rows: 1 } }
+    : frame >= 3 && frame < 6 ? { signal: 'loading' } : frame >= 6 ? { signal: 'data', details: { rows: 44 } } : { signal: null });
+  assert.equal(measured.feedbackSignal, 'loading');
+  assert.deepEqual(measured.details, { rows: 44 });
+  assert.ok(measured.feedbackMs < measured.dataMs);
+  // Details that change between frames are not stable data.
+  const flicker = await runPhase(script(), frame => frame < 10 ? { signal: 'data', details: { rows: frame } } : { signal: 'data', details: { rows: 44 } });
+  assert.deepEqual(flicker.details, { rows: 44 });
+  assert.ok(flicker.dataMs >= 50);
+  await assert.rejects(runPhase(script(100), () => ({ signal: 'loading' })), /timed phase deadline/);
+  await assert.rejects(runPhase(timedPhaseScript({ control: '() => null', observe: '() => ({ signal: null })' }), () => null), /control is missing/);
+  for (const file of fileOpenContract.files) for (const phase of [fileOpenMetadataPhase(file), fileOpenPreviewPhase(file)])
+    assert.doesNotThrow(() => new (Object.getPrototypeOf(async function () {}).constructor)(`return ${phase}`));
+  assert.doesNotThrow(() => new (Object.getPrototypeOf(async function () {}).constructor)(`return ${renderedPreviewDigest}`));
+  const previewProbe = fileOpenPreviewPhase(fileOpenContract.files[0]);
+  assert.ok(previewProbe.includes(JSON.stringify(fileOpenContract.files[0].firstRow)));
+  assert.ok(!previewProbe.includes(`${JSON.stringify(fileOpenContract.files[0].firstRow)}\\n#include`),
+    'the preview probe embeds boundary rows only, not the complete source text');
 });

@@ -34,9 +34,10 @@ export function sourceChunkMaximum(reported: string): number {
 
 export function sourceChunkRoute(selected: FileSelection, metadata: RevisionFile, position: SourcePosition, maximum: number): string {
   sourcePosition(`?byte=${position.offset}${position.line === null ? '' : `&line=${position.line}`}`);
+  const size = metadata.item.sizeBytes;
   if (!Number.isInteger(maximum) || maximum < 4 || maximum > SOURCE_CHUNK_LIMIT || !metadata.item.declaredViewable
-    || BigInt(metadata.item.sizeBytes) > SOURCE_FILE_LIMIT || BigInt(position.offset) > BigInt(metadata.item.sizeBytes)
-    || (metadata.item.sizeBytes !== '0' && position.offset === metadata.item.sizeBytes)) throw new ApiClientError('invalid_request');
+    || (size !== null && (BigInt(size) > SOURCE_FILE_LIMIT || BigInt(position.offset) > BigInt(size)
+      || (size !== '0' && position.offset === size)))) throw new ApiClientError('invalid_request');
   const query = new URLSearchParams({ offset: position.offset, maxBytes: String(maximum), metadataVersion: metadata.metadataVersion });
   return `${sourceReadRoute(selected, 'file', selected.fileId)}/chunk?${query.toString()}`;
 }
@@ -50,7 +51,7 @@ export function bindSourceChunk(chunk: SourceChunk, selected: FileSelection, met
     || metadata.binding.revisionId !== selected.revisionId || metadata.item.fileId !== selected.fileId
     || chunk.offsetBytes !== position.offset || BigInt(chunk.lengthBytes) > BigInt(maximum)) throw new ApiClientError('invalid_response');
   if (chunk.sourceSha256 !== metadata.sourceSha256 || chunk.metadataVersion !== metadata.metadataVersion
-    || chunk.sha256 !== metadata.item.sha256 || chunk.sizeBytes !== metadata.item.sizeBytes
+    || chunk.sha256 !== metadata.item.sha256 || (metadata.item.sizeBytes !== null && chunk.sizeBytes !== metadata.item.sizeBytes)
     || chunk.downloadAvailable !== metadata.item.declaredArchivable) {
     throw new ApiClientError('http_error', { serverCode: 'CURSOR_EXPIRED' });
   }

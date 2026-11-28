@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner } from '../api/generated';
 import { withApiFailureReference } from '../api/errors';
+import { isDeletedJob } from '../shared/retainMetadata';
 import { recordedValidationCopy as copy } from '../copy/attempt';
 import { commonCopy } from '../copy/common';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -18,15 +19,19 @@ import { message, textMessage } from '../shared/messages';
 function requestedValidation(search: string, preserveRouteContext = false) {
   try {
     const location = preserveRouteContext ? validationRouteLocation(search) : validationLocation(search);
-    return { location, key: preserveRouteContext ? search : validationSearch(location), invalid: false };
+    // Only validation-owned keys identify a restoration; other attempt query state (#495 artifact catalog) must not restart it.
+    return { location, key: validationSearch(location), invalid: false };
   }
   catch { return { location: null, key: 'invalid:' + search.slice(0, 4097), invalid: true }; }
 }
 
-export function RecordedValidationEvidence({ jobId, runId, basePath, navigation }: {
+export function RecordedValidationEvidence({ jobId, runId, basePath, navigation, onDeleted }: {
   jobId: string; runId: string; basePath: string; navigation?: ValidationNavigation;
+  /** A current read's confirmed RESOURCE_GONE tombstone ends the routed attempt instead of this panel (#512). */
+  onDeleted?: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const binding = useMemo(() => ({ client, jobId, runId, active: null as AbortController | null,
     requestSearch: null as string | null }), [client, jobId, runId]);
   const activeBinding = useRef(binding); activeBinding.current = binding;
@@ -70,6 +75,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
   }
   function failed(controller: AbortController, failure: unknown, restoring = false) {
     if (current(controller)) {
+      if (isDeletedJob(failure) && deletedHandler.current) { binding.active = null; deletedHandler.current(failure); return; }
       setSavedBaseline(null); setComparisonPage(1);
       setStored({ binding, locationKey: requested.key, history: null, selected: null, report: null, loading: false,
         error: withApiFailureReference(restoring ? copy.savedSelectionUnavailable : copy.failed, failure) });
@@ -92,9 +98,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
     }
     const selectedSearch = validationSearch(location);
     const search = nav.preserveRouteContext ? validationRouteSearch(actualSearch, selectedSearch) : selectedSearch;
-    installed.current = { binding, key: search }; binding.requestSearch = search;
-    if (search !== requested.key) nav.navigate(search, actualSearch);
-    return search;
+    installed.current = { binding, key: selectedSearch }; binding.requestSearch = selectedSearch;
+    if (selectedSearch !== requested.key) nav.navigate(search, actualSearch);
+    return selectedSearch;
   }
   async function loadHistory(controller: AbortController, page?: number, graph?: string) {
     const query = page === undefined ? '' : `?historyGraph=${graph}&historyPage=${page}`;
@@ -262,7 +268,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
       <ul aria-label={copy.reportLimitations}>{report.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
       {report.state === 'available' && report.binding.revisionId !== null && (cases || failure) &&
         <ValidationSourceSnapshot key={report.reportId} jobId={jobId} runId={runId} validationRevisionId={report.binding.revisionId}
-          sourceSha256={cases?.sourceSha256 ?? failure!.sourceSha256} basePath={basePath} />}
+          sourceSha256={cases?.sourceSha256 ?? failure!.sourceSha256} basePath={basePath} {...(onDeleted && { onDeleted })} />}
       {report.summary && 'result' in report.summary && <dl>
         <dt>{copy.result}</dt><dd>{report.summary.result}</dd><dt>{copy.compared}</dt><dd>{report.summary.casesCompared}</dd>
       </dl>}

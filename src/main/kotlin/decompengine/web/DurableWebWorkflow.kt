@@ -29,7 +29,53 @@ interface DurableWebWorkflowAdapter {
     val publication: DurableWebWorkflowPublication? get() = null
     /** Null means checkpoint resume is unsupported; explicit retry remains a separate new attempt. */
     val checkpoints: DurableWebWorkflowCheckpointPolicy? get() = null
+    /** A distinct opt-in: the default continuation path always refuses. */
+    val continuation: DurableWebWorkflowContinuation? get() = null
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
+}
+
+/**
+ * Only detached bytes from the admitted checkpoint may reach the execution adapter. [MAX_BYTES] is checked
+ * after the adapter has read the payload, so it does not bound that read: the first production
+ * continuation must capture through a shared bounded reader, tested at exactly [MAX_BYTES] and one byte over.
+ */
+class VerifiedWebCheckpoint(bytes: ByteArray, val restores: WorkflowResumeRestoration) {
+    init { require(bytes.size <= MAX_BYTES) }
+    private val content = bytes.copyOf()
+    val sha256 = decompengine.project.sha256(content)
+    fun bytes(): ByteArray = content.copyOf()
+
+    companion object {
+        const val MAX_BYTES = 1_048_576
+    }
+}
+
+interface DurableWebWorkflowContinuation {
+    /** Read only the workflow's fixed, bounded checkpoint files and return a detached capture. */
+    fun capture(request: DurableWebWorkflowCheckpointRequest): VerifiedWebCheckpoint?
+    /**
+     * Cancellation or shutdown can arrive after the service's last ownership check and before this call
+     * begins. An implementation must therefore perform no side effect (process, session, network or file
+     * write) except inside the `run` callback of [DurableWebWorkflowContinuationFence.launch], and must not
+     * catch what that call throws.
+     */
+    fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint,
+        fence: DurableWebWorkflowContinuationFence): DurableWebWorkflowOutcome
+}
+
+/**
+ * Serializes a continuation's first side effect with cancellation and shutdown through a service-owned launch
+ * permit. [launch] rechecks ownership, cancellation and publication state under the service monitor and grants
+ * the permit under the lock that publishes the shutdown signal. [prepare] runs while the permit is granted and
+ * must be inert and bounded: it may build the work, for example a process description, but must not start it,
+ * block, or call back into the service. [run] then starts and awaits the work outside every service lock.
+ *
+ * A refused launch throws, and neither [prepare] nor [run] starts anything. Cancellation or shutdown signalled
+ * after the grant interrupts the thread running [run], which must stop the work it started and must not catch
+ * what [launch] throws. Each continuation may launch once.
+ */
+interface DurableWebWorkflowContinuationFence {
+    fun <W, T> launch(prepare: () -> W, run: (W) -> T): T
 }
 
 /**
@@ -108,10 +154,11 @@ data class DurableWebWorkflowPublicationContext(
 
 /**
  * Internal execution context. Paths are never transport DTO fields. A recovery attempt records its
- * mode/checkpoint in [WorkflowAttempt.recovery]; [predecessorReportsDirectory] is present only for resume.
+ * mode and admitted checkpoint in [WorkflowAttempt.recovery].
  * [inputSourceTree] is the selected recorded revision's retained source for adapters that require one.
  */
 data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt, val reportsDirectory: Path,
+    /** Retained for source compatibility. Verified continuation receives detached checkpoint bytes. */
     val predecessorReportsDirectory: Path? = null, val inputSourceTree: Path? = null)
 
 sealed interface DurableWebWorkflowOutcome {

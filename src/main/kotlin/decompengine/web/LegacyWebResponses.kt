@@ -21,6 +21,7 @@ internal fun legacyError(
     requestDiagnosticOutput: (String) -> Unit = System.err::println,
     html: () -> String,
 ) {
+    WebDeniedResponseTrace.note(code)
     val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
     val json = segments.firstOrNull() == "api" ||
         (exchange.requestMethod == "POST" && segments == listOf("jobs") &&
@@ -50,6 +51,7 @@ internal fun sendCorrelatedLegacyJsonProblem(
     requestDiagnosticOutput: (String) -> Unit = System.err::println,
 ) {
     require(status in 400..599)
+    WebDeniedResponseTrace.note(code)
     val fields = Json.parseToJsonElement(payload) as? JsonObject
         ?: error("Legacy JSON error payload must be an object")
     val requestId = java.util.UUID.randomUUID().toString()

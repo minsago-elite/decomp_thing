@@ -1,6 +1,8 @@
 package decompengine.mvp
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
@@ -49,6 +51,12 @@ data class BinaryIsolation(
 
 fun interface BinaryExecutionBoundary {
     fun execute(executable: Path, workingDirectory: Path, environment: Map<String, String>): BinaryExecutionResult
+
+    fun execute(executable: Path, workingDirectory: Path, environment: Map<String, String>, arguments: List<String>): BinaryExecutionResult {
+        validateBinaryArguments(arguments)
+        require(arguments.isEmpty()) { "binary execution boundary does not support arguments" }
+        return execute(executable, workingDirectory, environment)
+    }
 }
 
 object BinaryExecutionBoundaryFactory {
@@ -67,7 +75,11 @@ class BubblewrapBinaryExecutionBoundary(
     private val timeout: Path = Path.of("/usr/bin/timeout"),
     private val duration: Duration = Duration.ofSeconds(5),
 ) : BinaryExecutionBoundary {
-    override fun execute(executable: Path, workingDirectory: Path, environment: Map<String, String>): BinaryExecutionResult {
+    override fun execute(executable: Path, workingDirectory: Path, environment: Map<String, String>): BinaryExecutionResult =
+        execute(executable, workingDirectory, environment, emptyList())
+
+    override fun execute(executable: Path, workingDirectory: Path, environment: Map<String, String>, arguments: List<String>): BinaryExecutionResult {
+        validateBinaryArguments(arguments)
         validateEnvironment(environment)
         val executablePath = executable.toAbsolutePath().normalize()
         val directory = workingDirectory.toAbsolutePath().normalize()
@@ -79,14 +91,20 @@ class BubblewrapBinaryExecutionBoundary(
         }
         val command = mutableListOf(
             timeout.pathString, "${duration.toSeconds()}s", bwrap.pathString,
-            "--unshare-net", "--die-with-parent", "--clearenv",
+            "--unshare-net", "--unshare-pid", "--proc", "/proc", "--die-with-parent", "--clearenv",
             "--ro-bind", "/usr", "/usr",
+            "--ro-bind", "/bin", "/bin",
             "--ro-bind", "/lib", "/lib",
         )
         if (Path.of("/lib64").exists()) command += listOf("--ro-bind", "/lib64", "/lib64")
+        // Runtime loader metadata contains library paths, without exposing host configuration or credentials.
+        if (Path.of("/etc/ld.so.cache").isRegularFile()) {
+            command += listOf("--dir", "/etc", "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache")
+        }
         command += listOf("--dir", "/tmp", "--ro-bind", directory.pathString, directory.pathString, "--chdir", directory.pathString)
         environment.toSortedMap().forEach { (key, value) -> command += listOf("--setenv", key, value) }
         command += executablePath.pathString
+        command += arguments
         val process = ProcessBuilder(command).apply { environment().clear() }.start()
         val stdout = process.inputStream.bufferedReader().readText()
         val stderr = process.errorStream.bufferedReader().readText()
@@ -116,13 +134,18 @@ class SpoolBinaryExecutionBoundary(
     private val requests = controlDirectory.toAbsolutePath().normalize().resolve("requests").createDirectories()
     private val responses = controlDirectory.toAbsolutePath().normalize().resolve("responses").createDirectories()
 
-    override fun execute(executable: Path, workingDirectory: Path, environment: Map<String, String>): BinaryExecutionResult {
+    override fun execute(executable: Path, workingDirectory: Path, environment: Map<String, String>): BinaryExecutionResult =
+        execute(executable, workingDirectory, environment, emptyList())
+
+    override fun execute(executable: Path, workingDirectory: Path, environment: Map<String, String>, arguments: List<String>): BinaryExecutionResult {
+        validateBinaryArguments(arguments)
         validateEnvironment(environment)
         val id = UUID.randomUUID().toString()
         val request = buildJsonObject {
             put("id", id)
             put("executable", executable.toAbsolutePath().normalize().pathString)
             put("workingDirectory", workingDirectory.toAbsolutePath().normalize().pathString)
+            put("arguments", JsonArray(arguments.map(::JsonPrimitive)))
             put("environment", JsonObject(environment.toSortedMap().mapValues { JsonPrimitive(it.value) }))
         }
         atomicWrite(requests.resolve("$id.json"), request.toString())
@@ -190,7 +213,14 @@ class BinaryRunnerService(
         val directory = authorize(Path.of(request.getValue("workingDirectory").jsonPrimitive.content), executable = false)
         val suppliedEnvironment = request["environment"]?.jsonObject?.mapValues { it.value.jsonPrimitive.content }.orEmpty()
         validateEnvironment(suppliedEnvironment)
-        val process = ProcessBuilder("/usr/bin/timeout", "${processTimeout.toSeconds()}s", executable.pathString)
+        val suppliedArguments = request["arguments"]?.jsonArray
+        require(suppliedArguments == null || suppliedArguments.size <= 32) { "binary argument count exceeds 32" }
+        val arguments = suppliedArguments?.map {
+            require(it is JsonPrimitive && it.isString) { "runner arguments must be strings" }
+            it.content
+        }.orEmpty()
+        validateBinaryArguments(arguments)
+        val process = ProcessBuilder(listOf("/usr/bin/timeout", "${processTimeout.toSeconds()}s", executable.pathString) + arguments)
             .directory(directory.toFile())
             .redirectErrorStream(false)
             .apply {
@@ -240,5 +270,18 @@ private fun moveAtomically(source: Path, target: Path) {
         Files.move(source, target, StandardCopyOption.ATOMIC_MOVE)
     } catch (_: Exception) {
         Files.move(source, target)
+    }
+}
+
+/** Validate at both request producer and worker, before creating a process. */
+internal fun validateBinaryArguments(arguments: List<String>) {
+    require(arguments.size <= 32) { "binary argument count exceeds 32" }
+    var bytes = 0L
+    for (argument in arguments) {
+        require('\u0000' !in argument) { "binary argument contains NUL" }
+        val size = argument.toByteArray(Charsets.UTF_8).size
+        require(size <= 4096) { "binary argument exceeds 4096 bytes" }
+        bytes += size
+        require(bytes <= 16_384) { "binary arguments exceed 16384 bytes" }
     }
 }

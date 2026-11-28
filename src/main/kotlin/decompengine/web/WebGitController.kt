@@ -65,6 +65,8 @@ internal class WebGitController(
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Only If-Match is supported for repository creation.")
                     }
                     val request = readRequest(exchange)
+                    // The audit entry names the requested source as commitments until admission confirms it.
+                    (request as? GitRepositoryRequest.Init)?.let { WebAuditSourceTarget.note(it.runId, it.revisionId, confirmed = false) }
                     val expected = match.removeSurrounding("\"")
                     // Keyed replay precedes the fresh guard, so an old If-Match still replays its original result.
                     val admission = mutation.request(repositories, jobId, request, key) {
@@ -72,6 +74,8 @@ internal class WebGitController(
                         if (current != expected) throw WebAccessDenied(412, "VERSION_CONFLICT", "The job changed. Refresh it before creating a repository.")
                     }
                     val operation = admission.operation
+                    // Admission resolved this source for the job; a replay returns the operation it originally admitted.
+                    (operation.request as? GitRepositoryRequest.Init)?.let { WebAuditSourceTarget.note(it.runId, it.revisionId, confirmed = true) }
                     exchange.responseHeaders.set("Location", "${basePath}api/v1/jobs/$jobId/repositories/${operation.repositoryId}/operations/${operation.operationId}")
                     exchange.responseHeaders.set("ETag", "\"${operation.version}\"")
                     if (admission.replayed) exchange.responseHeaders.set("Idempotency-Replayed", "true")

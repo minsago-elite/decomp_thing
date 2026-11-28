@@ -142,6 +142,11 @@ runs the upgrade, then restores it and confirms the restored tree hashes identic
   this build does not support, this build refuses startup with `UNSUPPORTED_WORKFLOW_SCHEMA` and leaves the file
   unchanged (tested by rewriting the version to 2). It never silently downgrades or rewrites a newer schema. Start the
   newer release again, or restore the backup taken before that upgrade.
+- *Audit log after a newer write*: an older build ignores newer fields on actions it knows, but rejects a segment
+  containing a newer action. It then hides that segment and refuses new audit appends whenever startup reads it.
+  Before downgrading, stop the server and move `<store>/.web-audit/` aside; the older build then writes a separate
+  audit log. When upgrading again, preserve that rollback-era log before restoring the original directory (see
+  [the API contract](web-api.md), "Audit log compatibility").
 
 ## Non-Git jobs and user repositories
 

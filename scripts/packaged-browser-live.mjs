@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
 // Authored inert storage fixtures, never an analyzed or executable target.
-function record(root, index) {
+export function record(root, index) {
   const id = createHash('sha256').update(`live-dashboard:${index}`).digest('hex').slice(0, 32);
   const at = new Date(Date.parse('2026-01-01T00:00:00Z') + index * 1000).toISOString();
   return { id, filename: `live-dashboard-${index}.elf`, status: 'uploaded', created_at: at, updated_at: at,
@@ -13,7 +13,7 @@ function record(root, index) {
       machine: 'x86-64', entry_point: 0, elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
 }
 
-async function publish(root, job, input) {
+export async function publish(root, job, input) {
   // A live listing must never observe a half-written fixture job.
   const directory = join(root, '.live-job-' + job.id);
   await fs.mkdir(directory, { mode: 0o700 });
@@ -32,6 +32,54 @@ export async function seedLive(root) {
   return { root, jobs, input };
 }
 
+const ownerLocks = ['.web-owner.lock', '.workflow-owner.lock'];
+
+// Session exchanges legitimately create the server-owned audit directory. Keep an
+// exact root inventory; do not ignore dotfiles or relax the owner/job checks.
+export async function assertLiveStorageInventory(root, jobs) {
+  assert.deepEqual((await fs.readdir(root)).sort(),
+    ['.web-audit', ...ownerLocks, ...jobs.map(job => job.id)].sort());
+  const audit = await fs.lstat(join(root, '.web-audit'));
+  assert.ok(audit.isDirectory() && !audit.isSymbolicLink(), 'Audit storage must be a real directory');
+}
+
+/** Recognize only the listener's known storage metadata, without ignoring arbitrary hidden entries. */
+export async function inspectLiveStorage(root, jobs) {
+  await assertLiveStorageInventory(root, jobs);
+  const owners = await Promise.all(ownerLocks.map(name => fs.lstat(join(root, name))));
+  for (const owner of owners) assert.ok(owner.isFile() && !owner.isSymbolicLink());
+  const auditRoot = join(root, '.web-audit');
+  const names = (await fs.readdir(auditRoot)).sort();
+  assert.deepEqual(names, ['current.jsonl', 'incomplete']);
+  const audit = [];
+  for (const name of names) {
+    const path = join(auditRoot, name);
+    const stat = await fs.lstat(path);
+    assert.ok(stat.isFile() && !stat.isSymbolicLink(), 'Audit entries must be regular files');
+    audit.push({ name, bytes: await fs.readFile(path) });
+  }
+  return { owners, audit };
+}
+
+// Session establishment legitimately persists audit state even when the dashboard never mutates jobs.
+// Capture it explicitly, rather than ignoring arbitrary hidden storage or weakening the read-only check.
+export async function snapshotLiveAudit(root) {
+  const directory = join(root, '.web-audit');
+  const identity = stat => Object.fromEntries(['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].map(key => [key, stat[key]]));
+  const stat = await fs.lstat(directory);
+  assert.ok(stat.isDirectory() && !stat.isSymbolicLink());
+  const names = (await fs.readdir(directory)).sort();
+  assert.deepEqual(names, ['current.jsonl', 'incomplete']);
+  const files = {};
+  for (const name of names) {
+    const path = join(directory, name);
+    const file = await fs.lstat(path);
+    assert.ok(file.isFile() && !file.isSymbolicLink());
+    files[name] = { identity: identity(file), bytes: (await fs.readFile(path)).toString('base64') };
+  }
+  return { identity: identity(stat), files };
+}
+
 export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin }) {
   const tab = await makeTarget();
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
@@ -42,10 +90,9 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.deepEqual(await evaluate(tab, rows), initial);
   // The running JVM owns these cooperative locks. Inspect metadata only and keep
   // both original files in place throughout the authored fixture updates.
-  const ownerLocks = ['.web-owner.lock', '.workflow-owner.lock'];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), [...ownerLocks, ...fixture.jobs.map(job => job.id)].sort());
-  const initialOwners = await Promise.all(ownerLocks.map(name => fs.lstat(join(fixture.root, name))));
-  for (const owner of initialOwners) assert.ok(owner.isFile() && !owner.isSymbolicLink());
+  const initialStorage = await inspectLiveStorage(fixture.root, fixture.jobs);
+  const initialOwners = initialStorage.owners;
+  const initialAudit = await snapshotLiveAudit(fixture.root);
   const heldPath = '/nested/jobs/' + fixture.jobs[0].id;
   assert.equal(await evaluate(tab, `(() => {
     const link = document.querySelector('ul[aria-label="Uploaded jobs"] a[href="${heldPath}"]');
@@ -80,9 +127,11 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.equal(await evaluate(tab, `[...document.querySelectorAll('button')].some(button => button.textContent === 'Resume live updates' && button.getAttribute('aria-pressed') === 'true')`), true);
 
   const finalJobs = [changed, fixture.jobs[1], added];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), [...ownerLocks, ...finalJobs.map(job => job.id)].sort());
+  const finalStorage = await inspectLiveStorage(fixture.root, finalJobs);
+  assert.deepEqual(finalStorage.audit, initialStorage.audit, 'Read-only dashboard checks must not change audit history');
+  assert.deepEqual(await snapshotLiveAudit(fixture.root), initialAudit, 'Read-only dashboard checks changed durable audit state');
   for (const [index, name] of ownerLocks.entries()) {
-    const finalOwner = await fs.lstat(join(fixture.root, name));
+    const finalOwner = finalStorage.owners[index];
     assert.ok(finalOwner.isFile() && !finalOwner.isSymbolicLink());
     for (const field of ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs']) assert.equal(finalOwner[field], initialOwners[index][field],
       'Live dashboard checks changed the running JVM owner lock: ' + name + ' ' + field);
@@ -100,6 +149,7 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
     stateUpdatePreservesRowAndFocus: true, newJobDeferredWithoutReorder: true,
     explicitRefreshAppliesCompleteSnapshot: true, pauseControlOperable: true,
     fixtureMutations: ['one atomic authored job status update', 'one authored inert job publication'],
-    existingOwnerLockPreserved: true, existingWorkflowOwnerLockPreserved: true, jobStorageUnchangedExceptFixtureEdits: true,
+    existingAuditStatePreserved: true, existingOwnerLockPreserved: true, existingWorkflowOwnerLockPreserved: true, existingAuditHistoryPreserved: true,
+    jobStorageUnchangedExceptFixtureEdits: true,
     mutationRequests: 0, executionStarted: false };
 }
