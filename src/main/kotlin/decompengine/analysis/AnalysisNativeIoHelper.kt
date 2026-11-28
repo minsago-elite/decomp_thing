@@ -1,5 +1,11 @@
 package decompengine.analysis
 
+import com.sun.jna.Library
+import com.sun.jna.Memory
+import com.sun.jna.Native
+import com.sun.jna.NativeLong
+import com.sun.jna.Platform
+import com.sun.jna.Pointer
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import java.io.FileDescriptor
@@ -95,8 +101,9 @@ internal object AnalysisNativeIoHelper {
     }
 
     /**
-     * Opens [helper] once, verifies the exact opened bytes with [verify], and returns a command that
-     * executes that descriptor through /proc. The pin follows the launch lifecycle of [beforeLaunch].
+     * Opens [helper] once, verifies the exact opened bytes with [verify], copies them into a sealed
+     * memfd and returns a command that executes that snapshot through /proc. A later write to the
+     * helper's inode cannot change what runs. The pin follows the launch lifecycle of [beforeLaunch].
      */
     internal fun pinExecutable(
         helper: Path,
@@ -109,22 +116,28 @@ internal object AnalysisNativeIoHelper {
         val pin = pins.reserve()
         try {
             val before = regularAttributes(helper)
-            val channel = FileChannel.open(helper, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
-            pin.accept(channel)
-            val descriptor = Jdk21IoDescriptor.number(channel)
-            val executable = Path.of("/proc", ProcessHandle.current().pid().toString(), "fd", descriptor.toString())
-            val opened = Files.readAttributes(executable, BasicFileAttributes::class.java)
-            require(sameFile(before, opened) && opened.isRegularFile && channel.size() == before.size()) {
-                "$label executable changed while its descriptor was opened"
+            val bytes = FileChannel.open(helper, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                val descriptor = Jdk21IoDescriptor.number(channel)
+                val source = Path.of("/proc", ProcessHandle.current().pid().toString(), "fd", descriptor.toString())
+                val opened = Files.readAttributes(source, BasicFileAttributes::class.java)
+                require(sameFile(before, opened) && opened.isRegularFile && channel.size() == before.size()) {
+                    "$label executable changed while its descriptor was opened"
+                }
+                val bytes = ByteArray(Math.toIntExact(before.size().also {
+                    require(it in 64..maximumBytes.toLong())
+                }))
+                val buffer = ByteBuffer.wrap(bytes)
+                while (buffer.hasRemaining()) require(channel.read(buffer) > 0)
+                require(channel.read(ByteBuffer.allocate(1)) == -1 && channel.size() == before.size() &&
+                    sameFile(before, regularAttributes(helper))) { "$label executable changed while being pinned" }
+                // Permissions are checked on the opened source image; the snapshot is what executes.
+                verify(bytes, source)
+                bytes
             }
-            val bytes = ByteArray(Math.toIntExact(before.size().also {
-                require(it in 64..maximumBytes.toLong())
-            }))
-            val buffer = ByteBuffer.wrap(bytes)
-            while (buffer.hasRemaining()) require(channel.read(buffer) > 0)
-            require(channel.read(ByteBuffer.allocate(1)) == -1 && channel.size() == before.size() &&
-                sameFile(before, regularAttributes(helper))) { "$label executable changed while being pinned" }
-            verify(bytes, executable)
+            val snapshot = SealedExecutableSnapshot.create(helper.fileName.toString(), bytes, label)
+            pin.accept(snapshot)
+            val descriptor = Jdk21IoDescriptor.number(snapshot)
+            val executable = Path.of("/proc", ProcessHandle.current().pid().toString(), "fd", descriptor.toString())
             return PinnedNativeIoCommand(pin, listOf(executable.toString()) + arguments)
         } catch (failure: Throwable) {
             try { pin.notLaunched() } catch (cleanup: Throwable) {
@@ -469,6 +482,63 @@ internal class NativeIoExecutablePin(
         } catch (failure: Throwable) {
             unconfirmed.set(true)
             throw failure
+        }
+    }
+}
+
+/**
+ * Verified executable bytes in a memfd sealed against writing, growing, shrinking and further sealing,
+ * so neither this process nor a writer of the source inode can change them before exec.
+ */
+private object SealedExecutableSnapshot {
+    private interface Libc : Library {
+        fun memfd_create(name: String, flags: Int): Int
+        fun fcntl(fd: Int, command: Int, argument: Int): Int
+        fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
+        fun close(fd: Int): Int
+    }
+
+    private val libc: Libc by lazy { Native.load(Platform.C_LIBRARY_NAME, Libc::class.java) }
+    private const val MFD_CLOEXEC = 0x1
+    private const val MFD_ALLOW_SEALING = 0x2
+    private const val MFD_EXEC = 0x10
+    private const val F_ADD_SEALS = 1033
+    private const val F_GET_SEALS = 1034
+    private const val REQUIRED_SEALS = 0x1 or 0x2 or 0x4 or 0x8 // SEAL, SHRINK, GROW, WRITE
+    private const val EINTR = 4
+    private const val EINVAL = 22
+
+    fun create(name: String, bytes: ByteArray, label: String): FileChannel {
+        // MFD_EXEC (Linux 6.3) keeps the memfd executable when vm.memfd_noexec defaults to no-exec.
+        var fd = libc.memfd_create(name, MFD_CLOEXEC or MFD_ALLOW_SEALING or MFD_EXEC)
+        if (fd < 0 && Native.getLastError() == EINVAL) fd = libc.memfd_create(name, MFD_CLOEXEC or MFD_ALLOW_SEALING)
+        require(fd >= 0) { "$label snapshot could not be created (errno ${Native.getLastError()})" }
+        try {
+            val memory = Memory(bytes.size.toLong())
+            memory.write(0, bytes, 0, bytes.size)
+            var written = 0L
+            while (written < bytes.size) {
+                val count = libc.write(fd, memory.share(written), NativeLong(bytes.size - written)).toLong()
+                if (count < 0 && Native.getLastError() == EINTR) continue
+                require(count > 0) { "$label snapshot could not be written (errno ${Native.getLastError()})" }
+                written += count
+            }
+            require(libc.fcntl(fd, F_ADD_SEALS, REQUIRED_SEALS) == 0 &&
+                libc.fcntl(fd, F_GET_SEALS, 0) and REQUIRED_SEALS == REQUIRED_SEALS) { "$label snapshot could not be sealed" }
+            val snapshot = FileChannel.open(Path.of("/proc/self/fd/$fd"), StandardOpenOption.READ)
+            try {
+                val copy = ByteBuffer.allocate(bytes.size + 1)
+                while (snapshot.read(copy) > 0) Unit
+                require(copy.position() == bytes.size && MessageDigest.isEqual(bytes, copy.array().copyOf(bytes.size))) {
+                    "$label snapshot differs from its verified bytes"
+                }
+                return snapshot
+            } catch (failure: Throwable) {
+                snapshot.close()
+                throw failure
+            }
+        } finally {
+            libc.close(fd)
         }
     }
 }

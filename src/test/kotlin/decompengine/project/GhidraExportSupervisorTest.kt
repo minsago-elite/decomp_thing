@@ -86,6 +86,38 @@ class GhidraExportSupervisorTest {
     }
 
     @Test
+    fun `a write to the verified inode after verification cannot change what runs`() = inControlTemporaryDirectory { root ->
+        val copy = Files.createDirectory(root.resolve("libexec")).resolve(ExportSupervisorHelper.BINARY_NAME)
+        Files.write(copy, Files.readAllBytes(ExportSupervisorHelper.verifiedDefaultArtifact()))
+        Files.setPosixFilePermissions(copy, PosixFilePermissions.fromString("rwxr-xr-x"))
+        val inode = Files.readAttributes(copy, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+        val workerRan = root.resolve("worker-ran")
+        val tamperedRan = root.resolve("tampered-ran")
+        val command = ExportSupervisorHelper.commandAt(copy, listOf("/bin/sh", "-c", "touch '$workerRan'"), 0)
+
+        // Rewrite the same inode in place with a script, after verification and before launch.
+        java.nio.channels.FileChannel.open(copy, java.nio.file.StandardOpenOption.WRITE).use { channel ->
+            channel.truncate(0)
+            channel.write(java.nio.ByteBuffer.wrap("#!/bin/sh\ntouch '$tamperedRan'\n".toByteArray()))
+        }
+        assertEquals(inode, Files.readAttributes(copy, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey())
+        val supervisor = startSupervisedExportProcess(command, root)
+        try {
+            assertTrue(Files.readSymbolicLink(Path.of("/proc/${supervisor.pid()}/exe")).toString().startsWith("/memfd:"),
+                "the launched image is the sealed snapshot")
+            supervisor.outputStream.write("1\n".toByteArray())
+            supervisor.outputStream.flush()
+            assertTrue(supervisor.waitFor(10, TimeUnit.SECONDS))
+            assertEquals(0, supervisor.exitValue())
+        } finally {
+            supervisor.outputStream.close()
+            supervisor.waitFor(5, TimeUnit.SECONDS)
+        }
+        assertTrue(workerRan.exists(), "the verified supervisor ran its worker")
+        assertFalse(tamperedRan.exists(), "the rewritten inode never ran")
+    }
+
+    @Test
     fun `the packaged supervisor authenticates from the development build`() {
         val helper = ExportSupervisorHelper.verifiedDefaultArtifact()
         assertEquals(ExportSupervisorHelper.BINARY_NAME, helper.fileName.toString())

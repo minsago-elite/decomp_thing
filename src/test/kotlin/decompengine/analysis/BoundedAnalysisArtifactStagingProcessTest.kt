@@ -269,8 +269,10 @@ class BoundedAnalysisArtifactStagingProcessTest {
                 assertFalse(openedIdentity == Files.readAttributes(helper, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).fileKey())
                 val descriptor = Path.of(command.first())
                 assertTrue(descriptor.startsWith(Path.of("/proc", ProcessHandle.current().pid().toString(), "fd")))
-                assertEquals(openedIdentity, Files.readAttributes(descriptor, BasicFileAttributes::class.java).fileKey())
-                assertContentEquals(authenticated, stagingDigest(descriptor), "the command must still name the authenticated old inode")
+                // The command names a sealed snapshot of the authenticated bytes, not the replaced path.
+                assertTrue(Files.readSymbolicLink(descriptor).toString().startsWith("/memfd:"), "the command executes a sealed snapshot")
+                assertFalse(openedIdentity == Files.readAttributes(descriptor, BasicFileAttributes::class.java).fileKey())
+                assertContentEquals(authenticated, stagingDigest(descriptor), "the command must still name the authenticated bytes")
             }
         })
         var failure: Throwable? = null
