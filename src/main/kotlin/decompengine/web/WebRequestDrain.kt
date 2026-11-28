@@ -57,6 +57,9 @@ internal class WebRequestDrain(private val clock: () -> Long = System::nanoTime)
         }
     }
 
+    /** Whether the drain extended to the audit deadline: only audit appends remained at the request deadline. */
+    val auditExtended: Boolean get() = auditExtension == true
+
     /** Nanoseconds until the next deadline that can change [decide]. */
     fun waitNanos(): Long = (if (auditExtension == true) auditDeadline else requestDeadline) - clock()
 }

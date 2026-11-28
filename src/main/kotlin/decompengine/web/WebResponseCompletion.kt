@@ -24,6 +24,10 @@ internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpE
     // Set before delegating an exchange close: the JDK then marks the body closed and swallows a short-body
     // failure, so a later body close would wrongly look clean. Completion established earlier is kept.
     @Volatile private var exchangeClosed = false
+    private var declaredLength = 0L
+    private val written = java.util.concurrent.atomic.AtomicLong()
+    /** Test seam between a body close returning and its completion check, where an exchange close can race. */
+    @Volatile internal var afterBodyClose: () -> Unit = {}
     private var body: TrackedBody? = null
 
     private inline fun <T> tracked(block: () -> T): T = try { block() } catch (failure: Throwable) { failed = true; throw failure }
@@ -32,7 +36,7 @@ internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpE
         tracked { delegate.sendResponseHeaders(rCode, responseLength) }
         // These responses carry no body: the JDK finishes them once their headers are written.
         if (responseLength == -1L || delegate.requestMethod == "HEAD" || rCode == 204 || rCode == 304) completed = true
-        else if (responseLength > 0) fixedLengthBody = true
+        else if (responseLength > 0) { declaredLength = responseLength; fixedLengthBody = true }
     }
 
     override fun getResponseBody(): OutputStream {
@@ -45,12 +49,16 @@ internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpE
     }
 
     private inner class TrackedBody(val output: OutputStream) : OutputStream() {
-        override fun write(b: Int) = tracked { output.write(b) }
-        override fun write(b: ByteArray, off: Int, len: Int) = tracked { output.write(b, off, len) }
+        override fun write(b: Int) { tracked { output.write(b) }; written.incrementAndGet() }
+        override fun write(b: ByteArray, off: Int, len: Int) { tracked { output.write(b, off, len) }; written.addAndGet(len.toLong()) }
         override fun flush() = tracked { output.flush() }
         override fun close() {
             tracked { output.close() }
-            if (fixedLengthBody && !failed && !exchangeClosed) completed = true
+            afterBodyClose()
+            // An exchange close (for example the request deadline) can overlap this one. A clean return then
+            // confirms completion only if the exact declared length was accepted: after an exchange close the
+            // JDK marks the body closed and swallows a short-body failure, so the return alone proves nothing.
+            if (fixedLengthBody && !failed && (!exchangeClosed || written.get() == declaredLength)) completed = true
         }
     }
 

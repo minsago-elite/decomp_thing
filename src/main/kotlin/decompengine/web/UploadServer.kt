@@ -380,6 +380,8 @@ class UploadServer(
     private val admittedOnThread = ThreadLocal<Boolean>()
     /** Test seam between the request-drain decision and the ownership decision in [stop]. */
     @Volatile internal var requestDrainObserver: () -> Unit = {}
+    /** Test seam run, under lifecycleLock and without blocking, when stop's drain extends to the audit deadline. */
+    @Volatile internal var auditExtensionObserver: () -> Unit = {}
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
 
@@ -706,8 +708,10 @@ class UploadServer(
         synchronized(lifecycleLock) {
             requestDrain.begin(TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs),
                 TimeUnit.MILLISECONDS.toNanos(auditShutdownTimeoutMs))
+            var extensionReported = false
             while (true) {
                 requestDrain.decide()?.let { return it }
+                if (!extensionReported && requestDrain.auditExtended) { extensionReported = true; auditExtensionObserver() }
                 val remaining = requestDrain.waitNanos()
                 if (remaining <= 0) continue
                 try { TimeUnit.NANOSECONDS.timedWait(lifecycleLock, remaining) } catch (_: InterruptedException) { onInterrupt() }
