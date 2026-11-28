@@ -36,6 +36,8 @@ class WebProgramStructureTest {
         val acceptedModules: Set<String> = emptySet(),
         val unresolvedImplementations: List<String> = emptyList(),
         val modelInput: String = inputSha,
+        /** Non-module files whose manifest records carry acceptedImplementation=true, which the manifest permits. */
+        val acceptedOtherPaths: Set<String> = emptySet(),
     ) {
         val sources = (listOf("Makefile", "include/decomp_types.h") + modules.flatMap { listOf("src/modules/$it.c", "include/modules/$it.h") })
             .associateWith { "// $it\n".toByteArray() }
@@ -52,7 +54,8 @@ class WebProgramStructureTest {
                 val declaration = profile.layout.declarationForPath(path)
                 val module = path.removePrefix("src/modules/").removeSuffix(".c")
                 GeneratedFileEvidence(path, sha(bytes), "fixture",
-                    acceptedImplementation = if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) module in acceptedModules else null,
+                    acceptedImplementation = if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) module in acceptedModules
+                        else if (path in acceptedOtherPaths) true else null,
                     roles = declaration.roles, contentKind = declaration.contentKind)
             }, unresolvedEntityIds = emptyList(), unresolvedImplementationIds = unresolvedImplementations).toJson().toByteArray()
         val descriptor = buildJsonObject {
@@ -522,6 +525,27 @@ class WebProgramStructureTest {
         assertContract("moduleDetail", detail); assertEquals(JsonNull, detail["module"])
         val absent = Revision(model(functions), null, listOf("core")).pages.functions("owner", jobId, runId, revisionId, null)
         assertEquals("not-recorded", absent.getValue("plan").jsonObject.text("state"))
+    }
+
+    @Test fun `a planned source path naming another declared file never classifies the module as accepted`() {
+        val owned = listOf("fn_0000000000401000")
+        fun classification(sourcePath: String, acceptedModules: Set<String>, acceptedOther: Set<String>): Pair<String?, Int> {
+            val plan = plan(PlannedModule("core", sourcePath, "include/modules/core.h", owned, emptyList(), emptyList(), emptyList()))
+            val revision = Revision(model(functions, globals, types), plan, listOf("core"), acceptedModules, acceptedOtherPaths = acceptedOther)
+            val modules = revision.pages.modules("owner", jobId, runId, revisionId, null)
+            assertContract("moduleInventory", modules)
+            assertEquals("available", modules.getValue("plan").jsonObject.text("state"), sourcePath)
+            return modules.items().single().text("implementationDeclaration") to
+                modules.getValue("summary").jsonObject.getValue("modulesDeclaredAccepted").jsonPrimitive.int
+        }
+        // The manifest permits acceptedImplementation=true on other declarations; only the profile's
+        // module-implementation declaration may classify a planned module.
+        for (other in listOf("include/decomp_types.h", "Makefile")) {
+            assertEquals("not-classified" to 0, classification(other, setOf("core"), setOf(other)), other)
+        }
+        // Positive control: the module's own implementation file still classifies it.
+        assertEquals("accepted" to 1, classification("src/modules/core.c", setOf("core"), emptySet()))
+        assertEquals("unaccepted" to 0, classification("src/modules/core.c", emptySet(), emptySet()))
     }
 
     @Test fun `module detail lists owned entities progress and revision source links`() {
