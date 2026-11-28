@@ -39,9 +39,19 @@ const inputValue = (workflow: string) => option(workflow).getByText('Input revis
 it('keeps retained revision facts through a transient job refresh and clears them from the next job report', async () => {
   const { session, bootstrap } = await launchSession();
   const old = 'revision_previously_accepted_7';
-  transport.get.mockResolvedValueOnce({ data: { ...sample, acceptedRevisionId: old } })
-    .mockRejectedValueOnce(new ApiClientError('timeout'))
-    .mockResolvedValueOnce({ data: { ...sample, acceptedRevisionId: null } });
+  // Job reads answer in order; the accepted-work lookup reads history separately, so it cannot consume them.
+  const jobReads: (() => Promise<unknown>)[] = [
+    () => Promise.resolve({ data: { ...sample, acceptedRevisionId: old } }),
+    () => Promise.reject(new ApiClientError('timeout')),
+    () => Promise.resolve({ data: { ...sample, acceptedRevisionId: null } }),
+  ];
+  const emptyHistory = { ...fixture<Runs>('runs-page.json'), items: [], page: { limit: 50, pageNumber: 1, snapshotVersion: sample.version, nextCursor: null } };
+  transport.get.mockImplementation(kind => {
+    if (kind === 'job') return jobReads.shift()?.() ?? Promise.reject(new ApiClientError('timeout'));
+    if (kind === 'runs') return Promise.resolve({ data: emptyHistory });
+    return Promise.reject(new ApiClientError('timeout'));
+  });
+  const reads = (kind: string) => transport.get.mock.calls.filter(call => call[0] === kind).length;
   history.replaceState(null, '', '/nested/jobs/' + sample.jobId);
   try {
     render(<App basePath="/nested" session={session} />);
@@ -72,7 +82,10 @@ it('keeps retained revision facts through a transient job refresh and clears the
     expect(within(inputValue('Repair')).getByRole('link', { name: 'attempt history' })).toBeTruthy();
     expect(inputValue('Validation').textContent).toBe('Optional. This workflow can start from the uploaded binary alone. The last job report names no accepted revision to specify.');
     expect(within(inputValue('Validation')).queryByRole('link')).toBeNull();
-    expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job', 'job', 'job']);
+    expect(reads('job')).toBe(3);
+    // Only the first job report names an accepted revision, so only it reads history.
+    expect(reads('runs')).toBe(1);
+    expect(transport.get.mock.calls.every(call => call[0] === 'job' || call[0] === 'runs')).toBe(true);
     // Refresh job reads the job record only; the session report is still the first bootstrap.
     expect(bootstrap).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: /start|select|reload|check/i })).toBeNull();
@@ -110,7 +123,7 @@ it.each(['metadata', 'missing-metadata'])('leads from the required-input guidanc
     expect(screen.queryByText(result)).toBeNull();
 
     fireEvent.click(within(inputValue('Repair')).getByRole('link', { name: 'attempt history' }));
-    const attempt = await screen.findByRole('link', { name: new RegExp(run.runId) });
+    const attempt = await screen.findByRole('link', { name: `${run.workflow}: ${run.runId}` });
     // History lists the completed state but neither revision ID.
     expect(within(attempt.closest('li')!).getByText(/Attempt state: completed\./)).toBeTruthy();
     expect(screen.queryByText(result)).toBeNull();
@@ -153,7 +166,7 @@ it('renders a completed exploration attempt without a result candidate', async (
     await screen.findByRole('heading', { name: 'Workflow availability for this job' });
     expect(inputValue('Repair').textContent).toContain('Open a completed attempt in attempt history and use its Result revision. If it has none, check another attempt.');
     fireEvent.click(within(inputValue('Repair')).getByRole('link', { name: 'attempt history' }));
-    const attempt = await screen.findByRole('link', { name: new RegExp(run.runId) });
+    const attempt = await screen.findByRole('link', { name: `${run.workflow}: ${run.runId}` });
     expect(within(attempt.closest('li')!).getByText(/Attempt state: completed/)).toBeTruthy();
     fireEvent.click(attempt);
     await screen.findByText('No result revision recorded');
