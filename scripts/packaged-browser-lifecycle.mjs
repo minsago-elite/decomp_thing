@@ -68,12 +68,33 @@ async function tombstoneReference(observation, waitFor) {
   return reference;
 }
 
-async function listed(tab, evaluate, id, archived) {
-  return evaluate(tab, `(async () => {
-    const response = await fetch('/nested/api/v1/jobs?limit=100${archived ? '&archived=' + archived : ''}');
-    if (response.status !== 200) throw new Error('job listing ' + response.status);
-    return (await response.json()).data.items.some(job => job.jobId === '${id}');
-  })()`);
+// The server collects one job listing at a time and refuses an overlapping one with 503 LISTING_BUSY
+// (WebJobPages), which the dashboard's own 30 s poll can trigger. Retry only that refusal, a bounded
+// number of times; every other status or error code fails at once.
+export const listingBusyWaitsMs = [100, 200, 400, 800];
+export const listingProbe = (id, archived) => `(async () => {
+  const url = ${JSON.stringify('/nested/api/v1/jobs?limit=100' + (archived ? '&archived=' + archived : ''))};
+  const waits = ${JSON.stringify(listingBusyWaitsMs)};
+  for (let attempt = 1; ; attempt++) {
+    const response = await fetch(url);
+    if (response.status === 200) return (await response.json()).data.items.some(job => job.jobId === ${JSON.stringify(id)});
+    let code = null;
+    try {
+      const body = JSON.parse(await response.text());
+      if (body && body.kind === 'error' && body.error && typeof body.error.code === 'string') code = body.error.code;
+    } catch {}
+    if (response.status !== 503 || code !== 'LISTING_BUSY' || attempt > waits.length) {
+      throw new Error('job listing failed after ' + attempt + ' attempt(s): status=' + response.status + ' code=' + code);
+    }
+    let wait = waits[attempt - 1];
+    const retryAfter = response.headers.get('Retry-After');
+    if (retryAfter !== null && /^\\d+$/.test(retryAfter.trim())) wait = Math.min(wait, Number(retryAfter.trim()) * 1000);
+    await new Promise(resolve => setTimeout(resolve, wait));
+  }
+})()`;
+
+export async function listed(tab, evaluate, id, archived) {
+  return evaluate(tab, listingProbe(id, archived));
 }
 
 export async function qualifyLifecycle({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin }) {
