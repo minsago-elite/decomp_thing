@@ -832,11 +832,15 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         return AcpProviderRelayChannelFactory { AcpProviderRelayEndpoints(sink, spare.source()) }
     }
 
-    /** A real pipe whose write end is already full, so the broker's write can never make progress. */
+    /**
+     * A real pipe whose write end is already full, so the broker's write can never make progress. The end is left in
+     * blocking mode, as a fresh pipe is, so only the broker's own non-blocking setup keeps its write from blocking.
+     */
     private fun fullPipe(): java.nio.channels.Pipe = java.nio.channels.Pipe.open().also { pipe ->
         closeables += pipe.source()
         pipe.sink().configureBlocking(false)
         while (pipe.sink().write(ByteBuffer.allocate(64 * 1024)) > 0) Unit
+        pipe.sink().configureBlocking(true)
     }
 
     /** Reads the delivered capability from the relay end, as the contained relay would. */
