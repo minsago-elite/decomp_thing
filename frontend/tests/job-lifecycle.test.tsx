@@ -67,8 +67,8 @@ it('reports a stale guard, re-reads the job and never retries the change automat
   render(<JobOrganization job={job()} client={typed} basePath="/" session={session} onChanged={changed} />);
   fireEvent.input(screen.getByLabelText('Display label (optional)'), { target: { value: 'Mine' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save organization' }));
-  expect(await screen.findByText(/changed in another tab or request/)).toBeTruthy();
   await waitFor(() => expect(changed).toHaveBeenCalledWith(expect.objectContaining({ version: 'version_9' })));
+  expect(await screen.findByText('The job changed in another tab or request. The current version is shown; review it before saving again.')).toBeTruthy();
   expect(client.put).toHaveBeenCalledOnce();
 });
 

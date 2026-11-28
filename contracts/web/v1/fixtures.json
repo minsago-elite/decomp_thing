@@ -985,6 +985,11 @@
       "reason": "A page with unrecorded entries cannot claim completeness."
     },
     {
+      "file": "fixtures/invalid-support-export-audit-revision.json",
+      "valid": false,
+      "reason": "A revision-bound audit target names a closed-syntax revision ID or commitment."
+    },
+    {
       "file": "fixtures/capacity-saturated.json",
       "valid": true
     },
