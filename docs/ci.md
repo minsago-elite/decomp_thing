@@ -238,7 +238,9 @@ command's process tree writes to `/tmp`. Its default command is
 As root, or with passwordless `sudo -n` (hosted CI), the namespace keeps real user
 and group IDs. Otherwise the check uses an unprivileged user namespace, where files
 owned by other users appear as the overflow user and setuid programs such as `sudo`
-fail.
+fail. Build steps that check file ownership fail there too. For example,
+`buildAnalysisIoHelper` refuses the root-owned `/usr/bin/cc` with `fileUid=65534`. Use
+the user-namespace mode only for commands that do not check ownership.
 
 Limits:
 
