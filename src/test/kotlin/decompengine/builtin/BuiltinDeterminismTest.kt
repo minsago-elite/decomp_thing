@@ -444,7 +444,7 @@ class BuiltinDeterminismTest {
     }
 
     private fun assemble(request: AgentExecutionRequest): BuiltinContextPackage = BuiltinContextAssembler.assemble(
-        request, 12_000, 64_000, true,
+        request, 12_000, 64_000, 8192, true,
         BuiltinExecutionControl(request, System.nanoTime() + Duration.ofSeconds(10).toNanos()),
     ) { messages -> contextBytes(messages) }
 
