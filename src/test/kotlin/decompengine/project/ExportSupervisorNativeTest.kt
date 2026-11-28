@@ -205,11 +205,14 @@ class ExportSupervisorNativeTest {
                 echo ${'$'}w > "${'$'}out/worker"
                 (
                     trap "" TERM
+                    touch "${'$'}out/leftover-ready"
                     while kill -0 ${'$'}w 2>/dev/null; do sleep 0.01; done
                     echo ${'$'}((w - 1)) > /proc/sys/kernel/ns_last_pid
                     /bin/sh -c "echo \${'$'}\${'$'} > \"${'$'}out/reuser\"; sleep 0.3; exit 99" &
                     exit 0
                 ) &
+                # The leftover installs its trap before the worker exits, so the drain SIGTERM cannot arrive first.
+                while [ ! -e "${'$'}out/leftover-ready" ]; do sleep 0.01; done
                 exit 7' worker "${'$'}work" &
             supervisor=${'$'}!
             status=0
