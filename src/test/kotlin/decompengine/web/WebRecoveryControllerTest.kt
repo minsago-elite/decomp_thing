@@ -14,6 +14,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executor
@@ -32,12 +33,17 @@ class WebRecoveryControllerTest {
         @Volatile var deferred: Boolean = false,
         val checkpoints: DurableWebWorkflowCheckpointPolicy? = null,
         val launch: DurableWebWorkflowLaunch? = null,
+        val captureBytes: (DurableWebWorkflowCheckpointRequest) -> ByteArray = { CONTINUATION_BYTES },
+        val afterCapture: (DurableWebWorkflowCheckpointRequest) -> Unit = {},
+        val beforeLaunch: () -> Unit = {},
+        val duringLaunch: () -> Unit = {},
         seed: ((WorkflowAttemptStore, String) -> Unit)? = null,
         private val deleteRoot: Boolean = true,
     ) : AutoCloseable {
         val store = JobStore(root)
         val job = reuseJob?.let(store::get) ?: store.createFromUpload("authored.elf", elfFixture())
         val contexts = CopyOnWriteArrayList<DurableWebWorkflowContext>()
+        val restored = CopyOnWriteArrayList<ByteArray>()
         val outcomes = ConcurrentLinkedQueue<DurableWebWorkflowOutcome>()
         val pending = ConcurrentLinkedQueue<Runnable>()
         @Volatile var fault: WorkflowStoreFaultPoint? = null
@@ -65,6 +71,23 @@ class WebRecoveryControllerTest {
                     override val harnessCapabilityId = CAPABILITY
                     override val launch = this@Fixture.launch
                     override val checkpoints = policy
+                    override val continuation = if (policy == null) null else object : DurableWebWorkflowContinuation {
+                        override fun capture(request: DurableWebWorkflowCheckpointRequest): VerifiedWebCheckpoint {
+                            val captured = VerifiedWebCheckpoint(captureBytes(request), WorkflowResumeRestoration.PROJECT_EVIDENCE)
+                            afterCapture(request)
+                            return captured
+                        }
+                        override fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint,
+                            fence: DurableWebWorkflowContinuationFence): DurableWebWorkflowOutcome {
+                            beforeLaunch()
+                            fence.launch({ checkpoint.bytes() }) { bytes ->
+                                contexts += context
+                                restored += bytes
+                                duringLaunch()
+                            }
+                            return outcomes.poll() ?: DurableWebWorkflowOutcome.Failed()
+                        }
+                    }
                     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
                         contexts += context
                         return outcomes.poll() ?: DurableWebWorkflowOutcome.Failed()
@@ -147,6 +170,7 @@ class WebRecoveryControllerTest {
         assertEquals(WorkflowLaunchSelection("workflow-reconstruct-agent", "agent"), f.attempt(id).launchSelection)
         assertEquals("${f.runs}/$id", response.headers().firstValue("Location").orElseThrow())
         assertEquals(2, f.contexts.size); assertNull(f.contexts.last().predecessorReportsDirectory)
+        assertTrue(f.restored.isEmpty())
         // The predecessor is unchanged; retry restores nothing from it.
         assertEquals(predecessorBytes, Json.parseToJsonElement(webRun(f.attempt(failed)).toString()))
         val stored = f.state().readBytes()
@@ -189,7 +213,8 @@ class WebRecoveryControllerTest {
             assertEquals(buildJsonObject { put("mode", "resume"); put("restores", "project-evidence"); put("checkpointSha256", SHA) }, resumed["recovery"])
             val context = f.contexts.last()
             assertEquals(WorkflowRecoveryMode.RESUME, context.attempt.recovery!!.mode)
-            assertEquals(f.store.runReportsDirectory(f.job.id, failed), context.predecessorReportsDirectory)
+            assertNull(context.predecessorReportsDirectory)
+            assertContentEquals(CONTINUATION_BYTES, f.restored.single())
             assertTrue(inspected.all { it.predecessor.runId == failed && it.job.id == f.job.id })
             assertEquals(CAPABILITY, resumed.getValue("harnessCapabilityId").jsonPrimitive.content)
             assertEquals(WorkflowLaunchSelection("workflow-reconstruct-agent", "agent"),
@@ -250,6 +275,374 @@ class WebRecoveryControllerTest {
                 assertTrue(f.contexts.isEmpty())
             }
         } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun `a duplicate published during inspection is replayed before predecessor checks`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val inspections = java.util.concurrent.atomic.AtomicInteger()
+        Fixture(checkpoints = {
+            if (inspections.getAndIncrement() == 0) {
+                entered.countDown()
+                check(release.await(10, TimeUnit.SECONDS))
+            }
+            DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE)
+        }).use { f ->
+            val failed = f.attempt(f.start())
+            f.deferred = true
+            val executor = Executors.newSingleThreadExecutor()
+            fun request() = f.service.requestDurableRecovery(f.job.id, failed.runId, failed.version, WorkflowRecoveryMode.RESUME, null, KEY)
+            try {
+                val first = executor.submit<DurableWebWorkflowStartResult> { request() }
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                val published = request()
+                assertFalse(published.replayed)
+                release.countDown()
+                val replay = first.get(3, TimeUnit.SECONDS)
+                assertTrue(replay.replayed)
+                assertEquals(published.attempt, replay.attempt)
+                assertEquals(1, f.pending.size)
+                assertEquals(2, inspections.get())
+            } finally {
+                release.countDown()
+                executor.shutdownNow()
+                assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS))
+            }
+        }
+    }
+
+    @Test
+    fun `controls expose a closed refusal when the inspected version changes`() {
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { request ->
+            fixture.service.setProgressRetentionPinned(request.job.id, request.predecessor.runId, request.predecessor.version, true)
+            DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE)
+        }).use { f ->
+            fixture = f
+            val id = f.start()
+            val data = f.controls(id).second
+            assertEquals(control(false, "CHECKPOINT_UNVERIFIED"), data.getValue("resume"))
+            assertEquals(f.attempt(id).version, data.getValue("runVersion").jsonPrimitive.content)
+            assertNull(data["resumeRestores"]?.takeUnless { it == JsonNull })
+        }
+    }
+
+    @Test
+    fun `blocked eligibility and admission inspections permit unrelated status and recheck a racing retry`() {
+        val entered = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        Fixture(checkpoints = {
+            entered.countDown()
+            check(release.await(10, TimeUnit.SECONDS))
+            DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE)
+        }).use { f ->
+            val failed = f.attempt(f.start())
+            val other = f.store.createFromUpload("other.elf", elfFixture())
+            val workers = Executors.newFixedThreadPool(3)
+            try {
+                val controls = workers.submit<WebAttemptControls> { f.service.attemptControls(f.job.id, failed.runId) }
+                val resume = workers.submit<String> {
+                    assertFailsWith<WebJobServiceException> {
+                        f.service.requestDurableRecovery(f.job.id, failed.runId, failed.version,
+                            WorkflowRecoveryMode.RESUME, null, "blocked_resume_key")
+                    }.code
+                }
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                val retry = workers.submit<WorkflowAttempt> {
+                    assertEquals("CAPACITY_UNAVAILABLE", f.service.attemptControls(f.job.id, failed.runId).resumeReason)
+                    assertEquals(other.id, f.service.presentation(other.id).job.id)
+                    f.service.requestDurableRecovery(f.job.id, failed.runId, failed.version,
+                        WorkflowRecoveryMode.RETRY, null, "racing_retry_key_01").attempt
+                }.get(3, TimeUnit.SECONDS)
+                release.countDown()
+                assertEquals("ATTEMPT_SUPERSEDED", controls.get(3, TimeUnit.SECONDS).resumeReason)
+                assertEquals("ATTEMPT_SUPERSEDED", resume.get(3, TimeUnit.SECONDS))
+                assertEquals(retry.runId, f.snapshot().latestRun?.runId)
+                assertEquals(2, f.snapshot().attempts.size)
+                assertTrue(f.restored.isEmpty())
+            } finally {
+                release.countDown()
+                workers.shutdownNow()
+                assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS))
+            }
+        }
+    }
+
+    @Test
+    fun `checkpoint substitution in the queue refuses before execution and replays the same successor`() {
+        val policy = DurableWebWorkflowCheckpointPolicy { request ->
+            val bytes = request.predecessorReportsDirectory.resolve("checkpoint").readBytes()
+            DurableWebWorkflowCheckpoint.Verified(decompengine.project.sha256(bytes), WorkflowResumeRestoration.PROJECT_EVIDENCE)
+        }
+        Fixture(checkpoints = policy, captureBytes = { it.predecessorReportsDirectory.resolve("checkpoint").readBytes() }).use { f ->
+            val predecessor = f.start()
+            val reports = f.contexts.single().reportsDirectory
+            val file = Files.write(reports.resolve("checkpoint"), CONTINUATION_BYTES)
+            val version = f.attempt(predecessor).version
+            val before = f.state().readBytes()
+            fun inventory() = Files.walk(f.root).use { entries -> entries.map(f.root::relativize).sorted().toList() }
+            val beforeFiles = inventory()
+
+            repeat(2) { assertEquals(control(true, null), f.controls(predecessor).second.getValue("resume")) }
+            assertContentEquals(before, f.state().readBytes())
+            assertContentEquals(CONTINUATION_BYTES, file.readBytes())
+            assertEquals(beforeFiles, inventory())
+
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            assertEquals(WorkflowRunState.QUEUED, f.attempt(successor).state)
+            Files.writeString(file, "changed while queued")
+            f.pending.remove().run()
+            assertEquals(WorkflowRunState.FAILED, f.attempt(successor).state)
+            assertEquals(WorkflowTerminalReason.REFUSED, f.attempt(successor).terminalReason)
+            assertNull(f.snapshot().acceptedRevision)
+            assertNull(f.attempt(successor).candidate)
+            assertEquals(1, f.contexts.size)
+            assertTrue(f.restored.isEmpty())
+            val after = f.state().readBytes()
+            val replay = f.recover(predecessor, mode = "resume", version = version)
+            assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
+            assertEquals(successor, run(replay).getValue("runId").jsonPrimitive.content)
+            assertContentEquals(after, f.state().readBytes())
+            assertTrue(f.pending.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a queued successor cannot replace its admitted recovery and checkpoint together`() {
+        val replacement = "replacement".toByteArray()
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            captureBytes = { replacement }).use { f ->
+            val predecessor = f.start()
+            f.deferred = true
+            val id = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            val record = Files.readString(f.state())
+            assertEquals(1, Regex(SHA).findAll(record).count())
+            Files.writeString(f.state(), record.replace(SHA, decompengine.project.sha256(replacement)))
+            f.pending.remove().run()
+            assertEquals(WorkflowTerminalReason.REFUSED, f.attempt(id).terminalReason)
+            assertEquals(1, f.contexts.size)
+            assertTrue(f.restored.isEmpty())
+        }
+    }
+
+    @Test
+    fun `pinning both the successor and predecessor during capture preserves the admitted continuation`() {
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            afterCapture = { request ->
+                val running = fixture.snapshot().latestRun!!
+                fixture.service.setProgressRetentionPinned(fixture.job.id, running.runId, running.version, true)
+                val previous = request.predecessor
+                fixture.service.setProgressRetentionPinned(fixture.job.id, previous.runId, previous.version, true)
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            val id = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            assertEquals(WorkflowRunState.COMPLETED, f.attempt(id).state)
+            assertTrue(f.attempt(id).progressRetentionPinned)
+            assertTrue(f.attempt(predecessor).progressRetentionPinned)
+            assertContentEquals(CONTINUATION_BYTES, f.restored.single())
+        }
+    }
+
+    @Test
+    fun `uncertain cancellation publication during capture prevents continuation`() {
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            afterCapture = {
+                val running = fixture.snapshot().latestRun!!
+                fixture.fault = WorkflowStoreFaultPoint.AFTER_RENAME
+                val failure = assertFailsWith<WebJobServiceException> {
+                    fixture.service.cancelDurable(fixture.job.id, running.runId, running.version)
+                }
+                assertEquals("RECOVERY_REQUIRED", failure.code)
+                fixture.fault = null
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            run(f.recover(predecessor, mode = "resume"))
+            val failure = assertFailsWith<WebJobServiceException> { f.pending.remove().run() }
+            assertEquals("RECOVERY_REQUIRED", failure.code)
+            assertTrue(f.restored.isEmpty())
+            assertEquals(1, f.contexts.size)
+        }
+    }
+
+    @Test
+    fun `cancellation after the last ownership check refuses the continuation launch`() {
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            beforeLaunch = {
+                val running = fixture.snapshot().latestRun!!
+                fixture.service.cancelDurable(fixture.job.id, running.runId, running.version)
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            try { f.pending.remove().run() } finally { Thread.interrupted() }
+            assertEquals(WorkflowRunState.CANCELLED, f.attempt(successor).state)
+            assertEquals(WorkflowTerminalReason.CANCELLED, f.attempt(successor).terminalReason)
+            assertNull(f.attempt(successor).candidate)
+            assertTrue(f.restored.isEmpty())
+            assertEquals(1, f.contexts.size)
+        }
+    }
+
+    @Test
+    fun `uncertain cancellation publication after the last ownership check refuses the continuation launch`() {
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            beforeLaunch = {
+                val running = fixture.snapshot().latestRun!!
+                fixture.fault = WorkflowStoreFaultPoint.AFTER_RENAME
+                val failure = assertFailsWith<WebJobServiceException> {
+                    fixture.service.cancelDurable(fixture.job.id, running.runId, running.version)
+                }
+                assertEquals("RECOVERY_REQUIRED", failure.code)
+                fixture.fault = null
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            run(f.recover(predecessor, mode = "resume"))
+            val failure = assertFailsWith<WebJobServiceException> { f.pending.remove().run() }
+            assertEquals("RECOVERY_REQUIRED", failure.code)
+            assertTrue(f.restored.isEmpty())
+            assertEquals(1, f.contexts.size)
+        }
+    }
+
+    @Test
+    fun `an independent shutdown signal between the fence check and launch refuses the start`() {
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) }).use { f ->
+            val predecessor = f.start()
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            val signalled = java.util.concurrent.atomic.AtomicBoolean()
+            f.service.continuationLaunchObserver = {
+                // The shutdown path never takes the service monitor this check holds, so the signal completes here.
+                val signaller = Thread({ f.service.signalShutdown(); signalled.set(true) }, "independent-shutdown-signal")
+                signaller.start()
+                signaller.join(TimeUnit.SECONDS.toMillis(5))
+                check(signalled.get()) { "the shutdown signal did not complete" }
+            }
+            try { f.pending.remove().run() } finally { Thread.interrupted() }
+            assertTrue(signalled.get())
+            assertTrue(f.restored.isEmpty(), "no continuation may start after the shutdown signal")
+            assertEquals(1, f.contexts.size)
+            assertEquals(WorkflowRunState.INTERRUPTED, f.attempt(successor).state)
+            assertEquals(WorkflowTerminalReason.PROCESS_INTERRUPTED, f.attempt(successor).terminalReason)
+            assertNull(f.attempt(successor).candidate)
+        }
+    }
+
+    @Test
+    fun `a shutdown signal after the launch permit interrupts the started continuation`() {
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean()
+        lateinit var fixture: Fixture
+        lateinit var signaller: Thread
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            duringLaunch = {
+                signaller = Thread({ fixture.service.signalShutdown() }, "post-launch-shutdown-signal")
+                signaller.start()
+                // The interrupt may arrive during either wait; both are interruptible.
+                try {
+                    signaller.join(TimeUnit.SECONDS.toMillis(5))
+                    check(!signaller.isAlive) { "the shutdown signal waited on the launched work" }
+                    Thread.sleep(TimeUnit.SECONDS.toMillis(5))
+                } catch (cancelled: InterruptedException) {
+                    interrupted.set(true)
+                    throw cancelled
+                }
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            try { f.pending.remove().run() } finally { Thread.interrupted() }
+            assertTrue(interrupted.get(), "shutdown must observe the granted permit and interrupt its holder")
+            signaller.join(TimeUnit.SECONDS.toMillis(5))
+            assertFalse(signaller.isAlive)
+            assertContentEquals(CONTINUATION_BYTES, f.restored.single())
+            assertEquals(WorkflowRunState.INTERRUPTED, f.attempt(successor).state)
+            assertNull(f.attempt(successor).candidate)
+        }
+    }
+
+    @Test
+    fun `a launched continuation that waits for cancellation does not hold the service monitor`() {
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean()
+        lateinit var fixture: Fixture
+        lateinit var cancel: java.util.concurrent.FutureTask<WorkflowAttempt>
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            duringLaunch = {
+                val running = fixture.snapshot().latestRun!!
+                cancel = java.util.concurrent.FutureTask {
+                    fixture.service.cancelDurable(fixture.job.id, running.runId, running.version)
+                }
+                Thread(cancel, "launched-continuation-cancel").start()
+                // Cancellation needs the service monitor; it interrupts this thread during either wait.
+                try {
+                    cancel.get(5, TimeUnit.SECONDS)
+                    Thread.sleep(TimeUnit.SECONDS.toMillis(5))
+                } catch (cancelled: InterruptedException) {
+                    interrupted.set(true)
+                    throw cancelled
+                }
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            try { f.pending.remove().run() } finally { Thread.interrupted() }
+            assertTrue(interrupted.get())
+            assertEquals(WorkflowRunState.CANCELLING, cancel.get(5, TimeUnit.SECONDS).state)
+            assertEquals(WorkflowRunState.CANCELLED, f.attempt(successor).state)
+            assertEquals(WorkflowTerminalReason.CANCELLED, f.attempt(successor).terminalReason)
+            assertNull(f.attempt(successor).candidate)
+        }
+    }
+
+    @Test
+    fun `matching bytes cannot substitute a different restoration mode`() {
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.AGENT_SESSION) }).use { f ->
+            val predecessor = f.start()
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            assertEquals(WorkflowTerminalReason.REFUSED, f.attempt(successor).terminalReason)
+            assertEquals(1, f.contexts.size)
+            assertTrue(f.restored.isEmpty())
+        }
+    }
+
+    @Test
+    fun `continuation consumes detached bytes when predecessor changes after capture`() {
+        val buffer = CONTINUATION_BYTES.copyOf()
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            captureBytes = { request ->
+                request.predecessorReportsDirectory.resolve("checkpoint").readBytes().copyInto(buffer)
+                buffer
+            },
+            afterCapture = { request ->
+                buffer.fill(0)
+                Files.writeString(request.predecessorReportsDirectory.resolve("checkpoint"), "later contents")
+            }).use { f ->
+            val predecessor = f.start()
+            val checkpoint = Files.write(f.contexts.single().reportsDirectory.resolve("checkpoint"), CONTINUATION_BYTES)
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            assertEquals(WorkflowRunState.COMPLETED, f.attempt(successor).state)
+            assertEquals("later contents", Files.readString(checkpoint))
+            assertContentEquals(CONTINUATION_BYTES, f.restored.single())
+        }
     }
 
     @Test
@@ -469,7 +862,8 @@ class WebRecoveryControllerTest {
     private companion object {
         const val CAPABILITY = "authored_harness"
         const val KEY = "http_recovery_request_key_1"
-        val SHA = "d".repeat(64)
+        val CONTINUATION_BYTES = "verified inert checkpoint".toByteArray()
+        val SHA = java.security.MessageDigest.getInstance("SHA-256").digest(CONTINUATION_BYTES).joinToString("") { "%02x".format(it) }
         val LIMITS = WorkflowExecutionLimits(60_000uL, 15_000uL, 1_048_576uL, 16uL)
         fun recoverBody(mode: String, input: String?) = buildJsonObject {
             put("mode", mode); put("expectedInputRevisionId", input?.let(::JsonPrimitive) ?: JsonNull)
