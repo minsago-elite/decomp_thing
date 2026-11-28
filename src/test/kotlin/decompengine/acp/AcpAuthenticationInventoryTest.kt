@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import decompengine.testing.ChildJvm
 import com.agentclientprotocol.model.AuthMethod
 import com.agentclientprotocol.model.AuthMethodId
 import java.util.concurrent.TimeUnit
@@ -215,7 +216,7 @@ class AcpAuthenticationInventoryTest {
     @Test fun `inventory commitment scope changes across JVM restarts`() {
         fun isolated(): List<String> {
             val process = ProcessBuilder(
-                java.nio.file.Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                *ChildJvm.command().toTypedArray(),
                 "-cp", System.getProperty("java.class.path"), AuthenticationCommitmentProcessFixture::class.java.name,
             ).apply {
                 // Launcher diagnostics must never become part of the commitment protocol.

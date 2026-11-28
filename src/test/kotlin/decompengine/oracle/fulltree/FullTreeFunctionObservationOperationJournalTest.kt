@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.testing.ChildJvm
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
 import decompengine.acp.LinuxFilesystemCapacity
@@ -1320,9 +1321,8 @@ class FullTreeFunctionObservationOperationJournalTest {
 
     @Test
     fun `journal root lock is released after separate JVM process death`() = withJournalRoot { root ->
-        val java = Path.of(System.getProperty("java.home"), "bin", "java")
         val process = ProcessBuilder(
-            java.toString(),
+            *ChildJvm.command().toTypedArray(),
             "-cp",
             System.getProperty("java.class.path"),
             FullTreeFunctionObservationJournalLockProbe::class.java.name,

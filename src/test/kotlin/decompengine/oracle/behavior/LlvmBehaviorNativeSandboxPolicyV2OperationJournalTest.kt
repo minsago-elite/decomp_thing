@@ -1,5 +1,6 @@
 package decompengine.oracle.behavior
 
+import decompengine.testing.ChildJvm
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -375,9 +376,8 @@ class LlvmBehaviorNativeSandboxPolicyV2OperationJournalTest {
 
     @Test
     fun `root lock is released after separate JVM owner death`() = withFixture { fixture ->
-        val java = Path.of(System.getProperty("java.home"), "bin", "java")
         val process = ProcessBuilder(
-            java.toString(),
+            *ChildJvm.command().toTypedArray(),
             "-cp",
             System.getProperty("java.class.path"),
             LlvmBehaviorNativeSandboxPolicyV2OperationJournalLockProbe::class.java.name,

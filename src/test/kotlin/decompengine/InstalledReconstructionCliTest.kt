@@ -1,5 +1,6 @@
 package decompengine
 
+import decompengine.testing.ChildJvm
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -27,7 +28,7 @@ class InstalledReconstructionCliTest {
                 builder.environment().remove(key)
             }
             builder.environment()["JAVA_HOME"] = System.getProperty("java.home")
-            builder.environment()["JAVA_OPTS"] = "-Xmx256m"
+            builder.environment()["JAVA_OPTS"] = (listOf("-Xmx256m") + ChildJvm.options()).joinToString(" ")
             val process = builder.start()
             try {
                 assertTrue(process.waitFor(30, TimeUnit.SECONDS))

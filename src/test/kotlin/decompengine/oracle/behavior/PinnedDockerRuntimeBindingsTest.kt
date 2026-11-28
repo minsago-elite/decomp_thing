@@ -1,5 +1,6 @@
 package decompengine.oracle.behavior
 
+import decompengine.testing.ShortSocketDirectory
 import com.sun.jna.Native
 import com.sun.jna.NativeLong
 import com.sun.jna.Pointer
@@ -627,7 +628,7 @@ private fun verifyNativeTerminalForTest(bindings: PinnedDockerRuntimeBindings) {
 }
 
 private class RuntimeBindingFixture : AutoCloseable {
-    val root: Path = Files.createTempDirectory("pinned-docker-runtime-").toAbsolutePath().normalize()
+    val root: Path = ShortSocketDirectory.create()
     val controlClient: Path = root.resolve("docker-client")
     val dockerConfig: Path = root.resolve("docker-config")
     private val socketParent: Path = root.resolve("runtime")

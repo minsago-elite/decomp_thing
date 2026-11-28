@@ -92,23 +92,25 @@ class OracleNativeLibrariesTest {
 
     @Test
     fun `fresh JNA and SQLite bootstrap succeeds on noexec scratch without extracting native code`() {
-        val parent = noexecParent()
-        if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
-            assertNotNull(parent, "required CI noexec native-library regression has no writable noexec filesystem")
-        }
-        assumeTrue(parent != null, "a writable noexec filesystem is required")
-        withRoot(Files.createTempDirectory(checkNotNull(parent), "decomp-native-noexec-")) { root ->
+        // A repository-local scratch directory is bind-remounted noexec inside an unprivileged user and
+        // mount namespace for each child JVM, so no scratch is created on host-wide noexec mounts (#2001).
+        withRoot(createTempDirectory("oracle-native-noexec-")) { root ->
+            val noexec = noexecNamespace(root)
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertNotNull(noexec, "required CI noexec native-library regression cannot remount scratch noexec")
+            }
+            assumeTrue(noexec != null, "an unprivileged user and mount namespace is required for noexec scratch")
             val temporary = root.resolve("tmp").createDirectories()
             val jna = Path.of(com.sun.jna.Native::class.java.protectionDomain.codeSource.location.toURI())
             val baseline = runJava(root, listOf(
                 "-Djna.nosys=true", "-Djna.tmpdir=$temporary", "-Djava.io.tmpdir=$temporary",
                 "-classpath", jna.toString(), "com.sun.jna.Native",
-            ))
+            ), checkNotNull(noexec))
             assertTrue(baseline.first != 0 && baseline.second.contains("UnsatisfiedLinkError"), baseline.second)
             val corrected = runJava(root, isolatedObservationJvmTemporaryArguments(root, staged) + listOf(
                 "-classpath", System.getProperty("java.class.path"), OracleNativeLibrariesProbe::class.java.name,
                 root.resolve("database.sqlite").toString(),
-            ))
+            ), noexec)
             assertEquals(0, corrected.first, corrected.second)
             assertTrue(corrected.second.contains("native-bootstrap-ok"), corrected.second)
             assertTrue(Files.newDirectoryStream(temporary).use { !it.iterator().hasNext() })
@@ -116,22 +118,34 @@ class OracleNativeLibrariesTest {
         }
     }
 
-    private fun noexecParent(): Path? = listOfNotNull(
-        Path.of("/run/lock"), Path.of("/dev/shm"), System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")?.let(Path::of),
-    ).firstOrNull { parent ->
-        if (!Files.isDirectory(parent) || !Files.isWritable(parent)) return@firstOrNull false
-        val process = ProcessBuilder("findmnt", "--noheadings", "--output", "OPTIONS", "--target", parent.toString())
-            .redirectErrorStream(true).start()
+    /** Returns a command prefix that runs its command with [root] remounted noexec, or null if unavailable. */
+    private fun noexecNamespace(root: Path): List<String>? {
+        val tools = listOf("unshare", "mount", "findmnt").map { name ->
+            System.getenv("PATH").orEmpty().split(':').filter(String::isNotEmpty).map { Path.of(it, name) }
+                .firstOrNull(Files::isExecutable) ?: return null
+        }
+        val target = root.toRealPath().toString()
+        // $0 is the scratch root and $1 is mount; the remaining arguments are the command to run.
+        // --no-mtab keeps libmount from writing userspace mount bookkeeping (for example /run/mount)
+        // outside the checkout: the private namespace still shares the host filesystem.
+        val prefix = listOf(tools[0].toString(), "--user", "--map-root-user", "--mount", "--propagation", "private",
+            "/bin/sh", "-c",
+            "set -e; \"\$1\" --no-mtab --bind \"\$0\" \"\$0\"; \"\$1\" --no-mtab -o remount,bind,noexec \"\$0\"; shift; exec \"\$@\"",
+            target, tools[1].toString())
+        val process = ProcessBuilder(prefix + listOf(tools[2].toString(), "--noheadings", "--output", "TARGET,OPTIONS",
+            "--target", target)).redirectErrorStream(true).start()
         try {
-            process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() == 0 &&
-                process.inputStream.readNBytes(4096).toString(Charsets.UTF_8).trim().split(',').contains("noexec")
+            process.outputStream.close()
+            if (!process.waitFor(5, TimeUnit.SECONDS) || process.exitValue() != 0) return null
+            val fields = process.inputStream.readNBytes(4096).toString(Charsets.UTF_8).trim().split(Regex("\\s+"))
+            return prefix.takeIf { fields.size == 2 && fields[0] == target && "noexec" in fields[1].split(',') }
         } finally {
             if (process.isAlive) process.destroyForcibly().waitFor()
         }
     }
 
-    private fun runJava(root: Path, arguments: List<String>): Pair<Int, String> {
-        val process = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+    private fun runJava(root: Path, arguments: List<String>, prefix: List<String> = emptyList()): Pair<Int, String> {
+        val process = ProcessBuilder(prefix + listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
             "-XX:-UsePerfData", "-Duser.home=$root") + arguments).directory(root.toFile()).redirectErrorStream(true).apply {
             environment().clear()
             environment()["HOME"] = root.toString()

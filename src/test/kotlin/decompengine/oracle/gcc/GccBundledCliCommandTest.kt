@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.testing.ChildJvm
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
 import java.io.File
@@ -253,7 +254,7 @@ class GccBundledCliCommandTest {
         }
         fun invoke(arguments: List<String>): Pair<Int, String> {
             val log = Files.createTempFile(root, "cli-", ".log")
-            val process = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx256m",
+            val process = ProcessBuilder(ChildJvm.command("-Xmx256m",
                 "-cp", classpath, "decompengine.MainKt", "gcc-engine-plan") + arguments)
                 .redirectErrorStream(true).redirectOutput(log.toFile()).start()
             try {

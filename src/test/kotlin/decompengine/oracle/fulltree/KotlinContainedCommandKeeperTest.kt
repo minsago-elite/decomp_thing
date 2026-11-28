@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.testing.ChildJvm
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import java.io.File
@@ -389,7 +390,9 @@ class KotlinContainedCommandKeeperTest {
             val java = Path.of(System.getProperty("java.home"), "bin", "java").toRealPath()
             val classPath = System.getProperty("java.class.path").split(File.pathSeparator).filter(String::isNotEmpty)
                 .joinToString(File.pathSeparator) { Path.of(it).toAbsolutePath().normalize().toString() }
-            val command = if (waitingChild) listOf(java.toString(), "-classpath", classPath, KotlinContainedCommandTestSleeper::class.java.name) else listOf(java.toString(), "-version")
+            val childOptions = listOf(ChildJvm.NO_PERF_DATA, "-Djava.io.tmpdir=${run.resolve("tmp")}")
+            val command = if (waitingChild) listOf(java.toString()) + childOptions + listOf("-classpath", classPath,
+                KotlinContainedCommandTestSleeper::class.java.name) else listOf(java.toString()) + childOptions + "-version"
             val request = request(root = run, command = command, startSeconds = 30L, wallSeconds = 30L, allowInterruption = waitingChild)
             val requestPath = run.resolve("runtime/${KotlinContainedCommandRequest.REQUEST_FILE}")
             Files.write(requestPath, request.canonicalBytes)

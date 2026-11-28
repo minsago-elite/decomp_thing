@@ -1,5 +1,7 @@
 package decompengine.web
 
+import decompengine.testing.ChildJvm.withRepositoryTemporary
+import decompengine.testing.ChildJvm
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import org.junit.jupiter.api.extension.ExtendWith
@@ -55,11 +57,11 @@ class WebShutdownTest {
         val root = createTempDirectory("web-shutdown-")
         val log = root.resolve("child.log")
         val process = ProcessBuilder(
-            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
+            *ChildJvm.command().toTypedArray(),
             "-cp", System.getProperty("java.class.path"),
             WebShutdownFixture::class.java.name, root.toString(), swallowInterruption.toString(), keepWaiting.toString(),
-        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }.start()
+        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }
+            .withRepositoryTemporary().start()
         try {
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
             while (!Files.exists(root.resolve("ready")) && process.isAlive && System.nanoTime() < deadline) {

@@ -1,5 +1,6 @@
 package decompengine.jobs
 
+import decompengine.testing.ChildJvm
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import org.junit.jupiter.api.extension.ExtendWith
@@ -68,7 +69,7 @@ class UploadStagingRecoveryTest {
     @Test fun `killed publisher cleanup preserves post-rename receipt and never recovers partial jobs`() {
         for (point in listOf("DURING_BINARY", "AFTER_BINARY_SYNC", "AFTER_METADATA_SYNC", "BEFORE_RENAME", "AFTER_RENAME")) withRoot { root ->
             val reached = root.resolve("reached")
-            val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            val process = ProcessBuilder(*ChildJvm.command().toTypedArray(),
                 "-Djna.nosys=true", "-Djna.nounpack=true",
                 "-Djna.boot.library.path=${System.getProperty("jna.boot.library.path")}",
                 "-Ddecompengine.oracle.nativeLibraryDirectory=${System.getProperty("decompengine.oracle.nativeLibraryDirectory")}",

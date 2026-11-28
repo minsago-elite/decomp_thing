@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.testing.ChildJvm
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
@@ -1830,9 +1831,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         GccPlanningBatchBytes(checkpoint, functions, globals, types, replacement)
 
     private fun javap(type: Class<*>): String {
-        val executable = Path.of(System.getProperty("java.home"), "bin", "javap")
         val process = ProcessBuilder(
-            executable.toString(),
+            *ChildJvm.toolCommand("javap").toTypedArray(),
             "-classpath",
             System.getProperty("java.class.path"),
             "-p",

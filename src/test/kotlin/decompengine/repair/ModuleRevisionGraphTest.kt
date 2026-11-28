@@ -1,5 +1,6 @@
 package decompengine.repair
 
+import decompengine.testing.ChildJvm
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.AcpExecutionCleanupDisposition
 import decompengine.acp.AcpExecutionEvidenceCompleteness
@@ -5777,9 +5778,8 @@ class ModuleRevisionGraphTest {
     fun `separate JVM cannot acquire the project graph until the OS lock is released`() {
         val project = generatedProject()
         val first = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
-        val java = Path.of(System.getProperty("java.home"), "bin", "java")
         val process = ProcessBuilder(
-            java.toString(),
+            *ChildJvm.command().toTypedArray(),
             "-cp",
             System.getProperty("java.class.path"),
             ModuleRevisionGraphLockProbe::class.java.name,
@@ -5814,9 +5814,8 @@ class ModuleRevisionGraphTest {
         Files.copy(heldReports.resolve("program_model.json"), reports.resolve("program_model.json"))
         Files.copy(heldReports.resolve("module_plan.json"), reports.resolve("module_plan.json"))
 
-        val java = Path.of(System.getProperty("java.home"), "bin", "java")
         val process = ProcessBuilder(
-            java.toString(),
+            *ChildJvm.command().toTypedArray(),
             "-cp",
             System.getProperty("java.class.path"),
             ModuleRevisionGraphLockProbe::class.java.name,

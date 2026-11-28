@@ -16,6 +16,7 @@ import java.io.File
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -1894,8 +1895,47 @@ val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSig
             roots.flatMap { listOf("--class-root", it.absolutePath) })
     }
 }
+// Each Test task execution gets a fresh, owner-only temporary root build/t/<base36 counter>, created
+// with an exclusive mkdir so an existing root (or a link planted at that name) is skipped, never reused.
+// Nothing here deletes or traverses test temporary roots: JUnit already deletes @TempDir contents after
+// each test, and the per-execution roots left behind accumulate only under the gitignored build/ until
+// `./gradlew clean` removes them. A counter rather than a random name keeps the root to one or two
+// characters, because Unix socket fixtures under it must fit Linux's 108-byte sun_path even in nested
+// worktrees (RepositoryTemporaryRootTest binds the longest fixture socket path).
+// Assumes build/ and build/t are not attacker-planted links: createDirectories follows them, the same trust
+// boundary as every other Gradle output under build/.
+fun createTestTemporaryRoot(parent: Path): Path {
+    Files.createDirectories(parent)
+    val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))
+    for (index in 0 until 36 * 36) {
+        try {
+            return Files.createDirectory(parent.resolve(index.toString(36)), ownerOnly)
+        } catch (_: FileAlreadyExistsException) {
+            // Taken by an earlier or concurrent execution; try the next name.
+        }
+    }
+    error("no unused test temporary root under $parent; run ./gradlew clean")
+}
 tasks.withType<Test>().configureEach {
     dependsOn(verifyCompiledJunitSignatures)
+    // HotSpot otherwise writes /tmp/hsperfdata_<user>/<pid> for every worker regardless of java.io.tmpdir.
+    jvmArgs("-XX:-UsePerfData")
+    // Keep @TempDir, Files.createTempDirectory and native temp files inside the repository.
+    // Specialized tasks that already choose java.io.tmpdir keep their own roots; whichever
+    // doFirst runs first, the explicit override wins. Set at execution time so the absolute
+    // path never becomes a cache-key input.
+    val repositoryTemporaryParent = layout.buildDirectory.dir("t")
+    val testRepositoryRoot = layout.projectDirectory.asFile.absolutePath
+    doFirst {
+        val testTask = this as Test
+        testTask.systemProperty("decompengine.test.repositoryRoot", testRepositoryRoot)
+        if (!testTask.systemProperties.containsKey("java.io.tmpdir")) {
+            val root = createTestTemporaryRoot(repositoryTemporaryParent.get().asFile.toPath()).toFile()
+            testTask.systemProperty("java.io.tmpdir", root.absolutePath)
+            testTask.systemProperty("jna.tmpdir", root.absolutePath)
+            testTask.environment("TMPDIR", root.absolutePath)
+        }
+    }
 }
 
 tasks.test {

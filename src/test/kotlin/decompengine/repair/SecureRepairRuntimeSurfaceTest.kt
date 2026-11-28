@@ -1,5 +1,6 @@
 package decompengine.repair
 
+import decompengine.testing.ChildJvm
 import decompengine.validation.SandboxUnavailableException
 import java.lang.reflect.Constructor
 import java.lang.reflect.InvocationTargetException
@@ -477,8 +478,7 @@ class SecureRepairRuntimeSurfaceTest {
     ) { "missing class bytes for ${type.name}" }.use { it.readBytes() }
 
     private fun javap(type: Class<*>, includeCode: Boolean = false): String {
-        val executable = Path.of(System.getProperty("java.home"), "bin", "javap")
-        val command = mutableListOf(executable.toString(), "-p")
+        val command = ChildJvm.toolCommand("javap", "-p").toMutableList()
         if (includeCode) command += "-c"
         command += listOf("-classpath", System.getProperty("java.class.path"), type.name)
         val process = ProcessBuilder(command).redirectErrorStream(true).start()
