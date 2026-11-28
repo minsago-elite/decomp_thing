@@ -3369,6 +3369,11 @@ class LinuxBubblewrapBoundaryTest {
                 unstick.countDown()
                 setup.join(30_000)
             }
+            // An unexpectedly authorized target is reaped first, so its cleanup cannot mask the assertion.
+            requireNotNull(outcome).getOrNull()?.let { process ->
+                process.process.waitFor(8, TimeUnit.SECONDS)
+                process.awaitCleanup(Duration.ofSeconds(5))
+            }
             assertTrue(releasedAfterExpiry, "the seam must release the grant after the drain deadline")
             val failure = requireNotNull(outcome).exceptionOrNull()
             assertEquals("restarted sandbox setup did not finish before authorization", failure?.message, failure.toString())
@@ -3460,6 +3465,10 @@ class LinuxBubblewrapBoundaryTest {
             } finally {
                 unstick.countDown()
                 setup.join(30_000)
+            }
+            requireNotNull(outcome).getOrNull()?.let { process ->
+                process.process.waitFor(8, TimeUnit.SECONDS)
+                process.awaitCleanup(Duration.ofSeconds(5))
             }
             val drained = Duration.ofNanos(finishedAt - drainObserved)
             val failure = requireNotNull(outcome).exceptionOrNull()
