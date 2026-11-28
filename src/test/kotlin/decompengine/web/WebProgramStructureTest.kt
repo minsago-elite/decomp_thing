@@ -238,6 +238,130 @@ class WebProgramStructureTest {
         }
     }
 
+    @Test fun `private entity ids stay distinct after redaction and agree across inventory and references`() {
+        val first = functions[1].copy(id = "/tmp/a", name = "first")
+        val second = functions[2].copy(id = "/tmp/b", name = "second")
+        val missing = "/tmp/missing"
+        val caller = functions.first().copy(calls = setOf(first.id, second.id, missing), referencedGlobals = emptySet())
+        val aliasLookalike = functions[3].copy(id = "function:" + sha(first.id.toByteArray(Charsets.UTF_16BE)), name = "lookalike")
+        val harmless = functions[4].copy(id = "local:entry", name = "local")
+        val revision = Revision(model(listOf(caller, first, second, aliasLookalike, harmless)),
+            plan(planned("core", listOf(caller.id, first.id, second.id, missing))), listOf("core"))
+        val policy = WebRedactionPolicy.BASELINE
+        fun publicData(kind: String, raw: JsonObject): JsonObject = policy.json(raw).jsonObject.also { data ->
+            assertContract(kind, data)
+            assertFalse(data.toString().contains("/tmp/"))
+        }
+        val inventory = publicData("functionInventory", revision.pages.functions("owner", jobId, runId, revisionId, null))
+        val byName = inventory.items().associateBy { it.text("name") }
+        val firstId = byName.getValue("first").text("entityId")
+        val secondId = byName.getValue("second").text("entityId")
+        assertNotEquals(firstId, secondId)
+        assertEquals(inventory.items().size, inventory.items().map { it.text("entityId") }.distinct().size)
+        assertEquals(harmless.id, byName.getValue("local").text("entityId"))
+        for (name in listOf("first", "second")) assertEquals(JsonNull, byName.getValue(name)["selector"])
+        assertEquals(caller.id, byName.getValue("main").text("selector"))
+
+        val module = publicData("moduleDetail", revision.pages.module("owner", jobId, runId, revisionId, "core", null))
+        val owned = module.getValue("owned").jsonObject.items()
+        val missingId = owned.single { it.getValue("recorded").jsonPrimitive.boolean == false }.text("entityId")
+        val privateIds = setOf(firstId, secondId, missingId)
+        assertEquals(3, privateIds.size)
+        assertEquals(privateIds, owned.filter { it["selector"] == JsonNull }.map { it.text("entityId") }.toSet())
+        val detail = publicData("entityDetail", revision.pages.entity(WebStructureKind.FUNCTION,
+            jobId, runId, revisionId, caller.id, null))
+        val calls = detail.getValue("entity").jsonObject.getValue("calls").jsonObject.items()
+        assertEquals(missingId, calls.single { it.text("resolution") == "no-record" }.text("entityId"))
+        for (call in calls.filter { it.text("resolution") == "recorded" }) {
+            assertEquals(byName.getValue(call.text("name")).text("entityId"), call.text("entityId"))
+        }
+        assertEquals(privateIds, calls.map { it.text("entityId") }.toSet())
+        assertTrue(calls.all { it["selector"] == JsonNull })
+    }
+
+    @Test fun `redacted structure responses preserve recorded module selectors across inventories and details`() {
+        val moduleId = "sk-abcdefghijklmnop"
+        val function = functions.first().copy(calls = emptySet(), referencedGlobals = emptySet())
+        val revision = Revision(model(listOf(function)), plan(planned(moduleId, listOf(function.id))), listOf(moduleId))
+        val policy = WebRedactionPolicy.create(emptyMap(), emptyList(), emptyList())
+        val before = revision.records.mapValues { sha(it.value) }
+        val modules = policy.json(revision.pages.modules("owner", jobId, runId, revisionId, null)).jsonObject
+        assertContract("moduleInventory", modules)
+        val listed = modules.items().single()
+        assertEquals(moduleId, listed.text("moduleId")); assertEquals(moduleId, listed.text("selector"))
+        val inventory = policy.json(revision.pages.functions("owner", jobId, runId, revisionId, null)).jsonObject
+        assertContract("functionInventory", inventory)
+        val owned = inventory.items().single()
+        assertEquals(function.id, owned.text("entityId")); assertEquals(function.id, owned.text("selector"))
+        assertEquals(moduleId, owned.text("moduleId")); assertEquals(moduleId, owned.text("moduleSelector"))
+        val module = policy.json(revision.pages.module("owner", jobId, runId, revisionId, moduleId, null)).jsonObject
+        assertContract("moduleDetail", module)
+        assertEquals(moduleId, module.getValue("module").jsonObject.text("selector"))
+        assertEquals(moduleId, module.getValue("owned").jsonObject.items().single().text("moduleSelector"))
+        val detail = policy.json(revision.pages.entity(WebStructureKind.FUNCTION, jobId, runId, revisionId, function.id, null)).jsonObject
+        assertContract("entityDetail", detail)
+        assertEquals(moduleId, detail.getValue("entity").jsonObject.text("moduleSelector"))
+        assertEquals(before, revision.records.mapValues { sha(it.value) }, "projection never changes committed records")
+    }
+
+    @Test fun `structure previews redact complete configured credentials before any prefix is bounded`() {
+        val stringSecret = "StringCredential9".repeat(40).take(512)
+        val textSecret = "BodyCredential8".repeat(300).take(4096)
+        val boundarySecret = "BoundaryCredential7".repeat(40).take(512)
+        val policy = WebRedactionPolicy.create(mapOf("API_TOKEN" to stringSecret, "AUTH_TOKEN" to textSecret,
+            "SECRET_VALUE" to boundarySecret), emptyList(), emptyList())
+        val function = RecoveredFunction("fn_0000000000401000", "public", 0x401000u,
+            "public $textSecret suffix", "body $textSecret suffix", strings = setOf("recorded $stringSecret suffix"))
+        val global = RecoveredGlobal("global_0000000000404000", "public", 0x404000u,
+            "type $textSecret suffix", "init $textSecret suffix")
+        val type = RecoveredType("type_${"c".repeat(64)}", "declaration $textSecret suffix", 0x405000u)
+        val revision = Revision(model(listOf(function), listOf(global), listOf(type)),
+            plan(planned("core", listOf(function.id), listOf(global.id), listOf(type.id),
+                listOf("boundary $boundarySecret suffix"))), listOf("core"))
+        val before = revision.records.mapValues { sha(it.value) }
+        for ((kind, selector) in listOf(WebStructureKind.FUNCTION to function.id, WebStructureKind.GLOBAL to global.id,
+                WebStructureKind.TYPE to type.id)) {
+            val response = policy.json(revision.pages.entity(kind, jobId, runId, revisionId, selector, null, policy)).jsonObject
+            assertContract("entityDetail", response)
+            for (secret in listOf(stringSecret, textSecret)) assertFalse(response.toString().contains(secret.take(128)), response.toString())
+            val entity = response.getValue("entity").jsonObject
+            for (field in entity.getValue("texts").jsonArray) {
+                val preview = field.jsonObject.getValue("preview").jsonObject
+                assertTrue(preview.text("text")!!.contains(WebRedactionPolicy.SECRET_MARK))
+                assertEquals(preview.text("text")!!.length.toString(), preview.text("characters"))
+                assertFalse(preview.getValue("truncated").jsonPrimitive.boolean)
+            }
+            if (kind == WebStructureKind.FUNCTION) {
+                val preview = entity.getValue("strings").jsonObject.items().single()
+                assertEquals("recorded ${WebRedactionPolicy.SECRET_MARK} suffix", preview.text("text"))
+                assertFalse(preview.getValue("truncated").jsonPrimitive.boolean)
+            }
+        }
+        val module = policy.json(revision.pages.module("owner", jobId, runId, revisionId, "core", null, policy)).jsonObject
+        assertContract("moduleDetail", module)
+        assertFalse(module.toString().contains(boundarySecret.take(128)), module.toString())
+        val evidence = module.getValue("module").jsonObject.getValue("boundaryEvidence").jsonObject.items().single()
+        assertEquals("boundary ${WebRedactionPolicy.SECRET_MARK} suffix", evidence.text("text"))
+        assertEquals(evidence.text("text")!!.length.toString(), evidence.text("characters"))
+        assertFalse(evidence.getValue("truncated").jsonPrimitive.boolean)
+        assertEquals(before, revision.records.mapValues { sha(it.value) }, "redaction must not rewrite committed model/plan bytes")
+    }
+
+    @Test fun `function search matches dotted I in the original recorded name and identity`() {
+        val byName = functions[1].copy(name = "İ")
+        val byId = functions[2].copy(id = "fn_İ", name = "second")
+        val other = functions[3].copy(name = "other")
+        val rows = listOf(byName, byId, other)
+        val revision = Revision(model(rows), plan(planned("core", rows.map { it.id })), listOf("core"))
+
+        val page = revision.pages.functions("owner", jobId, runId, revisionId, "search=%C4%B0")
+        assertEquals(listOf(byName.name, byId.name), page.items().map { it.text("name") })
+        assertEquals("İ", page.getValue("query").jsonObject.text("search"))
+
+        val address = revision.pages.functions("owner", jobId, runId, revisionId, "search=0X4011")
+        assertEquals(listOf(byName.id), address.items().map { it.text("entityId") })
+    }
+
     @Test fun `functions keep recorded identity exact addresses ownership and evidence references`() {
         val revision = standard()
         val page = revision.pages.functions("owner", jobId, runId, revisionId, null)
@@ -423,8 +547,14 @@ class WebProgramStructureTest {
         val module = detail.getValue("module").jsonObject
         assertEquals("unaccepted", module.text("implementationDeclaration"))
         val snapshot = revision.evidence.readRevision(revision.reference)
-        val implementation = snapshot.files.indexOfFirst { it.evidence.path == "src/modules/extra.c" }
-        assertEquals(revisionSourceFileId(revision.reference, implementation, "src/modules/extra.c"), module.text("implementationFileId"))
+        // reports/* sort before src/modules/*, so display order and the input-first identity order differ here.
+        val displayed = snapshot.files.indexOfFirst { it.evidence.path == "src/modules/extra.c" }
+        val implementation = snapshot.files[displayed]
+        assertNotEquals(displayed, snapshot.identityIndex(implementation))
+        val linked = assertNotNull(module.text("implementationFileId"))
+        assertEquals(snapshot.fileId(implementation), linked)
+        // The link resolves through the same reader the file view uses.
+        assertEquals("src/modules/extra.c", resolveRevisionSourceFile(snapshot, linked).evidence.path)
         assertEquals("include/modules/extra.h", module.text("interfacePath"))
         val owned = detail.getValue("owned").jsonObject
         assertEquals(3, owned.getValue("total").jsonPrimitive.int)

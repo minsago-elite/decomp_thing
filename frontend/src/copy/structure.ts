@@ -42,6 +42,7 @@ export const structureCopy = {
     'limit-exceeded': 'The module plan exceeds this reader\'s limits, so ownership is not recorded for any entity.',
   },
   reason: 'Reason code: {code}',
+  labeledValue: '{label}: {value}',
   assessment: {
     unassessed: 'Recovery assessment: unassessed. The producer records extraction labels only.',
     'not-recorded': 'Recovery assessment: not recorded.',
@@ -58,7 +59,6 @@ export const structureCopy = {
     available: 'available', 'not-recorded': 'not recorded by the current producer', unsupported: 'unsupported schema',
     invalid: 'malformed record', 'limit-exceeded': 'exceeds reader limits',
   },
-  labelSeparator: ': ',
   evidenceTitle: 'Evidence classes',
   evidence: {
     recovered: 'Recovered label', inferred: 'Inferred', unresolved: 'Unresolved', excluded: 'Excluded',
@@ -123,8 +123,8 @@ export const structureCopy = {
   yes: 'Yes', no: 'No',
   textFields: { prototype: 'Recorded prototype', decompiledC: 'Recorded decompiler output', type: 'Recorded type text', initializer: 'Recorded initializer', declaration: 'Recorded declaration' },
   textNotRecorded: 'Not recorded for this entity.',
-  textTruncated: 'Preview of the first {shown} of {total} characters. Open the generated source to inspect the complete reconstruction.',
-  textComplete: '{total} characters recorded.',
+  textTruncated: 'Preview of the first {shown} of {total} displayed characters, after redaction. Open the generated source to inspect the complete reconstruction.',
+  textComplete: '{total} displayed characters, after redaction.',
   strings: 'Referenced strings',
   calls: 'Calls', calledBy: 'Called by', referencedGlobals: 'Referenced globals', referencedBy: 'Referenced by functions',
   noReferences: 'None recorded.',

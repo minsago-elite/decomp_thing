@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, RevisionFile } from '../src/api/generated';
@@ -74,6 +74,91 @@ it('keeps inventory filters, sorting and cursors in the URL and reads one bounde
   } finally { auth.dispose(); }
 });
 
+it('reuses the displayed first page on a repeated filter submission and goes Back to the previous filter', async () => {
+  const auth = await session();
+  const filtered = { ...inventory, matchedFunctions: 1, items: inventory.items.slice(0, 1), page: { ...inventory.page, nextCursor: null } };
+  transport.get.mockImplementation((_kind, path) => Promise.resolve({ data: path.includes('search=main') ? filtered : inventory }));
+  history.replaceState(null, '', `${revision}/functions`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const firstField = await screen.findByRole('searchbox');
+    fireEvent.input(firstField, { target: { value: 'main' } });
+    fireEvent.submit(firstField.closest('form')!);
+    await screen.findByText('Showing 1–1 of 1 matching functions (5 recorded).');
+    const results = screen.getByRole('heading', { name: copy.results });
+    await waitFor(() => expect(document.activeElement).toBe(results));
+    const entries = history.length;
+    const field = screen.getByRole('searchbox');
+    field.focus();
+    fireEvent.submit(field.closest('form')!);
+    expect(document.activeElement).toBe(results);
+    expect(history.length).toBe(entries);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+
+    await act(() => { history.back(); });
+    await screen.findByText('Showing 1–3 of 5 matching functions (5 recorded).');
+    expect(location.search).toBe('');
+    expect(screen.getByRole('searchbox')).toHaveProperty('value', '');
+    expect(transport.get).toHaveBeenCalledTimes(3);
+  } finally { auth.dispose(); }
+});
+
+it('recognizes the current filter in a bookmarked URL with explicit defaults', async () => {
+  const auth = await session();
+  transport.get.mockResolvedValue({ data: inventory });
+  history.replaceState(null, '', `${revision}/functions?order=asc&search=main&sort=address`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const field = await screen.findByRole('searchbox');
+    const entries = history.length;
+    field.focus();
+    fireEvent.submit(field.closest('form')!);
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: copy.results }));
+    expect(location.search).toBe('?order=asc&search=main&sort=address');
+    expect(history.length).toBe(entries);
+    expect(transport.get).toHaveBeenCalledTimes(1);
+  } finally { auth.dispose(); }
+});
+
+it('applies unchanged filters from a continuation by loading the first page', async () => {
+  const auth = await session();
+  transport.get.mockResolvedValue({ data: inventory });
+  history.replaceState(null, '', `${revision}/functions?search=main&cursor=${inventory.page.nextCursor}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const field = await screen.findByRole('searchbox');
+    field.focus();
+    fireEvent.submit(field.closest('form')!);
+    await waitFor(() => expect(location.search).toBe('?search=main'));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: copy.results })));
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    expect(transport.get).toHaveBeenLastCalledWith('functionInventory', `${api}/functions?search=main&limit=100`, expect.anything());
+  } finally { auth.dispose(); }
+});
+
+it.each(['wait', 'move'] as const)('respects the reader’s choice to %s during a function filter read', async choice => {
+  const auth = await session();
+  let finish!: (value: { data: FunctionInventory }) => void;
+  const pending = new Promise<{ data: FunctionInventory }>(resolve => { finish = resolve; });
+  transport.get.mockResolvedValueOnce({ data: inventory }).mockReturnValueOnce(pending);
+  history.replaceState(null, '', `${revision}/functions`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const field = await screen.findByRole('searchbox');
+    field.focus();
+    fireEvent.input(field, { target: { value: 'main' } });
+    fireEvent.submit(field.closest('form')!);
+    await screen.findByText(copy.loading);
+    const modules = screen.getByRole('link', { name: copy.browseModules });
+    if (choice === 'move') modules.focus();
+    await act(async () => { finish({ data: inventory }); await pending; });
+    const results = await screen.findByRole('heading', { name: copy.results });
+    // The results handoff runs in a Preact after-paint effect.
+    await new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+    await waitFor(() => expect(document.activeElement).toBe(choice === 'move' ? modules : results));
+  } finally { auth.dispose(); }
+});
+
 it('states unsupported or exceeded models explicitly instead of an empty successful inventory', async () => {
   const auth = await session();
   for (const name of ['function-inventory-unsupported', 'function-inventory-limit-exceeded']) {
@@ -128,7 +213,7 @@ it('shows entity facts with bounded previews, revision-scoped cross links and un
   history.replaceState(null, '', `${revision}/functions/fn_0000000000401100`);
   const view = render(<App basePath="/nested" session={second} />);
   try {
-    await screen.findByText('Preview of the first 2048 of 5000 characters. Open the generated source to inspect the complete reconstruction.');
+    await screen.findByText('Preview of the first 2048 of 5000 displayed characters, after redaction. Open the generated source to inspect the complete reconstruction.');
     expect(screen.getAllByRole('link', { name: 'helper' }).map(link => link.getAttribute('href'))).toContain(
       `${revision}/globals/global_0000000000404000?structureVersion=${truncated.structureVersion}`);
   } finally { view.unmount(); second.dispose(); }
@@ -323,4 +408,20 @@ it('round-trips inventory selections and builds exact bounded API routes', () =>
     expect(() => functionLocation(search)).toThrow();
   }
   expect(() => structureReadRoute(selected, 'functions', '../x')).toThrow();
+});
+
+
+it('uses identical count units for non-BMP structure preview text and its advertised total', async () => {
+  const auth = await session();
+  const detail = fixture<EntityDetail>('entity-detail-function');
+  const value = detail.entity!.texts.find(text => text.field === 'decompiledC')!;
+  const text = '🧪'.repeat(1023) + 'x';
+  value.preview = { text, characters: '5000', truncated: true };
+  transport.get.mockResolvedValue({ data: detail });
+  history.replaceState(null, '', `${revision}/functions/fn_0000000000401100`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const expected = copy.textTruncated.replace('{shown}', String(text.length)).replace('{total}', '5000');
+    await screen.findByText(expected);
+  } finally { auth.dispose(); }
 });

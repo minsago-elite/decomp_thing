@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
 import { useLocation } from 'preact-iso/router';
 import { structureCopy as copy } from '../copy/structure';
 import { ApiClientError } from '../api/errors';
+import { useHeadingHandoff } from '../shared/useHeadingHandoff';
 import { message } from '../shared/messages';
 import type { EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, StructureEntity, StructureReference,
   StructureReferences, StructureText, StructureUnrecordedEntity } from '../api/generated';
@@ -60,7 +61,7 @@ function States({ data }: { data: Header }) {
     <p>{copy.assessment[data.recoveryAssessment]}</p>
     <details>
       <summary>{copy.capabilitiesTitle}</summary>
-      <ul>{data.capabilities.map(item => <li key={item.id}>{copy.capabilityNames[item.id]}{copy.labelSeparator}{copy.capabilityStates[item.state]}
+      <ul>{data.capabilities.map(item => <li key={item.id}>{message(copy.labeledValue, { label: copy.capabilityNames[item.id], value: copy.capabilityStates[item.state] })}
         {item.reason && <> ({message(copy.reason, { code: <code>{item.reason}</code> })})</>}</li>)}</ul>
     </details>
   </>;
@@ -144,18 +145,23 @@ function Functions({ selected, basePath, search }: { selected: SourceSelection; 
   const query = functionLocation(search);
   const [draft, setDraft] = useState<FunctionQuery>(() => withField(query, 'cursor', ''));
   const results = useRef<HTMLHeadingElement>(null);
-  const moveFocus = useRef(false);
+  const moveFocus = useHeadingHandoff(results, false);
   const key = [selected.jobId, selected.runId, selected.revisionId, search].join('/');
   const [read, refresh] = useStructureRead<FunctionInventory>(key, async signal =>
     bindStructure((await client.get('functionInventory', functionReadRoute(selected, query), { signal })).data, selected));
   useEffect(() => { setDraft(withField(query, 'cursor', '')); }, [search]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (read.state !== 'loading' && moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
   }, [read]);
   const data = read.state === 'ready' ? read.value : null;
   const go = (next: FunctionQuery, cursor?: string) => {
+    const nextSearch = functionSearch(withField(next, 'cursor', cursor ?? ''));
+    if (nextSearch === functionSearch(query)) {
+      results.current?.focus();
+      return;
+    }
     moveFocus.current = true;
-    location.route(structureListPath(basePath, selected, 'functions', functionSearch(withField(next, 'cursor', cursor ?? ''))));
+    location.route(structureListPath(basePath, selected, 'functions', nextSearch));
   };
   const offset = query.cursor ? Number(query.cursor.split('_')[1]) : 0;
   const unscoped = withField(withField(query, 'module', ''), 'cursor', '');
@@ -340,7 +346,7 @@ function Preview({ label, value }: { label: string; value: { recorded: boolean; 
     <h3>{label}</h3>
     {value.preview ? <>
       <pre class="structure-preview">{value.preview.text}</pre>
-      <p>{value.preview.truncated ? message(copy.textTruncated, { shown: [...value.preview.text].length, total: value.preview.characters })
+      <p>{value.preview.truncated ? message(copy.textTruncated, { shown: value.preview.text.length, total: value.preview.characters })
         : message(copy.textComplete, { total: value.preview.characters })}</p>
     </> : <p>{copy.textNotRecorded}</p>}
   </section>;
@@ -418,7 +424,7 @@ function Entity({ selected, basePath, kind, selector, search }: {
         <h3>{copy.collisionsTitle}</h3>
         {entity.collisions.total === 0 ? <p>{copy.noCollisions}</p> : <>
           <ul>{entity.collisions.items.map(item => <li key={`${item.kind}/${item.entityId}`}>
-            {item.kind}{copy.labelSeparator}<EntityName basePath={basePath} selected={selected} entity={item} version={data.structureVersion} /> (<code>{item.entityId}</code>)</li>)}</ul>
+            {message(copy.labeledValue, { label: item.kind, value: <EntityName basePath={basePath} selected={selected} entity={item} version={data.structureVersion} /> })} (<code>{item.entityId}</code>)</li>)}</ul>
           {entity.collisions.total > entity.collisions.items.length && <p>{message(copy.boundedList, { shown: entity.collisions.items.length, total: entity.collisions.total })}</p>}
         </>}
       </section>

@@ -102,6 +102,17 @@ class LegacyWebSessionTest {
             }
             assertContentEquals(before, Files.readAllBytes(record))
             assertEquals(storageBefore, storageSnapshot(root), "denied legacy mutations must not create or rewrite retained state")
+            // Each refusal is audited, without any job state change.
+            // An entry is written as its handler exits, after the response bytes.
+            val auditDeadline = System.nanoTime() + 10_000_000_000L
+            fun mutations() = WebAuditLog(root).read().entries.filter { it.action != WebAuditAction.SESSION_START }
+            while (mutations().size < 9 && System.nanoTime() < auditDeadline) Thread.sleep(10)
+            val audited = mutations()
+            assertEquals(9, audited.size)
+            assertTrue(audited.all { it.outcome == WebAuditOutcome.REJECTED })
+            // Legacy session establishment is audited like the versioned route, attributed to the issued session.
+            val logins = WebAuditLog(root).read().entries.filter { it.action == WebAuditAction.SESSION_START }
+            assertTrue(logins.isNotEmpty() && logins.all { it.outcome == WebAuditOutcome.ACCEPTED && it.actor.kind == "browser_session" })
             assertEquals(0, executions)
             val logout = request("/api/v1/session", "DELETE", session + mapOf("Origin" to origin, "Content-Type" to "application/json"))
             assertEquals(204, logout.statusCode())
@@ -115,7 +126,8 @@ class LegacyWebSessionTest {
     }
 
     private fun storageSnapshot(root: Path): Map<String, Pair<String, List<Byte>>> = Files.walk(root).use { paths ->
-        paths.iterator().asSequence().filter { it != root }.associate { path ->
+        // The sensitive-action audit is append-only server evidence, not job state.
+        paths.iterator().asSequence().filter { it != root && !root.relativize(it).startsWith(WebAuditLog.DIRECTORY) }.associate { path ->
             val kind = when {
                 Files.isRegularFile(path, NOFOLLOW_LINKS) -> "file"
                 Files.isDirectory(path, NOFOLLOW_LINKS) -> "directory"

@@ -32,6 +32,12 @@ export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
   'scripts/packaged-browser-upgrade.mjs',
   'scripts/packaged-browser-audit.mjs',
   'scripts/packaged-browser-cdp-diagnostics.mjs',
+  'scripts/packaged-browser-target-lifecycle.mjs',
+  'scripts/packaged-browser-log-server-phases.mjs',
+  'scripts/packaged-browser-logs.mjs',
+  'scripts/packaged-browser-log-projection-evidence.mjs',
+  'scripts/packaged-browser-sources.mjs',
+  'scripts/packaged-browser-native-download.mjs',
   'scripts/test-packaged-browser-structure.mjs',
   'scripts/test-packaged-browser-structure-cold.mjs',
 ]);

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { gzipSync } from 'node:zlib';
 
 // Packaged accessibility, reflow, asset and timing audit (#615 #616 #619 #623 #633).
 // The document, CSP header, base path, entry/lazy chunks and worker are the real packaged
@@ -11,19 +10,43 @@ import { gzipSync } from 'node:zlib';
 // response is a schema fixture the SPA validates exactly as it would a server response.
 
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
-  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file', 'structure'];
+  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file', 'structure functions'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
-export const engineSupplementalInteractionContexts = [
-  ...['attempt overview', 'attempt activity', 'attempt evidence', 'source file'].flatMap(page =>
-    ['focus light', 'focus dark'].map(context => ({ page, context }))),
-  { page: 'attempt overview', context: 'keyboard commands' },
-  { page: 'source file', context: 'keyboard download' },
-  { page: 'source file', context: 'worker/CSP qualification' },
-];
+export const focusInteractionContexts = Object.freeze(['focus light', 'focus dark']);
+export const supplementalInteractionContextNames = Object.freeze([...focusInteractionContexts,
+  'keyboard commands', 'keyboard download', 'worker/CSP qualification']);
+/**
+ * Every fixture page whose trusted contract declares preparation is re-prepared once per focus
+ * scheme (both the DevTools and Playwright runners open each page with preparation before the
+ * Tab walk), so focus contexts derive from the fixture contract rather than a hand-kept list.
+ */
+export function preparedFocusInteractionContexts(pages) {
+  if (!Array.isArray(pages)) throw new TypeError('preparedFocusInteractionContexts: pages must be the fixture page contract');
+  return pages.filter(page => {
+    if (!page || typeof page.name !== 'string' || !auditPageNames.includes(page.name)) {
+      throw new TypeError(`preparedFocusInteractionContexts: undeclared fixture page ${JSON.stringify(page?.name)}`);
+    }
+    if (page.preparation !== undefined && !Array.isArray(page.preparation)) {
+      throw new TypeError(`preparedFocusInteractionContexts: invalid preparation for ${page.name}`);
+    }
+    return (page.preparation ?? []).length > 0;
+  }).flatMap(({ name }) => focusInteractionContexts.map(context => ({ page: name, context })));
+}
+/** Firefox/WebKit: per-scheme focus preparation plus the engine runner's keyboard and worker passes. */
+export function engineSupplementalInteractionContexts(pages) {
+  return [
+    ...preparedFocusInteractionContexts(pages),
+    { page: 'attempt overview', context: 'keyboard commands' },
+    { page: 'source file', context: 'keyboard download' },
+    { page: 'source file', context: 'worker/CSP qualification' },
+  ];
+}
 export const auditProfileEvidence = (profile) => {
   if (profile === 'reference') return { name: 'reference', cpuThrottlingRate: 1, network: 'browser-default' };
+  // docs/web-delivery.md constrained profile: 4x CPU, 10 Mbit/s down, 2 Mbit/s up, 100 ms
+  // round trip. CDP throughput is bytes per second; latency is the added request-to-headers delay.
   if (profile === 'constrained') return { name: 'constrained', cpuThrottlingRate: 4,
-    network: { offline: false, latency: 0, downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 } };
+    network: { offline: false, latency: 100, downloadThroughput: 1_250_000, uploadThroughput: 250_000 } };
   throw new Error(`Unknown packaged audit profile: ${profile}`);
 };
 export async function applyAuditProfile(cdp, sessionId, profile) {
@@ -36,8 +59,7 @@ export async function applyAuditProfile(cdp, sessionId, profile) {
 }
 export function chromiumSupplementalInteractionContexts(pages) {
   return [
-    ...pages.filter(page => (page.preparation ?? []).length > 0).flatMap(({ name }) =>
-      ['focus light', 'focus dark'].map(context => ({ page: name, context }))),
+    ...preparedFocusInteractionContexts(pages),
     { page: 'source file', context: 'worker/CSP qualification' },
   ];
 }
@@ -338,7 +360,8 @@ export function auditFixtures(repo, buildId) {
   };
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
-  const functionInventory = bound('function-inventory', selected);
+  // The lazily loaded Structure route reads the recorded function inventory for this revision.
+  const functions = bound('function-inventory', selected);
   const owner = history.data.items[0];
   const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
   const routes = [
@@ -363,7 +386,7 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
-    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions$`), () => ok(functionInventory)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions$`), () => ok(functions)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), (accept, query, pathname) => sourceFileFrom(pathname)
       ? ok(sourceFileFrom(pathname).chunk) : error(404, 'NOT_FOUND')],
@@ -390,6 +413,7 @@ export function auditFixtures(repo, buildId) {
     { action: `Inspect cases: ${owner.ownerKind} ${owner.ownerId}`, reads: [`${api}/reports/revision-validation`],
       content: [{ selector: '[aria-label="Recorded validation cases"] tbody', text: validation.data.validationCases.items[0].caseId }] },
   ];
+  const inventoryRange = `Showing 1–${functions.data.items.length} of ${functions.data.matchedFunctions} matching functions (${functions.data.totalFunctions} recorded).`;
   // Unknown paths are a server 404 document, not an SPA view, so the router's not-found view
   // stays covered by the component accessibility gate.
   const pages = [
@@ -412,7 +436,12 @@ export function auditFixtures(repo, buildId) {
         { selector: '.source-token-comment', text: 'Synthetic audit source' },
         { selector: '.source-token-number', text: '0x00' },
       ] }] },
-    { name: 'structure', path: `${base}/revisions/${revisionId}/functions`, rendered: 'Showing 1–3 of 5 matching functions' },
+    // The inventory loads on navigation; the explicit refresh proves a fresh bound read and a re-rendered table.
+    { name: 'structure functions', path: `${base}/revisions/${revisionId}/functions`, rendered: inventoryRange,
+      preparation: [{ action: 'Refresh from the first page', reads: [`${api}/revisions/${revisionId}/functions`], content: [
+        { selector: '.structure-view [role="status"]', text: inventoryRange },
+        { selector: '.structure-view tbody', text: functions.data.items.at(-1).address },
+      ] }] },
   ];
   return {
     pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId, chartExpected,
@@ -764,6 +793,9 @@ export const measureContrast = `(() => {
   return { measured: results.length, minimum: results.length ? Number(Math.min(...results).toFixed(3)) : null, failures: failures.slice(0, 12), failureCount: failures.length, unsupported: unsupported.slice(0, 12), tokens };
 })()`;
 
+/** Failure-only focus trajectory bounds, independent of every assertion deadline. */
+export const focusTrajectoryFrames = 30;
+export const focusTrajectoryMs = 1000;
 export const measureFocus = `(async () => {
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const element = document.activeElement;
@@ -781,8 +813,12 @@ export const measureFocus = `(async () => {
   const box = element.getBoundingClientRect();
   const hit = document.elementFromPoint(Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1), Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1));
   const [low, high] = outline && adjacent ? [luminance(outline), luminance(adjacent)].sort((a, b) => a - b) : [0, 0];
-  return {
+  const result = {
     key: ids.get(element), heading: element.matches('main h1'),
+    // Numeric layout facts only; keep the original sample and verdict, without scrolling or extra waits.
+    geometry: { left: box.left, top: box.top, right: box.right, bottom: box.bottom,
+      width: box.width, height: box.height, viewportWidth: innerWidth, viewportHeight: innerHeight,
+      scrollX, scrollY },
     target: element.tagName.toLowerCase() + (element.id ? '#' + element.id : '') + ' ' + JSON.stringify((element.getAttribute('aria-label') || element.textContent || '').trim().slice(0, 40)),
     focusVisible: element.matches(':focus-visible'), outlineStyle: style.outlineStyle, outlineWidth: parseFloat(style.outlineWidth),
     contrast: outline && adjacent ? Number(((high + 0.05) / (low + 0.05)).toFixed(3)) : null,
@@ -790,6 +826,25 @@ export const measureFocus = `(async () => {
     inViewport: box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth,
     unobscured: hit !== null && (element.contains(hit) || hit.contains(element)),
   };
+  // Failure-only diagnostic: after an off-screen sample, record later frames without scrolling or
+  // refocusing, so a delayed engine focus scroll is distinguishable from a persistent one. Numbers
+  // and a fixed same-target flag only. Bounded by ${focusTrajectoryFrames} frames and ${focusTrajectoryMs} ms.
+  if (!result.inViewport) {
+    const started = performance.now(); const trajectory = [];
+    for (let frame = 1; frame <= ${focusTrajectoryFrames}; frame += 1) {
+      const elapsed = performance.now() - started;
+      if (elapsed >= ${focusTrajectoryMs}) break;
+      const ticked = await new Promise(resolve => { const timer = setTimeout(() => resolve(false), ${focusTrajectoryMs} - elapsed);
+        requestAnimationFrame(() => { clearTimeout(timer); resolve(true); }); });
+      if (!ticked) break;
+      const later = element.getBoundingClientRect();
+      trajectory.push({ frame, ms: Number((performance.now() - started).toFixed(1)), top: later.top, bottom: later.bottom,
+        left: later.left, right: later.right, viewportWidth: innerWidth, viewportHeight: innerHeight, scrollX, scrollY,
+        sameTarget: document.activeElement === element });
+    }
+    result.trajectory = trajectory;
+  }
+  return result;
 })()`;
 
 function percentile(values, fraction) {
@@ -1376,9 +1431,28 @@ export function interactionEvidenceFailures(audit, pages, extraContexts = []) {
   const failures = [];
   if (!Array.isArray(pages)) return ['interactions: missing expected fixture contract'];
   const contextsByPage = new Map(pages.map(page => [page.name, auditViewports.map(viewport => viewport.name)]));
+  const preparedPages = new Set(pages.filter(page => Array.isArray(page?.preparation) && page.preparation.length > 0).map(page => page.name));
+  if (!Array.isArray(extraContexts)) {
+    failures.push('interactions: invalid extra context contract');
+    extraContexts = [];
+  }
   for (const extra of extraContexts) {
-    if (!extra || typeof extra.page !== 'string' || typeof extra.context !== 'string' || !contextsByPage.has(extra.page)) {
+    if (!extra || typeof extra.page !== 'string' || typeof extra.context !== 'string' || !contextsByPage.has(extra.page) ||
+        !auditPageNames.includes(extra.page)) {
       failures.push('interactions: invalid extra context contract');
+      continue;
+    }
+    const where = JSON.stringify([extra.page, extra.context]);
+    if (!supplementalInteractionContextNames.includes(extra.context)) {
+      failures.push(`interactions: undeclared extra context ${where}`);
+      continue;
+    }
+    if (!preparedPages.has(extra.page)) {
+      failures.push(`interactions: extra context for unprepared page ${where}`);
+      continue;
+    }
+    if (contextsByPage.get(extra.page).includes(extra.context)) {
+      failures.push(`interactions: duplicate extra context ${where}`);
       continue;
     }
     contextsByPage.get(extra.page).push(extra.context);
@@ -1437,34 +1511,6 @@ export function interactionEvidenceFailures(audit, pages, extraContexts = []) {
     }
   }
   return failures;
-}
-
-/** Compact pointer for report.json; the complete measurements remain in the hashed audit sidecar. */
-export function summarizeAuditEvidence(audit, evidence) {
-  return {
-    evidence,
-    fixtures: audit.fixtures,
-    coverage: {
-      layout: audit.layout.map(({ page, viewport, scheme }) => ({ page, viewport, scheme })),
-      contrast: audit.contrast.map(({ page, viewport, scheme }) => ({ page, viewport, scheme })),
-      focus: audit.focus.map(({ page, scheme, stops }) => ({ page, scheme, stopCount: stops.length })),
-      focusStops: audit.focus.reduce((count, entry) => count + entry.stops.length, 0),
-    },
-    unmapped: audit.unmapped,
-    interactions: audit.interactions,
-    workers: { highlightedTokens: audit.workers.highlightedTokens,
-      targets: audit.workers.targets.map(({ url, responses }) => ({ url, responses })) },
-    keyboard: audit.keyboard,
-    timing: audit.timing,
-  };
-}
-
-export function encodeAuditEvidence(audit, maxBytes = 8 * 1024 * 1024) {
-  const json = Buffer.from(JSON.stringify(audit), 'utf8');
-  assert.ok(json.byteLength <= maxBytes, `Audit evidence exceeds its ${maxBytes}-byte raw bound`);
-  const bytes = gzipSync(json, { level: 9, mtime: 0 });
-  return { bytes, metadata: { sha256: createHash('sha256').update(bytes).digest('hex'),
-    compressedBytes: bytes.byteLength, uncompressedBytes: json.byteLength } };
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */

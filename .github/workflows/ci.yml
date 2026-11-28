@@ -65,22 +65,34 @@ jobs:
           } > "$RUNNER_TEMP/frontend-ci/toolchain.txt"
           npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
           python3 -m pip install --requirement requirements/oracle-generation.txt
-      - name: Verify packaged upgrade and cache evidence controls
-        run: node scripts/test-packaged-browser-upgrade.mjs
+      - name: Verify packaged upgrade, cache and live storage evidence controls
+        run: |
+          node --test scripts/test-packaged-browser-upgrade.mjs scripts/test-packaged-browser-live.mjs
+          node --test scripts/packaged-browser-live.test.mjs
       - name: Verify packaged accessibility and asset audit controls
         run: |
           node scripts/test-packaged-browser-audit.mjs
           node scripts/test-browser-engine-input.mjs
           node scripts/test-packaged-browser-engine-adapter.mjs
           node --test scripts/test-packaged-browser-engine-diagnostics.mjs
+          node --test scripts/test-packaged-browser-exception-context.mjs
           node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
-      - name: Verify packaged program-structure browser controls
-        run: node scripts/test-packaged-browser-structure.mjs
+      - name: Verify packaged deletion verdict controls
+        run: node --test scripts/packaged-browser-lifecycle.test.mjs
+      - name: Verify packaged DevTools target lifecycle controls
+        run: node --test scripts/test-packaged-browser-target-lifecycle.mjs
+      - name: Verify packaged browser target setup integration
+        run: node scripts/test-packaged-browser-target-setup-integration.mjs
+      - name: Verify packaged logs failure-phase evidence controls
+        run: node --test scripts/test-packaged-browser-logs-phase-evidence.mjs scripts/test-packaged-browser-log-projection-evidence.mjs scripts/packaged-browser-log-server-phases.test.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
+      - name: Verify bounded archival image capture controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-archival-image-capture.py --verbose
       - name: Verify bounded sanitizer invocation controls
         timeout-minutes: 1
         run: python3 -B scripts/test-clang-sanitizer.py --verbose
@@ -98,6 +110,8 @@ jobs:
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Verify live dashboard audit preservation controls
+        run: node --test scripts/packaged-browser-live.test.mjs | tee "$RUNNER_TEMP/frontend-ci/live-audit-tests.txt"
       - name: Check frontend freshness diagnostic controls
         timeout-minutes: 1
         run: python3 -B scripts/test-frontend-freshness.py --verbose
@@ -199,12 +213,19 @@ jobs:
           node --test scripts/packaged-browser-restart.test.mjs
           node --check scripts/packaged-browser-cdp-diagnostics.mjs
           node --test scripts/packaged-browser-cdp-diagnostics.test.mjs
+          node --test scripts/packaged-browser-native-download.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
           DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
         run: |
-          ./gradlew --no-daemon test --tests 'decompengine.web.BrowserSessionExpiryTest' \
+          # Use the archival build's bounded resolver backoff for cold dependency acquisition.
+          ./gradlew --no-daemon \
+            -Dorg.gradle.internal.repository.max.tentatives=5 \
+            -Dorg.gradle.internal.repository.initial.backoff=2000 \
+            -Dorg.gradle.internal.http.connectionTimeout=30000 \
+            -Dorg.gradle.internal.http.socketTimeout=60000 \
+            test --tests 'decompengine.web.BrowserSessionExpiryTest' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
             verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
@@ -251,18 +272,37 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode metadata --no-sandbox
+      - name: Browse, preview, highlight and compare retained sources by keyboard
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode sources --no-sandbox
       - name: Preserve focused dashboard rows during actual background updates
         run: |
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode live --no-sandbox
+      - name: Verify packaged job history and browser Back and Forward in pinned Chrome
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode history --no-sandbox
       - name: Verify bounded dashboard paging with ten thousand persisted jobs
         run: |
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Qualify large replaced log recordings and browser teardown budgets
+        run: |
+          node --test scripts/test-packaged-browser-logs.mjs
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode logs --no-sandbox
       - name: Exercise same-origin JVM restart and two-tab stale progress pin
         run: |
           xvfb-run -a node scripts/check-packaged-web-browser.mjs \
@@ -325,7 +365,7 @@ jobs:
             build/packaged-web-ci
             build/packaged-web-ci/program-structure-cold-*.json
             build/packaged-browser-*/report.json
-            build/packaged-browser-*/audit-evidence.json.gz
+            build/packaged-browser-*/report.full.part-*
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test
@@ -361,6 +401,7 @@ jobs:
       - uses: ./.github/actions/setup-gradle-compiler-cache
         id: gradle-cache
         with:
+          matrix: ${{ toJSON(matrix) }}
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
@@ -381,8 +422,29 @@ jobs:
       - name: Install sandbox host prerequisites
         timeout-minutes: 10
         run: |
-          # Bound stalled mirrors without changing required packages or test budgets.
+          # Use an isolated Ubuntu-signed distro view; leave runner repositories intact.
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_CODENAME" = noble
+          test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          case "$(dpkg --print-architecture)" in
+            amd64) ubuntu_archive=https://archive.ubuntu.com/ubuntu; ubuntu_security=https://security.ubuntu.com/ubuntu ;;
+            arm64) ubuntu_archive=https://ports.ubuntu.com/ubuntu-ports; ubuntu_security=$ubuntu_archive ;;
+            *) echo 'Unsupported hosted runner architecture' >&2; exit 1 ;;
+          esac
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          apt_root=$(mktemp -d "$GITHUB_WORKSPACE/build/sandbox-apt.XXXXXXXX")
+          trap 'sudo rm -rf -- "$apt_root"' EXIT
+          chmod 755 "$apt_root"
+          mkdir -p "$apt_root/lists/partial" "$apt_root/empty"
+          for suite in noble noble-updates noble-backports; do
+            echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $ubuntu_archive $suite main restricted universe multiverse"
+          done > "$apt_root/ubuntu.list"
+          echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $ubuntu_security noble-security main restricted universe multiverse" >> "$apt_root/ubuntu.list"
           apt_acquire_options=(
+            -o "Dir::Etc::sourcelist=$apt_root/ubuntu.list"
+            -o "Dir::Etc::sourceparts=$apt_root/empty"
+            -o "Dir::State::lists=$apt_root/lists"
             -o Acquire::Retries=2
             -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30
@@ -757,6 +819,7 @@ jobs:
   archival-ghidra:
     needs: frontend
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:

@@ -1,4 +1,4 @@
-import type { ContractDocument, Page } from '../api/generated';
+import type { ContractDocument, Page, StructureText } from '../api/generated';
 import { ApiClientError } from '../api/errors';
 import { registerContractGroup } from '../api/decode';
 import { structureContractGroup } from '../api/generated-schema-structure';
@@ -9,6 +9,13 @@ const requireValue = (condition: boolean): void => {
 
 type StructureHeader = Extract<ContractDocument, { kind: 'functionInventory' | 'moduleInventory' | 'moduleDetail' | 'entityDetail' }>['data'];
 type StructureRow = { selector: string | null; entityId: string; recorded: boolean; evidenceState?: string; ownership?: string; moduleId?: string | null; moduleSelector?: string | null };
+
+/** Counts describe the redacted display value in the API's UTF-16 units. */
+function checkStructureText(value: StructureText, maximum = 2048): void {
+  const shown = BigInt(value.text.length);
+  const total = BigInt(value.characters);
+  requireValue(value.text.length <= maximum && total >= shown && value.truncated === (total > shown));
+}
 
 /** Recorded structure: unavailable models carry no rows, selectors are the recorded identities, and evidence classes agree with ownership. */
 function checkStructure(data: StructureHeader, rows: readonly StructureRow[]): void {
@@ -57,7 +64,10 @@ function checkStructureDocument(document: ContractDocument): void {
         checkStructurePage(owned.page, structureVersion, owned.items.length);
         requireValue(owned.items.length <= owned.total && owned.items.every(item => item.kind === owned.kind));
       }
-      if (module) requireValue(module.selector === null || module.selector === module.moduleId);
+      if (module) {
+        requireValue(module.selector === null || module.selector === module.moduleId);
+        for (const preview of module.boundaryEvidence.items) checkStructureText(preview, 256);
+      }
       break;
     }
     case 'entityDetail': {
@@ -69,7 +79,11 @@ function checkStructureDocument(document: ContractDocument): void {
           if (references) requireValue(references.items.length <= references.total
             && references.items.every(item => item.resolution === 'recorded' || item.selector === null));
         }
-        for (const text of entity.texts) requireValue(text.recorded === (text.preview !== null));
+        for (const text of entity.texts) {
+          requireValue(text.recorded === (text.preview !== null));
+          if (text.preview) checkStructureText(text.preview);
+        }
+        for (const preview of entity.strings?.items ?? []) checkStructureText(preview, 256);
       }
       break;
     }
