@@ -13,7 +13,11 @@ internal object GccBundledCliIntentBuilder {
     fun build(operationId: String, engineId: String, runKind: GccCompilerEngineContainmentRunKind,
         binary: Path, profilePath: Path, archive: Path, controls: Path, journalRoot: Path, scratch: Path,
         diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null,
-        fullRecoveryExport: Boolean = false, runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false): GccBundledOperationIntent {
+        fullRecoveryExport: Boolean = false, runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false,
+        retainedControls: Boolean = false): GccBundledOperationIntent {
+        require(!retainedControls || (cliInvocation != null && runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED)) {
+            "retained CLI controls are reused only by later-invocation recovery of an interrupted operation"
+        }
         require(!runtimeDiagnostics || (fullRecoveryExport && engineId == "cc1")) {
             "runtime diagnostics require a fresh cc1 full-recovery operation"
         }
@@ -62,7 +66,11 @@ internal object GccBundledCliIntentBuilder {
                     }
                 }
             }
-            require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty()) { "CLI control directory must be empty" }
+            if (retainedControls) {
+                require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 3).toSet() == STAGED_CONTROLS) {
+                    "CLI control directory must retain exactly its two staged controls"
+                }
+            } else require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty()) { "CLI control directory must be empty" }
             GccRetainedCompilerEngineProfile.open(profilePath, engineId).use { profile ->
                 profile.requireDisjoint(roots)
                 if (nativeCallObservations) profile.requireNativeCallProfile()
@@ -137,9 +145,19 @@ internal object GccBundledCliIntentBuilder {
                                     suite.budgets.exportMaximumResidentBytes, 128),
                                 diskPolicy, profile, cliInvocation)
                             requireDirectory()
-                            require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty())
-                            DescriptorBoundAtomicStateFile.publishManifestNoReplace(directory, "boot-classpath.json", manifest, MAXIMUM_CONTROL_BYTES)
-                            DescriptorBoundAtomicStateFile.publishManifestNoReplace(directory, "ExportProgramModel.java", exporter, MAXIMUM_CONTROL_BYTES)
+                            if (retainedControls) {
+                                // A later invocation reuses the earlier owner's staged bytes only when they are identical.
+                                for ((name, bytes) in listOf("boot-classpath.json" to manifest, "ExportProgramModel.java" to exporter)) {
+                                    val retained = DescriptorBoundAtomicStateFile.readManifestOrNull(directory, name, MAXIMUM_CONTROL_BYTES)
+                                    require(retained != null && retained.bytes.contentEquals(bytes)) {
+                                        "retained CLI control differs from the current deployment: $name"
+                                    }
+                                }
+                            } else {
+                                require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty())
+                                DescriptorBoundAtomicStateFile.publishManifestNoReplace(directory, "boot-classpath.json", manifest, MAXIMUM_CONTROL_BYTES)
+                                DescriptorBoundAtomicStateFile.publishManifestNoReplace(directory, "ExportProgramModel.java", exporter, MAXIMUM_CONTROL_BYTES)
+                            }
                             requireDirectory()
                             GccBundledOperationInputs.open(intent, listOf(journalRoot, scratch)).use { it.verify("after CLI intent preparation") }
                             guards.forEach { it.verifyUnchanged("after CLI intent preparation") }
@@ -147,7 +165,7 @@ internal object GccBundledCliIntentBuilder {
                             boot.verify("after CLI intent preparation")
                             deployment.verify("after CLI intent preparation")
                             requireDirectory()
-                            require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 3).toSet() == setOf("boot-classpath.json", "ExportProgramModel.java"))
+                            require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 3).toSet() == STAGED_CONTROLS)
                             return intent
                         }
                     }
@@ -170,4 +188,5 @@ internal object GccBundledCliIntentBuilder {
 
     private fun overlaps(first: Path, second: Path) = first.startsWith(second) || second.startsWith(first)
     private const val MAXIMUM_CONTROL_BYTES = 4 * 1024 * 1024
+    private val STAGED_CONTROLS = setOf("boot-classpath.json", "ExportProgramModel.java")
 }

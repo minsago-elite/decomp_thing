@@ -15,6 +15,8 @@ internal data class GccBundledCliOptions(
     val resumeAfterCheckpoint: Long?, val fullRecoveryExport: Boolean = false,
     val runtimeDiagnostics: Boolean = false,
     val nativeCallObservations: Boolean = false,
+    /** A later invocation's selection of one unfinished interrupted operation; never part of a retained invocation. */
+    val recoverOperationId: String? = null,
 ) {
     val commandName: String get() = when {
         nativeCallObservations -> "gcc-engine-native-calls"
@@ -45,7 +47,7 @@ internal data class GccBundledCliOptions(
             val positionals = mutableListOf<String>()
             val values = linkedMapOf<String, String>()
             val allowed = setOf("--profile", "--ghidra-archive", "--output", "--scratch", "--resume-after-checkpoint",
-                "--scratch-min-bytes", "--scratch-max-bytes", "--scratch-min-inodes", "--scratch-max-inodes")
+                "--scratch-min-bytes", "--scratch-max-bytes", "--scratch-min-inodes", "--scratch-max-inodes", "--recover-operation")
             var index = 0
             while (index < arguments.size) {
                 val argument = arguments[index++]
@@ -80,13 +82,19 @@ internal data class GccBundledCliOptions(
             val threshold = number("--resume-after-checkpoint")?.also { GccBundledCheckpointTrigger(it) }
             require(!fullRecoveryExport || threshold == null) { "full-recovery export cannot resume from a planning checkpoint" }
             require(!nativeCallObservations || threshold == null) { "native call observations cannot resume from a planning checkpoint" }
+            val recovery = values["--recover-operation"]?.also {
+                require(it.matches(Regex("[a-f0-9]{64}"))) { "--recover-operation requires a 64-character lowercase hex operation ID" }
+                require(!fullRecoveryExport && !runtimeDiagnostics && !nativeCallObservations && threshold != null) {
+                    "--recover-operation requires the original interrupted gcc-engine-plan selection with --resume-after-checkpoint"
+                }
+            }
             return GccBundledCliOptions(positionals[0], path(positionals[1]), required("--profile"), required("--ghidra-archive"),
                 required("--output"), required("--scratch"), FullTreeDiskScratchPolicy(
                     number("--scratch-min-bytes", 8L * 1024 * 1024 * 1024)!!,
                     number("--scratch-max-bytes", 64L * 1024 * 1024 * 1024)!!,
                     number("--scratch-min-inodes", 32768)!!, number("--scratch-max-inodes", 1_000_000)!!), threshold,
                 fullRecoveryExport = fullRecoveryExport, runtimeDiagnostics = runtimeDiagnostics,
-                nativeCallObservations = nativeCallObservations).also {
+                nativeCallObservations = nativeCallObservations, recoverOperationId = recovery).also {
                 require(it.diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
                     it.diskPolicy.maximumFilesystemInodes <= 2_000_000)
                 require(!it.output.startsWith(it.scratch) && !it.scratch.startsWith(it.output)) { "output and scratch must be disjoint" }
@@ -121,6 +129,7 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
     val canonicalBytes: ByteArray get() = encoded.copyOf()
 
     init {
+        require(options.recoverOperationId == null) { "a later-invocation recovery selection is never a retained invocation" }
         require(directories.keys == setOf(options.output, options.output.resolve("inputs"), options.output.resolve("journal")))
         require(GccBundledCliOptions.parse(arguments, fullRecoveryExport = options.fullRecoveryExport,
             runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations) == options) {

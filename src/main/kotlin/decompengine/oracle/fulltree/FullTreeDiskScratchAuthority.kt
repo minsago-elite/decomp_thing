@@ -743,6 +743,37 @@ internal class FullTreeDiskScratchLease internal constructor(
         }
     }
 
+    /**
+     * Pins a residual run root that a cold handle has just authenticated, while the mount flock is held. The
+     * descriptor is owned by this lease from entry, so [abandonForRecovery] closes it on any failure.
+     */
+    @Synchronized
+    internal fun adoptRecoveredOperationRunRoot(
+        descriptor: LinuxDescriptor,
+        constructionPermit: Any,
+    ): FullTreeDiskScratchRunRoot {
+        check(constructionPermit === FullTreeDiskScratchRunRootConstructionPermit) {
+            "recovered disk-scratch run roots can only be adopted from a cold lease transfer"
+        }
+        check(!closed) { "disk-scratch lease is closed" }
+        if (operationRunDescriptor != null || operationRunRoot != null) {
+            scratchFail("disk-scratch operation run root was already prepared")
+        }
+        operationRunDescriptor = descriptor
+        val adopted = FullTreeDiskScratchRunRoot.create(FullTreeDiskScratchRunRootConstructionPermit)
+        operationRunRoot = adopted
+        requireManagedLeaseDirectory(
+            LinuxFilesystemSyscalls.identity(descriptor.fd), mountDescriptor.identity, "recovered disk-scratch operation run root",
+        )
+        requireSameDirectory(scratchParent.resolve(runDirectoryName(evidence.operationId)), descriptor,
+            "recovered disk-scratch operation run root")
+        requireCurrentOperationRunRoot(adopted, FullTreeDiskScratchStage.BEFORE_LAUNCH)
+        return adopted
+    }
+
+    @Synchronized
+    internal fun pinsOperationRunDescriptor(descriptor: LinuxDescriptor): Boolean = operationRunDescriptor === descriptor
+
     /** Proves that this still-live lease owns the exact opaque run-root token. */
     @Synchronized
     fun requireCurrentOperationRunRoot(
@@ -1188,6 +1219,54 @@ internal class FullTreeDiskScratchColdLease internal constructor(
         return result as T
     }
 
+    /**
+     * Moves this lock-retaining handle into a live lease that pins the exact residual active run, for a later
+     * owner that has separately reconciled its durable operation history against [expectedEvidence]. The mount
+     * flock is held throughout: the live lease receives the same locked descriptor. Nothing on the mount is
+     * created, renamed, synchronized or removed, and this cold handle is closed without unlocking.
+     */
+    @Synchronized
+    fun transferToRecoveredLease(
+        expectedEvidence: FullTreeDiskScratchEvidence,
+    ): Pair<FullTreeDiskScratchLease, FullTreeDiskScratchRunRoot> {
+        check(!closed) { "disk-scratch cold lease is closed" }
+        val snapshot = requireCurrentInternal(expectedEvidence)
+        if (snapshot.population != FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN) {
+            scratchFail("cold disk-scratch lease lacks its active operation run")
+        }
+        val runName = runDirectoryName(operation.operationId)
+        val opened = leaseDescriptor.whileOpen { leaseFd -> LinuxFilesystemSyscalls.openDirectoryAt(leaseFd, runName) }
+        try {
+            if (requireColdBorrowedRunRoot(opened, scratchParent.resolve(runName), runName) != snapshot.runRootIdentity) {
+                scratchFail("cold disk-scratch active run differs from its retained snapshot")
+            }
+        } catch (failure: Throwable) {
+            runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+        closed = true
+        val live = FullTreeDiskScratchLease(
+            scratchParent = scratchParent,
+            evidence = expectedEvidence,
+            mountPath = mountPath,
+            mountDescriptor = mountDescriptor,
+            leaseName = leaseName,
+            leaseDescriptor = leaseDescriptor,
+            leaseRecordBytes = recordBytes,
+            policy = policy,
+            authorizedMount = authorizedMount,
+            authorizedCapacity = authorizedCapacity,
+        )
+        try {
+            recordDescriptor.close()
+            return live to live.adoptRecoveredOperationRunRoot(opened, FullTreeDiskScratchRunRootConstructionPermit)
+        } catch (failure: Throwable) {
+            if (!live.pinsOperationRunDescriptor(opened)) runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            runCatching { live.abandonForRecovery() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
     private fun requireColdBorrowedRunRoot(
         descriptor: LinuxDescriptor,
         path: Path,
@@ -1346,6 +1425,26 @@ internal class FullTreeDiskScratchColdLease internal constructor(
 }
 
 internal object FullTreeDiskScratchAuthority {
+    /**
+     * Later-owner recovery of one exact residual active run. Taking the mount flock without blocking proves that
+     * no cooperating live lease holds it; cold reconciliation against [expectedEvidence] then precedes a
+     * lock-preserving transfer into a live lease. Record-only, foreign or changed residue fails closed.
+     */
+    fun reacquireActiveRunForRecovery(
+        provisionedMount: Path,
+        operation: FullTreeDiskScratchOperation,
+        policy: FullTreeDiskScratchPolicy,
+        expectedEvidence: FullTreeDiskScratchEvidence,
+    ): Pair<FullTreeDiskScratchLease, FullTreeDiskScratchRunRoot> {
+        val cold = openExistingReadOnly(provisionedMount, operation, policy)
+        try {
+            return translateScratchFailures { cold.transferToRecoveredLease(expectedEvidence) }
+        } catch (failure: Throwable) {
+            runCatching { cold.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
     fun openExistingReadOnly(
         provisionedMount: Path,
         operation: FullTreeDiskScratchOperation,

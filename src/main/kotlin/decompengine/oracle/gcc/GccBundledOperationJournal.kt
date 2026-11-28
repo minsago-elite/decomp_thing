@@ -34,8 +34,20 @@ internal class GccBundledOperationJournal private constructor(
     private var stage = JournalStage.INTENT
     private var diskEvidenceSha256: String? = null
     private var plannerBaseFiles: Set<String>? = null
+    private var recoveredStopped: GccBundledStoppedJournalEvidence? = null
     private var poisoned = false
     private var closed = false
+
+    /** Exact durable record of a later owner's adoption; null for every fresh or same-owner chain. */
+    val recoveryRecordBytes: ByteArray?
+        @Synchronized get() = snapshots[RECOVERY_FILE]?.bytes
+
+    /** Stopped evidence parsed by [openStoppedForRecovery]; absent for every newly created journal. */
+    val recoveredStoppedEvidence: GccBundledStoppedJournalEvidence
+        @Synchronized get() {
+            checkOpen()
+            return checkNotNull(recoveredStopped) { "GCC journal was not reopened for later-invocation recovery" }
+        }
 
     val preparedBytes: ByteArray
         @Synchronized get() {
@@ -74,22 +86,8 @@ internal class GccBundledOperationJournal private constructor(
         if (path.startsWith(definition.outputLease.path) || definition.outputLease.path.startsWith(path)) {
             journalFail("GCC bundled journal must remain outside its writable output")
         }
-        val unsigned = JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-bundled-prepared-operation-v1"),
-            "schemaVersion" to JsonPrimitive(1),
-            "operationId" to JsonPrimitive(operationId),
-            "intentSha256" to JsonPrimitive(intentSha256),
-            "diskEvidenceSha256" to JsonPrimitive(checkNotNull(diskEvidenceSha256)),
-            "definitionSha256" to JsonPrimitive(OracleArtifacts.sha256(bytes)),
-            "definitionBindingSha256" to JsonPrimitive(definition.bindingSha256),
-            "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
-        ))
-        val prepared = OracleJson.canonicalBytes(
-            JsonObject(unsigned + ("preparedSha256" to JsonPrimitive(
-                OracleArtifacts.sha256(OracleJson.canonicalBytes(unsigned, JOURNAL_JSON_LIMITS)),
-            ))),
-            JOURNAL_JSON_LIMITS,
-        )
+        val prepared = preparedRecordBytes(operationId, intentSha256, checkNotNull(diskEvidenceSha256), bytes,
+            definition.bindingSha256, deploymentClosureSha256)
         publish(DEFINITION_FILE, bytes)
         stage = JournalStage.DEFINITION_STAGED
         requireCurrent("after GCC definition publication")
@@ -171,9 +169,32 @@ internal class GccBundledOperationJournal private constructor(
         snapshots.getValue(STATE_CAPTURED_FILE).bytes
     }
 
+    /**
+     * Durably names this later owner before any resume record. Only a journal reopened by
+     * [openStoppedForRecovery] can reach this transition; a same-owner chain never contains it.
+     */
+    @Synchronized
+    fun recordRecoveryAdopted(recoveryBytes: ByteArray): ByteArray = boundOperation("recording later-invocation GCC recovery") {
+        check(stage == JournalStage.STATE_CAPTURED && recoveredStopped != null) {
+            "GCC later-invocation recovery requires a reopened stopped journal"
+        }
+        val recovery = OracleJson.parseCanonical(recoveryBytes, JOURNAL_JSON_LIMITS).jsonObject
+        require(recovery["provider"] == JsonPrimitive(RECOVERY_PAYLOAD_PROVIDER) &&
+            recovery["operationId"] == JsonPrimitive(operationId) &&
+            recovery["stoppedStateRecordSha256"] == JsonPrimitive(OracleArtifacts.sha256(snapshots.getValue(STATE_CAPTURED_FILE).bytes))
+        ) { "GCC recovery record differs from its reopened stopped operation" }
+        publishLinkedRecord(RECOVERY_FILE, "gcc-bundled-later-invocation-recovery-adopted-v1", STATE_CAPTURED_FILE, "recovery", recoveryBytes)
+        stage = JournalStage.RECOVERY_ADOPTED
+        snapshots.getValue(RECOVERY_FILE).bytes
+    }
+
     @Synchronized
     fun recordResumePrepared(definitionBytes: ByteArray): ByteArray = boundOperation("preparing GCC resume") {
-        check(stage == JournalStage.STATE_CAPTURED) { "GCC resume requires recorded stopped state" }
+        check(stage == JournalStage.STATE_CAPTURED || stage == JournalStage.RECOVERY_ADOPTED) { "GCC resume requires recorded stopped state" }
+        check(stage == JournalStage.RECOVERY_ADOPTED || recoveredStopped == null) {
+            "a reopened GCC journal must record its later-invocation owner before resume"
+        }
+        val resumePredecessor = if (stage == JournalStage.RECOVERY_ADOPTED) RECOVERY_FILE else STATE_CAPTURED_FILE
         val bytes = boundedCopy(definitionBytes, MAXIMUM_DEFINITION_BYTES, "GCC resume definition")
         val resumed = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(bytes)
         val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(snapshots.getValue(DEFINITION_FILE).bytes)
@@ -205,7 +226,7 @@ internal class GccBundledOperationJournal private constructor(
             "definitionSha256" to JsonPrimitive(OracleArtifacts.sha256(bytes)),
             "definitionBindingSha256" to JsonPrimitive(resumed.bindingSha256),
         )))
-        publishLinkedRecord(RESUME_PREPARED_FILE, "gcc-bundled-resume-prepared-v1", STATE_CAPTURED_FILE, "resume", summary)
+        publishLinkedRecord(RESUME_PREPARED_FILE, "gcc-bundled-resume-prepared-v1", resumePredecessor, "resume", summary)
         stage = JournalStage.RESUME_PREPARED
         snapshots.getValue(RESUME_PREPARED_FILE).bytes
     }
@@ -335,24 +356,7 @@ internal class GccBundledOperationJournal private constructor(
     }
 
     private fun publishLinkedRecord(name: String, provider: String, previous: String, payloadName: String?, payloadBytes: ByteArray?) {
-        val fields = linkedMapOf<String, JsonElement>(
-            "provider" to JsonPrimitive(provider),
-            "schemaVersion" to JsonPrimitive(1),
-            "operationId" to JsonPrimitive(operationId),
-            "intentSha256" to JsonPrimitive(intentSha256),
-            "previousSha256" to JsonPrimitive(OracleArtifacts.sha256(snapshots.getValue(previous).bytes)),
-            "complete" to JsonPrimitive(false),
-            "releaseEligible" to JsonPrimitive(false),
-        )
-        if (payloadName != null) {
-            val bytes = boundedCopy(requireNotNull(payloadBytes), MAXIMUM_INTENT_BYTES, "GCC command record")
-            val payload = OracleJson.parseCanonical(bytes, JOURNAL_JSON_LIMITS)
-            require(payload is JsonObject) { "GCC command payload must be a canonical object" }
-            fields[payloadName] = payload
-            fields["${payloadName}Sha256"] = JsonPrimitive(OracleArtifacts.sha256(bytes))
-        }
-        fields["recordSha256"] = JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(fields), JOURNAL_JSON_LIMITS)))
-        publish(name, OracleJson.canonicalBytes(JsonObject(fields), JOURNAL_JSON_LIMITS))
+        publish(name, linkedRecordBytes(operationId, intentSha256, provider, snapshots.getValue(previous).bytes, payloadName, payloadBytes))
     }
 
     private fun publish(name: String, bytes: ByteArray) {
@@ -382,8 +386,10 @@ internal class GccBundledOperationJournal private constructor(
             JournalStage.STATE_MANIFEST_STAGED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE, INTERRUPTED_FILE, PREFIX_FILE, STATE_MANIFEST_FILE)
             JournalStage.RESUME_DEFINITION_STAGED, JournalStage.RESUME_PREPARED, JournalStage.RESUME_ATTACHED,
             JournalStage.RESUME_START_AUTHORIZED, JournalStage.RESUME_EXECUTED, JournalStage.RESUME_EXPORT_ASSESSED ->
-                STOPPED_FILES + RESUME_FILES.take(RESUME_STAGES.indexOf(stage) + 1)
-            JournalStage.STATE_CAPTURED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE, INTERRUPTED_FILE, PREFIX_FILE, STATE_MANIFEST_FILE, STATE_CAPTURED_FILE)
+                STOPPED_FILES + (if (recoveredStopped != null) setOf(RECOVERY_FILE) else emptySet()) +
+                    RESUME_FILES.take(RESUME_STAGES.indexOf(stage) + 1)
+            JournalStage.STATE_CAPTURED -> STOPPED_FILES
+            JournalStage.RECOVERY_ADOPTED -> STOPPED_FILES + RECOVERY_FILE
             JournalStage.PLANNER_REQUEST_STAGED, JournalStage.PLANNER_PREPARED, JournalStage.PLANNER_ATTACHED,
             JournalStage.PLANNER_START_AUTHORIZED, JournalStage.PLANNER_EXECUTED, JournalStage.PLANNER_ASSESSED ->
                 checkNotNull(plannerBaseFiles) + PLANNER_FILES.take(PLANNER_STAGES.indexOf(stage) + 1)
@@ -516,7 +522,224 @@ internal class GccBundledOperationJournal private constructor(
                 throw failure
             }
         }
+
+        /**
+         * Reopens one exactly stopped interrupted operation for a later owner. The journal-root and operation
+         * locks are taken without blocking before any record is read; either lock still held means the earlier
+         * owner is live, and recovery is refused. Every stopped record is rebuilt from its own payload and
+         * predecessor and must match byte for byte. Nothing is appended, repaired or removed here.
+         */
+        fun openStoppedForRecovery(
+            root: Path,
+            operationId: String,
+            intentBytes: ByteArray,
+            deploymentClosureSha256: String,
+        ): GccBundledOperationJournal {
+            require(operationId.matches(Regex("[a-f0-9]{64}"))) { "GCC bundled operation ID is invalid" }
+            require(deploymentClosureSha256.matches(Regex("[a-f0-9]{64}"))) { "GCC bundled deployment closure digest is invalid" }
+            val expectedIntent = boundedCopy(intentBytes, MAXIMUM_INTENT_BYTES, "GCC bundled operation intent")
+            if (
+                !root.isAbsolute || root.normalize() != root || root.parent == null ||
+                !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) || root.toRealPath() != root
+            ) journalFail("GCC bundled journal root must be a canonical non-root directory")
+            LinuxFilesystemSyscalls.requireSupported(root)
+            val parent = LinuxFilesystemSyscalls.openRoot(root.parent)
+            var rootDescriptor: LinuxDescriptor? = null
+            var directory: LinuxDescriptor? = null
+            var rootLocked = false
+            var directoryLocked = false
+            var journal: GccBundledOperationJournal? = null
+            try {
+                val openedRoot = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, root.fileName.toString())
+                rootDescriptor = openedRoot
+                requireRootBinding(root, parent, openedRoot)
+                if (!LinuxFilesystemSyscalls.tryExclusiveLock(openedRoot)) {
+                    journalFail("GCC bundled journal root is held by a live owner; later-invocation recovery refused")
+                }
+                rootLocked = true
+                requireRootBinding(root, parent, openedRoot)
+                val name = ".gcc-bundled-operation-$operationId"
+                LinuxFilesystemSyscalls.openPathAtOrNull(openedRoot.fd, name)?.close()
+                    ?: journalFail("GCC bundled operation journal selected for recovery is absent")
+                val openedDirectory = LinuxFilesystemSyscalls.openDirectoryAt(openedRoot.fd, name)
+                directory = openedDirectory
+                requireManagedDirectory(
+                    LinuxFilesystemSyscalls.identity(openedDirectory.fd), openedRoot.identity, "GCC bundled operation journal",
+                )
+                if (!LinuxFilesystemSyscalls.tryExclusiveLock(openedDirectory)) {
+                    journalFail("GCC bundled operation journal is held by a live owner; later-invocation recovery refused")
+                }
+                directoryLocked = true
+                requireRootBinding(root, parent, openedRoot)
+                val intent = DescriptorBoundAtomicStateFile.readOrNull(openedDirectory, INTENT_FILE, MAXIMUM_INTENT_BYTES)
+                    ?: journalFail("GCC stopped journal has no intent")
+                val opened = GccBundledOperationJournal(
+                    root.resolve(name), operationId, OracleArtifacts.sha256(expectedIntent), root,
+                    parent, openedRoot, openedDirectory, intent,
+                )
+                journal = opened
+                opened.restoreStopped(expectedIntent, deploymentClosureSha256)
+                journal = null
+                return opened
+            } catch (failure: Throwable) {
+                val opened = journal
+                val cleanup = if (opened != null) runCatching { opened.close() }.exceptionOrNull()
+                else closeJournalDescriptors(directory, rootDescriptor, parent, directoryLocked, rootLocked)
+                cleanup?.let { if (it !== failure) failure.addSuppressed(it) }
+                throw failure
+            }
+        }
     }
+
+    private fun restoreStopped(expectedIntent: ByteArray, deploymentClosureSha256: String) {
+        requireDirectoryBindings()
+        requireExactNames(STOPPED_FILES, "before later-invocation recovery")
+        val read = STOPPED_FILES.associateWith { name ->
+            (if (name == STATE_MANIFEST_FILE) {
+                DescriptorBoundAtomicStateFile.readManifestOrNull(directory, name, maximumFileBytes(name))
+            } else DescriptorBoundAtomicStateFile.readOrNull(directory, name, maximumFileBytes(name)))
+                ?: journalFail("GCC stopped journal file disappeared: $name")
+        }
+        fun bytes(name: String) = read.getValue(name).bytes
+        val intent = snapshots.getValue(INTENT_FILE)
+        if (!MessageDigest.isEqual(bytes(INTENT_FILE), expectedIntent) || read.getValue(INTENT_FILE).identity != intent.identity ||
+            !MessageDigest.isEqual(intent.bytes, expectedIntent)
+        ) journalFail("GCC stopped journal intent differs from the later invocation's rebuilt intent")
+        val leaseBytes = bytes(LEASE_FILE)
+        val evidence = FullTreeDiskScratchEvidence.parseCanonical(leaseBytes)
+        if (!MessageDigest.isEqual(evidence.canonicalBytes(), leaseBytes) ||
+            evidence.operationId != operationId || evidence.requestSha256 != intentSha256
+        ) journalFail("GCC stopped disk evidence belongs to a different operation intent")
+        val definitionBytes = bytes(DEFINITION_FILE)
+        val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definitionBytes)
+        val runtime = definition.bundledRuntime ?: journalFail("GCC stopped operation lacks a bundled definition")
+        if (definition.runKind != GccCompilerEngineContainmentRunKind.INTERRUPTED || runtime.invocationVersion != 3) {
+            journalFail("GCC later-invocation recovery requires an interrupted v3 planning definition")
+        }
+        if (path.startsWith(definition.outputLease.path) || definition.outputLease.path.startsWith(path)) {
+            journalFail("GCC bundled journal must remain outside its writable output")
+        }
+        if (!MessageDigest.isEqual(bytes(PREPARED_FILE), preparedRecordBytes(operationId, intentSha256,
+                evidence.evidenceSha256, definitionBytes, definition.bindingSha256, deploymentClosureSha256))
+        ) journalFail("GCC stopped prepared record differs from its definition, disk evidence or current deployment")
+        fun linked(name: String, provider: String, previous: String, payloadName: String?): ByteArray? {
+            val record = OracleJson.parseCanonical(bytes(name), JOURNAL_JSON_LIMITS) as? JsonObject
+                ?: journalFail("GCC stopped record is not an object: $name")
+            val payload = payloadName?.let { field ->
+                OracleJson.canonicalBytes(record[field] as? JsonObject ?: journalFail("GCC stopped record lacks $field: $name"),
+                    JOURNAL_JSON_LIMITS)
+            }
+            if (!MessageDigest.isEqual(bytes(name),
+                    linkedRecordBytes(operationId, intentSha256, provider, bytes(previous), payloadName, payload))
+            ) journalFail("GCC stopped record is not the exact linked successor of $previous: $name")
+            return payload
+        }
+        linked(ATTACHMENT_FILE, "gcc-bundled-command-attached-v1", PREPARED_FILE, "attachment")
+        linked(START_FILE, "gcc-bundled-command-start-authorized-v1", ATTACHMENT_FILE, null)
+        val authorization = checkNotNull(linked(INTERRUPT_FILE, "gcc-bundled-command-interrupt-authorized-v1", START_FILE, "authorization"))
+        val execution = checkNotNull(linked(INTERRUPTED_FILE, "gcc-bundled-command-interrupted-v1", INTERRUPT_FILE, "execution"))
+        val prefix = checkNotNull(linked(PREFIX_FILE, "gcc-bundled-command-prefix-assessed-v1", INTERRUPTED_FILE, "assessment"))
+        val manifest = bytes(STATE_MANIFEST_FILE)
+        val manifestDocument = OracleJson.parseCanonical(manifest, GccBundledAnalysisStateCapture.JSON_LIMITS).jsonObject
+        val entryCount = manifestDocument.getValue("entryCount").jsonPrimitive.content.toLong()
+        val totalBytes = manifestDocument.getValue("totalBytes").jsonPrimitive.content.toLong()
+        val summary = OracleJson.canonicalBytes(JsonObject(mapOf(
+            "manifestSha256" to JsonPrimitive(OracleArtifacts.sha256(manifest)),
+            "manifestBytes" to JsonPrimitive(manifest.size),
+            "entryCount" to JsonPrimitive(entryCount),
+            "totalBytes" to JsonPrimitive(totalBytes),
+        )))
+        val captured = checkNotNull(linked(STATE_CAPTURED_FILE, "gcc-bundled-interrupted-state-captured-v1", PREFIX_FILE, "analysisState"))
+        if (!captured.contentEquals(summary)) journalFail("GCC stopped state record differs from its retained manifest")
+        val executed = OracleJson.parseCanonical(execution, JOURNAL_JSON_LIMITS).jsonObject
+        if (executed["provider"]?.jsonPrimitive?.content?.matches(Regex("kotlin-lease-contained-command-interrupted-v[12]")) != true ||
+            listOf("unitAbsent", "cgroupAbsent", "processesAbsent").any { executed[it] != JsonPrimitive(true) } ||
+            executed["interruptionAuthorizationSha256"] != JsonPrimitive(OracleArtifacts.sha256(authorization))
+        ) journalFail("GCC stopped execution does not durably prove worker absence after its authorized interruption")
+        snapshots.clear()
+        read.forEach { (name, snapshot) -> snapshots[name] = snapshot }
+        diskEvidenceSha256 = evidence.evidenceSha256
+        stage = JournalStage.STATE_CAPTURED
+        recoveredStopped = GccBundledStoppedJournalEvidence(evidence, definitionBytes, authorization,
+            bytes(INTERRUPTED_FILE), execution, bytes(PREFIX_FILE), prefix, manifest, bytes(STATE_CAPTURED_FILE),
+            entryCount, totalBytes)
+        requireCurrent("after later-invocation recovery reopen")
+    }
+}
+
+/** Exact stopped records parsed from a reopened journal. They grant no START until a live lease is held. */
+internal class GccBundledStoppedJournalEvidence(
+    val diskEvidence: FullTreeDiskScratchEvidence,
+    definitionBytes: ByteArray,
+    interruptAuthorizationBytes: ByteArray,
+    interruptedRecordBytes: ByteArray,
+    interruptedExecutionBytes: ByteArray,
+    prefixRecordBytes: ByteArray,
+    prefixAssessmentBytes: ByteArray,
+    stateManifestBytes: ByteArray,
+    stateRecordBytes: ByteArray,
+    val stateEntryCount: Long,
+    val stateTotalBytes: Long,
+) {
+    private val definition = definitionBytes.copyOf()
+    private val authorization = interruptAuthorizationBytes.copyOf()
+    private val interruptedRecord = interruptedRecordBytes.copyOf()
+    private val interruptedExecution = interruptedExecutionBytes.copyOf()
+    private val prefixRecord = prefixRecordBytes.copyOf()
+    private val prefixAssessment = prefixAssessmentBytes.copyOf()
+    private val stateManifest = stateManifestBytes.copyOf()
+    private val stateRecord = stateRecordBytes.copyOf()
+    val definitionBytes: ByteArray get() = definition.copyOf()
+    val interruptAuthorizationBytes: ByteArray get() = authorization.copyOf()
+    val interruptedRecordBytes: ByteArray get() = interruptedRecord.copyOf()
+    val interruptedExecutionBytes: ByteArray get() = interruptedExecution.copyOf()
+    val prefixRecordBytes: ByteArray get() = prefixRecord.copyOf()
+    val prefixAssessmentBytes: ByteArray get() = prefixAssessment.copyOf()
+    val stateManifestBytes: ByteArray get() = stateManifest.copyOf()
+    val stateRecordBytes: ByteArray get() = stateRecord.copyOf()
+}
+
+private fun preparedRecordBytes(operationId: String, intentSha256: String, diskEvidenceSha256: String,
+    definitionBytes: ByteArray, definitionBindingSha256: String, deploymentClosureSha256: String): ByteArray {
+    val unsigned = JsonObject(mapOf(
+        "provider" to JsonPrimitive("gcc-bundled-prepared-operation-v1"),
+        "schemaVersion" to JsonPrimitive(1),
+        "operationId" to JsonPrimitive(operationId),
+        "intentSha256" to JsonPrimitive(intentSha256),
+        "diskEvidenceSha256" to JsonPrimitive(diskEvidenceSha256),
+        "definitionSha256" to JsonPrimitive(OracleArtifacts.sha256(definitionBytes)),
+        "definitionBindingSha256" to JsonPrimitive(definitionBindingSha256),
+        "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
+    ))
+    return OracleJson.canonicalBytes(
+        JsonObject(unsigned + ("preparedSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(unsigned, JOURNAL_JSON_LIMITS)),
+        ))),
+        JOURNAL_JSON_LIMITS,
+    )
+}
+
+/** The single linked-record encoding shared by publication and later-invocation reconstruction. */
+private fun linkedRecordBytes(operationId: String, intentSha256: String, provider: String, previousBytes: ByteArray,
+    payloadName: String?, payloadBytes: ByteArray?): ByteArray {
+    val fields = linkedMapOf<String, JsonElement>(
+        "provider" to JsonPrimitive(provider),
+        "schemaVersion" to JsonPrimitive(1),
+        "operationId" to JsonPrimitive(operationId),
+        "intentSha256" to JsonPrimitive(intentSha256),
+        "previousSha256" to JsonPrimitive(OracleArtifacts.sha256(previousBytes)),
+        "complete" to JsonPrimitive(false),
+        "releaseEligible" to JsonPrimitive(false),
+    )
+    if (payloadName != null) {
+        val bytes = boundedCopy(requireNotNull(payloadBytes), MAXIMUM_INTENT_BYTES, "GCC command record")
+        val payload = OracleJson.parseCanonical(bytes, JOURNAL_JSON_LIMITS)
+        require(payload is JsonObject) { "GCC command payload must be a canonical object" }
+        fields[payloadName] = payload
+        fields["${payloadName}Sha256"] = JsonPrimitive(OracleArtifacts.sha256(bytes))
+    }
+    fields["recordSha256"] = JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(fields), JOURNAL_JSON_LIMITS)))
+    return OracleJson.canonicalBytes(JsonObject(fields), JOURNAL_JSON_LIMITS)
 }
 
 private fun requireRootBinding(path: Path, parent: LinuxDescriptor, root: LinuxDescriptor) {
@@ -597,7 +820,7 @@ private fun closeJournalDescriptors(
 
 private fun journalFail(message: String): Nothing = throw IllegalArgumentException(message)
 
-private enum class JournalStage { INTENT, LEASED, DEFINITION_STAGED, PREPARED, ATTACHED, START_AUTHORIZED, EXECUTED, EXPORT_ASSESSED, INTERRUPT_AUTHORIZED, INTERRUPTED, PREFIX_ASSESSED, STATE_MANIFEST_STAGED, STATE_CAPTURED, RESUME_DEFINITION_STAGED, RESUME_PREPARED, RESUME_ATTACHED, RESUME_START_AUTHORIZED, RESUME_EXECUTED, RESUME_EXPORT_ASSESSED, PLANNER_REQUEST_STAGED, PLANNER_PREPARED, PLANNER_ATTACHED, PLANNER_START_AUTHORIZED, PLANNER_EXECUTED, PLANNER_ASSESSED }
+private enum class JournalStage { INTENT, LEASED, DEFINITION_STAGED, PREPARED, ATTACHED, START_AUTHORIZED, EXECUTED, EXPORT_ASSESSED, INTERRUPT_AUTHORIZED, INTERRUPTED, PREFIX_ASSESSED, STATE_MANIFEST_STAGED, STATE_CAPTURED, RECOVERY_ADOPTED, RESUME_DEFINITION_STAGED, RESUME_PREPARED, RESUME_ATTACHED, RESUME_START_AUTHORIZED, RESUME_EXECUTED, RESUME_EXPORT_ASSESSED, PLANNER_REQUEST_STAGED, PLANNER_PREPARED, PLANNER_ATTACHED, PLANNER_START_AUTHORIZED, PLANNER_EXECUTED, PLANNER_ASSESSED }
 private const val INTENT_FILE = "intent.json"
 private const val LEASE_FILE = "lease-evidence.json"
 private const val DEFINITION_FILE = "definition.json"
@@ -611,6 +834,8 @@ private const val INTERRUPTED_FILE = "interrupted-execution.json"
 private const val PREFIX_FILE = "interrupted-prefix-assessment.json"
 private const val STATE_MANIFEST_FILE = "analysis-state-manifest.json"
 private const val STATE_CAPTURED_FILE = "analysis-state-captured.json"
+private const val RECOVERY_FILE = "recovery-adopted.json"
+internal const val RECOVERY_PAYLOAD_PROVIDER = "gcc-bundled-later-invocation-recovery-v1"
 private const val RESUME_DEFINITION_FILE = "resume-definition.json"
 private const val RESUME_PREPARED_FILE = "resume-prepared.json"
 private const val RESUME_ATTACHMENT_FILE = "resume-attachment.json"
@@ -636,7 +861,7 @@ private val PLANNER_STAGES = listOf(JournalStage.PLANNER_REQUEST_STAGED, Journal
     JournalStage.PLANNER_ATTACHED, JournalStage.PLANNER_START_AUTHORIZED, JournalStage.PLANNER_EXECUTED, JournalStage.PLANNER_ASSESSED)
 private const val OWNER_DIRECTORY_MODE = 0x1c0
 private const val GROUP_OR_OTHER_WRITE_MODE = 0x12
-private const val MAXIMUM_JOURNAL_ENTRIES = 23
+private const val MAXIMUM_JOURNAL_ENTRIES = 24
 private const val MAXIMUM_INTENT_BYTES = 256 * 1024
 private const val MAXIMUM_DEFINITION_BYTES = 1024 * 1024
 private val JOURNAL_JSON_LIMITS = StrictJsonLimits(

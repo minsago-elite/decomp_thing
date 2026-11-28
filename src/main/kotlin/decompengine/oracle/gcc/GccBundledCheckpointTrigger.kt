@@ -4,10 +4,13 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Fresh planning threshold; neither a detached progress record nor this trigger proves interruption. */
 internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) {
-    private var observed: GccExportProgressAssessment? = null
+    private class Selected(val stateSha256: String, val artifactSha256: String, val completed: Long, val total: Long)
+    private var observed: Selected? = null
     private val policy = OracleJson.canonicalBytes(JsonObject(mapOf(
         "provider" to JsonPrimitive("gcc-bundled-planning-interrupt-policy-v1"),
         "minimumCompletedFunctions" to JsonPrimitive(minimumCompletedFunctions),
@@ -27,7 +30,7 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
         if (progress.phase != "planning" || progress.completed < minimumCompletedFunctions ||
             progress.completed >= progress.total) return null
         require(progress.completed % 512L == 0L) { "GCC planning progress is not at a whole checkpoint" }
-        observed = progress
+        observed = Selected(progress.stateSha256, progress.artifactSha256, progress.completed, progress.total)
         return OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-bundled-planning-interrupt-trigger-v1"),
             "stateSha256" to JsonPrimitive(progress.stateSha256),
@@ -79,5 +82,53 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
             ) } ?: emptyMap()))
         return OracleJson.canonicalBytes(JsonObject(unsigned + ("assessmentSha256" to
             JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(unsigned))))))
+    }
+
+    companion object {
+        /**
+         * Restores the selected trigger for a later owner from the durable interrupt authorization the earlier
+         * owner journaled before delivering the interruption. A progress record alone never selects a trigger.
+         */
+        fun restoreFromDurableAuthorization(authorizationBytes: ByteArray, boundThreshold: Long?): GccBundledCheckpointTrigger {
+            val authorization = OracleJson.parseCanonical(authorizationBytes) as? JsonObject
+                ?: throw IllegalArgumentException("GCC interrupt authorization must be an object")
+            val selectedPolicy = authorization.getValue("policy").jsonObject
+            val threshold = selectedPolicy.getValue("minimumCompletedFunctions").jsonPrimitive.let {
+                require(!it.isString) { "GCC interrupt policy threshold is invalid" }
+                it.content.toLong()
+            }
+            require(boundThreshold == null || boundThreshold == threshold) {
+                "checkpoint threshold differs from the bound CLI selection"
+            }
+            val restored = GccBundledCheckpointTrigger(threshold)
+            val minimumCompletedFunctions = threshold
+            val policy = restored.policy
+            require(authorization["provider"] == JsonPrimitive("kotlin-contained-command-interrupt-authorization-v1") &&
+                authorization["policy"] == OracleJson.parseCanonical(policy) &&
+                authorization["policySha256"] == JsonPrimitive(OracleArtifacts.sha256(policy))) {
+                "GCC interrupt authorization differs from the bound checkpoint threshold"
+            }
+            val trigger = authorization.getValue("trigger").jsonObject
+            require(trigger.keys == setOf("provider", "stateSha256", "progressSha256", "completed", "total") &&
+                trigger["provider"] == JsonPrimitive("gcc-bundled-planning-interrupt-trigger-v1") &&
+                authorization["triggerSha256"] == JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(trigger)))) {
+                "GCC interrupt authorization has no exact planning trigger"
+            }
+            fun digest(name: String) = trigger.getValue(name).jsonPrimitive.let {
+                require(it.isString && it.content.matches(Regex("[a-f0-9]{64}"))) { "GCC trigger $name is invalid" }
+                it.content
+            }
+            fun count(name: String) = trigger.getValue(name).jsonPrimitive.let {
+                require(!it.isString) { "GCC trigger $name is invalid" }
+                it.content.toLong()
+            }
+            val completed = count("completed")
+            val total = count("total")
+            require(completed >= minimumCompletedFunctions && completed % 512L == 0L && completed < total) {
+                "GCC durable trigger is not a whole fresh planning checkpoint at the bound threshold"
+            }
+            restored.observed = Selected(digest("stateSha256"), digest("progressSha256"), completed, total)
+            return restored
+        }
     }
 }
