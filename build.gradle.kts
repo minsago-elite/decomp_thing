@@ -1878,6 +1878,24 @@ val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSig
 }
 tasks.withType<Test>().configureEach {
     dependsOn(verifyCompiledJunitSignatures)
+    // Keep @TempDir, Files.createTempDirectory and native temp files inside the repository.
+    // Specialized tasks that already choose java.io.tmpdir keep their own roots; whichever
+    // doFirst runs first, the explicit override wins. Set at execution time so the absolute
+    // path never becomes a cache-key input.
+    val repositoryTemporaryRoot = layout.buildDirectory.dir("test-tmp/$name")
+    val testRepositoryRoot = layout.projectDirectory.asFile.absolutePath
+    doFirst {
+        val testTask = this as Test
+        testTask.systemProperty("decompengine.test.repositoryRoot", testRepositoryRoot)
+        if (!testTask.systemProperties.containsKey("java.io.tmpdir")) {
+            val root = repositoryTemporaryRoot.get().asFile
+            check(!root.exists() || root.deleteRecursively()) { "stale test temporary root not removable: $root" }
+            check(root.mkdirs()) { "test temporary root unavailable: $root" }
+            testTask.systemProperty("java.io.tmpdir", root.absolutePath)
+            testTask.systemProperty("jna.tmpdir", root.absolutePath)
+            testTask.environment("TMPDIR", root.absolutePath)
+        }
+    }
 }
 
 tasks.test {
