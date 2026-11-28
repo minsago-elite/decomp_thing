@@ -367,6 +367,12 @@ class WebAuditLogTest {
         assertEquals(WebAuditAction.GIT_REPOSITORY_MUTATION to WebAuditTarget(job),
             WebAuditRecorder.versionedAction("POST", "jobs/$job/repositories"))
         assertNull(WebAuditRecorder.versionedAction("GET", "jobs/$job/repositories"))
+        assertEquals(WebAuditAction.ARCHIVE_VERIFY to WebAuditTarget(job, "r", revisionId = "revision_1"),
+            WebAuditRecorder.versionedAction("POST", "jobs/$job/runs/r/revisions/revision_1/archive-verifications"))
+        assertNull(WebAuditRecorder.versionedAction("GET", "jobs/$job/runs/r/revisions/revision_1/archive-verifications"))
+        assertNull(WebAuditRecorder.versionedAction("POST", "jobs/$job/runs/r/revisions/revision_1/archive-verifications/operation_1"))
+        assertEquals(WebAuditTarget(job, "r"),
+            WebAuditRecorder.versionedAction("POST", "jobs/$job/runs/r/revisions/..%2F/archive-verifications")?.second)
         assertEquals(WebAuditAction.RUN_RECOVER, WebAuditRecorder.versionedAction("POST", "jobs/$job/runs/r/recover")?.first)
         assertEquals(WebAuditAction.PROGRESS_PIN, WebAuditRecorder.versionedAction("PUT", "jobs/$job/runs/r/progress-pin")?.first)
         assertEquals(WebAuditTarget(null, "r"), WebAuditRecorder.versionedAction("PUT", "jobs/../runs/r/progress-pin")?.second)
@@ -379,5 +385,26 @@ class WebAuditLogTest {
         assertNull(WebAuditRecorder.legacyAction("GET", listOf("api", "v1", "session")))
         assertEquals(WebAuditAction.OPERATOR_INSPECTION_CANCEL,
             WebAuditRecorder.legacyAction("POST", listOf("api", "operator", "auth-methods", "cancel"))?.first)
+    }
+
+    @Test fun `revision targets are additive and entries written without them still parse`() {
+        val root = root("revision-target")
+        try {
+            val log = WebAuditLog(root, clock)
+            log.cancel()
+            log.record(WebAuditActor.browserSession(session), WebAuditAction.ARCHIVE_VERIFY,
+                WebAuditTarget(job, "run_1", revisionId = "revision_1"), WebAuditOutcome.ACCEPTED, 202, null, null)
+            log.record(WebAuditActor.browserSession(session), WebAuditAction.ARCHIVE_VERIFY,
+                WebAuditTarget(job, "run_1", revisionId = "../not an id"), WebAuditOutcome.REJECTED, 404, null, null)
+            val lines = Files.readAllLines(root.resolve(".web-audit/current.jsonl"))
+            assertFalse(lines[0].contains("revisionId"), "entries without a revision keep their original shape")
+            assertTrue(lines[1].contains("\"revisionId\":\"revision_1\""))
+            assertFalse(lines[2].contains("revisionId"), "out-of-syntax revision IDs are dropped")
+            val reopened = WebAuditLog(root, clock).read().entries
+            assertNull(reopened[0].target.revisionId)
+            assertEquals("revision_1", reopened[1].target.revisionId)
+            assertEquals("revision.archive-verify", reopened[1].toJson().getValue("action").toString().trim('"'))
+            assertEquals(WebAuditEntry.parse(lines[0]), reopened[0])
+        } finally { root.toFile().deleteRecursively() }
     }
 }

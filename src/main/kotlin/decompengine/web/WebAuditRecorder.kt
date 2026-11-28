@@ -50,6 +50,10 @@ internal class WebAuditRecorder(
             val runId = (target.runId ?: location?.second)?.let { value ->
                 if (SERVER_RUN.matches(value) && !policy.leaks(value)) value else runCommitment(value)
             }
+            // Revision IDs have no server-generated syntax, so a route value is only an identity once the
+            // server confirmed it in the operation Location it sent; refused requests keep a commitment.
+            val revisionId = location?.third?.takeIf { it == target.revisionId && !policy.leaks(it) }
+                ?: target.revisionId?.let(::revisionCommitment)
             log.record(
                 actor = sessionId?.let(WebAuditActor::browserSession) ?: WebAuditActor.UNAUTHENTICATED,
                 action = action,
@@ -58,6 +62,7 @@ internal class WebAuditRecorder(
                     runId = runId,
                     expectedVersion = strongVersion(exchange.requestHeaders["If-Match"])?.let(::versionCommitment),
                     resultVersion = if (status < 400) strongVersion(headers["ETag"])?.takeUnless(policy::leaks) else null,
+                    revisionId = revisionId,
                 ),
                 outcome = outcome,
                 status = status,
@@ -70,21 +75,23 @@ internal class WebAuditRecorder(
     private fun strongVersion(values: List<String>?): String? =
         values?.singleOrNull()?.takeIf { it.length in 3..130 && it.startsWith('"') && it.endsWith('"') }?.removeSurrounding("\"")
 
-    private fun locationTarget(location: String): Pair<String?, String?>? {
+    private fun locationTarget(location: String): Triple<String?, String?, String?>? {
         val match = LOCATION.find(location) ?: return null
-        return match.groupValues[1] to match.groupValues[2].takeIf(String::isNotEmpty)
+        return Triple(match.groupValues[1], match.groupValues[2].takeIf(String::isNotEmpty), match.groupValues[3].takeIf(String::isNotEmpty))
     }
 
     companion object {
         /** A commitment, not validation that caller-controlled bytes identify a server version. */
         internal fun versionCommitment(value: String): String = commitment("if-match", "ifmatch_", value)
         internal fun runCommitment(value: String): String = commitment("requested-run", "requested_run_", value)
+        internal fun revisionCommitment(value: String): String = commitment("requested-revision", "requested_revision_", value)
         private fun commitment(domain: String, prefix: String, value: String): String = prefix + MessageDigest.getInstance("SHA-256")
             .digest("decomp-web-audit-$domain-v1\u0000$value".toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
 
         private val SERVER_RUN = Regex("run_[a-f0-9]{32}")
-        private val LOCATION = Regex("/(?:api/v1/)?jobs/([a-f0-9]{32})(?:/runs/([A-Za-z0-9][A-Za-z0-9_-]{0,127}))?$")
+        private val LOCATION = Regex("/(?:api/v1/)?jobs/([a-f0-9]{32})(?:/runs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})" +
+            "(?:/revisions/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/archive-verifications/[A-Za-z0-9][A-Za-z0-9_-]{0,127})?)?$")
         private val JOB = Regex("[a-f0-9]{32}")
         private val RUN = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
@@ -103,6 +110,8 @@ internal class WebAuditRecorder(
                 parts.size == 2 && parts[0] == "jobs" && method == "PATCH" -> WebAuditAction.JOB_UPDATE
                 parts.size == 2 && parts[0] == "jobs" && method == "DELETE" -> WebAuditAction.JOB_DELETE
                 parts.size == 3 && parts[0] == "jobs" && parts[2] == "runs" && method == "POST" -> WebAuditAction.RUN_START
+                parts.size == 7 && parts[0] == "jobs" && parts[2] == "runs" && parts[4] == "revisions" &&
+                    parts[6] == "archive-verifications" && method == "POST" -> WebAuditAction.ARCHIVE_VERIFY
                 parts.size == 5 && parts[0] == "jobs" && parts[2] == "runs" -> when {
                     parts[4] == "cancel" && method == "POST" -> WebAuditAction.RUN_CANCEL
                     parts[4] == "recover" && method == "POST" -> WebAuditAction.RUN_RECOVER
@@ -111,7 +120,8 @@ internal class WebAuditRecorder(
                 }
                 else -> null
             } ?: return null
-            return action to WebAuditTarget(jobId = job(), runId = if (parts.size >= 4) run() else null)
+            val revision = if (action == WebAuditAction.ARCHIVE_VERIFY) parts[5].takeIf(RUN::matches) else null
+            return action to WebAuditTarget(jobId = job(), runId = if (parts.size >= 4) run() else null, revisionId = revision)
         }
 
         /** Legacy presentation mutations, by path segment. */

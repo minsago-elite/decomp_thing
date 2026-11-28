@@ -2017,8 +2017,13 @@ requested or displayed (the activity view shows "Not reported").
 finishes, including refused and failed requests: `session.start`, `session.end`, `job.upload`, `job.update`,
 `job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
 `operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy), `support.export`, and
-`git.repository-mutate` for managed repository creation/attachment. This Git mutation entry is
-scoped to the validated job ID from `POST /api/v1/jobs/{jobId}/repositories`. An entry records a
+`git.repository-mutate` for managed repository creation/attachment, and `revision.archive-verify` for
+`POST J/runs/{runId}/revisions/{revisionId}/archive-verifications`. This Git mutation entry is
+scoped to the validated job ID from `POST /api/v1/jobs/{jobId}/repositories`. Revision-bound actions also carry
+`target.revisionId`: the revision the server confirmed in the operation `Location` it sent, otherwise (refusals,
+or a configured-sensitive value) a `requested_revision_`-prefixed domain-separated SHA-256 commitment to the requested
+route value. The field is additive and present only on revision-bound entries; other entries keep their earlier shape.
+The idempotency key and request body are never recorded. An entry records a
 sequence, time, the response request ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
 identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
 commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the
