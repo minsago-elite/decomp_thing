@@ -3283,7 +3283,105 @@ class LinuxBubblewrapBoundaryTest {
             boundary.close()
         }
         runStuckSetupRestartDrainProbe(runtime, limits, expected, scopes, phase)
+        runLateGrantReleaseProbe(runtime, limits, expected, scopes, phase)
         println("setup-restart-barrier-probe: all controls passed")
+    }
+
+    /** A grant released after the drain deadline, before the waiter rechecks, never lets the expired launch authorize. */
+    private fun runLateGrantReleaseProbe(
+        runtime: Path,
+        limits: AcpRuntimeClosureLimits,
+        expected: String,
+        scopes: Set<*>,
+        phase: Any,
+    ) {
+        val before = controlDirectories()
+        val units = mutableListOf<String>()
+        val scopeIdentities = mutableListOf<AcpSandboxScopeIdentity>()
+        val drainObserver = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+            .getDeclaredField("setupRestartDrainObserver").apply { isAccessible = true }
+        val boundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            observer = unitObserver(units),
+            scopeObserver = AcpSandboxScopeObserver { identity -> scopeIdentities.add(identity) },
+        )
+        try {
+            val permit = setupRestartPermit(boundary)
+            val stuck = java.util.concurrent.CountDownLatch(1)
+            val unstick = java.util.concurrent.CountDownLatch(1)
+            var injected = false
+            var restarted: Result<String>? = null
+            val setup = Thread {
+                restarted = runCatching {
+                    buildRuntimeManifest(runtime, limits, emptySet(), cancellationCheck = {
+                        val frames = Thread.currentThread().stackTrace
+                        val inScope = frames.any { it.className.startsWith("decompengine.acp.RuntimePrivateControlScope") }
+                        if (!injected && frames.any { it.methodName == "checkpointLocked" } &&
+                            frames.none { it.className == "decompengine.acp.RuntimePrivateControlScope\$Companion" }) {
+                            injected = true
+                            val scope = scopes.single { candidate ->
+                                val root = candidate!!.javaClass.getDeclaredField("root").apply { isAccessible = true }.get(candidate)
+                                root.javaClass.getDeclaredMethod("getNamespacePath").invoke(root) == runtime
+                            }!!
+                            val check = scope.javaClass.getDeclaredField("mountEventCheck").apply { isAccessible = true }.get(scope)
+                            runCatching {
+                                invokePrivate(check, check.javaClass.getDeclaredMethod("requireObservation",
+                                    java.lang.Long.TYPE, phase.javaClass), (1L shl 32) or 10L, phase)
+                            }
+                        } else if (injected && stuck.count > 0 && !inScope &&
+                            frames.any { it.className.startsWith("java.util.stream.") }) {
+                            stuck.countDown()
+                            unstick.await(60, TimeUnit.SECONDS)
+                        }
+                    }, restart = permit).manifestSha256
+                }
+            }
+            val deadline = java.util.concurrent.atomic.AtomicLong(0L)
+            var releasedAfterExpiry = false
+            var authorizations = 0
+            var outcome: Result<AcpSandboxedProcess>? = null
+            drainObserver.set(null, { observed: Long -> deadline.set(observed) })
+            try {
+                setup.start()
+                assertTrue(stuck.await(30, TimeUnit.SECONDS), "the restarted attempt never reached its walk")
+                val launching = Thread {
+                    outcome = runCatching {
+                        boundary.launch(probeLaunch(listOf("netns")), true, {
+                            // Seam: the waiter's checkpoint runs outside the drain lock. Release the last
+                            // grant after expiry, before the waiter takes the lock again.
+                            val drainDeadline = deadline.get()
+                            if (!releasedAfterExpiry && drainDeadline != 0L &&
+                                Thread.currentThread().stackTrace.any { it.methodName == "revokeSetupRestarts" } &&
+                                System.nanoTime() - drainDeadline >= 0L) {
+                                releasedAfterExpiry = true
+                                unstick.countDown()
+                                setup.join(30_000)
+                                assertFalse(setup.isAlive, "the restarted attempt must release its grant")
+                            }
+                        }) { authorizations++ }
+                    }
+                }
+                launching.start()
+                launching.join(Duration.ofSeconds(40).toMillis())
+                assertFalse(launching.isAlive, "the expired launch must finish")
+            } finally {
+                drainObserver.set(null, null)
+                unstick.countDown()
+                setup.join(30_000)
+            }
+            assertTrue(releasedAfterExpiry, "the seam must release the grant after the drain deadline")
+            val failure = requireNotNull(outcome).exceptionOrNull()
+            assertEquals("restarted sandbox setup did not finish before authorization", failure?.message, failure.toString())
+            assertEquals(0, authorizations, "an expired drain must never authorize, even once the grant is gone")
+            assertTrue(boundary.evidence(null).launches.isEmpty())
+            units.forEach(::assertUnitAbsent)
+            scopeIdentities.forEach { assertFalse(Files.exists(it.cgroupPath, LinkOption.NOFOLLOW_LINKS)) }
+            assertEquals(expected, requireNotNull(restarted).getOrThrow())
+            println("setup-restart-barrier-probe: lateGrantReleaseAfterExpiryRefused=true authorizations=0")
+        } finally {
+            boundary.close()
+        }
+        assertBoundaryResidueAbsent(before, units, scopeIdentities)
     }
 
     /** A restarted attempt stuck in I/O cannot hold authorization past its own bound, even with a no-op checkpoint. */

@@ -2,8 +2,12 @@
 # Summarizes one CI run attempt's ACP host mount churn restart reports (#1799). Diagnostic only:
 # it never fails the job. Each test JVM writes test-jvm-<pid>.expected when its first ACP test class
 # starts and test-jvm-<pid>.json at the end; a missing JSON or an .incomplete marker is incomplete.
+# A job that knows how many ACP test JVMs it runs passes that minimum, so a JVM whose .expected
+# marker could not be written still makes the summary INCOMPLETE.
 set -u
-directory="${1:?usage: ci-summarize-host-mount-churn-restarts.sh <report-directory>}"
+directory="${1:?usage: ci-summarize-host-mount-churn-restarts.sh <report-directory> [minimum-reports]}"
+minimum="${2:-0}"
+case "$minimum" in ''|*[!0-9]*) minimum=0 ;; esac
 expected=0 complete=0 incomplete=0 restarted=0
 if [ -d "$directory" ]; then
   for marker in "$directory"/test-jvm-*.expected; do
@@ -21,12 +25,12 @@ if [ -d "$directory" ]; then
     incomplete=$((incomplete + 1))
   done
 fi
-if [ "$expected" -eq 0 ]; then status=ABSENT
-elif [ "$incomplete" -gt 0 ]; then status=INCOMPLETE
+if [ "$expected" -lt "$minimum" ] || [ "$incomplete" -gt 0 ]; then status=INCOMPLETE
+elif [ "$expected" -eq 0 ]; then status=ABSENT
 else status=COMPLETE
 fi
-line="acp-host-mount-churn-restarts status=$status expectedReports=$expected completeReports=$complete"
-line="$line incompleteReports=$incomplete restartedRefusals=$restarted"
+line="acp-host-mount-churn-restarts status=$status expectedReports=$expected minimumReports=$minimum"
+line="$line completeReports=$complete incompleteReports=$incomplete restartedRefusals=$restarted"
 echo "$line"
 if [ -d "$directory" ]; then printf '%s\n' "$line" > "$directory/summary.txt" 2>/dev/null || true; fi
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '%s\n' "$line" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true; fi

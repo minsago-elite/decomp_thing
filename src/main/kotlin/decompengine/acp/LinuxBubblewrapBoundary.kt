@@ -571,20 +571,28 @@ internal class LinuxBubblewrapBoundary private constructor(
         if (authorizationMayHaveCommitted.get()) return
         val bound = minOf(SETUP_RESTART_DRAIN_TIMEOUT, maximumWallDuration)
         val deadline = System.nanoTime() + bound.toNanos()
+        setupRestartDrainObserver?.invoke(deadline)
+        var waited = false
         while (true) {
             setupRestartLock.withLock {
                 if (Thread.currentThread() in setupRestartHolders) {
                     throw IOException("sandbox authorization cannot begin inside a restarted setup attempt")
                 }
                 setupRestartsClosed = true
+                // Monotonic and checked under the lock on every pass: once this launch has waited, a
+                // grant released after expiry cannot let it authorize.
+                val remaining = deadline - System.nanoTime()
+                if (waited && remaining <= 0L) {
+                    throw IOException("restarted sandbox setup did not finish before authorization")
+                }
                 if (setupRestartHolders.isEmpty()) {
                     authorizationMayHaveCommitted.set(true)
                     return
                 }
-                val remaining = deadline - System.nanoTime()
                 if (remaining <= 0L) {
                     throw IOException("restarted sandbox setup did not finish before authorization")
                 }
+                waited = true
                 setupRestartsReleased.awaitNanos(minOf(remaining, SETUP_RESTART_DRAIN_POLL_NANOS))
             }
             cancellationCheck()
@@ -1832,6 +1840,8 @@ internal enum class PrivateControlTransactionStage {
     AFTER_MANIFEST_DETACH,
 }
 private var privateControlTransactionObserver: ((PrivateControlTransactionStage) -> Unit)? = null
+/** Test-only: receives each restart drain's monotonic System.nanoTime deadline as it begins. */
+@Volatile private var setupRestartDrainObserver: ((Long) -> Unit)? = null
 private var privateControlTestUuid: UUID? = null
 private fun observePrivateControlTransaction(stage: PrivateControlTransactionStage) {
     privateControlTransactionObserver?.invoke(stage)

@@ -95,10 +95,11 @@ reserves its evidence and before the broker's write-ahead authorization callback
    or the launch's wall-duration ceiling if that is shorter, because the launch's systemd scope
    already enforces that ceiling. The caller's cancellation checkpoint is still checked every 50 ms,
    but the bound holds even when that checkpoint does nothing.
-3. If grants remain at the bound, the launch fails with
-   `restarted sandbox setup did not finish before authorization`. It goes through the same
-   pre-authorization cleanup as any other launch failure and never authorizes. Admission stays
-   closed, and a later launch waits again under its own bound.
+3. The deadline is monotonic and checked under the lock on every pass. Once a launch has waited, an
+   expired deadline fails it even if the last grant was released between the deadline and the
+   recheck. The launch then fails with `restarted sandbox setup did not finish before authorization`.
+   It goes through the same pre-authorization cleanup as any other launch failure and never
+   authorizes. Admission stays closed, and a later launch waits again under its own bound.
 
 Admission never reopens, even after cleanup is proven.
 
@@ -156,6 +157,9 @@ namespaces and cannot propagate into the JVM's namespace.
   - A restarted attempt blocks inside its walk while a launch with a no-op checkpoint reaches
     authorization. Restart admission closes as soon as draining begins. The launch fails at its
     bound, its sandbox scope and control directory are cleaned up, and it never authorizes.
+  - The last grant is released after the drain deadline but before the waiter retakes the lock,
+    through a seam in the launch's checkpoint. The launch still fails and makes no authorization
+    callback.
 
 ## Restart evidence in CI
 
@@ -173,6 +177,12 @@ summary and stores it as `summary.txt`:
 - `COMPLETE`: every expected report is present.
 - `INCOMPLETE`: an expected report is missing or marked incomplete.
 - `ABSENT`: no ACP test JVM registered.
+
+The summary can only count JVMs that wrote their `.expected` marker. A job that knows how many ACP
+test JVMs it runs passes that minimum to the script, which then reports `INCOMPLETE` if fewer
+markers exist. The required ACP contract job declares one test JVM. The `kotlin-<shard>` jobs run
+different subsets of ACP classes per shard and declare no minimum. In those jobs, a JVM that could
+not write its marker is not counted.
 
 The required ACP contract job and every `kotlin-<shard>` job upload the directory, named with the
 run attempt. A quiet run reports zero; a recovered run reports a positive count. Tests that inject
