@@ -1,6 +1,9 @@
 package decompengine.testing
 
 import org.junit.jupiter.api.io.TempDir
+import java.net.StandardProtocolFamily
+import java.net.UnixDomainSocketAddress
+import java.nio.channels.ServerSocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -48,6 +51,22 @@ class RepositoryTemporaryRootTest {
             }
         } finally {
             Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
+    fun `short socket directories stay repository-local and fit sun_path at fixture depth`() {
+        val root = ShortSocketDirectory.create()
+        try {
+            assertUnderBuild(root, "ShortSocketDirectory")
+            // The deepest existing fixture socket suffix is runtime/docker.sock or runtime/replacement.
+            val runtime = Files.createDirectory(root.resolve("runtime"))
+            val socket = runtime.resolve("docker.sock")
+            assertTrue(socket.toString().toByteArray().size < 108, "socket path exceeds sun_path: $socket")
+            ServerSocketChannel.open(StandardProtocolFamily.UNIX).use { it.bind(UnixDomainSocketAddress.of(socket)) }
+            assertUnderBuild(socket, "fixture socket")
+        } finally {
+            root.toFile().deleteRecursively()
         }
     }
 }

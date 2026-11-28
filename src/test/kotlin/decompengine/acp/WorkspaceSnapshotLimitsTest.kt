@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import decompengine.testing.ShortSocketDirectory
 import decompengine.agent.*
 import java.nio.file.Files
 import java.nio.file.Path
@@ -485,7 +486,7 @@ class WorkspaceSnapshotLimitsTest {
 
     @Test
     fun `special socket entries are rejected without opening their content`() {
-        val root = workspace()
+        val root = ShortSocketDirectory.create().also { Files.createDirectory(it.resolve("src")) }
         val socket = root.resolve("src/socket")
         java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
             server.bind(java.net.UnixDomainSocketAddress.of(socket))

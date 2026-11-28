@@ -1881,8 +1881,9 @@ tasks.withType<Test>().configureEach {
     // Keep @TempDir, Files.createTempDirectory and native temp files inside the repository.
     // Specialized tasks that already choose java.io.tmpdir keep their own roots; whichever
     // doFirst runs first, the explicit override wins. Set at execution time so the absolute
-    // path never becomes a cache-key input.
-    val repositoryTemporaryRoot = layout.buildDirectory.dir("test-tmp/$name")
+    // path never becomes a cache-key input. The root stays short because Unix socket fixtures
+    // under it must fit Linux's 108-byte sun_path even in nested worktrees.
+    val repositoryTemporaryRoot = layout.buildDirectory.dir(if (name == "test") "t" else "t-$name")
     val testRepositoryRoot = layout.projectDirectory.asFile.absolutePath
     doFirst {
         val testTask = this as Test
