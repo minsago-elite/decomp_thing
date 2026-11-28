@@ -710,7 +710,10 @@ capture of the selected report. It distinguishes unknown, partial, unsupported a
 only `available` data shows summary metrics and candidate rows. A legacy page's `available` label
 has the same limited meaning as the adapter state above: structure was checked, not acceptance or
 behavioral equivalence. Downloading the report performs a fresh bounded artifact read, separate
-from the capture used for classification.
+from the capture used for classification. The legacy reconstruction-progress and repair-history
+panels print recorded counts (completed/total units, attempted/maximum attempts, attempt index)
+as their exact canonical decimal values and label an absent or malformed count as not reported,
+never as zero.
 
 `available` means the adapter verified the report's structure and bindings, not that the
 reconstruction was accepted: `acceptance` stays `not-evaluated` unless an acceptance artifact

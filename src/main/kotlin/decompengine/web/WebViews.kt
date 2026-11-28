@@ -889,7 +889,7 @@ fun renderRepairHistory(
     }
     if (iterations.isEmpty() && runs.isEmpty()) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No repair attempts are recorded.</p></section>"
     val items = iterations.joinToString("") { iteration ->
-        val index = iteration.historyCount("index", allowZero = false).let { if (it == "0") "?" else it }
+        val index = iteration.historyCount("index", allowZero = false).let { if (it == "not reported") "?" else it }
         val failureKind = safeRepairFailureKind(iteration.historyText("failureKind"))
         val regressions = (iteration["retainedRegressionIds"] as? JsonArray)?.size ?: 0
         val before = renderEvidence("Before", iteration["before"] as? JsonObject, job, reports, authorizedArtifacts, artifactStates)
@@ -958,8 +958,10 @@ private fun safeRevisionIdentity(value: String?): String =
     value?.takeIf { it == "root" || it == "baseline" || it.matches(Regex("revision_[0-9]{8}_[a-f0-9]{16}")) }
         ?: "unavailable"
 
+/** Shows the recorded canonical count unchanged; absent or malformed values are never rendered as zero. */
 private fun JsonObject.historyCount(name: String, allowZero: Boolean = true): String =
-    historyText(name)?.toIntOrNull()?.takeIf { if (allowZero) it in 0..100_000 else it in 1..100_000 }?.toString() ?: "0"
+    historyText(name)?.takeIf { it.matches(Regex("0|[1-9][0-9]{0,19}")) && it.toULongOrNull() != null && (allowZero || it != "0") }
+        ?: "not reported"
 
 private fun repairRollbackLabel(iteration: JsonObject): String = when (iteration.historyText("disposition")) {
     // Rejection alone carries no canonical restoration state.
