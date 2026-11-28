@@ -1144,7 +1144,7 @@ class UploadServerTest {
         val password = "synthetic-password-value"
         val basicToken = "c3ludGhldGljOnNlbnRpbmVs" // Deliberately absent from sensitiveValues.
         val server = UploadServer("127.0.0.1", 0, dataDir,
-            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=$password; pRoXy-AuThOrIzAtIoN: bAsIc $basicToken <script>bad</script>") },
+            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=\"$password bravo charlie\"; pRoXy-AuThOrIzAtIoN: bAsIc $basicToken <script>bad</script>") },
             reconstructor = JobReconstructor { _, _ -> error("z".repeat(17000) + configured) },
             executor = Executor { it.run() }, sensitiveValues = listOf(configured))
         server.start()
@@ -1160,7 +1160,7 @@ class UploadServerTest {
             val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
             val page = request(server, "GET", "/jobs/$id").body.decodeToString()
             listOf(persisted).forEach { text ->
-                listOf(configured, bearer, password, basicToken).forEach { assertTrue(!text.contains(it)) }
+                listOf(configured, bearer, password, "bravo", "charlie", basicToken).forEach { assertTrue(!text.contains(it)) }
                 assertTrue(text.contains("[redacted]"))
             }
             listOf(configured, bearer, password, basicToken, "status_message", "binary_path").forEach {
@@ -1421,7 +1421,20 @@ class UploadServerTest {
                 "Fixture must exceed the retained-byte admission headroom: used=$retainedBefore max=$maximumRetainedBytes")
             assertTrue(Files.getFileStore(root).usableSpace >= WebUploadStorage.FREE_HEADROOM_BYTES + reservation,
                 "Fixture should reach the retained-byte limit, not the separate free-space limit")
-            val beforeBytes = recordedProjectBytes(root).mapValues { (_, bytes) -> sha256(bytes) }
+            // The listener appends its audit entry after sending each HTTP response.
+            fun awaitUploadAudit(count: Int): List<WebAuditEntry> {
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+                while (true) {
+                    val entries = server.audit.read().entries.filter { it.action == WebAuditAction.JOB_UPLOAD }
+                    if (entries.size >= count) return entries
+                    check(System.nanoTime() < deadline) { "Expected $count upload audit entries, found ${entries.size}" }
+                    Thread.sleep(10)
+                }
+            }
+            assertEquals(jobIds.size, awaitUploadAudit(jobIds.size).size)
+            val auditSegment = ".web-audit/current.jsonl"
+            val beforeAudit = Files.readString(root.resolve(auditSegment))
+            val beforeBytes = (recordedProjectBytes(root) - auditSegment).mapValues { (_, bytes) -> sha256(bytes) }
             val beforeEntries = Files.walk(root).use { paths -> paths.map { root.relativize(it).toString() }.toList().toSet() }
 
             val firstReadReached = java.util.concurrent.CountDownLatch(1)
@@ -1484,8 +1497,15 @@ class UploadServerTest {
                 assertFalse(dashboard.isDone)
                 assertEquals(beforeEntries, Files.walk(root).use { paths -> paths.map { root.relativize(it).toString() }.toList().toSet() },
                     "Denied storage admission must not leave an upload stage")
-                assertEquals(beforeBytes, recordedProjectBytes(root).mapValues { (_, bytes) -> sha256(bytes) },
-                    "Denied storage admission must preserve every retained byte")
+                val refusal = awaitUploadAudit(jobIds.size + 1).single { it.status == 503 }
+                assertEquals("UPLOAD_STORAGE", refusal.reasonCode)
+                assertEquals(WebAuditTarget(), refusal.target)
+                val afterAudit = Files.readString(root.resolve(auditSegment))
+                assertTrue(afterAudit.startsWith(beforeAudit), "Refusal rewrote existing audit history")
+                val appendedLine = afterAudit.substring(beforeAudit.length).lines().filter { it.isNotEmpty() }.single()
+                assertEquals(refusal, WebAuditEntry.parse(appendedLine))
+                assertEquals(beforeBytes, (recordedProjectBytes(root) - auditSegment).mapValues { (_, bytes) -> sha256(bytes) },
+                    "Denied storage admission changed retained bytes outside its single audit entry")
                 println("issue-162-retained-quota-http-v1 refusal=503/UPLOAD_STORAGE request_body_bytes_sent=0 " +
                     "status_responses=${statusLatencies.size} status_max_ms=${statusLatencies.maxOrNull()} " +
                     "dashboard_read_held=true storage_measure_held_through_status=true " +
@@ -2651,8 +2671,22 @@ class UploadServerTest {
             report.createDirectories()
             refuse()
             Files.delete(report)
+            // A contained path must still pass the strict JSON report projection.
             report.writeText("ordinary inside report")
-            assertContentEquals("ordinary inside report".toByteArray(), request(server, "GET", path).body)
+            for (method in listOf("GET", "HEAD")) {
+                val malformed = request(server, method, path)
+                assertEquals(409, malformed.status, method)
+                assertTrue(!malformed.body.decodeToString().contains("ordinary inside report"))
+            }
+            val payload = "{\"message\":\"ordinary inside report\"}".toByteArray()
+            report.writeBytes(payload)
+            val contained = request(server, "GET", path)
+            assertEquals(200, contained.status)
+            assertContentEquals(payload, contained.body)
+            val head = request(server, "HEAD", path)
+            assertEquals(200, head.status)
+            assertEquals(payload.size.toString(), head.contentLength)
+            assertTrue(head.body.isEmpty())
             assertEquals("outside-boundary-marker", outside.resolve("ordinary.json").readBytes().decodeToString())
         }
     }
@@ -2790,6 +2824,10 @@ class UploadServerTest {
                 assertContentEquals(archive.archivePath.readBytes(), downloaded.body)
                 assertEquals(archive.archiveSha256, digest(downloaded.body))
                 assertEquals("\"${archive.archiveSha256}\"", downloaded.etag)
+                val incomplete = downloaded.body.copyOf(downloaded.body.size - 1)
+                archive.archivePath.writeBytes(incomplete)
+                val current = "/jobs/$jobId/artifacts/reports/source-tree.zip?sha256=${digest(incomplete)}"
+                assertEquals(400, request(server, "GET", current).status)
             }
         }
     }
@@ -2888,9 +2926,13 @@ class UploadServerTest {
         }
     }
 
-    private fun uploadedJobId(server: UploadServer): String =
-        Json.parseToJsonElement(upload(server, "boundary.elf", elfFixture(), acceptJson = true).body.decodeToString())
-            .jsonObject.getValue("id").toString().trim('"')
+    private fun uploadedJobId(server: UploadServer): String {
+        val response = upload(server, "boundary.elf", elfFixture(), acceptJson = true)
+        assertEquals(201, response.status, "Unexpected upload response: ${response.body.decodeToString()}")
+        val document = Json.parseToJsonElement(response.body.decodeToString()).jsonObject
+        assertTrue("id" in document, "Legacy upload response omitted id: $document")
+        return document.getValue("id").toString().trim('"')
+    }
 
     private fun UploadServer.internalStore(): decompengine.jobs.JobStore =
         UploadServer::class.java.getDeclaredField("store").apply { isAccessible = true }

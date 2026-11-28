@@ -2,63 +2,7 @@
   "schema": "contract.schema.json",
   "fixtures": [
     {
-      "file": "fixtures/agent-preflight-cancelled.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/agent-preflight-idle.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/agent-preflight-inspecting.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/agent-preflight-ready.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/agent-preflight.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/artifact.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/attempt-controls-resume.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/attempt-controls-retry.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/attempt-controls-running.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/attempt-controls-superseded.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/bootstrap-retention.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/bootstrap-scheduler-saturated.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/bootstrap-scheduler-unavailable.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/bootstrap-without-launch.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/bootstrap-workflow-launch.json",
+      "file": "fixtures/session.json",
       "valid": true
     },
     {
@@ -66,35 +10,83 @@
       "valid": true
     },
     {
-      "file": "fixtures/error-denied.json",
+      "file": "fixtures/job-lossless.json",
       "valid": true
     },
     {
-      "file": "fixtures/error-event-gap-empty-cutover.json",
+      "file": "fixtures/jobs-page.json",
       "valid": true
     },
     {
-      "file": "fixtures/error-event-gap-empty.json",
+      "file": "fixtures/jobs-empty.json",
       "valid": true
     },
     {
-      "file": "fixtures/error-event-gap.json",
+      "file": "fixtures/run-queued.json",
       "valid": true
     },
     {
-      "file": "fixtures/error-git-repository-unsupported.json",
+      "file": "fixtures/run-completed-unaccepted.json",
       "valid": true
     },
     {
-      "file": "fixtures/error-git-unavailable.json",
+      "file": "fixtures/run-interrupted.json",
       "valid": true
     },
     {
-      "file": "fixtures/error-validation.json",
+      "file": "fixtures/run-failed.json",
       "valid": true
     },
     {
-      "file": "fixtures/error-version-conflict.json",
+      "file": "fixtures/artifact.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-accepted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-accepted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-exploration.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-missing.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-unknown.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-normal-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-invalid.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-incompatible.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/event-message-lossless.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/event-run-state.json",
       "valid": true
     },
     {
@@ -106,11 +98,197 @@
       "valid": true
     },
     {
-      "file": "fixtures/event-message-lossless.json",
+      "file": "fixtures/snapshot.json",
       "valid": true
     },
     {
-      "file": "fixtures/event-observation-plan-metadata.json",
+      "file": "fixtures/events-poll.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-workspace.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-validation.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-denied.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-version-conflict.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-workflow-start.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-workflow-cancel.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-workflow-cancel-actor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-workflow-cancel-action.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-recover.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-commit.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-push.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-session.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-numeric-count.json",
+      "valid": false,
+      "reason": "Byte counts must be decimal strings."
+    },
+    {
+      "file": "fixtures/invalid-count-overflow.json",
+      "valid": false,
+      "reason": "Unsigned 64-bit byte count cannot overflow."
+    },
+    {
+      "file": "fixtures/invalid-address.json",
+      "valid": false,
+      "reason": "Address exceeds unsigned 64-bit width."
+    },
+    {
+      "file": "fixtures/invalid-private-path.json",
+      "valid": false,
+      "reason": "Producer schema must reject internal path leakage."
+    },
+    {
+      "file": "fixtures/invalid-unknown-enum.json",
+      "valid": false,
+      "reason": "Unknown states cannot be accepted as known runtime state."
+    },
+    {
+      "file": "fixtures/invalid-unknown-version.json",
+      "valid": false,
+      "reason": "Unsupported API major must fail known-schema validation."
+    },
+    {
+      "file": "fixtures/invalid-partial-accepted.json",
+      "valid": false,
+      "reason": "Partial evidence cannot be accepted."
+    },
+    {
+      "file": "fixtures/invalid-root-accepted.json",
+      "valid": false,
+      "reason": "Root snapshot is not an accepted repair."
+    },
+    {
+      "file": "fixtures/invalid-test-only-accepted.json",
+      "valid": false,
+      "reason": "Test-only publication cannot be release acceptance."
+    },
+    {
+      "file": "fixtures/invalid-terminal-without-time.json",
+      "valid": false,
+      "reason": "Terminal attempts need a persisted terminal timestamp."
+    },
+    {
+      "file": "fixtures/invalid-git-sha256-abbreviation.json",
+      "valid": false,
+      "reason": "Git mutation/view identity uses a full object ID for its format."
+    },
+    {
+      "file": "fixtures/invalid-request-unknown-field.json",
+      "valid": false,
+      "reason": "Mutation requests reject unknown fields."
+    },
+    {
+      "file": "fixtures/invalid-report-artifact-binding.json",
+      "valid": false,
+      "reason": "Report evidence cannot be borrowed from another attempt."
+    },
+    {
+      "file": "fixtures/invalid-page-over-limit.json",
+      "valid": false,
+      "reason": "Record count must obey the declared page limit."
+    },
+    {
+      "file": "fixtures/invalid-snapshot-watermark.json",
+      "valid": false,
+      "reason": "A cursor without its matching snapshot sequence is inconsistent."
+    },
+    {
+      "file": "fixtures/invalid-report-failed-accepted.json",
+      "valid": false,
+      "reason": "Failed validation cannot be presented as accepted."
+    },
+    {
+      "file": "fixtures/invalid-gap-invented-cursor.json",
+      "valid": false,
+      "reason": "A transport gap cannot manufacture a durable event cursor or sequence."
+    },
+    {
+      "file": "fixtures/upload-progress.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-upload-progress-publication.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-upload-progress-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/runs-page.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/runs-wrong-job.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/runs-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/event-workflow-observation.json",
+      "valid": false,
+      "reason": "A public observation cannot carry retained raw workflow identity or prose."
+    },
+    {
+      "file": "fixtures/invalid-observation-authority.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-observation-numeric-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-observation-missing-omission.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-observation-raw-object.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/events-observation-poll.json",
       "valid": true
     },
     {
@@ -119,8 +297,13 @@
       "reason": "A public observation cannot carry retained plan-entry prose."
     },
     {
-      "file": "fixtures/event-observation-public-metadata.json",
-      "valid": true
+      "file": "fixtures/invalid-observation-plan-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-observation-negative-duration.json",
+      "valid": false,
+      "reason": "Public elapsed durations cannot be negative."
     },
     {
       "file": "fixtures/event-observation-truncated-preview.json",
@@ -128,146 +311,55 @@
       "reason": "A public observation cannot carry retained task identity or plan-entry prose, even when truncated."
     },
     {
-      "file": "fixtures/event-run-state.json",
+      "file": "fixtures/snapshot-progress-omissions.json",
       "valid": true
     },
     {
-      "file": "fixtures/event-workflow-observation.json",
-      "valid": false,
-      "reason": "A public observation cannot carry retained raw workflow identity or prose."
-    },
-    {
-      "file": "fixtures/events-observation-poll.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/events-poll.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-diff.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-history-many-parents.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-history.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-operation-attach-unsupported.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-operation-init-completed.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-operation-init-interrupted.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-operation.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-refs.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-repositories.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-status.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-workspace-detached-imported.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-workspace-unborn-dirty.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-workspace.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/invalid-address.json",
-      "valid": false,
-      "reason": "Address exceeds unsigned 64-bit width."
-    },
-    {
-      "file": "fixtures/invalid-agent-preflight-detail.json",
+      "file": "fixtures/invalid-snapshot-progress-boundary.json",
       "valid": false
     },
     {
-      "file": "fixtures/invalid-agent-preflight-failed-identity.json",
+      "file": "fixtures/invalid-snapshot-progress-count.json",
       "valid": false
     },
     {
-      "file": "fixtures/invalid-agent-preflight-failed-without-reason.json",
+      "file": "fixtures/bootstrap-scheduler-saturated.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/bootstrap-scheduler-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-scheduler-bound.json",
       "valid": false
     },
     {
-      "file": "fixtures/invalid-agent-preflight-idle-detail.json",
+      "file": "fixtures/invalid-scheduler-exact.json",
       "valid": false
     },
     {
-      "file": "fixtures/invalid-agent-preflight-ready-reason.json",
+      "file": "fixtures/invalid-scheduler-capacity.json",
       "valid": false
     },
     {
-      "file": "fixtures/invalid-agent-preflight-reason-vocabulary.json",
-      "valid": false
+      "file": "fixtures/event-observation-public-metadata.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-agent-preflight-request-action.json",
-      "valid": false
+      "file": "fixtures/event-observation-plan-metadata.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-agent-preflight-status.json",
-      "valid": false
+      "file": "fixtures/error-event-gap.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-attempt-controls-available-reason.json",
-      "valid": false
+      "file": "fixtures/error-event-gap-empty.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-attempt-controls-resume-scope.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-attempt-controls-retry-resume-reason.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-attempt-controls-superseded-retry.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-attempt-controls-terminal-cancel.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-count-overflow.json",
-      "valid": false,
-      "reason": "Unsigned 64-bit byte count cannot overflow."
-    },
-    {
-      "file": "fixtures/invalid-deletion-preview-protected-deletable.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-deletion-preview-undo.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-empty-cutover-missing-watermark.json",
+      "file": "fixtures/invalid-event-gap-missing.json",
       "valid": false
     },
     {
@@ -275,7 +367,7 @@
       "valid": false
     },
     {
-      "file": "fixtures/invalid-event-gap-missing.json",
+      "file": "fixtures/invalid-event-gap-wrong-code.json",
       "valid": false
     },
     {
@@ -287,39 +379,943 @@
       "valid": false
     },
     {
-      "file": "fixtures/invalid-event-gap-wrong-code.json",
+      "file": "fixtures/snapshot-empty-cutover.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-event-gap-empty-cutover.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-empty-cutover-missing-watermark.json",
       "valid": false
     },
     {
-      "file": "fixtures/invalid-gap-invented-cursor.json",
-      "valid": false,
-      "reason": "A transport gap cannot manufacture a durable event cursor or sequence."
+      "file": "fixtures/progress-pin.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-git-detached-branch.json",
-      "valid": false,
-      "reason": "A detached HEAD names an object only, never a branch or ref record."
+      "file": "fixtures/request-progress-pin.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-git-sha256-abbreviation.json",
-      "valid": false,
-      "reason": "Git mutation/view identity uses a full object ID for its format."
-    },
-    {
-      "file": "fixtures/invalid-git-unborn-mapping.json",
-      "valid": false,
-      "reason": "An unborn branch has no commit, so no source provenance mapping."
-    },
-    {
-      "file": "fixtures/invalid-job-label-control.json",
+      "file": "fixtures/invalid-progress-pin-numeric.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/invalid-progress-pin-actor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/agent-preflight.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/agent-preflight-idle.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-agent-preflight.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-status.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-detail.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-request-action.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/agent-preflight-ready.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-idle-detail.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-failed-without-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-reason-vocabulary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-ready-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-retention.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-retention-accounting.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-retention-error.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/recovery-retained.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/recovery-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/recovery-incomplete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-recovery-complete.json",
+      "valid": false,
+      "reason": "Uninspected entries cannot assert a complete inspection."
+    },
+    {
+      "file": "fixtures/invalid-recovery-byte-bound.json",
+      "valid": false,
+      "reason": "Observed bytes cannot exceed the 64 MiB inspection ceiling."
+    },
+    {
+      "file": "fixtures/invalid-recovery-candidate-bound.json",
+      "valid": false,
+      "reason": "Combined retained candidates cannot exceed 128."
+    },
+    {
+      "file": "fixtures/source-catalog.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-snapshot.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-total.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-revision.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-path-id.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-catalog-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-complete-continuation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-sources.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-sources-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-null-binding.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-numeric-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-complete-continuation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-authority.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-directory-root.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-child-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-complete-continuation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-descendant-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-omitted-ancestors.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-order.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-path-label.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-directory-deep.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-unicode-order.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-utf8-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-complete-BOM-CRLF.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-hex.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-mid-line.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-length.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-next-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-completeness.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-hex-lines.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-fallback.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-first-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-end-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-oversize.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-surrogate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-numeric-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-file-root.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-file-unicode.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-file-verification.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-binding.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-numeric-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-root-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-nested-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-empty-component.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-long-component.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-path-selector.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/report-normal-cases.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-report-case-preview-truncation.json",
+      "valid": false,
+      "reason": "A bounded preview must state truncation from its exact observed and prefix byte counts."
+    },
+    {
+      "file": "fixtures/validation-history.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-history-unrecorded-inspection.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/report-validation-failure.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/validation-history-failure.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-failure-position.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-validation-history-failure-borrow.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/agent-preflight-inspecting.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/agent-preflight-cancelled.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-failed-identity.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/attempt-controls-retry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-running.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-superseded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-retry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-available-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-resume-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-terminal-cancel.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-superseded-retry.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-retry-resume-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-recovery-without-predecessor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-retry-checkpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-resume-without-checkpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-recover-mode.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-recover-caller-workspace.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-recover-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/log-range-available.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/log-range-missing.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-log-range-gap.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-marker.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-search-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-search-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-long-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-log-range-host-path.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/function-inventory.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-filtered-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-limit-exceeded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-unavailable-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-unavailable-empty-success.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-verified-label.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-excluded-owner.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-selector.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-address.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/module-inventory.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/module-inventory-plan-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-module-inventory-unavailable-summary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/module-detail.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-module-detail-missing-owned.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/entity-detail-function.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-function-references.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-global.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unrecorded-link.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unbounded-preview.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unavailable-entity.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/support-export-server.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/support-export-job.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-support-export-redaction-version.json",
+      "valid": false,
+      "reason": "An export must name the redaction policy version that produced it."
+    },
+    {
+      "file": "fixtures/invalid-support-export-unscoped-job.json",
+      "valid": false,
+      "reason": "A job-scoped export must name its job."
+    },
+    {
+      "file": "fixtures/invalid-support-export-section.json",
+      "valid": false,
+      "reason": "Only the closed public sections can be exported."
+    },
+    {
+      "file": "fixtures/invalid-support-export-audit-actor.json",
+      "valid": false,
+      "reason": "A browser-session actor is identified only by its session digest."
+    },
+    {
+      "file": "fixtures/invalid-support-export-audit-outcome.json",
+      "valid": false,
+      "reason": "A rejected action reports a 4xx status."
+    },
+    {
+      "file": "fixtures/invalid-support-export-audit-complete.json",
+      "valid": false,
+      "reason": "A page with unrecorded entries cannot claim completeness."
+    },
+    {
+      "file": "fixtures/capacity-saturated.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-capacity-reason-text.json",
+      "valid": false,
+      "reason": "Failure reasons are fixed public error codes, never request text."
+    },
+    {
+      "file": "fixtures/invalid-capacity-extra-field.json",
+      "valid": false,
+      "reason": "Capacity is closed; no job or path detail can be added."
+    },
+    {
+      "file": "fixtures/revision-sources-legacy.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-root-legacy.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-file-root-legacy.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-complete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-no-matches.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-incomplete-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-partial-without-cursor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-complete-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-scope-sum.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-case-sensitive-match.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-line-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-complete-remaining.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-symbol-boundary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-file-order.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-numeric-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-index.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-search-continued-gaps.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-below-page.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-over-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/artifacts-run.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/artifacts-revision.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/artifacts-job-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/artifact-catalog-entry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-artifacts-foreign-job.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-revision-without-run.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-run-filter.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-revision-filter.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-verified-archive.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-family-prefix.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-uncataloged-family.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-missing-verification.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-over-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifact-catalog-verified-archive.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-verified-without-revision.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-report-verbatim.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-missing-content.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-diff-page.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-text.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-binary.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-renamed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-manifest-entry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-diff-added-base.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-removed-head.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-unchanged-listed.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-count-total.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-over-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-foreign-authority.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-binary-patch.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-renamed-text.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-context-side.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-hunk-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-line-sequence.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-next-hunk.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-truncation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-binary-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-manifest-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-input-without-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-archive-verified.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-stale.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-missing.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-git-mapped.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/operation-archive-verify-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/archive-verification-request.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-archive-verified-without-operation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-missing-verified.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-stale-without-previous.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-failed-without-code.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-foreign-download.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-download-digest.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-git-path.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-build-without-executable.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-operation-archive-verify-object.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-archive-verification-request-digest.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-empty-patch.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-file-diff-empty-added.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-diff-unchanged-modified.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-diff-content-kind.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/bootstrap-workflow-launch.json",
+      "valid": true
     },
     {
       "file": "fixtures/invalid-launch-agent-contact.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-launch-contract-version.json",
       "valid": false
     },
     {
@@ -327,12 +1323,56 @@
       "valid": false
     },
     {
+      "file": "fixtures/invalid-launch-without-limits.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-contract-version.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/invalid-launch-unknown-tool.json",
       "valid": false
     },
     {
-      "file": "fixtures/invalid-launch-without-limits.json",
+      "file": "fixtures/bootstrap-without-launch.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/job-organized.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/job-deletion-preview.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/job-deletion-preview-protected.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-deletion-preview-protected-deletable.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/invalid-deletion-preview-undo.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/operation-job-delete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/storage-summary.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-storage-summary-complete-uninspected.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/maintenance-preview.json",
+      "valid": true
     },
     {
       "file": "fixtures/invalid-maintenance-preview-automatic-deletion.json",
@@ -343,57 +1383,104 @@
       "valid": false
     },
     {
-      "file": "fixtures/invalid-numeric-count.json",
+      "file": "fixtures/request-job-organization.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-job-organization-clear.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-job-organization-empty.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-request-job-organization-filename.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-job-label-control.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-job-deletion.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-job-deletion-extra.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/git-workspace-unborn-dirty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-workspace-detached-imported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-git-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-repositories.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-init-completed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-init-interrupted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-attach-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-init.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-attach.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-attach-path.json",
       "valid": false,
-      "reason": "Byte counts must be decimal strings."
+      "reason": "Import names one admitted repository; a host path is never a request field."
     },
     {
-      "file": "fixtures/invalid-observation-authority.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-observation-missing-omission.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-observation-negative-duration.json",
+      "file": "fixtures/invalid-request-git-init-command.json",
       "valid": false,
-      "reason": "Public elapsed durations cannot be negative."
+      "reason": "Repository requests are closed; command or template fields are refused."
     },
     {
-      "file": "fixtures/invalid-observation-numeric-count.json",
-      "valid": false
+      "file": "fixtures/error-git-repository-unsupported.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-observation-plan-limit.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-observation-raw-object.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-page-over-limit.json",
+      "file": "fixtures/invalid-git-detached-branch.json",
       "valid": false,
-      "reason": "Record count must obey the declared page limit."
+      "reason": "A detached HEAD names an object only, never a branch or ref record."
     },
     {
-      "file": "fixtures/invalid-partial-accepted.json",
+      "file": "fixtures/invalid-git-unborn-mapping.json",
       "valid": false,
-      "reason": "Partial evidence cannot be accepted."
+      "reason": "An unborn branch has no commit, so no source provenance mapping."
     },
     {
-      "file": "fixtures/invalid-private-path.json",
-      "valid": false,
-      "reason": "Producer schema must reject internal path leakage."
+      "file": "fixtures/queue-position-queued.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-progress-pin-actor.json",
-      "valid": false
+      "file": "fixtures/queue-position-not-queued.json",
+      "valid": true
     },
     {
-      "file": "fixtures/invalid-progress-pin-numeric.json",
-      "valid": false
+      "file": "fixtures/queue-position-unavailable.json",
+      "valid": true
     },
     {
       "file": "fixtures/invalid-queue-position-ahead.json",
@@ -412,582 +1499,7 @@
       "valid": false
     },
     {
-      "file": "fixtures/invalid-recover-caller-workspace.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-recover-mode.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-recovery-byte-bound.json",
-      "valid": false,
-      "reason": "Observed bytes cannot exceed the 64 MiB inspection ceiling."
-    },
-    {
-      "file": "fixtures/invalid-recovery-candidate-bound.json",
-      "valid": false,
-      "reason": "Combined retained candidates cannot exceed 128."
-    },
-    {
-      "file": "fixtures/invalid-recovery-complete.json",
-      "valid": false,
-      "reason": "Uninspected entries cannot assert a complete inspection."
-    },
-    {
-      "file": "fixtures/invalid-report-artifact-binding.json",
-      "valid": false,
-      "reason": "Report evidence cannot be borrowed from another attempt."
-    },
-    {
-      "file": "fixtures/invalid-report-case-preview-truncation.json",
-      "valid": false,
-      "reason": "A bounded preview must state truncation from its exact observed and prefix byte counts."
-    },
-    {
-      "file": "fixtures/invalid-report-failed-accepted.json",
-      "valid": false,
-      "reason": "Failed validation cannot be presented as accepted."
-    },
-    {
-      "file": "fixtures/invalid-request-git-attach-path.json",
-      "valid": false,
-      "reason": "Import names one admitted repository; a host path is never a request field."
-    },
-    {
-      "file": "fixtures/invalid-request-git-init-command.json",
-      "valid": false,
-      "reason": "Repository requests are closed; command or template fields are refused."
-    },
-    {
-      "file": "fixtures/invalid-request-job-deletion-extra.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-request-job-organization-empty.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-request-job-organization-filename.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-request-unknown-field.json",
-      "valid": false,
-      "reason": "Mutation requests reject unknown fields."
-    },
-    {
-      "file": "fixtures/invalid-retention-accounting.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-retention-error.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-directory-complete-continuation.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-directory-descendant-count.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-directory-duplicate.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-directory-omitted-ancestors.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-directory-order.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-directory-parent.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-directory-path-label.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-directory-version.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-file-binding.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-file-empty-component.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-file-long-component.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-file-nested-parent.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-file-numeric-size.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-file-path-selector.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-file-root-parent.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-file-verification.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-sources-authority.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-sources-complete-continuation.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-sources-duplicate.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-sources-null-binding.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-sources-numeric-size.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-revision-sources-version.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-root-accepted.json",
-      "valid": false,
-      "reason": "Root snapshot is not an accepted repair."
-    },
-    {
-      "file": "fixtures/invalid-run-interrupted-timed-out.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-run-recovery-without-predecessor.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-run-resume-without-checkpoint.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-run-retry-checkpoint.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-scheduler-bound.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-scheduler-capacity.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-scheduler-exact.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-snapshot-progress-boundary.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-snapshot-progress-count.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-snapshot-watermark.json",
-      "valid": false,
-      "reason": "A cursor without its matching snapshot sequence is inconsistent."
-    },
-    {
-      "file": "fixtures/invalid-source-catalog-complete-continuation.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-catalog-duplicate.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-catalog-path-id.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-catalog-revision.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-catalog-snapshot.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-catalog-total.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-completeness.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-end-line.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-fallback.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-first-line.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-hex-lines.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-length.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-next-offset.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-numeric-offset.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-oversize.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-chunk-surrogate.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-case-sensitive-match.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-complete-reason.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-complete-remaining.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-file-order.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-gaps-below-page.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-gaps-over-scope.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-index.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-limit.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-line-offset.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-numeric-line.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-partial-without-cursor.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-scope-sum.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-source-search-symbol-boundary.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-storage-summary-complete-uninspected.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-terminal-without-time.json",
-      "valid": false,
-      "reason": "Terminal attempts need a persisted terminal timestamp."
-    },
-    {
-      "file": "fixtures/invalid-test-only-accepted.json",
-      "valid": false,
-      "reason": "Test-only publication cannot be release acceptance."
-    },
-    {
-      "file": "fixtures/invalid-unknown-enum.json",
-      "valid": false,
-      "reason": "Unknown states cannot be accepted as known runtime state."
-    },
-    {
-      "file": "fixtures/invalid-unknown-version.json",
-      "valid": false,
-      "reason": "Unsupported API major must fail known-schema validation."
-    },
-    {
-      "file": "fixtures/invalid-upload-progress-limit.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-upload-progress-publication.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-validation-failure-position.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-validation-history-failure-borrow.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-validation-history-unrecorded-inspection.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-workflow-cancel-action.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-workflow-cancel-actor.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/job-deletion-preview-protected.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/job-deletion-preview.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/job-lossless.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/job-organized.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/jobs-empty.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/jobs-page.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/maintenance-preview.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/operation-job-delete.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/progress-pin.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/queue-position-not-queued.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/queue-position-queued.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/queue-position-unavailable.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/recovery-empty.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/recovery-incomplete.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/recovery-retained.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-accepted.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-exploration.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-incompatible.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-invalid.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-missing.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-normal-cases.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-normal-not-recorded.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-partial.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-unknown.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-unsupported.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/report-validation-failure.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-agent-preflight.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-git-attach.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-git-commit.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-git-init.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-git-push.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-job-deletion.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-job-organization-clear.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-job-organization.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-progress-pin.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-recover-resume.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-recover.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-session.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-workflow-cancel.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-workflow-start.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-accepted.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-directory-child-partial.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-directory-deep.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-directory-root.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-directory-unicode-order.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-file-root.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-file-unicode.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-sources-partial.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/revision-sources.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/run-completed-unaccepted.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/run-failed.json",
+      "file": "fixtures/run-timed-out.json",
       "valid": true
     },
     {
@@ -995,115 +1507,39 @@
       "valid": true
     },
     {
-      "file": "fixtures/run-interrupted.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/run-queued.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/run-resume.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/run-retry.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/run-timed-out.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/runs-duplicate.json",
+      "file": "fixtures/invalid-run-interrupted-timed-out.json",
       "valid": false
     },
     {
-      "file": "fixtures/runs-page.json",
+      "file": "fixtures/report-exploration-redacted.json",
       "valid": true
     },
     {
-      "file": "fixtures/runs-wrong-job.json",
+      "file": "fixtures/report-exploration-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-artifact-family-role-projection.json",
       "valid": false
     },
     {
-      "file": "fixtures/session.json",
+      "file": "fixtures/git-diff.json",
       "valid": true
     },
     {
-      "file": "fixtures/snapshot-empty-cutover.json",
+      "file": "fixtures/git-history-many-parents.json",
       "valid": true
     },
     {
-      "file": "fixtures/snapshot-progress-omissions.json",
+      "file": "fixtures/git-history.json",
       "valid": true
     },
     {
-      "file": "fixtures/snapshot.json",
+      "file": "fixtures/git-refs.json",
       "valid": true
     },
     {
-      "file": "fixtures/source-catalog-partial.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-catalog.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-chunk-complete-BOM-CRLF.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-chunk-empty.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-chunk-hex.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-chunk-mid-line.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-chunk-utf8-partial.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-search-complete.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-search-continued-gaps.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-search-incomplete-empty.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-search-no-matches.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/source-search-partial.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/storage-summary.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/upload-progress.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/validation-history-failure.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/validation-history.json",
+      "file": "fixtures/git-status.json",
       "valid": true
     }
   ]

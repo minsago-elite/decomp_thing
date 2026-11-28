@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { decodeContract, decodeResponse, encodeRequest } from '../src/api/decode';
+import '../src/structure/contract';
 import { ApiClientError } from '../src/api/errors';
 import { parseBoundedJson } from '../src/api/json';
 import type { ResponseOf, Run } from '../src/api/generated';
@@ -28,6 +29,17 @@ function mismatchContract(page = 1) {
 }
 
 describe('generated v1 contract pipeline', () => {
+  it('retains unchanged legacy source fixtures and refuses unknown-size legacy inputs', () => {
+    for (const name of ['revision-sources', 'revision-directory-root', 'revision-file-root']) {
+      const text = fixture(`${name}-legacy`);
+      const legacy = JSON.parse(text) as { data: { items?: Array<{ kind?: string; sizeBytes?: string | null }>; item?: { sizeBytes?: string | null } } };
+      for (const mode of ['producer', 'response'] as const) expect(decodeContract(text, { mode })).toEqual(legacy);
+      // Omission means source-input, never a nullable-size manifest entry.
+      const item = legacy.data.item ?? legacy.data.items!.find(value => value.kind !== 'directory')!;
+      item.sizeBytes = null;
+      for (const mode of ['producer', 'response'] as const) expect(() => decodeContract(JSON.stringify(legacy), { mode })).toThrow(ApiClientError);
+    }
+  });
   it('accepts only coherent preflight status identity and fixed reason combinations', () => {
     const allowed = new Set(['idle:null:null', 'inspecting:inspection_fixture:null', 'ready:inspection_fixture:null',
       'cancelled:inspection_fixture:null', 'failed:inspection_fixture:AGENT_PREFLIGHT_FAILED']);

@@ -2,6 +2,29 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
+async function readJobRecord(path) {
+  try {
+    return JSON.parse(await fs.readFile(path, 'utf8'));
+  } catch (error) {
+    assert.fail(`Expected valid job metadata at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** SessionStatus can settle before the lazy upload form has its authenticated limits (#1697 predicate). */
+export const uploadFormReady = `document.body.innerText.includes('Local session connected.') &&
+  document.querySelector('#upload-guidance')?.textContent.includes('The complete request limit is 33554432 bytes') &&
+  document.querySelector('#binary-file:not(:disabled)') !== null`;
+
+/** Committed selection predicate (#1697); the qualify flows use the equivalent #1758 selection wait. */
+export function uploadSubmitReady(label) {
+  return `(() => {
+    const picker = document.querySelector('#binary-file');
+    const submit = document.querySelector('.upload-panel button[type="submit"]');
+    return picker?.files?.[0]?.name === 'inert-browser-fixture.elf' &&
+      submit?.textContent === ${JSON.stringify(label)} && !submit.disabled;
+  })()`;
+}
+
 // The connected shell can render before the lazy Home route mounts its upload panel.
 async function readyForUpload(tab, ready) {
   await ready(tab, `location.pathname === '/nested/' &&
@@ -87,7 +110,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   await ready(tab, `location.pathname === '/nested/jobs/${ids[0]}' && document.body.innerText.includes('inert-browser-fixture.elf')`, 'retry recovers durable job route');
   assert.deepEqual(await evaluate(tab, 'window.__uploadProof()'), { requests: 1, sameKey: true, hidden: true });
   assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
-  const record = JSON.parse(await fs.readFile(join(data, ids[0], 'job.json'), 'utf8'));
+  const record = await readJobRecord(join(data, ids[0], 'job.json'));
   assert.equal(record.status, 'uploaded');
   const files = await fs.readdir(join(data, ids[0]));
   assert.deepEqual(files.sort(), ['input.elf', 'job.json', 'upload-receipt.json']);

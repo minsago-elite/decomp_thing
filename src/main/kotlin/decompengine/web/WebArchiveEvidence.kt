@@ -26,6 +26,10 @@ internal data class WebArchiveSnapshot(
     val sha256: String,
     val source: SourceTreeView,
     val manifestDocument: JsonObject,
+    /** Digest of the payload's own build contract, the descriptor that binds the candidate's source digest. */
+    val contractSha256: String,
+    /** Raw manifest digest checked by the authoritative source observation. */
+    val manifestSha256: String,
 )
 
 internal class WebArchiveEvidence(private val store: JobStore, private val sources: WebSourceEvidence,
@@ -39,7 +43,8 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
         val archive = readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES)
         require(expectedSha256 == null || archive.sha256 == expectedSha256) { "archive differs from the displayed verified digest" }
         val input = identity(store.readInput(jobId))
-        val source = sources.read(jobId, reportPrefix).revision()
+        val sourceSnapshot = sources.read(jobId, reportPrefix)
+        val source = sourceSnapshot.revision()
         val adapter = ReconstructionAdapters.resolve(source.profile)
         val buildPolicy = adapter.archiveBuild
         val transport = adapter.archiveBuild.checkedTransportLayout(source.profile)
@@ -67,6 +72,8 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                 throw IllegalArgumentException("source archive ZIP is truncated", failure)
             }
             val relatives = paths.map { extractedRoot.relativize(it).toString().replace('\\', '/') }.toSet()
+            // Repository metadata never belongs to the deterministic source payload.
+            require(relatives.none { relative -> relative.split('/').any { it == ".git" } }) { "archive payload contains repository metadata" }
             require(relatives == inventory.filterValues { it.isRegularFile }.keys) {
                 "archive payload does not match the complete current source-tree inventory"
             }
@@ -77,6 +84,9 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                     observed.identity == inventory.getValue(relative)
                 ) { "archive payload differs from the current source tree: $relative" }
                 ReadIdentity(observed.sha256, observed.identity)
+            }
+            require(current.getValue("source_tree_manifest.json").sha256 == sourceSnapshot.manifestSha256) {
+                "archive manifest differs from the checked source manifest"
             }
             val contractSnapshot = revalidate { readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES) }
             requireSame(current.getValue(layout.contractPath), contractSnapshot)
@@ -98,14 +108,15 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             if (revalidated != receipts) {
                 throw ArtifactChangedException("archive source tree changed during verification")
             }
-            val manifest = revalidate { sources.read(jobId, reportPrefix).manifestDocument }
-            if (source.manifestDocument != manifest) {
+            val manifest = revalidate { sources.read(jobId, reportPrefix) }
+            if (sourceSnapshot.manifestSha256 != manifest.manifestSha256 || source.manifestDocument != manifest.manifestDocument) {
                 throw ArtifactChangedException("archive source revision changed during verification")
             }
             requireSame(executable, revalidate { readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES) })
             requireSame(input, revalidate { store.readInput(jobId) })
             requireSame(identity(archive), revalidate { readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES) })
-            return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument)
+            return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument,
+                contractSnapshot.sha256, sourceSnapshot.manifestSha256)
         } finally {
             LinuxFilesystemSyscalls.openRoot(temporary).use { directory ->
                 deletePrivateTreeContents(directory, AcpRuntimeClosureLimits(maximumUserOwnedFileBytes = MAXIMUM_CLEANUP_BYTES, maximumDepth = 64))
