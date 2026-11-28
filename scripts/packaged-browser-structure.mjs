@@ -170,7 +170,7 @@ export function structureFailureEvidence(error) {
  * In-memory observations of already-emitted module-detail events. Adds no CDP call, wait or retry, and
  * persists no request/session ids, URLs or payloads: only fixed labels, booleans and bounded numbers.
  */
-function moduleBodyObserver() {
+export function moduleBodyObserver() {
   let incomplete = false;
   const started = performance.now();
   const clamp = (value, max) => {
@@ -997,6 +997,10 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
       value.responseRequestId = safeId(responseRequestId);
       value.capture = ['not-ok', 'response-error', 'read-failed', 'foreign'].includes(reason) ? reason : 'unavailable';
     },
+    /** Ledger network IDs recorded for this module route, in arrival order; for the in-memory observer only. */
+    networkIds(path) {
+      return order.filter((value) => value.path === path).map((value) => value.networkId);
+    },
     continued(networkId, ok) {
       const value = byNetworkId.get(safeId(networkId));
       if (value) value.continuation = ok ? 'continued' : 'continue-failed';
@@ -1078,7 +1082,7 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
  * Fetch.requestPaused handler: reads the body before continuation and always continues the response unchanged.
  * It never fulfils, fails, retries, or refetches a request.
  */
-export function createModuleResponseInterceptor({ call, recorder, browserOrigin }) {
+export function createModuleResponseInterceptor({ call, recorder, browserOrigin, observer = null }) {
   return async (event) => {
     const interceptionId = event?.requestId;
     let ok = false;
@@ -1104,7 +1108,9 @@ export function createModuleResponseInterceptor({ call, recorder, browserOrigin 
         return;
       }
       let body;
-      try { body = await call('Fetch.getResponseBody', { requestId: interceptionId }); }
+      // The #1879 observer, when given, records this response-stage read's ordering and outcome (R2).
+      const read = () => call('Fetch.getResponseBody', { requestId: interceptionId });
+      try { body = await (observer ? observer.bodyCall(networkId, read) : read()); }
       catch {
         recorder.bodyUnavailable(networkId, path, { status, responseRequestId, reason: 'read-failed' });
         return;
@@ -1768,21 +1774,40 @@ export function assessArchivedConsumption(measurements) {
   return valid ? { validatedConsumption: true } : { validatedConsumption: false, status: 'FAIL', reason: 'unproven: report lacks response-body and document-nonce consumption evidence' };
 }
 
+/** Attaches the #1879 observer's bounded snapshot to a budgeted or cold failure, as qualifyStructure does (R2). */
+async function observeStructureFailure(run) {
+  const observer = moduleBodyObserver();
+  try {
+    return await run(observer);
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && !structureFailures.has(error)) {
+      try { structureFailures.set(error, observer.snapshot()); }
+      catch { /* Evidence never replaces the original failure. */ }
+    }
+    throw error;
+  }
+}
+
 export async function qualifyStructureBudgets(options) {
-  const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
-  try { return await qualifyStructureWithRssSampler(options, jvmRssSampler); }
-  finally { await jvmRssSampler.stop(); }
+  return observeStructureFailure(async (observer) => {
+    const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
+    try { return await qualifyStructureWithRssSampler(options, jvmRssSampler, observer); }
+    finally { await jvmRssSampler.stop(); }
+  });
 }
 
 export async function qualifyStructureColdSample(options) {
-  const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
-  try { return await qualifyStructureWithRssSampler({ ...options, coldSample: true }, jvmRssSampler); }
-  finally { await jvmRssSampler.stop(); }
+  return observeStructureFailure(async (observer) => {
+    const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
+    try { return await qualifyStructureWithRssSampler({ ...options, coldSample: true }, jvmRssSampler, observer); }
+    finally { await jvmRssSampler.stop(); }
+  });
 }
 
 async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin,
-  profile: profileName = 'loopback', coldSample = false }, jvmRssSampler) {
+  profile: profileName = 'loopback', coldSample = false }, jvmRssSampler, observer = moduleBodyObserver()) {
   const tab = await makeTarget();
+  observer.attach(cdp, tab.sessionId, browserOrigin);
   const profile = structureProfile(profileName);
   await applyStructureProfile(cdp, tab.sessionId, profile);
   const localFeedbackMs = [];
@@ -1867,7 +1892,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   cdp.on('Network.loadingFinished', (event) => moduleResponses.loadingFinished(event.requestId), tab.sessionId);
   cdp.on('Network.loadingFailed', (event) => moduleResponses.loadingFailed(event.requestId, event), tab.sessionId);
   cdp.on('Fetch.requestPaused', createModuleResponseInterceptor({
-    call: (method, params) => cdp.call(method, params, tab.sessionId), recorder: moduleResponses, browserOrigin,
+    call: (method, params) => cdp.call(method, params, tab.sessionId), recorder: moduleResponses, browserOrigin, observer,
   }), tab.sessionId);
   await cdp.call('Fetch.enable', { patterns: [moduleDetailFetchPattern(browserOrigin)] }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {
@@ -2014,14 +2039,21 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
   const evidenceFailures = [];
   let moduleResponseEvidence = null;
+  const moduleApiPath = `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`;
+  // #1879 stages: a readiness failure above stays at before-lookup; a lone candidate is selected before matching.
+  observer.stage('lookup');
+  const moduleCandidates = moduleResponses.networkIds(moduleApiPath);
+  if (moduleCandidates.length === 1) observer.select(moduleCandidates[0], moduleApiPath);
+  observer.stage('body-decode');
   try {
-    const consumed = moduleResponses.consumedResponse(
-      `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`,
+    const consumed = moduleResponses.consumedResponse(moduleApiPath,
       (snapshot) => {
         assert.equal(snapshot?.module?.moduleId, module);
         assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
         return true;
       });
+    if (moduleCandidates.length !== 1) observer.select(consumed.evidence.networkId, moduleApiPath);
+    observer.stage('after-source-link');
     moduleResponseEvidence = consumed.evidence;
   } catch (failure) {
     let rendered = { path: false, moduleHeading: false, ownedTable: false };

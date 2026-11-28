@@ -6,6 +6,10 @@ import { appendStructureFeedbackSample, assertStructureSourceLink, createBrowser
   classifyFailedInventoryRequests, createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets,
   isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordBrowserHeapSample, recordJvmRssSample,
   startBrowserHeapSampler, structureFeedbackInstrumentation, summarizeBrowserHeap, summarizeJvmRss } from './packaged-browser-structure.mjs';
+import { moduleBodyObserver, qualifyStructureBudgets, qualifyStructureColdSample, structureFailureEvidence } from './packaged-browser-structure.mjs';
+import { TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
+import { spawn } from 'node:child_process';
+import { readFileSync, promises as fsp } from 'node:fs';
 
 const revision = `/nested/jobs/${'f'.repeat(32)}/runs/run_structure_scale/revisions/revision_structure_scale`;
 const browserOrigin = 'http://127.0.0.1:12345';
@@ -266,6 +270,115 @@ test('conflicting or undelivered matching captures still fail (R3)', async () =>
   deliver(extra, 'net-1');
   deliver(extra, 'net-2');
   assert.throws(() => extra.consumedResponse(modulePath, rendered('module_0041')), /Unaccounted module response.*id=net-2.*role=unaccounted/);
+});
+
+// R2: the #536 budgeted journey keeps the #1879 bounded, identifier-free observations.
+const R2_SESSION = 'SESSION-SECRET-536';
+const NO_DATA = 'No data found for resource with given identifier';
+const observationLeaks = (evidence) => {
+  const text = JSON.stringify(evidence);
+  return ['net-1', 'req-1', 'interception-1', R2_SESSION, '127.0.0.1', 'module_0041', 'nested', 'http', NO_DATA, 'canary']
+    .filter((secret) => text.includes(secret));
+};
+function targetProtocol(replies = {}) {
+  const socket = new EventTarget();
+  socket.close = () => {};
+  const sent = [];
+  socket.send = (text) => {
+    const { id, method, sessionId } = JSON.parse(text);
+    sent.push(method);
+    queueMicrotask(() => socket.dispatchEvent(Object.assign(new Event('message'),
+      { data: JSON.stringify({ id, sessionId, ...(replies[method] ?? { result: {} }) }) })));
+  };
+  const cdp = new TargetProtocol(socket);
+  const fire = (method, params) => socket.dispatchEvent(Object.assign(new Event('message'),
+    { data: JSON.stringify({ method, params, sessionId: R2_SESSION }) }));
+  return { cdp, fire, sent };
+}
+
+test('the ledger interceptor records its response-stage read in the #1879 observer through TargetProtocol dispatch (R2)', async () => {
+  for (const [name, reply, outcome] of [
+    ['no data', { error: { code: -32000, message: NO_DATA } }, 'rejected'],
+    ['body', { result: { body: moduleBody('module_0041'), base64Encoded: false } }, 'resolved'],
+  ]) {
+    const { cdp, fire, sent } = targetProtocol({ 'Fetch.getResponseBody': reply });
+    const observer = moduleBodyObserver();
+    observer.attach(cdp, R2_SESSION, browserOrigin);
+    const recorder = createStructureResponseRecorder();
+    const intercept = createModuleResponseInterceptor({ call: (method, params) => cdp.call(method, params, R2_SESSION),
+      recorder, browserOrigin, observer });
+    fire('Network.requestWillBeSent', { requestId: 'net-1', request: { url: moduleUrl, method: 'GET' } });
+    await intercept(paused());
+    fire('Network.responseReceived', { requestId: 'net-1', response: { url: moduleUrl, status: 200 } });
+    fire('Network.loadingFinished', { requestId: 'net-1', encodedDataLength: 64 });
+    deliver(recorder, 'net-1'); // The journey feeds the ledger the same network events through its own listeners.
+    assert.deepEqual(sent, ['Fetch.getResponseBody', 'Fetch.continueResponse'], `${name}: one read, unchanged continuation, no retry`);
+    observer.stage('lookup');
+    observer.select('net-1', modulePath);
+    observer.stage('body-decode');
+    if (outcome === 'rejected') {
+      assert.throws(() => recorder.consumedResponse(modulePath, rendered('module_0041')), /capture=read-failed/);
+    } else {
+      assert.equal(recorder.consumedResponse(modulePath, rendered('module_0041')).evidence.networkId, 'net-1');
+    }
+    const evidence = observer.snapshot();
+    assert.ok(Object.isFrozen(evidence) && Object.isFrozen(evidence.selected), name);
+    assert.equal(evidence.stage, 'body-decode');
+    assert.deepEqual([evidence.moduleRequests, evidence.moduleResponses, evidence.moduleOkResponses], [1, 1, 1], name);
+    const { bodyOutcome, bodyReadStage, responseBeforeBodyCall, loadingFinished, status, encodedDataLength } = evidence.selected;
+    assert.deepEqual({ bodyOutcome, bodyReadStage, responseBeforeBodyCall, loadingFinished, status, encodedDataLength },
+      { bodyOutcome: outcome, bodyReadStage: 'fetch-response', responseBeforeBodyCall: false, loadingFinished: true, status: 200, encodedDataLength: 64 }, name);
+    assert.deepEqual(observationLeaks(evidence), [], name);
+  }
+});
+
+async function jvmLikeProcess(t) {
+  // Only the RSS sampler's entry-point check needs this argument; the child runs no application code.
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'decompengine.MainKt'], { stdio: 'ignore' });
+  t.after(() => child.kill('SIGKILL'));
+  for (let waited = 0; waited < 5000; waited += 20) {
+    const commandLine = await fsp.readFile(`/proc/${child.pid}/cmdline`).catch(() => Buffer.alloc(0));
+    if (commandLine.toString('utf8').split('\0').includes('decompengine.MainKt')) return child.pid;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('JVM-like control process did not start');
+}
+
+test('budgeted and cold journeys attach bounded identifier-free observations to readiness failures (R2)', async (t) => {
+  const applicationPid = await jvmLikeProcess(t);
+  for (const [name, qualify] of [['budgeted', qualifyStructureBudgets], ['cold', qualifyStructureColdSample]]) {
+    const fault = new Error('structure readiness canary');
+    const calls = [];
+    const tab = { sessionId: R2_SESSION, exceptions: [], requests: [], initialize: async (method) => { calls.push(method); return {}; } };
+    const cdp = { on() {}, call: async (method) => { calls.push(method); return method === 'Performance.getMetrics' ? { metrics: [] } : {}; } };
+    const ready = async (_tab, _expression, label) => { if (label === 'structure links on the result revision') throw fault; };
+    const fixture = { jobId: 'a'.repeat(32), runId: 'run', revisionId: 'rev', functionAddress: (index) => 0x400000 + index * 16 };
+    const error = await qualify({ fixture, makeTarget: async () => tab, cdp, evaluate: async () => true, ready,
+      browserOrigin, applicationPid, profile: 'loopback' }).then(() => null, (value) => value);
+    assert.equal(error, fault, `${name}: the readiness failure propagates unchanged`);
+    assert.ok(calls.includes('Fetch.enable') && calls.includes('Page.navigate'), name);
+    const evidence = structureFailureEvidence(fault);
+    assert.ok(evidence && Object.isFrozen(evidence), name);
+    assert.equal(evidence.stage, 'before-lookup', name);
+    assert.equal(evidence.selected, null, name);
+    assert.deepEqual([evidence.moduleRequests, evidence.moduleResponses, evidence.trackedRequests], [0, 0, 0], name);
+    assert.deepEqual(observationLeaks(evidence), [], name);
+  }
+  // A failure before the browser journey (no JVM identity) is observed too.
+  const early = await qualifyStructureBudgets({ applicationPid: -1 }).then(() => null, (value) => value);
+  assert.match(early.message, /process identity is unavailable/);
+  assert.equal(structureFailureEvidence(early).stage, 'before-lookup');
+});
+
+test('the budgeted journey wires the observer, selects the module response and labels its stages (R2)', () => {
+  const source = readFileSync(new URL('./packaged-browser-structure.mjs', import.meta.url), 'utf8');
+  const journey = source.slice(source.indexOf('async function qualifyStructureWithRssSampler('));
+  assert.match(journey, /jvmRssSampler, observer = moduleBodyObserver\(\)\) \{\n {2}const tab = await makeTarget\(\);\n {2}observer\.attach\(cdp, tab\.sessionId, browserOrigin\);/);
+  assert.match(journey, /recorder: moduleResponses, browserOrigin, observer,\n/);
+  const at = (text) => { const index = journey.indexOf(text); assert.ok(index > 0, text); return index; };
+  const order = [at("'owning module detail'"), at("observer.stage('lookup')"), at('moduleResponses.networkIds(moduleApiPath)'),
+    at("observer.stage('body-decode')"), at('moduleResponses.consumedResponse(moduleApiPath'), at("observer.stage('after-source-link')")];
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
 });
 
 test('cancellation cannot excuse a conflicting captured body or failed capture', async () => {

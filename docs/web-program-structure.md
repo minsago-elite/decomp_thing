@@ -190,6 +190,8 @@ first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budg
   none of the budgets below and does not verify source or browser identity. CI runs it
   before the Vite proxy step, and runs the cold samples and both profiled journeys after
   that step, so a budget failure cannot skip the ordinary journey or the proxy.
+  Failures of the profiled journeys and cold samples carry the same bounded #1879
+  observations in the report's `structureFailurePhase`.
 - `node scripts/check-packaged-web-browser.mjs --mode structure --structure-profile <loopback-or-constrained>` seeds a persisted
   100,000-function revision (`scripts/packaged-browser-structure.mjs`) into the
   packaged application and drives pinned Chrome: it opens the inventory from the
