@@ -2,35 +2,46 @@ package decompengine.acp
 
 import java.net.Inet6Address
 import java.net.InetAddress
-import java.util.Properties
-import javax.net.ssl.SNIHostName
-import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLParameters
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 
 class AcpProviderRoutingTest {
-    private val policy = AcpProviderTransportPolicy.fromOperatorPolicy(providerPolicyConfiguration()) as AcpProviderTransportPolicy.Approved
+    private val policy = approved()
 
     @Test
     fun `the declared operation routes only to the approved endpoint whatever host the agent names`() {
         listOf("127.0.0.1:41000", "evil.example", "169.254.169.254", "chatgpt.com").forEach { host ->
             val decision = assertIs<AcpProviderRouteDecision.Routed>(
-                AcpProviderRouting.route(policy, request(headers = listOf("Host" to host, "Content-Type" to "application/json"))),
+                AcpProviderRouting.route(policy, head(fields = listOf("Host" to host, "Content-Type" to "text/plain", "Content-Length" to "17"))),
             )
             assertEquals(AcpProviderOperation.RESPONSES_CREATE, decision.operation)
             assertEquals(APPROVED_CODEX_CHATGPT_RESPONSES_ENDPOINT, decision.endpoint)
             assertEquals(policy.descriptorSha256, decision.policyDescriptorSha256)
+            assertEquals(17, decision.contentLength)
         }
+    }
+
+    @Test
+    fun `upstream headers are rebuilt from policy values and the validated length only`() {
+        val routed = assertIs<AcpProviderRouteDecision.Routed>(AcpProviderRouting.route(policy, head(fields = listOf(
+            "Host" to "evil.example", "Content-Length" to "42", "Content-Type" to "text/x-evil", "Accept" to "*/*",
+            "Authorization" to "Bearer agent-chosen", "Cookie" to "a=b", "User-Agent" to "agent",
+        ))))
+        assertEquals(
+            listOf(
+                "Host" to "chatgpt.com", "Content-Type" to "application/json", "Accept" to "text/event-stream",
+                "Content-Length" to "42",
+            ),
+            routed.upstreamHeaders(),
+        )
     }
 
     @Test
     fun `a disabled transport refuses every request response and destination before inspecting it`() {
         val disabled = AcpProviderTransportPolicy.DISABLED
-        listOf(request(), request(method = "CONNECT", target = "chatgpt.com:443"), request(target = "garbage\r\n")).forEach {
+        listOf(head(), head(method = "CONNECT", target = "chatgpt.com:443"), "garbage".toByteArray()).forEach {
             assertRefused(AcpProviderRouteRefusal.TRANSPORT_DISABLED, AcpProviderRouting.route(disabled, it))
         }
         assertEquals(AcpProviderRouteRefusal.TRANSPORT_DISABLED, AcpProviderRouting.responseStatusRefusal(disabled, 200))
@@ -40,18 +51,13 @@ class AcpProviderRoutingTest {
     @Test
     fun `CONNECT tunnels and proxy request forms are refused`() {
         listOf("chatgpt.com:443", "/responses", "127.0.0.1:22").forEach { target ->
-            assertRefused(AcpProviderRouteRefusal.CONNECT_REFUSED, AcpProviderRouting.route(policy, request(method = "CONNECT", target = target)))
+            assertRefused(AcpProviderRouteRefusal.CONNECT_REFUSED, AcpProviderRouting.route(policy, head(method = "CONNECT", target = target)))
         }
         listOf(
-            "https://chatgpt.com/backend-api/codex/responses",
-            "http://chatgpt.com/responses",
-            "HTTPS://evil.example/responses",
-            "ws://chatgpt.com/responses",
-            "file:///etc/passwd",
-            "chatgpt.com:443",
-            "*",
+            "https://chatgpt.com/backend-api/codex/responses", "http://chatgpt.com/responses", "HTTPS://evil.example/responses",
+            "ws://chatgpt.com/responses", "file:///etc/passwd", "chatgpt.com:443", "*",
         ).forEach { target ->
-            assertRefused(AcpProviderRouteRefusal.PROXY_REQUEST_REFUSED, AcpProviderRouting.route(policy, request(target = target)), target)
+            assertRefused(AcpProviderRouteRefusal.PROXY_REQUEST_REFUSED, AcpProviderRouting.route(policy, head(target = target)), target)
         }
     }
 
@@ -61,13 +67,13 @@ class AcpProviderRoutingTest {
             "/responses/", "/Responses", "/v1/responses", "/backend-api/codex/responses", "/%72esponses", "/./responses",
             "//chatgpt.com/responses", "/responses/../models", "/models", "/responses/compact", "/responses;x=1", "/",
         ).forEach { target ->
-            assertRefused(AcpProviderRouteRefusal.OPERATION_UNSUPPORTED, AcpProviderRouting.route(policy, request(target = target)), target)
+            assertRefused(AcpProviderRouteRefusal.OPERATION_UNSUPPORTED, AcpProviderRouting.route(policy, head(target = target)), target)
         }
         listOf("/responses?url=https://evil.example/", "/responses?").forEach { target ->
-            assertRefused(AcpProviderRouteRefusal.QUERY_REFUSED, AcpProviderRouting.route(policy, request(target = target)), target)
+            assertRefused(AcpProviderRouteRefusal.QUERY_REFUSED, AcpProviderRouting.route(policy, head(target = target)), target)
         }
         listOf("GET", "PUT", "post", "OPTIONS").forEach { method ->
-            assertRefused(AcpProviderRouteRefusal.METHOD_UNSUPPORTED, AcpProviderRouting.route(policy, request(method = method)), method)
+            assertRefused(AcpProviderRouteRefusal.METHOD_UNSUPPORTED, AcpProviderRouting.route(policy, head(method = method)), method)
         }
     }
 
@@ -78,51 +84,96 @@ class AcpProviderRoutingTest {
             "X-Forwarded-Port" to "80", "X-Forwarded-Prefix" to "/v1", "X-Original-URL" to "/models", "X-Original-Host" to "evil.example",
             "X-Rewrite-URL" to "/models", "X-Host" to "evil.example", "X-HTTP-Method-Override" to "GET",
             "Proxy-Authorization" to "Basic Zm9vOmJhcg==", "Proxy-Connection" to "keep-alive",
-        ).forEach { header ->
-            assertRefused(
-                AcpProviderRouteRefusal.ROUTING_OVERRIDE_REFUSED,
-                AcpProviderRouting.route(policy, request(headers = listOf("Host" to "relay", header))),
-                header.first,
-            )
+        ).forEach { field ->
+            assertRefused(AcpProviderRouteRefusal.ROUTING_OVERRIDE_REFUSED, AcpProviderRouting.route(policy, head(extra = listOf(field))), field.first)
         }
         listOf(
             listOf("Upgrade" to "websocket", "Connection" to "Upgrade"),
-            listOf("Connection" to "keep-alive, upgrade"),
+            listOf("Connection" to "keep-alive,\tupgrade"),
             listOf("HTTP2-Settings" to "AAMAAABkAAQAAP__"),
-        ).forEach { headers ->
-            assertRefused(AcpProviderRouteRefusal.PROTOCOL_UPGRADE_REFUSED, AcpProviderRouting.route(policy, request(headers = listOf("Host" to "relay") + headers)))
+        ).forEach { fields ->
+            assertRefused(AcpProviderRouteRefusal.PROTOCOL_UPGRADE_REFUSED, AcpProviderRouting.route(policy, head(extra = fields)))
         }
     }
 
     @Test
-    fun `ambiguous or malformed request heads are refused`() {
+    fun `only one canonical Content-Length delimits a request body`() {
+        listOf("0", "1", "1048576").forEach { length ->
+            assertEquals(length.toInt(), assertIs<AcpProviderRouteDecision.Routed>(AcpProviderRouting.route(policy, head(length = length))).contentLength)
+        }
+        listOf("01", "+5", "-1", "5, 5", "5,5", "0x10", "1e3", "5 5", "", "12345678901", "١").forEach { length ->
+            assertRefused(AcpProviderRouteRefusal.MALFORMED_REQUEST, AcpProviderRouting.route(policy, head(length = length)), length)
+        }
+        assertRefused(AcpProviderRouteRefusal.REQUEST_BODY_TOO_LARGE, AcpProviderRouting.route(policy, head(length = "1048577")))
+        assertRefused(AcpProviderRouteRefusal.REQUEST_FRAMING_UNSUPPORTED, AcpProviderRouting.route(policy, head(length = null)))
+        assertRefused(
+            AcpProviderRouteRefusal.MALFORMED_REQUEST,
+            AcpProviderRouting.route(policy, head(extra = listOf("content-length" to "5"))),
+        )
         listOf(
-            request(headers = emptyList()),
-            request(headers = listOf("Host" to "relay", "host" to "evil.example")),
-            request(headers = listOf("Host" to "relay\r\nHost: evil.example")),
-            request(headers = listOf("Host" to "relay", "Bad Name" to "x")),
-            request(headers = listOf("Host" to "relay", "Content-Length" to "5", "Transfer-Encoding" to "chunked")),
-            request(headers = listOf("Host" to "relay", "Content-Length" to "5", "content-length" to "6")),
-            request(target = "/responses#fragment"),
-            request(target = "/respo nses"),
-            request(target = ""),
-            request(method = "PO ST"),
-        ).forEach { assertRefused(AcpProviderRouteRefusal.MALFORMED_REQUEST, AcpProviderRouting.route(policy, it)) }
+            "Transfer-Encoding" to "chunked", "Transfer-Encoding" to "gzip, chunked", "Transfer-Encoding" to "identity",
+            "transfer-encoding" to "chunked, chunked", "TE" to "trailers", "Expect" to "100-continue",
+            "Content-Encoding" to "zstd", "Content-Encoding" to "identity", "Trailer" to "X-Checksum",
+        ).forEach { field ->
+            assertRefused(AcpProviderRouteRefusal.REQUEST_FRAMING_UNSUPPORTED, AcpProviderRouting.route(policy, head(extra = listOf(field))), field.toString())
+            assertRefused(
+                AcpProviderRouteRefusal.REQUEST_FRAMING_UNSUPPORTED,
+                AcpProviderRouting.route(policy, head(length = null, extra = listOf(field))),
+                field.toString(),
+            )
+        }
     }
 
     @Test
-    fun `request heads above the policy header bounds are refused`() {
-        val bounded = AcpProviderTransportPolicy.fromOperatorPolicy(
-            providerPolicyConfiguration() + ("maximumHeaderFields" to "2") + ("maximumHeaderBytes" to "64"),
-        ) as AcpProviderTransportPolicy.Approved
-        assertIs<AcpProviderRouteDecision.Routed>(AcpProviderRouting.route(bounded, request(headers = listOf("Host" to "relay"))))
-        assertRefused(
-            AcpProviderRouteRefusal.REQUEST_HEAD_TOO_LARGE,
-            AcpProviderRouting.route(bounded, request(headers = listOf("Host" to "relay", "A" to "1", "B" to "2"))),
+    fun `malformed request heads and prohibited field characters are refused`() {
+        val valid = "POST /responses HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\n"
+        assertIs<AcpProviderRouteDecision.Routed>(AcpProviderRouting.route(policy, valid.toByteArray()))
+        assertIs<AcpProviderRouteDecision.Routed>(
+            AcpProviderRouting.route(policy, "POST /responses HTTP/1.1\r\nHost:\t relay \t\r\nContent-Length:2\r\nX-Note: a\tb\r\n\r\n".toByteArray()),
         )
+        listOf(
+            "POST /responses HTTP/1.1\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\r\nhost: evil.example\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\nGET /models HTTP/1.1\r\n\r\n",
+            "\r\nPOST /responses HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\nHost: relay\nContent-Length: 2\n\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\nX: y\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\rX: y\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\nHost : relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\r\n folded\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\n\tHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\r\nBad Name: x\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\r\n: x\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.1\r\nHost: relay\r\nNoColon\r\nContent-Length: 2\r\n\r\n",
+            "POST  /responses HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses  HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/1.0\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses HTTP/2\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses http/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "PO\tST /responses HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /responses#fragment HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+            "POST /respo\u0001nses HTTP/1.1\r\nHost: relay\r\nContent-Length: 2\r\n\r\n",
+        ).forEach { text -> assertRefused(AcpProviderRouteRefusal.MALFORMED_REQUEST, AcpProviderRouting.route(policy, text.toByteArray()), text) }
+
+        // Every C0 control other than HTAB, plus DEL and any non-ASCII byte, is refused inside a field value.
+        ((0x00..0x1f).filter { it != 0x09 && it != 0x0a && it != 0x0d } + 0x7f + 0x80 + 0xff).forEach { byte ->
+            val bytes = head(extra = listOf("X-Note" to "a#b")).also { raw -> raw[raw.indexOf('#'.code.toByte())] = byte.toByte() }
+            assertRefused(AcpProviderRouteRefusal.MALFORMED_REQUEST, AcpProviderRouting.route(policy, bytes), "byte $byte")
+        }
+    }
+
+    @Test
+    fun `the head byte bound counts the request line field lines and terminator exactly`() {
+        val exact = head(fields = listOf("Host" to "r", "Content-Length" to "1"))
+        val bounded = approved("maximumHeaderBytes" to exact.size.toString(), "maximumHeaderFields" to "2")
+        assertIs<AcpProviderRouteDecision.Routed>(AcpProviderRouting.route(bounded, exact))
+        assertRefused(AcpProviderRouteRefusal.REQUEST_HEAD_TOO_LARGE, AcpProviderRouting.route(approved("maximumHeaderBytes" to (exact.size - 1).toString()), exact))
+        val twoFields = approved("maximumHeaderFields" to "2")
         assertRefused(
             AcpProviderRouteRefusal.REQUEST_HEAD_TOO_LARGE,
-            AcpProviderRouting.route(bounded, request(headers = listOf("Host" to "relay", "A" to "x".repeat(64)))),
+            AcpProviderRouting.route(twoFields, head(fields = listOf("Host" to "r", "Content-Length" to "1", "A" to "1"))),
         )
     }
 
@@ -138,76 +189,82 @@ class AcpProviderRoutingTest {
     }
 
     @Test
-    fun `resolved destinations must be public unless the operator permits private addresses`() {
-        val permitted = AcpProviderTransportPolicy.fromOperatorPolicy(
-            providerPolicyConfiguration() + ("privateDestinations" to "PERMITTED"),
-        ) as AcpProviderTransportPolicy.Approved
-        val public = listOf("104.18.32.47", "8.8.8.8", "2606:4700::6812:202f", "2002:0808:0808::1", "64:ff9b::808:808")
-        public.forEach { assertNull(AcpProviderRouting.destinationRefusal(policy, listOf(address(it))), it) }
+    fun `public IPv4 and allocated IPv6 global unicast destinations are admitted`() {
+        listOf(
+            "104.18.32.47", "8.8.8.8", "1.1.1.1", "2606:4700::6812:202f", "2001:4860:4860::8888", "2a00:1450:4001::200e",
+            "2400:cb00::1", "2800:3f0::1", "2c0f:fb50::1", "2003:de::1", "2610:a1::1", "2620:fe::fe", "2630::1", "2a10::1",
+        ).forEach { assertNull(AcpProviderRouting.destinationRefusal(policy, listOf(address(it))), it) }
+    }
 
-        val private = listOf("10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1", "100.64.0.1", "fd00::1", "2002:0a00:0001::1")
-        private.forEach {
+    @Test
+    fun `private destinations require explicit operator permission`() {
+        val permitted = approved("privateDestinations" to "PERMITTED")
+        listOf("10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1", "100.64.0.1", "fd00::1", "fc00::1").forEach {
             assertEquals(AcpProviderRouteRefusal.PRIVATE_DESTINATION_NOT_PERMITTED, AcpProviderRouting.destinationRefusal(policy, listOf(address(it))), it)
             assertNull(AcpProviderRouting.destinationRefusal(permitted, listOf(address(it))), it)
         }
+    }
 
-        val forbidden = listOf(
-            "127.0.0.1", "127.1.2.3", "0.0.0.0", "169.254.169.254", "224.0.0.1", "255.255.255.255", "240.0.0.1",
-            "192.0.2.1", "198.51.100.1", "203.0.113.1", "198.18.0.1", "192.0.0.8",
-            "::", "::1", "::127.0.0.1", "fe80::1", "fec0::1", "ff02::1", "2001:db8::1", "2001::1", "3fff::1", "100::1",
-            "64:ff9b::7f00:1", "2002:7f00:0001::1", "64:ff9b:1::1",
+    @Test
+    fun `special-purpose transition and reserved destinations are refused even when private is permitted`() {
+        val permissive = approved("privateDestinations" to "PERMITTED", "addressTranslation" to "WELL_KNOWN_NAT64")
+        val refused = mapOf(
+            "IPv4 this-network" to "0.0.0.1", "IPv4 loopback" to "127.1.2.3", "IPv4 link-local metadata" to "169.254.169.254",
+            "IPv4 multicast" to "224.0.0.1", "IPv4 reserved" to "240.0.0.1", "IPv4 broadcast" to "255.255.255.255",
+            "IPv4 IETF assignments" to "192.0.0.8", "TEST-NET-1" to "192.0.2.1", "TEST-NET-2" to "198.51.100.1",
+            "TEST-NET-3" to "203.0.113.1", "IPv4 benchmarking" to "198.19.0.1", "6to4 relay anycast" to "192.88.99.1",
+            "AS112-v4" to "192.31.196.1", "AMT" to "192.52.193.1", "AS112 direct delegation v4" to "192.175.48.1",
+            "IPv6 unspecified" to "::", "IPv6 loopback" to "::1", "IPv4-compatible" to "::127.0.0.1",
+            "IPv4-mapped loopback" to "::ffff:127.0.0.1", "IPv6 link-local" to "fe80::1", "IPv6 site-local" to "fec0::1",
+            "IPv6 multicast" to "ff02::1", "discard-only" to "100::1", "dummy prefix" to "100:0:0:1::1",
+            "local-use NAT64" to "64:ff9b:1::808:808", "Teredo" to "2001::1", "PCP anycast" to "2001:1::1",
+            "benchmarking" to "2001:2::1", "AMT v6" to "2001:3::1", "AS112-v6" to "2001:4:112::1",
+            "ORCHID" to "2001:10::1", "ORCHIDv2" to "2001:20::1", "drone remote ID" to "2001:30::1",
+            "documentation 2001:db8::/32" to "2001:db8::1", "documentation 3fff::/20" to "3fff::1",
+            "6to4 public embedded" to "2002:808:808::1", "6to4 private embedded" to "2002:a00:1::1",
+            "AS112 direct delegation v6" to "2620:4f:8000::1", "segment routing" to "5f00::1",
+            "unallocated in 2000::/3" to "2004::1", "IANA reserved 2d00::/8" to "2d00::1", "IANA reserved 2e00::/7" to "2f00::1",
+            "IANA reserved 3000::/4" to "3000::1", "returned 6bone" to "3ffe::1", "RIR-unallocated 2003 tail" to "2003:4000::1",
         )
-        forbidden.forEach {
-            assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(policy, listOf(address(it))), it)
-            assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(permitted, listOf(address(it))), it)
+        refused.forEach { (label, literal) ->
+            assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(policy, listOf(address(literal))), label)
+            assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(permissive, listOf(address(literal))), label)
         }
         val mappedLoopback = Inet6Address.getByAddress(null, ByteArray(16).also { it[10] = -1; it[11] = -1; it[12] = 127; it[15] = 1 }, null)
-        assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(policy, listOf(mappedLoopback)))
-
-        assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(policy, emptyList()))
+        assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(permissive, listOf(mappedLoopback)))
+        assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(permissive, emptyList()))
         assertEquals(
             AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED,
-            AcpProviderRouting.destinationRefusal(permitted, listOf(address("8.8.8.8"), address("10.0.0.1"), address("127.0.0.1"))),
+            AcpProviderRouting.destinationRefusal(permissive, listOf(address("8.8.8.8"), address("10.0.0.1"), address("127.0.0.1"))),
         )
     }
 
     @Test
-    fun `upstream TLS requires hostname verification policy SNI and modern protocols`() {
-        val defaults = SSLContext.getDefault().defaultSSLParameters
-        val parameters = AcpProviderRouting.upstreamSslParameters(policy, defaults)
-        assertEquals("HTTPS", parameters.endpointIdentificationAlgorithm)
-        assertEquals(listOf("chatgpt.com"), parameters.serverNames.map { (it as SNIHostName).asciiName })
-        AcpProviderRouting.requireMandatoryUpstreamTls(policy, parameters, Properties())
-
-        val weakened = listOf<SSLParameters.() -> Unit>(
-            { endpointIdentificationAlgorithm = null },
-            { endpointIdentificationAlgorithm = "LDAPS" },
-            { protocols = arrayOf("TLSv1.3", "TLSv1.1") },
-            { protocols = arrayOf() },
-            { serverNames = listOf(SNIHostName("evil.example")) },
-            { serverNames = emptyList() },
-            { protocols = null },
-        )
-        val unset = SSLParameters().apply { endpointIdentificationAlgorithm = "HTTPS" }
-        assertFailsWith<IllegalStateException> { AcpProviderRouting.requireMandatoryUpstreamTls(policy, unset, Properties()) }
-        weakened.forEach { weaken ->
-            val copy = AcpProviderRouting.upstreamSslParameters(policy, defaults).apply(weaken)
-            assertFailsWith<IllegalStateException> { AcpProviderRouting.requireMandatoryUpstreamTls(policy, copy, Properties()) }
-        }
-        listOf("", "true", "false").forEach { value ->
-            val properties = Properties().apply { setProperty("jdk.internal.httpclient.disableHostnameVerification", value) }
-            assertFailsWith<IllegalStateException>(value) { AcpProviderRouting.requireMandatoryUpstreamTls(policy, parameters, properties) }
-        }
-        assertFailsWith<IllegalArgumentException> {
-            AcpProviderRouting.upstreamSslParameters(policy, SSLParameters(defaults.cipherSuites, arrayOf("TLSv1.1")))
+    fun `well-known NAT64 is an explicit deployment decision admitting only global embedded IPv4`() {
+        val nat64 = approved("addressTranslation" to "WELL_KNOWN_NAT64")
+        val nat64Private = approved("addressTranslation" to "WELL_KNOWN_NAT64", "privateDestinations" to "PERMITTED")
+        assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(policy, listOf(address("64:ff9b::808:808"))))
+        assertNull(AcpProviderRouting.destinationRefusal(nat64, listOf(address("64:ff9b::808:808"))))
+        listOf("64:ff9b::a00:1", "64:ff9b::c0a8:101", "64:ff9b::6440:1", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::c000:201").forEach {
+            assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(nat64, listOf(address(it))), it)
+            assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(nat64Private, listOf(address(it))), it)
         }
     }
 
-    private fun request(
+    private fun head(
         method: String = "POST",
         target: String = "/responses",
-        headers: List<Pair<String, String>> = listOf("Host" to "127.0.0.1:41000"),
-    ) = AcpProviderRelayRequest(method, target, headers)
+        length: String? = "2",
+        fields: List<Pair<String, String>>? = null,
+        extra: List<Pair<String, String>> = emptyList(),
+    ): ByteArray {
+        val lines = (fields ?: (listOf("Host" to "127.0.0.1:41000") + listOfNotNull(length?.let { "Content-Length" to it }))) + extra
+        return ("$method $target HTTP/1.1\r\n" + lines.joinToString("") { (name, value) -> "$name: $value\r\n" } + "\r\n")
+            .toByteArray(Charsets.UTF_8)
+    }
+
+    private fun approved(vararg overrides: Pair<String, String>): AcpProviderTransportPolicy.Approved =
+        AcpProviderTransportPolicy.fromOperatorPolicy(providerPolicyConfiguration() + overrides) as AcpProviderTransportPolicy.Approved
 
     private fun assertRefused(expected: AcpProviderRouteRefusal, decision: AcpProviderRouteDecision, message: String? = null) {
         assertEquals(AcpProviderRouteDecision.Refused(expected), decision, message)

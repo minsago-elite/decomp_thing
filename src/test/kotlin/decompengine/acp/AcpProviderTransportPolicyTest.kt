@@ -90,6 +90,7 @@ class AcpProviderTransportPolicyTest {
             "reasoning" to listOf("UNKNOWN", "medium"),
             "tlsVerification" to listOf("NONE", "INSECURE", "TRUST_ALL", "PINNED"),
             "privateDestinations" to listOf("ALLOW", "INFERRED", "permitted"),
+            "addressTranslation" to listOf("NAT64", "NETWORK_SPECIFIC", "INFERRED", "well_known_nat64"),
         ).forEach { (key, values) ->
             values.forEach { value ->
                 assertFailsWith<IllegalArgumentException>("$key=$value") {
@@ -147,17 +148,30 @@ class AcpProviderTransportPolicyTest {
     }
 
     @Test
-    fun `descriptor binds every approved difference and carries no credential material`() {
+    fun `descriptor binds every configurable field and carries no credential material`() {
         assertEquals(approved().descriptorSha256, approved().descriptorSha256)
         assertEquals(64, approved().descriptorSha256.length)
-        assertNotEquals(approved().descriptorSha256, approved("model" to "gpt-6-mini").descriptorSha256)
-        assertNotEquals(approved().descriptorSha256, approved("reasoning" to "HIGH").descriptorSha256)
-        assertNotEquals(approved().descriptorSha256, approved("maximumOutputTokens" to "2048").descriptorSha256)
-        assertNotEquals(approved().descriptorSha256, approved("cleanupTimeoutMillis" to "4000").descriptorSha256)
+        // Keys with a single admissible value cannot vary; every other configurable field must change the digest.
+        val singleValued = setOf("mode", "runtimeAdapter", "endpoint", "operation", "authenticationMechanism", "credentialReference", "tlsVerification")
+        val variants = mapOf(
+            "model" to "gpt-6-mini", "reasoning" to "HIGH", "privateDestinations" to "PERMITTED",
+            "addressTranslation" to "WELL_KNOWN_NAT64", "maximumRequestBytes" to "1048575", "maximumResponseBytes" to "8388607",
+            "maximumHeaderBytes" to "32767", "maximumHeaderFields" to "63", "maximumChunkBytes" to "65535",
+            "maximumQueuedChunks" to "3", "maximumRequests" to "7", "maximumOutputTokens" to "2048",
+            "overallTimeoutMillis" to "119999", "idleTimeoutMillis" to "29999", "cleanupTimeoutMillis" to "4999",
+        )
+        assertEquals(providerPolicyConfiguration().keys, singleValued + variants.keys)
+        val digests = variants.map { (key, value) -> approved(key to value).descriptorSha256 } + approved().descriptorSha256
+        assertEquals(digests.size, digests.toSet().size)
         assertEquals("AcpProviderTransportPolicy.Approved(descriptorSha256=${approved().descriptorSha256})", approved().toString())
-        listOf("", "gpt 6", "gpt/6", "gpt-6\n", "x".repeat(129)).forEach { model ->
-            assertFailsWith<IllegalArgumentException> { approved("model" to model) }
+    }
+
+    @Test
+    fun `model is a bounded plain identifier never free text`() {
+        listOf("", "gpt 6", "gpt/6", "gpt-6\n", "gpt-6\u0000", "gpt=6", "Bearer abc", "x".repeat(129), "-gpt", "gpt\u00e9").forEach { model ->
+            assertFailsWith<IllegalArgumentException>(model) { approved("model" to model) }
         }
+        listOf("gpt-6", "gpt-6.1-sol", "org:model_v2", "A1").forEach { model -> assertEquals(model, approved("model" to model).model) }
     }
 
     @Test
@@ -192,7 +206,7 @@ internal fun providerPolicyConfiguration(): Map<String, String> = mapOf(
     "endpoint" to "https://chatgpt.com/backend-api/codex/responses", "operation" to "RESPONSES_CREATE",
     "authenticationMechanism" to "CHATGPT_CACHED_ACCESS_TOKEN", "credentialReference" to "LOCAL_CODEX_CACHED_AUTH",
     "model" to "gpt-6", "reasoning" to "MEDIUM", "tlsVerification" to "PLATFORM_TRUST_HOSTNAME_VERIFIED",
-    "privateDestinations" to "DENIED",
+    "privateDestinations" to "DENIED", "addressTranslation" to "NONE",
     "maximumRequestBytes" to "1048576", "maximumResponseBytes" to "8388608", "maximumHeaderBytes" to "32768",
     "maximumHeaderFields" to "64", "maximumChunkBytes" to "65536", "maximumQueuedChunks" to "2",
     "maximumRequests" to "8", "maximumOutputTokens" to "4096", "overallTimeoutMillis" to "120000",
