@@ -185,11 +185,40 @@ public final class OwnedExporterControlledListingProbe {
                 nested("SwitchProvenanceBudget")},
             function, listing.getInstructionAt(reader), read, listing.getDataAt(read.getToAddress()), "authored refusal", budget.newInstance(limit));
     }
-    static boolean proven(ghidra.program.model.pcode.HighFunction high, Object slots, int limit) throws Exception {
-        Method method = ExportProgramModelOwned.class.getDeclaredMethod("decompilerSwitchSlotsProven",
-            ghidra.program.model.pcode.HighFunction.class, List.class, int.class, TaskMonitor.class);
+    static final int ENTRY_LIMIT = ghidra.app.decompiler.DecompileOptions.SUGGESTED_MAX_JUMPTABLE_ENTRIES;
+    static Object budget(int limit) throws Exception {
+        Constructor<?> budget = nested("SwitchProvenanceBudget").getDeclaredConstructor(int.class);
+        budget.setAccessible(true);
+        return budget.newInstance(limit);
+    }
+    static long used(Object budget) throws Exception {
+        Method method = budget.getClass().getDeclaredMethod("used");
         method.setAccessible(true);
-        return (boolean)method.invoke(null, high, slots, limit, TaskMonitor.DUMMY);
+        return (long)method.invoke(budget);
+    }
+    static boolean proven(ghidra.program.model.pcode.HighFunction high, Object slots, Object budget) throws Exception {
+        Method method = ExportProgramModelOwned.class.getDeclaredMethod("decompilerSwitchSlotsProven",
+            ghidra.program.model.pcode.HighFunction.class, List.class, int.class, nested("SwitchProvenanceBudget"), TaskMonitor.class);
+        method.setAccessible(true);
+        return (boolean)method.invoke(null, high, slots, ENTRY_LIMIT, budget, TaskMonitor.DUMMY);
+    }
+    static boolean proven(ghidra.program.model.pcode.HighFunction high, Object slots, int limit) throws Exception {
+        return proven(high, slots, budget(limit));
+    }
+    static Object slotCandidate(Address reader, Address slot, Address value, Address jump) throws Exception {
+        Constructor<?> constructor = nested("SwitchSlotCandidate").getDeclaredConstructor(
+            Address.class, Address.class, Address.class, Address.class, int.class, String.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(reader, slot, value, jump, 8, MISSING);
+    }
+    static PcodeOp op(Address at, int sequence, int opcode, ghidra.program.model.pcode.Varnode output, ghidra.program.model.pcode.Varnode... inputs) {
+        return new PcodeOp(at, sequence, opcode, inputs, output);
+    }
+    /** The listing half's address binding, applied to authored raw p-code ending in one LOAD. */
+    static boolean binds(ExportProgramModelOwned exporter, Address slot, PcodeOp... ops) throws Exception {
+        return (boolean)OwnedExporterReferencedBytesProbe.invoke(exporter, "loadAddressBindsSlot",
+            new Class<?>[]{PcodeOp[].class, int.class, Address.class, int.class, nested("SwitchProvenanceBudget")},
+            ops, ops.length - 1, slot, 8, budget(4096));
     }
     interface Admits { boolean at(int limit) throws Exception; }
     /** The smallest allowance that admits the evidence. One unit less must keep the refusal. */
@@ -266,7 +295,7 @@ public final class OwnedExporterControlledListingProbe {
     static void switchProvenanceControls(ProgramDB program, Path work) throws Exception {
         AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
         program.getMemory().createInitializedBlock("switch-code", space.getAddress(0x4000), 0x2000, (byte)0, TaskMonitor.DUMMY, false);
-        program.getMemory().createInitializedBlock("switch-data", space.getAddress(0x9000), 0x400, (byte)0, TaskMonitor.DUMMY, false).setWrite(false);
+        program.getMemory().createInitializedBlock("switch-data", space.getAddress(0x9000), 0x800, (byte)0, TaskMonitor.DUMMY, false).setWrite(false);
         program.getMemory().createInitializedBlock("switch-writable", space.getAddress(0xa000), 0x100, (byte)0, TaskMonitor.DUMMY, false);
         int maximum = (int)ExportProgramModelOwned.class.getDeclaredField("MAXIMUM_SWITCH_PROVENANCE_WORK").get(null);
         check(maximum == 4096, "production provenance allowance");
@@ -316,7 +345,10 @@ public final class OwnedExporterControlledListingProbe {
             boolean finalLoad = false;
             for (var ops = high.getPcodeOps(tableRead); ops.hasNext();) finalLoad |= ops.next().getOpcode() == PcodeOp.LOAD;
             System.out.println("owned switch HighFunction retains the table LOAD at the reader=" + finalLoad);
+            check(decompiler.getOptions().getMaxJumpTableEntries() == ENTRY_LIMIT, "the worker configures Ghidra's jump-table entry limit");
             int decompilerLimit = exactLimit(limit -> proven(high, slots, limit), "decompiler provenance");
+            check(decompilerLimit > ENTRY_LIMIT + 1 && !proven(high, slots, ENTRY_LIMIT + 1),
+                "the entry bound plus the default case is reserved before each array copy: " + decompilerLimit);
             int listingLimit = exactLimit(limit -> candidate(exporter, function, tableRead, slotRead, limit) != null, "listing provenance");
             check(get(candidate(exporter, function, tableRead, slotRead, listingLimit), "jump").equals(jump), "listing candidate binds the jump");
 
@@ -335,6 +367,52 @@ public final class OwnedExporterControlledListingProbe {
             refused(render(metadata, failed, true), "a failed decompile");
             check(!proven(null, slots, maximum), "a missing HighFunction proves no slot");
             System.out.println("owned switch provenance exact limits listing=" + listingLimit + " decompiler=" + decompilerLimit + " of " + maximum);
+
+            // R4: repeated candidates at one jump fetch, charge and cache J's arrays once.
+            Object once = budget(maximum), thrice = budget(maximum);
+            Object repeated = slotCandidate(tableRead, table, space.getAddress(cases[0]), jump);
+            check(proven(high, slots, once) && proven(high, List.of(slots.get(0), repeated, repeated), thrice), "repeated candidates at one jump are proven");
+            long fetch = used(once) - tables.length - 1;
+            check(used(thrice) - used(once) == 2 && fetch >= 1 + 1 + tables[0].getCases().length,
+                "each repeated candidate costs one unit and no second fetch: once=" + used(once) + " thrice=" + used(thrice) + " fetch=" + fetch);
+            System.out.println("owned switch provenance charged once per jump: one=" + used(once) + " three=" + used(thrice) + " fetch=" + fetch);
+
+            // R2: the decompiler record must be anchored at R's own base, and the slot value must be the first case.
+            Object interior = slotCandidate(tableRead, table.add(8), space.getAddress(cases[1]), jump);
+            check(!proven(high, List.of(interior), maximum), "a slot covered by a LoadTable that starts at another base is refused");
+            Object shifted = slotCandidate(tableRead, table, space.getAddress(cases[1]), jump);
+            check(!proven(high, List.of(shifted), maximum), "a slot value that is not the anchored entry's case is refused");
+            Object elsewhere = slotCandidate(tableRead, table, space.getAddress(cases[0]), space.getAddress(0x4005));
+            check(!proven(high, List.of(elsewhere), maximum), "a candidate whose jump has no recovered table is refused");
+
+            // R2: R's LOAD address resolves only through reaching definitions inside R. These are authored raw p-code ops.
+            AddressSpace constants = program.getAddressFactory().getConstantSpace(), unique = program.getAddressFactory().getUniqueSpace();
+            var rax = new ghidra.program.model.pcode.Varnode(program.getRegister("RAX").getAddress(), 8);
+            var rbx = new ghidra.program.model.pcode.Varnode(program.getRegister("RBX").getAddress(), 8);
+            var ram = new ghidra.program.model.pcode.Varnode(constants.getAddress(space.getSpaceID()), 4);
+            var base = new ghidra.program.model.pcode.Varnode(constants.getAddress(table.getOffset()), 8);
+            var other = new ghidra.program.model.pcode.Varnode(constants.getAddress(0x1234), 8);
+            var eight = new ghidra.program.model.pcode.Varnode(constants.getAddress(8), 8);
+            var four = new ghidra.program.model.pcode.Varnode(constants.getAddress(4), 8);
+            var u1 = new ghidra.program.model.pcode.Varnode(unique.getAddress(0x100), 8);
+            var u2 = new ghidra.program.model.pcode.Varnode(unique.getAddress(0x200), 8);
+            var u3 = new ghidra.program.model.pcode.Varnode(unique.getAddress(0x300), 8);
+            var u4 = new ghidra.program.model.pcode.Varnode(unique.getAddress(0x400), 8);
+            check(binds(exporter, table, op(tableRead, 0, PcodeOp.COPY, u1, base), op(tableRead, 1, PcodeOp.INT_MULT, u2, rax, eight),
+                op(tableRead, 2, PcodeOp.INT_ADD, u3, u1, u2), op(tableRead, 3, PcodeOp.LOAD, u4, ram, u3)), "authored base + index * 8 binds");
+            check(binds(exporter, table, op(tableRead, 0, PcodeOp.COPY, u1, other), op(tableRead, 1, PcodeOp.COPY, u1, base),
+                op(tableRead, 2, PcodeOp.INT_MULT, u2, rax, eight), op(tableRead, 3, PcodeOp.INT_ADD, u3, u1, u2),
+                op(tableRead, 4, PcodeOp.LOAD, u4, ram, u3)), "the reaching definition of the base is the one that counts");
+            check(!binds(exporter, table, op(tableRead, 0, PcodeOp.COPY, u1, base), op(tableRead, 1, PcodeOp.COPY, u1, other),
+                op(tableRead, 2, PcodeOp.INT_MULT, u2, rax, eight), op(tableRead, 3, PcodeOp.INT_ADD, u3, u1, u2),
+                op(tableRead, 4, PcodeOp.LOAD, u4, ram, u3)), "an overwritten constant slot base is refused");
+            check(!binds(exporter, table, op(tableRead, 0, PcodeOp.INT_MULT, u2, rax, eight), op(tableRead, 1, PcodeOp.INT_ADD, u3, rbx, u2),
+                op(tableRead, 2, PcodeOp.LOAD, u4, ram, u3)), "a base held in a register from before R is refused");
+            check(!binds(exporter, table, op(tableRead, 0, PcodeOp.INT_MULT, u2, rax, four), op(tableRead, 1, PcodeOp.INT_ADD, u3, base, u2),
+                op(tableRead, 2, PcodeOp.LOAD, u4, ram, u3)), "an index scale other than the slot width is refused");
+            check(!binds(exporter, table, op(tableRead, 0, PcodeOp.INT_XOR, u1, base, rbx), op(tableRead, 1, PcodeOp.INT_MULT, u2, rax, eight),
+                op(tableRead, 2, PcodeOp.INT_ADD, u3, u1, u2), op(tableRead, 3, PcodeOp.LOAD, u4, ram, u3)),
+                "a slot-base constant used only transitively through another operator is refused");
 
             // (b) An ordinary untyped pointer holding a case address is read by a non-switch load.
             program.getListing().clearCodeUnits(ordinary, ordinary.add(7), false);
@@ -422,6 +500,43 @@ public final class OwnedExporterControlledListingProbe {
         check(candidate(longExporter, longRun, longRead, longLoad, 1 << 16) != null, "the long-run table load is bound with a larger allowance");
         check(candidate(longExporter, longRun, longRead, longLoad, maximum) == null, "the production allowance is reached before J");
         refused(switchMetadata(longExporter, longRun, work, "switch-long"), "a slot whose provenance exceeds the production allowance");
+
+        // F: a two-level switch. A second load on the same recovery path, a byte index table, adds a second LoadTable.
+        // The listing half binds R, and R's table covers the slot with a matching case. But Ghidra's merged load
+        // records cannot say which LoadTable R made, so the refusal stays.
+        // cmp edi,2; ja default; mov eax,edi; movzx eax,byte [rax+0x9400]; mov rax,[rax*8+0x9500]; jmp rax; three cases; default
+        Address indexTable = space.getAddress(0x9400), levelTable = space.getAddress(0x9500), levelRead = space.getAddress(0x4c0e);
+        Address levelJump = space.getAddress(0x4c16);
+        program.getMemory().setBytes(indexTable, new byte[]{0, 1, 2});
+        long[] levelCases = {0x4c18, 0x4c1e, 0x4c24};
+        for (int index = 0; index < levelCases.length; index++) program.getMemory().setLong(levelTable.add(index * 8L), levelCases[index]);
+        Function twoLevel = switchFunction(program, "switch_two_level", space.getAddress(0x4c00), space.getAddress(0x4c2c), new byte[]{
+            (byte)0x83,(byte)0xff,0x02, 0x77,0x25, (byte)0x89,(byte)0xf8, 0x0f,(byte)0xb6,(byte)0x80,0x00,(byte)0x94,0x00,0x00,
+            0x48,(byte)0x8b,0x04,(byte)0xc5,0x00,(byte)0x95,0x00,0x00, (byte)0xff,(byte)0xe0,
+            (byte)0xb8,0x0a,0x00,0x00,0x00,(byte)0xc3, (byte)0xb8,0x14,0x00,0x00,0x00,(byte)0xc3, (byte)0xb8,0x1e,0x00,0x00,0x00,(byte)0xc3,
+            0x31,(byte)0xc0,(byte)0xc3});
+        switchAnalysis(program, twoLevel, 1);
+        untypedSlot(program.getListing().getDataAt(levelTable), space.getAddress(levelCases[0]), "two-level address table slot");
+        ghidra.program.model.symbol.Reference levelLoad = readReference(program, levelRead, levelTable, 1);
+        ExportProgramModelOwned levelExporter = switchExporter(program);
+        check(candidate(levelExporter, twoLevel, levelRead, levelLoad, maximum) != null, "the listing half binds R in the two-level switch");
+        Object levelMetadata = switchMetadata(levelExporter, twoLevel, work, "switch-two-level");
+        check(((List<?>)get(levelMetadata, "switchSlots")).size() == 1, "the two-level table slot is a deferred candidate");
+        Object levelWorker = worker(levelExporter);
+        try {
+            var levelDecompiler = (ghidra.app.decompiler.DecompInterface)get(levelWorker, "decompiler");
+            var levelHigh = levelDecompiler.decompileFunction(twoLevel, 30, TaskMonitor.DUMMY).getHighFunction();
+            var levelTables = levelHigh.getJumpTables();
+            check(levelTables.length == 1 && levelTables[0].getSwitchAddress().equals(levelJump), "one recovered two-level table at J");
+            var levelLoads = levelTables[0].getLoadTables();
+            boolean extent = false;
+            for (var load : levelLoads) extent |= load.getAddress().equals(levelTable) && load.getSize() == 8 && load.getNum() == 3;
+            check(levelLoads.length == 2 && extent && Arrays.asList(levelTables[0].getCases()).contains(space.getAddress(levelCases[0])) &&
+                levelTables[0].getCases()[0].equals(space.getAddress(levelCases[0])),
+                "the slot has a matching extent and first case, beside a second LoadTable: " + levelLoads.length);
+            check(!proven(levelHigh, get(levelMetadata, "switchSlots"), maximum), "a second LoadTable on J's path keeps the refusal");
+            refused(execute(levelWorker, levelMetadata), "a two-level switch whose LoadTables are ambiguous");
+        } finally { dispose(levelWorker); }
         System.out.println("owned switch-table slot provenance and ordinary pointer refusal controls passed");
     }
 
