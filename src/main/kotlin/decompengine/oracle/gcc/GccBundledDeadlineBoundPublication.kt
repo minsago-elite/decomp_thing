@@ -1,30 +1,30 @@
 package decompengine.oracle.gcc
 
 import decompengine.acp.LinuxDescriptor
-import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
+import decompengine.oracle.core.DescriptorBoundCommitFaultInjector
 import decompengine.oracle.core.DescriptorBoundCommitGate
-import decompengine.oracle.core.DescriptorBoundStateFaultInjector
+import decompengine.oracle.core.DescriptorBoundPreparedCommit
 import decompengine.oracle.core.DescriptorBoundStateSnapshot
 import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
 
 /**
- * Single-commit admission under the operation deadline. The rename may start only while at least
- * [commitReserveMillis] remain, and it counts only if the deadline is still current when it
- * returns. Success is reported only after [accept] also sees a current deadline. Abandonment from
- * any earlier state means the result must not remain published.
+ * Single-commit admission under the operation deadline. The link may start only while at least
+ * [commitReserveMillis] remain, and it counts only if the deadline is still current both when it
+ * returns and after its durability sync. Abandonment from any earlier state means the result must
+ * not remain published.
  */
 internal class GccBundledDeadlineCommitGate(
     private val deadline: ContainedCommandOperationDeadline,
     private val commitReserveMillis: Long = COMMIT_RESERVE_MILLIS,
 ) : DescriptorBoundCommitGate {
-    enum class State { STAGING, COMMITTING, COMMITTED, FINISHED, ACCEPTED, ABANDONED }
+    enum class State { STAGING, COMMITTING, COMMITTED, FINISHED, ABANDONED }
 
     var state = State.STAGING
         @Synchronized get
         private set
-    var finishedIdentity: LinuxFileIdentity? = null
+    var finished: DescriptorBoundPreparedCommit? = null
         @Synchronized get
         private set
 
@@ -56,24 +56,26 @@ internal class GccBundledDeadlineCommitGate(
         return true
     }
 
+    /**
+     * The owned step's last transition, after the commit's durability sync: it succeeds only while
+     * the deadline is current, matching the owner's real-time wait. Afterwards only the caller may
+     * revoke [commit].
+     */
     @Synchronized
-    fun finish(identity: LinuxFileIdentity): Boolean {
+    fun finish(commit: DescriptorBoundPreparedCommit): Boolean {
         if (state != State.COMMITTED) return false
-        finishedIdentity = identity
+        if (runCatching { deadline.requireCurrent() }.isFailure) {
+            state = State.ABANDONED
+            return false
+        }
+        finished = commit
         state = State.FINISHED
         return true
     }
 
+    /** Returns the state that was abandoned. */
     @Synchronized
-    fun accept() {
-        check(state == State.FINISHED) { "GCC result publication was abandoned before acceptance" }
-        abandonOnFailure { deadline.requireCurrent() }
-        state = State.ACCEPTED
-    }
-
-    /** Returns the state that was abandoned; after [accept] nothing changes. */
-    @Synchronized
-    fun abandon(): State = state.also { if (it != State.ACCEPTED) state = State.ABANDONED }
+    fun abandon(): State = state.also { state = State.ABANDONED }
 
     private inline fun abandonOnFailure(action: () -> Unit) {
         try {
@@ -90,13 +92,15 @@ internal class GccBundledDeadlineCommitGate(
 }
 
 /**
- * Publishes one new result file so that an expired or failed operation leaves no result behind.
+ * Publishes one new result file so that a failed or expired operation reports no result.
  *
- * Staging and the gated rename run as owned host work bounded by the operation deadline. After the
- * step returns, [afterCommit] runs the caller's post-publication checks and the gate must still
- * accept. Every failure revokes the committed name: the in-flight step revokes it if the caller
- * stopped waiting first, otherwise a bounded cleanup step does. A cleanup step that is itself
- * blocked remains owned, and the operation must not release ownership while it is in flight.
+ * The caller completes every fallible verification first. Preparation and the gated link then
+ * run as owned host work bounded by the operation deadline; the link is the last fallible step
+ * apart from the directory sync it needs for durability. If that step fails, outlasts the owner's
+ * wait or completes after expiry, the result is revoked: by the in-flight step when its syscall
+ * returns, or by a bounded cleanup step when the owned step had already finished. A process that
+ * exits while such a step is still blocked can leave an unaccepted result.json behind; consumers
+ * must keep requiring a successful CLI exit before opening it.
  */
 internal object GccBundledDeadlineBoundPublication {
     const val CLEANUP_ALLOWANCE_MILLIS = 5_000L
@@ -108,57 +112,44 @@ internal object GccBundledDeadlineBoundPublication {
         bytes: ByteArray,
         maximumBytes: Int,
         deadline: ContainedCommandOperationDeadline,
-        faultInjector: DescriptorBoundStateFaultInjector? = null,
-        afterCommit: () -> Unit,
+        faultInjector: DescriptorBoundCommitFaultInjector? = null,
     ): DescriptorBoundStateSnapshot {
         val gate = GccBundledDeadlineCommitGate(deadline)
-        val published = try {
-            val allowance = deadline.remainingMillis(Long.MAX_VALUE)
-            val owned = duplicateOwnedDirectory(parent)
-            work.run("result publication", allowance, owned) {
-                val snapshot = DescriptorBoundAtomicStateFile.commitNoReplace(owned, name, bytes, maximumBytes, gate, faultInjector)
-                if (!gate.finish(snapshot.identity)) {
-                    DescriptorBoundAtomicStateFile.revokeCommitted(owned, name, snapshot.identity)
+        val owned = LinuxFilesystemSyscalls.duplicate(parent)
+        val commit = try {
+            work.run("result publication", { deadline.remainingMillis(Long.MAX_VALUE) }, owned) {
+                val prepared = DescriptorBoundAtomicStateFile.commitNoReplace(owned, name, bytes, maximumBytes, gate, faultInjector)
+                if (!gate.finish(prepared)) {
+                    try {
+                        DescriptorBoundAtomicStateFile.revokeCommitted(owned, prepared, faultInjector)
+                    } finally {
+                        prepared.close()
+                    }
                     error("GCC result publication was abandoned after its commit and was revoked")
                 }
-                snapshot
+                prepared
             }
         } catch (failure: Throwable) {
             if (gate.abandon() == GccBundledDeadlineCommitGate.State.FINISHED) {
-                revoke(work, parent, name, checkNotNull(gate.finishedIdentity), failure)
+                revoke(work, parent, checkNotNull(gate.finished), failure)
             }
             throw failure
         }
-        try {
-            afterCommit()
-            gate.accept()
-            return published
-        } catch (failure: Throwable) {
-            gate.abandon()
-            revoke(work, parent, name, published.identity, failure)
-            throw failure
-        }
+        return commit.use { it.snapshot }
     }
 
-    private fun revoke(work: GccBundledHostWorkTracker, parent: LinuxDescriptor, name: String,
-        identity: LinuxFileIdentity, failure: Throwable) {
+    private fun revoke(work: GccBundledHostWorkTracker, parent: LinuxDescriptor, commit: DescriptorBoundPreparedCommit,
+        failure: Throwable) {
         runCatching {
-            val owned = duplicateOwnedDirectory(parent)
-            work.run("result revocation", CLEANUP_ALLOWANCE_MILLIS, owned) {
-                DescriptorBoundAtomicStateFile.revokeCommitted(owned, name, identity)
+            val owned = try {
+                LinuxFilesystemSyscalls.duplicate(parent)
+            } catch (notDuplicated: Throwable) {
+                commit.close()
+                throw notDuplicated
+            }
+            work.run("result revocation", CLEANUP_ALLOWANCE_MILLIS, AutoCloseable { owned.close(); commit.close() }) {
+                DescriptorBoundAtomicStateFile.revokeCommitted(owned, commit)
             }
         }.exceptionOrNull()?.let(failure::addSuppressed)
     }
-}
-
-/** A separately owned descriptor for the same pinned directory, handed to exactly one step. */
-internal fun duplicateOwnedDirectory(directory: LinuxDescriptor): LinuxDescriptor {
-    val duplicate = directory.whileOpen { fd -> LinuxFilesystemSyscalls.openDirectoryAt(fd, ".") }
-    val expected = directory.identity
-    if (duplicate.identity.key != expected.key || duplicate.identity.mountId != expected.mountId ||
-        !duplicate.identity.isDirectory || duplicate.identity.isSymbolicLink) {
-        duplicate.close()
-        throw IllegalStateException("GCC owned directory descriptor differs from its pinned directory")
-    }
-    return duplicate
 }

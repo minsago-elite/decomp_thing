@@ -1,11 +1,12 @@
 package decompengine.oracle.gcc
 
 import decompengine.acp.LinuxFilesystemSyscalls
-import decompengine.oracle.core.DescriptorBoundStateFaultInjector
-import decompengine.oracle.core.DescriptorBoundStateFaultPoint
+import decompengine.oracle.core.DescriptorBoundCommitFaultInjector
+import decompengine.oracle.core.DescriptorBoundCommitFaultPoint
 import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -18,37 +19,30 @@ import kotlin.test.assertTrue
 class GccBundledDeadlineBoundPublicationTest {
     @Test
     fun `current deadline publishes exactly one owner-only result without staging residue`() = fixture { root ->
-        val clock = Clock()
-        var checks = 0
-        val published = publish(root, clock.deadline(), afterCommit = { checks++ })
+        val published = publish(root, Clock().deadline())
         assertContentEquals(BYTES, published.bytes)
         assertContentEquals(BYTES, Files.readAllBytes(root.resolve(NAME)))
         assertEquals("r--------", PosixFilePermissions.toString(Files.getPosixFilePermissions(root.resolve(NAME))))
         assertEquals(setOf(NAME), entries(root))
-        assertEquals(1, checks)
     }
 
     @Test
-    fun `expiry at every staging and commit point leaves no result and no staging residue`() {
-        for (point in DescriptorBoundStateFaultPoint.entries) fixture { root ->
+    fun `expiry at every preparation and commit point leaves no result and no staging residue`() {
+        val points = DescriptorBoundCommitFaultPoint.entries - DescriptorBoundCommitFaultPoint.BEFORE_REVOCATION
+        for (point in points) fixture { root ->
             val clock = Clock()
-            val failure = assertFailsWith<Throwable>(point.name) {
-                publish(root, clock.deadline(), fault = { hit -> if (hit == point) clock.expire() })
-            }
-            if (point == DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_DIRECTORY_SYNC) {
-                assertTrue(failure.message.orEmpty().contains("deadline"), failure.toString())
-            }
+            assertFailsWith<Throwable>(point.name) { publish(root, clock.deadline(), fault = { hit -> if (hit == point) clock.expire() }) }
             assertEquals(emptySet(), entries(root), point.name)
         }
     }
 
     @Test
-    fun `a rename that returns after expiry is revoked instead of published`() = fixture { root ->
+    fun `a commit link that returns after expiry is revoked instead of published`() = fixture { root ->
         val clock = Clock()
         val failure = assertFailsWith<java.io.IOException> {
             publish(root, clock.deadline(), fault = { hit ->
-                if (hit == DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME) {
-                    assertTrue(Files.exists(root.resolve(NAME)), "the rename has committed before its late return")
+                if (hit == DescriptorBoundCommitFaultPoint.AFTER_COMMIT) {
+                    assertTrue(Files.exists(root.resolve(NAME)), "the link has committed before its late return")
                     clock.expire()
                 }
             })
@@ -58,62 +52,78 @@ class GccBundledDeadlineBoundPublicationTest {
     }
 
     @Test
-    fun `commit is refused without its reserve and every post-commit failure revokes the result`() {
-        fixture { root ->
-            val clock = Clock()
-            val failure = assertFailsWith<IllegalStateException> {
-                publish(root, clock.deadline(), fault = { hit ->
-                    if (hit == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC) clock.now = 1_500_000_000L
+    fun `commit is refused without its reserve`() = fixture { root ->
+        val clock = Clock()
+        val failure = assertFailsWith<IllegalStateException> {
+            publish(root, clock.deadline(), fault = { hit ->
+                if (hit == DescriptorBoundCommitFaultPoint.AFTER_PREPARED_SYNC) clock.now = 1_500_000_000L
+            })
+        }
+        assertTrue(failure.message.orEmpty().contains("requires 1000 ms"), failure.toString())
+        assertEquals(emptySet(), entries(root))
+    }
+
+    @Test
+    fun `blocked preparation, link return and post-commit sync give bounded failures and leave nothing`() {
+        for (point in listOf(DescriptorBoundCommitFaultPoint.AFTER_PREPARED_SYNC, DescriptorBoundCommitFaultPoint.AFTER_COMMIT,
+            DescriptorBoundCommitFaultPoint.AFTER_COMMIT_DIRECTORY_SYNC)) fixture { root ->
+            val tracker = GccBundledHostWorkTracker()
+            val blocked = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val started = System.nanoTime()
+            assertFailsWith<GccBundledHostWorkTimeoutException>(point.name) {
+                publish(root, Clock().deadline(), tracker = tracker, fault = { hit ->
+                    if (hit == point) { blocked.countDown(); awaitIgnoringInterrupts(release) }
                 })
             }
-            assertTrue(failure.message.orEmpty().contains("requires 1000 ms"), failure.toString())
-            assertEquals(emptySet(), entries(root))
+            val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            assertTrue(blocked.count == 0L && elapsedMillis in 2_000..12_000, "${point.name}: $elapsedMillis ms")
+            assertEquals(listOf("result publication"), tracker.inFlightStages, point.name)
+            release.countDown()
+            tracker.requireRetired(10_000)
+            assertEquals(emptySet(), entries(root), point.name)
+        }
+    }
+
+    @Test
+    fun `a competing writer's result is never published or removed by this commit`() {
+        fixture { root ->
+            // The commit links the prepared inode itself, so a name that appears first is refused.
+            val failure = assertFailsWith<java.io.IOException> {
+                publish(root, Clock().deadline(), fault = { hit ->
+                    if (hit == DescriptorBoundCommitFaultPoint.BEFORE_COMMIT) Files.write(root.resolve(NAME), FOREIGN)
+                })
+            }
+            assertTrue(failure.message.orEmpty().contains("errno 17"), failure.toString())
+            assertEquals(setOf(NAME), entries(root))
+            assertContentEquals(FOREIGN, Files.readAllBytes(root.resolve(NAME)))
         }
         fixture { root ->
+            // Another writer replaces the committed name before revocation; revocation proves the inode and restores theirs.
             val clock = Clock()
-            assertFailsWith<IllegalStateException> { publish(root, clock.deadline(), afterCommit = { clock.expire() }) }
-            assertEquals(emptySet(), entries(root))
-        }
-        fixture { root ->
-            val failure = assertFailsWith<IllegalArgumentException> {
-                publish(root, Clock().deadline(), afterCommit = { throw IllegalArgumentException("inputs changed") })
+            val failure = assertFailsWith<java.io.IOException> {
+                publish(root, clock.deadline(), fault = { hit ->
+                    when (hit) {
+                        DescriptorBoundCommitFaultPoint.AFTER_COMMIT -> clock.expire()
+                        DescriptorBoundCommitFaultPoint.BEFORE_REVOCATION -> Files.move(Files.write(root.resolve("foreign"), FOREIGN),
+                            root.resolve(NAME), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                        else -> {}
+                    }
+                })
             }
-            assertEquals("inputs changed", failure.message)
-            assertEquals(emptySet(), entries(root))
+            val messages = listOf(failure) + failure.suppressed
+            assertTrue(messages.any { it.message.orEmpty().contains("another writer's entry") }, failure.stackTraceToString())
+            assertEquals(setOf(NAME), entries(root))
+            assertContentEquals(FOREIGN, Files.readAllBytes(root.resolve(NAME)))
         }
     }
 
     @Test
-    fun `blocked staging and a blocked rename return bounded failures and their owned steps leave nothing`() {
-        for (point in listOf(DescriptorBoundStateFaultPoint.AFTER_UNNAMED_FILE_SYNC, DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME)) {
-            fixture { root ->
-                val tracker = GccBundledHostWorkTracker()
-                val blocked = CountDownLatch(1)
-                val release = CountDownLatch(1)
-                val started = System.nanoTime()
-                assertFailsWith<GccBundledHostWorkTimeoutException>(point.name) {
-                    publish(root, Clock().deadline(), tracker = tracker, fault = { hit ->
-                        if (hit == point) { blocked.countDown(); awaitIgnoringInterrupts(release) }
-                    })
-                }
-                val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-                assertTrue(blocked.count == 0L && elapsedMillis in 2_000..12_000, "${point.name}: $elapsedMillis ms")
-                assertEquals(listOf("result publication"), tracker.inFlightStages, point.name)
-                release.countDown()
-                tracker.requireRetired(10_000)
-                assertEquals(emptySet(), entries(root), point.name)
-            }
-        }
-    }
-
-    @Test
-    fun `existing results and residue are refused and left untouched`() {
-        for (existing in listOf(NAME, ".$NAME.atomic")) fixture { root ->
-            Files.write(root.resolve(existing), byteArrayOf(1))
-            assertFailsWith<java.io.IOException>(existing) { publish(root, Clock().deadline()) }
-            assertEquals(setOf(existing), entries(root))
-            assertContentEquals(byteArrayOf(1), Files.readAllBytes(root.resolve(existing)))
-        }
+    fun `existing results are refused and left untouched`() = fixture { root ->
+        Files.write(root.resolve(NAME), FOREIGN)
+        assertFailsWith<java.io.IOException> { publish(root, Clock().deadline()) }
+        assertEquals(setOf(NAME), entries(root))
+        assertContentEquals(FOREIGN, Files.readAllBytes(root.resolve(NAME)))
     }
 
     private class Clock {
@@ -126,11 +136,10 @@ class GccBundledDeadlineBoundPublicationTest {
         root: Path,
         deadline: ContainedCommandOperationDeadline,
         tracker: GccBundledHostWorkTracker = GccBundledHostWorkTracker(),
-        afterCommit: () -> Unit = {},
-        fault: (DescriptorBoundStateFaultPoint) -> Unit = {},
+        fault: (DescriptorBoundCommitFaultPoint) -> Unit = {},
     ) = LinuxFilesystemSyscalls.openRoot(root).use { parent ->
         GccBundledDeadlineBoundPublication.publish(tracker, parent, NAME, BYTES, 1024, deadline,
-            DescriptorBoundStateFaultInjector { fault(it) }, afterCommit)
+            DescriptorBoundCommitFaultInjector { fault(it) })
     }.also { tracker.requireRetired(10_000) }
 
     private fun awaitIgnoringInterrupts(latch: CountDownLatch) {
@@ -156,5 +165,6 @@ class GccBundledDeadlineBoundPublicationTest {
     private companion object {
         const val NAME = "result.json"
         val BYTES = "{\"complete\":false}\n".toByteArray()
+        val FOREIGN = "{\"foreign\":true}\n".toByteArray()
     }
 }

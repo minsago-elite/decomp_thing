@@ -3,6 +3,7 @@ package decompengine.oracle.core
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxSyscallException
 import decompengine.acp.permissions
 import java.io.IOException
 import java.io.OutputStream
@@ -22,15 +23,46 @@ internal fun interface DescriptorBoundStateFaultInjector {
     fun hit(point: DescriptorBoundStateFaultPoint)
 }
 
-/** Owner admission for one staged no-replace commit; implementations must be thread safe. */
+/** Crash and race points of [DescriptorBoundAtomicStateFile.commitNoReplace] and its revocation. */
+internal enum class DescriptorBoundCommitFaultPoint {
+    AFTER_PREPARED_SYNC,
+    BEFORE_COMMIT,
+    AFTER_COMMIT,
+    AFTER_COMMIT_DIRECTORY_SYNC,
+    BEFORE_REVOCATION,
+}
+
+internal fun interface DescriptorBoundCommitFaultInjector {
+    fun hit(point: DescriptorBoundCommitFaultPoint)
+}
+
+/** One prepared immutable inode, named at most once, whose live descriptor proves what revocation removes. */
+internal class DescriptorBoundPreparedCommit internal constructor(
+    val name: String,
+    internal val prepared: LinuxDescriptor,
+    val identity: LinuxFileIdentity,
+    bytes: ByteArray,
+) : AutoCloseable {
+    private val contents = bytes.copyOf()
+
+    @Volatile
+    var committed = false
+        internal set
+
+    val snapshot: DescriptorBoundStateSnapshot get() = DescriptorBoundStateSnapshot(contents, identity)
+
+    override fun close() = prepared.close()
+}
+
+/** Owner admission for one no-replace commit; implementations must be thread safe. */
 internal interface DescriptorBoundCommitGate {
-    /** Throws to stop before the next staging step. */
+    /** Throws to stop before the next preparation step. */
     fun requireStaging(stage: String)
 
-    /** Atomically claims the single rename, or throws so that nothing is renamed. */
+    /** Atomically claims the single link, or throws so that nothing is named. */
     fun beginCommit()
 
-    /** Called once after the rename returns; false revokes the committed name. */
+    /** Called once after the link returns; false revokes the committed name. */
     fun completeCommit(): Boolean
 }
 
@@ -106,10 +138,11 @@ internal object DescriptorBoundAtomicStateFile {
     )
 
     /**
-     * Stages and commits one new immutable file under [gate]. Unlike [publishNoReplace], it never
-     * adopts an existing target or temporary, and no failure leaves this call's inode named: a
-     * refused, failed or unconfirmed commit removes the staged temporary and any committed target
-     * that still names this call's inode, then syncs the directory before rethrowing.
+     * Prepares [bytes] in an unnamed owner-only inode and names it [name] with one no-replace link
+     * of that inode, so no other writer's file can be published by this call. Every verification
+     * precedes the link; only the durability sync of [parent] follows it. A refused, failed or
+     * unconfirmed commit is revoked through [revokeCommitted] before rethrowing. The returned handle
+     * keeps the inode's descriptor so that a later revocation can prove what it removes.
      */
     fun commitNoReplace(
         parent: LinuxDescriptor,
@@ -117,79 +150,83 @@ internal object DescriptorBoundAtomicStateFile {
         bytes: ByteArray,
         maximumBytes: Int,
         gate: DescriptorBoundCommitGate,
-        faultInjector: DescriptorBoundStateFaultInjector? = null,
-    ): DescriptorBoundStateSnapshot {
+        faultInjector: DescriptorBoundCommitFaultInjector? = null,
+    ): DescriptorBoundPreparedCommit {
         requireName(name)
         require(maximumBytes in 1..MAXIMUM_STATE_FILE_BYTES)
         require(bytes.isNotEmpty() && bytes.size <= maximumBytes) { "immutable state bytes exceed their configured bound" }
         val expectedBytes = bytes.copyOf()
         requireParent(parent)
-        val temporaryName = temporaryName(name)
-        for (existing in listOf(name, temporaryName)) {
-            LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, existing)?.use {
-                stateFail("immutable commit target or temporary already exists")
-            }
-        }
+        LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, name)?.use { stateFail("immutable commit target already exists") }
         var prepared: LinuxDescriptor? = null
-        var staged: LinuxFileIdentity? = null
-        var committed: LinuxFileIdentity? = null
+        var commit: DescriptorBoundPreparedCommit? = null
         try {
             gate.requireStaging("before preparing $name")
             prepared = LinuxFilesystemSyscalls.createTemporaryAt(parent.fd)
             LinuxFilesystemSyscalls.write(prepared, expectedBytes) { gate.requireStaging("writing $name") }
             LinuxFilesystemSyscalls.chmod(prepared, OWNER_READ_ONLY_MODE)
             LinuxFilesystemSyscalls.synchronize(prepared)
-            val unnamedIdentity = LinuxFilesystemSyscalls.identity(prepared.fd)
-            requireUnnamedFile(unnamedIdentity, parent.identity, OWNER_READ_ONLY_MODE)
-            faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_UNNAMED_FILE_SYNC)
-            gate.requireStaging("before naming $name")
-            LinuxFilesystemSyscalls.linkTemporaryAt(prepared, parent.fd, temporaryName)
-            staged = unnamedIdentity
-            val materialized = readRequiredWithMode(parent, temporaryName, maximumBytes, OWNER_READ_ONLY_MODE)
-            requireExactBytes(materialized.bytes, expectedBytes, "immutable state temporary")
-            if (!sameFile(materialized.identity, unnamedIdentity)) stateFail("immutable state temporary differs from its unnamed inode")
-            LinuxFilesystemSyscalls.synchronize(parent)
-            faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC)
+            val identity = LinuxFilesystemSyscalls.identity(prepared.fd)
+            requireUnnamedFile(identity, parent.identity, OWNER_READ_ONLY_MODE)
+            requireExactBytes(LinuxFilesystemSyscalls.readPrefix(prepared, maximumBytes + 1), expectedBytes, "prepared immutable state")
+            commit = DescriptorBoundPreparedCommit(name, prepared, identity, expectedBytes)
+            faultInjector?.hit(DescriptorBoundCommitFaultPoint.AFTER_PREPARED_SYNC)
             gate.requireStaging("before committing $name")
-            requireNamedIdentity(parent, temporaryName, materialized.identity, "immutable state temporary")
+            requireParent(parent)
+            faultInjector?.hit(DescriptorBoundCommitFaultPoint.BEFORE_COMMIT)
             gate.beginCommit()
-            LinuxFilesystemSyscalls.renameNoReplace(parent.fd, temporaryName, name)
-            staged = null
-            committed = unnamedIdentity
-            faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME)
+            LinuxFilesystemSyscalls.linkTemporaryAt(prepared, parent.fd, name)
+            commit.committed = true
+            faultInjector?.hit(DescriptorBoundCommitFaultPoint.AFTER_COMMIT)
             if (!gate.completeCommit()) stateFail("immutable commit completed outside its admission and is revoked")
             LinuxFilesystemSyscalls.synchronize(parent)
-            faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_DIRECTORY_SYNC)
-            return readRequiredWithMode(parent, name, maximumBytes, OWNER_READ_ONLY_MODE).also { published ->
-                requireExactBytes(published.bytes, expectedBytes, "immutable state target")
-                if (!sameFile(published.identity, unnamedIdentity)) stateFail("immutable state target differs from its prepared inode")
-            }
+            faultInjector?.hit(DescriptorBoundCommitFaultPoint.AFTER_COMMIT_DIRECTORY_SYNC)
+            return commit
         } catch (failure: Throwable) {
-            val owned = listOfNotNull(committed?.let { name to it }, staged?.let { temporaryName to it })
-            runCatching { removeOwned(parent, owned) }.exceptionOrNull()?.let(failure::addSuppressed)
-            throw failure
-        } finally {
+            if (commit?.committed == true) {
+                runCatching { revokeCommitted(parent, commit, faultInjector) }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
             prepared?.close()
+            throw failure
         }
     }
 
-    /** Removes a committed target, and its temporary name, only while they name [identity]. */
-    fun revokeCommitted(parent: LinuxDescriptor, name: String, identity: LinuxFileIdentity) {
+    /**
+     * Removes [commit]'s name only after proving it still denotes the prepared inode. The name is
+     * first moved, without replacement, to a unique private name; that entry is unlinked only if
+     * it is the prepared inode, and is otherwise renamed back without replacement and left intact.
+     */
+    fun revokeCommitted(
+        parent: LinuxDescriptor,
+        commit: DescriptorBoundPreparedCommit,
+        faultInjector: DescriptorBoundCommitFaultInjector? = null,
+    ) {
         requireParent(parent)
-        removeOwned(parent, listOf(name to identity, temporaryName(name) to identity))
+        faultInjector?.hit(DescriptorBoundCommitFaultPoint.BEFORE_REVOCATION)
+        val quarantine = ".${commit.name}.revoked-" + ByteArray(16).also(REVOCATION_NAMES::nextBytes).hex()
+        try {
+            LinuxFilesystemSyscalls.renameNoReplace(parent.fd, commit.name, quarantine)
+        } catch (missing: LinuxSyscallException) {
+            if (missing.errno != LinuxFilesystemSyscalls.ENOENT) throw missing
+            requireUnnamed(commit)
+            return
+        }
+        val moved = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, quarantine)
+            ?: stateFail("revoked immutable entry disappeared from its private name")
+        if (moved.use { !sameFile(it.identity, commit.identity) }) {
+            LinuxFilesystemSyscalls.renameNoReplace(parent.fd, quarantine, commit.name)
+            LinuxFilesystemSyscalls.synchronize(parent)
+            stateFail("immutable commit revocation found another writer's entry and restored it")
+        }
+        LinuxFilesystemSyscalls.unlink(parent.fd, quarantine)
+        LinuxFilesystemSyscalls.synchronize(parent)
+        requireUnnamed(commit)
     }
 
-    private fun removeOwned(parent: LinuxDescriptor, entries: List<Pair<String, LinuxFileIdentity>>) {
-        var removed = false
-        var foreign = false
-        for ((entry, identity) in entries) {
-            val current = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, entry) ?: continue
-            if (current.use { !sameFile(it.identity, identity) }) { foreign = true; continue }
-            LinuxFilesystemSyscalls.unlink(parent.fd, entry)
-            removed = true
+    private fun requireUnnamed(commit: DescriptorBoundPreparedCommit) {
+        if (LinuxFilesystemSyscalls.identity(commit.prepared.fd).linkCount != 0) {
+            stateFail("revoked immutable inode remains named")
         }
-        if (removed) LinuxFilesystemSyscalls.synchronize(parent)
-        if (foreign) stateFail("immutable commit cleanup found a foreign entry and left it in place")
     }
 
     /** Larger immutable inventory manifests; ordinary journal records retain their one-MiB limit. */
@@ -584,6 +621,8 @@ private fun ByteArray.hex(): String = joinToString("") { byte ->
 }
 
 private fun stateFail(message: String): Nothing = throw IOException(message)
+
+private val REVOCATION_NAMES = java.security.SecureRandom()
 
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val OWNER_READ_ONLY_MODE = 0x100 // 0400

@@ -16,6 +16,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -166,34 +167,53 @@ class GccBundledPlannerOutputCaptureTest {
     }
 
     @Test
-    fun `planner capture over its host memory budget is refused with a bounded failure`() = fixture { root, request, model ->
+    fun `planner capture over its host memory budget is refused before the refused allocation`() = fixture { root, request, model ->
         val names = listOf("module_plan.json", "planner-output.json", "contained-command.stdout", "contained-command.stderr")
         val before = names.associateWith { Files.readAllBytes(request.outputDirectory.resolve(it)) }
         val reserved = GccBundledHostMemoryBudget.WORKING_RESERVATION_BYTES
+        val charge = 1 + GccBundledPlannerOutputCapture.ASSESSMENT_ALLOCATION_PER_INPUT_BYTE
         val planBytes = before.getValue("module_plan.json").size.toLong()
         val metadataBytes = before.getValue("planner-output.json").size.toLong()
-        val reads = planBytes + metadataBytes + 2 * 64 * 1024
-        val assessment = GccBundledPlannerOutputCapture.ASSESSMENT_ALLOCATION_PER_INPUT_BYTE * (model.size + planBytes + metadataBytes)
+        val exact = reserved + charge * (model.size + planBytes + metadataBytes) + 2 * 64 * 1024
         LinuxFilesystemSyscalls.openAbsolutePathOrNull(root)!!.use { run ->
             LinuxFilesystemSyscalls.openDirectoryAt(run.fd, CONTROL).use { control ->
                 fun capture(maximum: Long, allocated: () -> Long) = GccBundledPlannerOutputCapture.capture(run, CONTROL,
                     control.identity, request, model, 4, 0, GccBundledHostMemoryBudget(maximum, allocated)) {}
+                fun refusal(maximum: Long) = assertFailsWith<GccBundledHostMemoryBudgetException> { capture(maximum) { 0L } }.message.orEmpty()
                 val baseline = GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, 4, 0)
-                val exact = capture(reserved + reads + assessment, ::currentThreadAllocatedBytes)
-                assertContentEquals(baseline.canonicalBytes, exact.canonicalBytes)
-                val read = assertFailsWith<GccBundledHostMemoryBudgetException> { capture(reserved + planBytes - 1) { 0L } }
-                assertTrue(read.message.orEmpty().contains("planner output file read"), read.toString())
-                val assessed = assertFailsWith<GccBundledHostMemoryBudgetException> { capture(reserved + reads + assessment - 1) { 0L } }
-                assertTrue(assessed.message.orEmpty().contains("planner assessment"), assessed.toString())
-                var allocated = 0L
-                var checks = 0
+                assertContentEquals(baseline.canonicalBytes, capture(exact, ::currentThreadAllocatedBytes).canonicalBytes)
+                assertTrue(refusal(reserved + charge * model.size - 1).contains("captured model copy and assessment"))
+                // The plan buffer and its assessment allowance are charged from the pinned size before allocation.
+                val plan = refusal(reserved + charge * (model.size + planBytes) - 1)
+                assertTrue(plan.contains("planner output file read and assessment needs ${charge * planBytes} bytes"), plan)
+                assertTrue(refusal(exact - 1).contains("planner log digest buffer"))
                 val measured = assertFailsWith<GccBundledHostMemoryBudgetException> {
-                    capture(Long.MAX_VALUE / 2) { if (++checks == 4) allocated = reserved + 1; allocated }
+                    var checks = 0
+                    capture(Long.MAX_VALUE / 2) { if (++checks >= 4) Long.MAX_VALUE / 8 else 0L }
                 }
                 assertTrue(measured.message.orEmpty().contains("beyond its"), measured.toString())
             }
         }
         for (name in names) assertContentEquals(before.getValue(name), Files.readAllBytes(request.outputDirectory.resolve(name)))
+    }
+
+    @Test
+    fun `owned planner capture copies the model only after admitting its authenticated size`() = fixture { root, request, model ->
+        val charge = 1 + GccBundledPlannerOutputCapture.ASSESSMENT_ALLOCATION_PER_INPUT_BYTE
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(root)!!.use { run ->
+            LinuxFilesystemSyscalls.openDirectoryAt(run.fd, CONTROL).use { control ->
+                val tracker = GccBundledHostWorkTracker()
+                var copied = false
+                val failure = assertFailsWith<GccBundledHostMemoryBudgetException> {
+                    GccBundledPlannerOutputCapture.captureOwned(tracker, LinuxFilesystemSyscalls.duplicate(run), CONTROL,
+                        control.identity, request, { copied = true; model.copyOf() }, 4, 0,
+                        GccBundledHostMemoryBudget.WORKING_RESERVATION_BYTES + charge * model.size - 1, ContainedCommandOperationDeadline(2_000))
+                }
+                assertTrue(failure.message.orEmpty().contains("captured model copy and assessment"), failure.toString())
+                assertFalse(copied, "the model copy must follow its admission")
+                tracker.requireRetired(5_000)
+            }
+        }
     }
 
     @Test
@@ -218,8 +238,8 @@ class GccBundledPlannerOutputCaptureTest {
             LinuxFilesystemSyscalls.openDirectoryAt(run.fd, CONTROL).use { control ->
                 val direct = GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, 4, 0)
                 val tracker = GccBundledHostWorkTracker()
-                val owned = GccBundledPlannerOutputCapture.captureOwned(tracker, run, CONTROL, control.identity, request, model,
-                    4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(2_000))
+                val owned = GccBundledPlannerOutputCapture.captureOwned(tracker, LinuxFilesystemSyscalls.duplicate(run), CONTROL,
+                    control.identity, request, { model }, 4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(2_000))
                 assertContentEquals(direct.planBytes, owned.planBytes)
                 assertContentEquals(direct.canonicalBytes, owned.canonicalBytes)
                 tracker.requireRetired(5_000)
@@ -229,8 +249,8 @@ class GccBundledPlannerOutputCaptureTest {
                 val stages = java.util.Collections.synchronizedList(mutableListOf<String>())
                 val started = System.nanoTime()
                 assertFailsWith<GccBundledHostWorkTimeoutException> {
-                    GccBundledPlannerOutputCapture.captureOwned(tracker, run, CONTROL, control.identity, request, model,
-                        4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(2_000) { 0L }) { stage ->
+                    GccBundledPlannerOutputCapture.captureOwned(tracker, LinuxFilesystemSyscalls.duplicate(run), CONTROL,
+                        control.identity, request, { model }, 4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(2_000) { 0L }) { stage ->
                         stages += stage
                         if (stage == "reading planner output file" && blocked.count != 0L) {
                             blocked.countDown()

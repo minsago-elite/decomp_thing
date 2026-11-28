@@ -67,65 +67,83 @@ allocation or rendering step. The next section bounds the owner's wait on them.
 ## Host capture budget and deadline-safe result publication (#982)
 
 The planner owner runs output capture and assessment as one owned host step on a
-dedicated thread, using its own duplicate of the pinned run directory. The owner
-waits at most the operation deadline's remaining time. If the deadline passes, the
-owner returns a bounded failure even when the step is blocked in a native read
-that ignores interrupts or in one nonpreemptible library call. The step alone
-closes its descriptors, so no timed-out caller closes an fd that a blocked
-syscall still uses. It stops at its next checkpoint or when its syscall returns.
-`close()` waits a short grace period for owned steps. If any step is still in
-flight, it refuses to release disk and input ownership, which matches the
-existing unproved cgroup-absence path.
+dedicated thread. Once the planner's lexical run-root borrow is revalidated, the
+owner hands the step a kernel `F_DUPFD_CLOEXEC` duplicate of the pinned run-root
+descriptor. That handoff does no path lookup or filesystem I/O. The owner
+computes its wait from the operation deadline immediately before waiting. If the
+deadline passes, the owner returns a bounded failure even when the step is
+blocked in a native read or in one nonpreemptible library call. Abandonment never
+interrupts the step: on JDK 21, `Thread.interrupt()` runs an NIO channel's close
+on the interrupting thread, and that close waits for the blocked native operation
+to retire. The step stops at its next checkpoint or when its syscall returns, and
+it alone closes its descriptors. Run-root revalidation on a capture failure also
+runs as tracked work. `close()` waits a short grace period for owned steps. If any
+step is still in flight, it refuses to release disk and input ownership, which
+matches the existing unproved cgroup-absence path.
 
 Host memory for that step is held to the shared policy's `maximumResidentBytes`,
 the same ceiling the planner cgroup receives. Capture starts only after cgroup
-absence, so the host step never overlaps the worker. The step admits a 16 MiB
-working reservation, each retained file at its exact size before allocation, and
-128 bytes of assessment allocation per captured model, plan and metadata byte
-before parsing. Local measurement of the current assessment found 55 to 77
-allocated bytes per input byte, linear from 2,000 to 60,000 functions across
-dense, code-bearing and bare models. At the checked 16 GiB policy, about 127 MiB
-of captured input fits. Larger captures are refused rather than admitted without
-proof. At every cooperative checkpoint, the thread's measured heap
-allocation must stay within the admitted total. Measured allocation includes
-garbage, so it is an upper bound on the heap the step can retain. Anything over
-budget is refused with `GccBundledHostMemoryBudgetException` before the refused
-allocation, or at the next checkpoint for measured growth. Planner stdout/stderr,
-up to 64 MiB each, are now digested through a 64 KiB buffer instead of being
-retained. The recorded sizes and SHA-256 values are unchanged. Allocation inside
-one library call is seen only at the next checkpoint, and the JVM heap limit
-remains the backstop. This is a host-phase budget, not a whole-process RSS
-measurement.
+absence, so the host step never overlaps the worker. Before any allocation, the
+step admits a 16 MiB working reservation. The model is admitted from its
+authenticated size before it is copied, and each retained plan or metadata
+buffer is admitted from its pinned file size before allocation. Each of these
+also carries 128 bytes of assessment allocation per byte. Local measurement of
+the current assessment found 55 to 77 allocated bytes per input byte, linear from
+2,000 to 60,000 functions across dense, code-bearing and bare models. At the
+checked 16 GiB policy, about 127 MiB of captured input fits. Larger captures are
+refused rather than admitted without proof. At every cooperative checkpoint, the
+thread's measured heap allocation must stay within the admitted total. Measured
+allocation includes garbage, so it is an upper bound on the heap the step can
+retain. Anything over budget is refused with `GccBundledHostMemoryBudgetException`.
+Planner stdout/stderr, up to 64 MiB each, are digested through a 64 KiB buffer
+instead of being retained, and the recorded sizes and SHA-256 values are
+unchanged. Allocation inside one library call is seen only at the next
+checkpoint, and the JVM heap limit remains the backstop. This is a host-phase
+budget, not a whole-process RSS measurement.
 
-`publishCliResult` publishes `result.json` through
-`GccBundledDeadlineBoundPublication`. A fresh owner-only temporary is staged by
-O_TMPFILE write/fsync, link and directory fsync, and each step is gated by the
-deadline. A single `RENAME_NOREPLACE` may start only while at least one second
-remains. The commit counts only if the deadline is still current when the rename
-returns. The owner's existing post-publication checks then run, and acceptance
-must still see a current deadline. Every failure removes the staged temporary and
-revokes any committed target that still names this publication's inode. That
-includes expiry during staging, a late rename, expiry before acceptance, and a
-failed check. If the owner stops waiting first, the in-flight step revokes its
-own commit when its syscall returns. A step that already finished is revoked by a
-bounded cleanup step. An existing target or temporary is refused and left
-untouched. The operation therefore reports success only for a result committed
-and accepted before expiry, and a failed operation leaves no result or staging
-residue.
+`publishCliResult` completes every fallible verification before publication.
+`GccBundledDeadlineBoundPublication` then writes, fsyncs and verifies
+`result.json` in an unnamed O_TMPFILE inode, with each step gated by the
+deadline. It commits by linking that inode to `result.json` without replacement,
+so no other writer's file can be published by this call. The link may start only
+while at least one second remains. The commit counts only if the deadline is
+still current when the link returns and again after the directory sync it needs
+for durability. No verification follows the link. If the link or sync completes
+late, fails or outlasts the owner's wait, the result is revoked: by the in-flight
+step when its syscall returns, or by a bounded cleanup step when the step had
+already finished. Revocation keeps the prepared inode's descriptor open. It moves
+the name without replacement to a unique private name, compares that entry with
+the descriptor, and only then unlinks it. Another writer's entry is renamed back
+without replacement and left intact. An existing result is refused untouched.
 
-No rename-based commit can stop a concurrent reader from seeing the name between
-a late rename's return and its revocation. It also cannot survive process death
-inside that window. Readers must keep requiring a successful CLI exit. The commit
-reserve means that window opens only for a single rename slower than one second.
-Only the planner CLI result uses this protocol. The full-export and native-call
-CLI results keep their existing multi-file no-replace publication.
+Limits:
+
+- No rename- or link-based commit can stop a concurrent reader from seeing the
+  name between a late link's return and its revocation.
+- A process that exits while a revocation step is still blocked leaves an
+  unaccepted `result.json` behind. The in-tree reader requires CLI exit code 0
+  before it opens the file (`GccBundledCliQualificationTest`), and that remains
+  the consumer contract. Recording in-flight publication in the operation
+  journal, so that recovery removes an unaccepted result first, is a follow-up.
+  It would change the journal chain that cold recovery (#981) is also editing.
+- Revocation's private name narrows the replacement race to a deliberately
+  targeted random name between its identity check and unlink. That residual is
+  outside the directory's cooperative exclusive-owner contract.
+- Only the planner CLI result uses this protocol. The full-export and
+  native-call CLI results keep their existing multi-file no-replace publication.
+- The hosted `kotlin-oracle` fixtures use one- and two-function models. They do
+  not exercise the ~127 MiB admission ceiling, and no real cc1/lto1 model size
+  has been measured against it.
 
 Focused JVM controls are in `GccBundledHostWorkTest`,
 `GccBundledPlannerOutputCaptureTest` and `GccBundledDeadlineBoundPublicationTest`.
-They cover a genuinely blocked FIFO read, budget refusal at admission and by
-measurement, streamed logs, a blocked owned capture, and expiry or blocking at
-every staging and commit point. These are local-component controls. They do not
-qualify provisioned-host CLI wall time, peak RSS or real cc1/lto1 execution.
+They cover a blocked NIO FIFO read, a channel close that waits on its blocked
+operation, budget refusal before allocation and by measurement, model copying
+after admission, streamed logs, and a blocked owned capture. They also cover
+expiry or blocking at every preparation, commit and sync point, and competing
+writers before the commit and before revocation. These are local-component
+controls. They do not qualify provisioned-host CLI wall time, peak RSS or real
+cc1/lto1 execution.
 
 ## Observed contract
 

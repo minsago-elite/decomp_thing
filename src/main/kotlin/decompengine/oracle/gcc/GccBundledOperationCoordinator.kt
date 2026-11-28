@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
@@ -554,66 +555,82 @@ internal class GccBundledPreparedOperation internal constructor(
                     controlPath.resolve("runtime/classpath-$it.jar").toString()
                 }, GccBundledPlannerWorker::class.java.name, requestPath.toString(), requestSha)
             journal.recordPlannerPrepared(requestBytes)
-            return lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
-                fun requireCapturedModel() {
-                    deadline.requireCurrent()
-                    val current = borrowed.withPinnedDescriptor { descriptor ->
-                        val prefix = retainedExport
-                        if (prefix == null) GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
-                        else GccBundledExportCapture.captureResumed(descriptor, directories.getValue("reports"), intent.artifacts, prefix)
-                    }
-                    require(current.programModelBytes.contentEquals(exported.programModelBytes)) { "GCC captured model changed before planning" }
-                    deadline.requireCurrent()
-                }
-                requireCapturedModel()
-                val protectedDirectories = borrowed.withPinnedDescriptor { descriptor ->
-                    listOf("state", "reports").associateWith { name ->
-                        LinuxFilesystemSyscalls.openDirectoryAt(descriptor.fd, name).use { it.identity }
-                    }
-                }
-                val maximumFileBytes = minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024)
-                val execution = KotlinSystemdCgroupCommandLauncher.execute(
-                    borrowed, configuration, unit, original.expectedControlGroup.substringBeforeLast('/') + "/" + unit,
-                    requestSha, command, original.environment,
-                    listOf(KotlinSystemdCgroupCommandInput(requestPath, requestBytes.size.toLong(), requestSha)),
-                    listOf(runtimeMount), KotlinSystemdCgroupCommandResources(
-                        deadline.remainingWholeSecondsMillis(intent.budgets.wallClockMillis), intent.budgets.maximumResidentBytes,
-                        intent.budgets.pidsMax, maximumFileBytes), inputs.deploymentClosureSha256,
-                    controlDirectoryName = controlName, readOnlyControlDirectories = completedControls.toMap(),
-                    readOnlyStateDirectory = protectedDirectories.getValue("state"),
-                    readOnlyReportsDirectory = protectedDirectories.getValue("reports"), operationDeadline = deadline,
-                    beforeStart = { attachment ->
-                        inputs.verify("before GCC planner START")
-                        journal.verify("before GCC planner START")
-                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
-                        requireCapturedModel()
-                        journal.recordPlannerAttachment(attachment.canonicalBytes)
-                        journal.recordPlannerStartAuthorization()
-                        inputs.verify("after durable GCC planner START authorization")
-                        requireCapturedModel()
-                        journal.verify("before GCC planner START delivery")
-                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+            var runDuplicate: LinuxDescriptor? = null
+            val (executionReceipt, controlIdentity, logLimit) = try {
+                lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
+                    fun requireCapturedModel() {
                         deadline.requireCurrent()
-                    },
-                )
-                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-                inputs.verify("after GCC planner and cgroup absence")
-                val executionReceipt = journal.recordPlannerExecution(execution.canonicalBytes)
-                val logLimit = minOf(maximumFileBytes, 64L * 1024 * 1024).toInt()
-                deadline.requireCurrent()
-                val capturedModel = exported.programModelBytes
-                deadline.requireCurrent()
-                // Host capture/assessment shares the planner's memory ceiling; it starts only after cgroup absence.
-                val captured = borrowed.withPinnedDescriptor { descriptor ->
-                    GccBundledPlannerOutputCapture.captureOwned(hostWork, descriptor, controlName,
-                        checkNotNull(execution.controlDirectoryIdentity), request, capturedModel, logLimit, logLimit,
-                        intent.budgets.maximumResidentBytes, deadline)
+                        val current = borrowed.withPinnedDescriptor { descriptor ->
+                            val prefix = retainedExport
+                            if (prefix == null) GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+                            else GccBundledExportCapture.captureResumed(descriptor, directories.getValue("reports"), intent.artifacts, prefix)
+                        }
+                        require(current.programModelBytes.contentEquals(exported.programModelBytes)) { "GCC captured model changed before planning" }
+                        deadline.requireCurrent()
+                    }
+                    requireCapturedModel()
+                    val protectedDirectories = borrowed.withPinnedDescriptor { descriptor ->
+                        listOf("state", "reports").associateWith { name ->
+                            LinuxFilesystemSyscalls.openDirectoryAt(descriptor.fd, name).use { it.identity }
+                        }
+                    }
+                    val maximumFileBytes = minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024)
+                    val execution = KotlinSystemdCgroupCommandLauncher.execute(
+                        borrowed, configuration, unit, original.expectedControlGroup.substringBeforeLast('/') + "/" + unit,
+                        requestSha, command, original.environment,
+                        listOf(KotlinSystemdCgroupCommandInput(requestPath, requestBytes.size.toLong(), requestSha)),
+                        listOf(runtimeMount), KotlinSystemdCgroupCommandResources(
+                            deadline.remainingWholeSecondsMillis(intent.budgets.wallClockMillis), intent.budgets.maximumResidentBytes,
+                            intent.budgets.pidsMax, maximumFileBytes), inputs.deploymentClosureSha256,
+                        controlDirectoryName = controlName, readOnlyControlDirectories = completedControls.toMap(),
+                        readOnlyStateDirectory = protectedDirectories.getValue("state"),
+                        readOnlyReportsDirectory = protectedDirectories.getValue("reports"), operationDeadline = deadline,
+                        beforeStart = { attachment ->
+                            inputs.verify("before GCC planner START")
+                            journal.verify("before GCC planner START")
+                            lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                            requireCapturedModel()
+                            journal.recordPlannerAttachment(attachment.canonicalBytes)
+                            journal.recordPlannerStartAuthorization()
+                            inputs.verify("after durable GCC planner START authorization")
+                            requireCapturedModel()
+                            journal.verify("before GCC planner START delivery")
+                            lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                            deadline.requireCurrent()
+                        },
+                    )
+                    lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                    inputs.verify("after GCC planner and cgroup absence")
+                    val receipt = journal.recordPlannerExecution(execution.canonicalBytes)
+                    val control = checkNotNull(execution.controlDirectoryIdentity)
+                    // The capture step receives a kernel duplicate of the pinned run root after this borrow is
+                    // revalidated, so no lexical revalidation runs on its timeout path.
+                    runDuplicate = borrowed.withPinnedDescriptor(LinuxFilesystemSyscalls::duplicate)
+                    Triple(receipt, control, minOf(maximumFileBytes, 64L * 1024 * 1024).toInt())
                 }
-                inputs.verify("after GCC planner output capture")
-                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-                val assessmentReceipt = journal.recordPlannerAssessment(bindWallTime(captured.canonicalBytes))
-                GccBundledPlannedOperation(executionReceipt, assessmentReceipt, captured)
-            }.also { deadline.requireCurrent(); completedPlan = it }
+            } catch (failure: Throwable) {
+                runDuplicate?.close()
+                throw failure
+            }
+            // Host capture/assessment shares the planner's memory ceiling; it starts only after cgroup absence.
+            // The model is copied inside the metered step, after its authenticated size is admitted.
+            val captured = try {
+                GccBundledPlannerOutputCapture.captureOwned(hostWork, checkNotNull(runDuplicate), controlName, controlIdentity,
+                    request, { exported.programModelBytes }, logLimit, logLimit, intent.budgets.maximumResidentBytes, deadline)
+            } catch (failure: Throwable) {
+                // Failure-path run-root revalidation is tracked work, so a hung filesystem cannot hold this failure.
+                runCatching {
+                    hostWork.run("planner run-root revalidation", GccBundledDeadlineBoundPublication.CLEANUP_ALLOWANCE_MILLIS, null) {
+                        lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                    }
+                }.exceptionOrNull()?.let(failure::addSuppressed)
+                throw failure
+            }
+            inputs.verify("after GCC planner output capture")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val assessmentReceipt = journal.recordPlannerAssessment(bindWallTime(captured.canonicalBytes))
+            return GccBundledPlannedOperation(executionReceipt, assessmentReceipt, captured)
+                .also { deadline.requireCurrent(); completedPlan = it }
         } catch (failure: Throwable) {
             poisoned = true
             if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
@@ -654,13 +671,9 @@ internal class GccBundledPreparedOperation internal constructor(
             )))
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
-                // Any failure, including expiry before acceptance, revokes the committed result.
-                GccBundledDeadlineBoundPublication.publish(hostWork, output, "result.json", document, 256 * 1024, deadline) {
-                    cli.requireCurrent()
-                    inputs.verify("after CLI result publication")
-                    journal.verify("after CLI result publication")
-                    lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-                }
+                // Every fallible verification precedes the commit; the commit link is the last fallible
+                // step apart from its durability sync, and any failure revokes the result.
+                GccBundledDeadlineBoundPublication.publish(hostWork, output, "result.json", document, 256 * 1024, deadline)
             }
             return cli.options.output.resolve("result.json")
         } catch (failure: Throwable) {

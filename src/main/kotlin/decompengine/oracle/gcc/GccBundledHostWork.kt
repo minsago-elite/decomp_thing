@@ -28,9 +28,13 @@ internal class GccBundledHostWorkContext internal constructor(private val stage:
  * ignores interrupts, or one nonpreemptible library call, cannot hold the operation past its
  * allowance. The step alone closes [owned]; a timed-out caller never closes a descriptor that a
  * blocked syscall may still use. Unretired steps keep the operation from releasing ownership.
+ *
+ * Abandonment never interrupts the step: on JDK 21 `Thread.interrupt()` runs an NIO channel's
+ * close on the interrupting thread, and that close waits for the channel's native operation to
+ * retire. The step instead observes abandonment at its next cooperative checkpoint.
  */
 internal class GccBundledHostWorkTracker {
-    private class Step(val stage: String, val thread: Thread, val retired: CountDownLatch)
+    private class Step(val stage: String, val retired: CountDownLatch)
 
     private val steps = mutableListOf<Step>()
 
@@ -40,15 +44,21 @@ internal class GccBundledHostWorkTracker {
     val inFlightStages: List<String>
         @Synchronized get() = steps.filter { it.retired.count != 0L }.map { it.stage }
 
-    fun <T> run(stage: String, allowanceMillis: Long, owned: AutoCloseable?, work: (GccBundledHostWorkContext) -> T): T {
+    /** Fixed allowance, for cleanup steps that run after the operation deadline has passed. */
+    fun <T> run(stage: String, allowanceMillis: Long, owned: AutoCloseable?, work: (GccBundledHostWorkContext) -> T): T =
+        run(stage, { allowanceMillis }, owned, work)
+
+    /** [remainingMillis] is evaluated immediately before the wait, from the operation's absolute deadline. */
+    fun <T> run(stage: String, remainingMillis: () -> Long, owned: AutoCloseable?,
+        work: (GccBundledHostWorkContext) -> T): T {
         val context = GccBundledHostWorkContext(stage)
         val retired = CountDownLatch(1)
         val outcome = arrayOfNulls<Any>(1)
         var failure: Throwable? = null
-        val done = CountDownLatch(1)
         val thread = Thread({
             try {
                 try {
+                    context.requireCurrent("start")
                     outcome[0] = work(context)
                 } finally {
                     owned?.close()
@@ -56,13 +66,11 @@ internal class GccBundledHostWorkTracker {
             } catch (thrown: Throwable) {
                 failure = thrown
             } finally {
-                done.countDown()
                 retired.countDown()
             }
         }, "gcc-host-work").apply { isDaemon = true }
         try {
-            require(allowanceMillis > 0) { "GCC host $stage has no remaining allowance" }
-            register(Step(stage, thread, retired))
+            register(Step(stage, retired))
             thread.start()
         } catch (notStarted: Throwable) {
             runCatching { owned?.close() }.exceptionOrNull()?.let(notStarted::addSuppressed)
@@ -70,15 +78,14 @@ internal class GccBundledHostWorkTracker {
             throw notStarted
         }
         val completed = try {
-            done.await(allowanceMillis, TimeUnit.MILLISECONDS)
-        } catch (interrupted: InterruptedException) {
+            val allowance = remainingMillis()
+            allowance > 0 && retired.await(allowance, TimeUnit.MILLISECONDS)
+        } catch (stopped: Throwable) {
             context.abandon()
-            thread.interrupt()
-            throw interrupted
+            throw stopped
         }
         if (!completed) {
             context.abandon()
-            thread.interrupt()
             throw GccBundledHostWorkTimeoutException(stage)
         }
         failure?.let { throw it }

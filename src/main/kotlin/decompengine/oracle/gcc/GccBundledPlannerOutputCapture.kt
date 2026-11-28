@@ -20,7 +20,7 @@ internal class GccBundledCapturedPlannerOutput(plan: ByteArray, assessment: Byte
 
 /** Caller must establish worker absence and hold the run lease throughout capture. */
 internal object GccBundledPlannerOutputCapture {
-    /** Assessment allocation admitted per captured model and plan byte; see docs/gcc-engine-cli-evidence-v1.md. */
+    /** Assessment allocation admitted per captured model, plan and metadata byte; see docs/gcc-engine-cli-evidence-v1.md. */
     const val ASSESSMENT_ALLOCATION_PER_INPUT_BYTE = 128L
 
     fun capture(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
@@ -35,33 +35,41 @@ internal object GccBundledPlannerOutputCapture {
             GccBundledHostMemoryBudget(MAXIMUM_HOST_ASSESSMENT_BYTES), checkpoint)
 
     /**
-     * Production entry: capture and assessment run as one owned host step on a duplicate of [run],
-     * so a blocked read or nonpreemptible parse cannot hold the caller past [deadline], and the
-     * step's host allocation is held to [hostBudgetBytes].
+     * Production entry: capture and assessment run as one owned host step on [ownedRun], a kernel
+     * duplicate of the pinned run root whose ownership transfers to the step, so a blocked read or
+     * nonpreemptible parse cannot hold the caller past [deadline]. [capturedModel] is copied inside
+     * the step only after its authenticated size and assessment allowance are admitted against
+     * [hostBudgetBytes].
      */
-    internal fun captureOwned(work: GccBundledHostWorkTracker, run: LinuxDescriptor, controlName: String,
-        expectedControl: LinuxFileIdentity, request: GccBundledPlannerRequest, capturedModel: ByteArray,
+    internal fun captureOwned(work: GccBundledHostWorkTracker, ownedRun: LinuxDescriptor, controlName: String,
+        expectedControl: LinuxFileIdentity, request: GccBundledPlannerRequest, capturedModel: () -> ByteArray,
         maximumStdoutBytes: Int, maximumStderrBytes: Int, hostBudgetBytes: Long,
-        deadline: ContainedCommandOperationDeadline, stageHook: (String) -> Unit = {}): GccBundledCapturedPlannerOutput {
-        deadline.requireCurrent()
-        val allowance = deadline.remainingMillis(Long.MAX_VALUE)
-        val owned = duplicateOwnedDirectory(run)
-        return work.run("planner output capture", allowance, owned) { context ->
-            capture(owned, controlName, expectedControl, request, capturedModel, maximumStdoutBytes, maximumStderrBytes,
-                GccBundledHostMemoryBudget(hostBudgetBytes)) { stage ->
+        deadline: ContainedCommandOperationDeadline, stageHook: (String) -> Unit = {}): GccBundledCapturedPlannerOutput =
+        work.run("planner output capture", { deadline.remainingMillis(Long.MAX_VALUE) }, ownedRun) { context ->
+            captureMetered(ownedRun, controlName, expectedControl, request, capturedModel, maximumStdoutBytes,
+                maximumStderrBytes, GccBundledHostMemoryBudget(hostBudgetBytes)) { stage ->
                 context.requireCurrent(stage)
                 deadline.requireCurrent()
                 stageHook(stage)
             }
         }
-    }
 
     internal fun capture(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
         request: GccBundledPlannerRequest, capturedModel: ByteArray,
         maximumStdoutBytes: Int, maximumStderrBytes: Int, budget: GccBundledHostMemoryBudget,
+        unmetered: (String) -> Unit): GccBundledCapturedPlannerOutput =
+        captureMetered(run, controlName, expectedControl, request, { capturedModel }, maximumStdoutBytes, maximumStderrBytes,
+            budget, unmetered)
+
+    private fun captureMetered(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
+        request: GccBundledPlannerRequest, copyCapturedModel: () -> ByteArray,
+        maximumStdoutBytes: Int, maximumStderrBytes: Int, budget: GccBundledHostMemoryBudget,
         unmetered: (String) -> Unit): GccBundledCapturedPlannerOutput {
         val checkpoint: (String) -> Unit = { stage -> budget.requireWithinAdmission(stage); unmetered(stage) }
         checkpoint("before planner output capture")
+        budget.admit("captured model copy and assessment", retainedWithAssessment(request.modelBytes.toLong()))
+        val capturedModel = copyCapturedModel()
+        require(capturedModel.size == request.modelBytes) { "captured model differs from its authenticated size" }
         require(controlName.matches(Regex("control-[a-f0-9]{64}")))
         require(maximumStdoutBytes.toLong() in 0..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES &&
             maximumStderrBytes.toLong() in 0..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES)
@@ -89,15 +97,17 @@ internal object GccBundledPlannerOutputCapture {
                     }
                 }
                 verifyDirectories()
+                // Each retained buffer and its assessment allowance are admitted from the pinned size before allocation.
                 val files = GccBoundExportFiles.admitting(request.maximumPlanBytes.toLong() + METADATA_BYTES + maximumStdoutBytes + maximumStderrBytes,
-                    { bytes -> budget.admit("planner output file read", bytes) }) { checkpoint("reading planner output file") }
+                    { bytes, retained ->
+                        if (retained) budget.admit("planner output file read and assessment", retainedWithAssessment(bytes))
+                        else budget.admit("planner log digest buffer", bytes)
+                    }) { checkpoint("reading planner output file") }
                 val plan = files.read(reports, "module_plan.json", request.maximumPlanBytes)
                 val metadata = files.read(reports, "planner-output.json", METADATA_BYTES)
                 val (stdoutBytes, stdoutSha256) = files.digest(reports, "contained-command.stdout", maximumStdoutBytes)
                 val (stderrBytes, stderrSha256) = files.digest(reports, "contained-command.stderr", maximumStderrBytes)
                 checkpoint("before planner assessment")
-                budget.admit("planner assessment", Math.multiplyExact(ASSESSMENT_ALLOCATION_PER_INPUT_BYTE,
-                    capturedModel.size.toLong() + plan.size + metadata.size))
                 val assessed = GccBundledPlannerOutputAssessment.assess(request, capturedModel, plan, metadata, checkpoint)
                 files.verify()
                 verifyDirectories()
@@ -116,6 +126,9 @@ internal object GccBundledPlannerOutputCapture {
             }
         }
     }
+
+    private fun retainedWithAssessment(bytes: Long): Long =
+        Math.multiplyExact(bytes, 1 + ASSESSMENT_ALLOCATION_PER_INPUT_BYTE)
 
     private fun requirePrivateDirectory(identity: LinuxFileIdentity, parent: LinuxFileIdentity) {
         require(identity.isDirectory && !identity.isSymbolicLink && identity.mode.permissions == 448 &&

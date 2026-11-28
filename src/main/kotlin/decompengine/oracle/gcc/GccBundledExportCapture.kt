@@ -252,14 +252,14 @@ private fun requireInvocation(state: ByteArray, artifacts: List<GccCompilerEngin
 
 internal class GccBoundExportFiles private constructor(
     private val maximumBytes: Long,
-    private val admitRetainedBytes: (Long) -> Unit,
+    private val admitRetainedBytes: (Long, Boolean) -> Unit,
     private val checkpoint: () -> Unit,
 ) {
-    constructor(maximumBytes: Long, checkpoint: () -> Unit = {}) : this(maximumBytes, {}, checkpoint)
+    constructor(maximumBytes: Long, checkpoint: () -> Unit = {}) : this(maximumBytes, { _, _ -> }, checkpoint)
 
     companion object {
-        /** [admitRetainedBytes] sees each file's retained size, or one read buffer for a digest, before allocation. */
-        fun admitting(maximumBytes: Long, admitRetainedBytes: (Long) -> Unit, checkpoint: () -> Unit) =
+        /** [admitRetainedBytes] sees each retained file's pinned size, or one digest read buffer, before allocation. */
+        fun admitting(maximumBytes: Long, admitRetainedBytes: (bytes: Long, retained: Boolean) -> Unit, checkpoint: () -> Unit) =
             GccBoundExportFiles(maximumBytes, admitRetainedBytes, checkpoint)
     }
 
@@ -397,7 +397,7 @@ internal class GccBoundExportFiles private constructor(
             val metadata = Files.readAttributes(path, "unix:size,lastModifiedTime,ctime")
             val size = metadata.getValue("size") as Long
             require(size in 0..maximumFileBytes.toLong() && size <= maximumBytes - bytes) { "GCC export capture exceeds its byte bound" }
-            admitRetainedBytes(if (retain) size else READ_REQUEST_BYTES.toLong())
+            admitRetainedBytes(if (retain) size else READ_REQUEST_BYTES.toLong(), retain)
             bytes = Math.addExact(bytes, size)
             LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(selected).use { readable ->
                 FileChannel.open(LinuxFilesystemSyscalls.stableDescriptorPath(readable.fd), StandardOpenOption.READ).use { channel ->
