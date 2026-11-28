@@ -73,10 +73,12 @@ class WebExplorationReportTest {
         for ((text, expected, version) in listOf(
             Triple("$v2}", "partial", 2),
             Triple("$v2,\"candidateCount\":1}", "partial", 2),
-            Triple("$v2,\"state\":7}", "invalid", 2),
-            Triple("$v2,\"state\":\"partial\"}", "invalid", 2),
-            Triple("$v2,\"state\":\"complete\"}", "invalid", 2),
-            Triple("$v2,\"candidateCount\":\"1\"}", "invalid", 2),
+            // `invalid` is not evidence of any producer version, so it never reports one.
+            Triple("$v2,\"state\":7}", "invalid", null),
+            Triple("$v2,\"state\":\"partial\"}", "invalid", null),
+            Triple("$v2,\"state\":\"complete\"}", "invalid", null),
+            Triple("$v2,\"candidateCount\":\"1\"}", "invalid", null),
+            Triple("$v2,\"unexpected\":1}", "invalid", null),
             Triple("""{"schema":"decomp-exploration","schemaVersion":"2"}""", "invalid", null),
             Triple("""{"schema":2,"schemaVersion":2}""", "invalid", null),
             Triple("""{"confidence":[]}""", "invalid", null),
@@ -99,12 +101,14 @@ class WebExplorationReportTest {
         val presented = captureWebExplorationPresentation(policy) { text.toByteArray() }
         assertEquals("available", presented.state)
         assertTrue(presented.downloadAvailable)
-        assertTrue(marker !in presented.root.toString())
-        assertTrue(marker in classifyWebExploration(text.toByteArray()).root.toString())
+        val row = assertNotNull(presented.rows).single()
+        assertEquals("one", row.candidate?.getValue("id")?.jsonPrimitive?.content)
+        assertTrue(marker !in presented.rows.toString())
+        assertTrue(marker !in presented.toString())
         for (bytes in listOf("{".toByteArray(), byteArrayOf(0xff.toByte()))) {
             val withheld = captureWebExplorationPresentation(policy) { bytes }
             assertEquals("invalid", withheld.state)
-            assertTrue(withheld.bytesCaptured && !withheld.downloadAvailable && withheld.root == null)
+            assertTrue(withheld.bytesCaptured && !withheld.downloadAvailable && withheld.rows == null)
         }
         val unavailable = captureWebExplorationPresentation(policy) { throw IllegalStateException("read unavailable") }
         assertEquals("unknown", unavailable.state)
@@ -143,6 +147,119 @@ class WebExplorationReportTest {
         val unavailable = captureWebExploration { throw IllegalStateException("read unavailable") }
         assertEquals("unknown", unavailable.state)
         assertEquals(false, unavailable.bytesCaptured)
+    }
+
+    private fun versioned(fields: Map<String, JsonElement> = emptyMap(), omit: Set<String> = emptySet()): String {
+        val root = Json.parseToJsonElement(valid).jsonObject.toMutableMap()
+        root["schema"] = JsonPrimitive("decomp-exploration"); root["schemaVersion"] = JsonPrimitive(2)
+        root["state"] = JsonPrimitive("complete")
+        root["candidates"] = Json.parseToJsonElement("""[{"id":"candidate_case","source":"SEED","args":[],"stdinHex":""}]""")
+        root["retainedInputs"] = Json.parseToJsonElement("""[{"id":"retained_case","args":["argument"],"stdinHex":"00ff"}]""")
+        root["retainedInputsOmitted"] = JsonPrimitive(0)
+        root.putAll(fields)
+        omit.forEach(root::remove)
+        return JsonObject(root).toString()
+    }
+
+    @Test fun `version two field types are checked identically in complete and partial reports`() {
+        assertEquals("available", report(versioned()).getValue("state").jsonPrimitive.content)
+        assertEquals("partial", report(versioned(omit = setOf("state", "observations"))).getValue("state").jsonPrimitive.content)
+        assertEquals(2, report(versioned(omit = setOf("state", "observations"))).getValue("producerSchemaVersion").jsonPrimitive.int)
+        val angrDiagnostics = Json.parseToJsonElement("""{"argvStates":1,"stdinStates":0,"argvSteps":2,"stdinSteps":0}""")
+        assertEquals("available", report(versioned(mapOf("angr" to angrDiagnostics))).getValue("state").jsonPrimitive.content)
+        val mistyped = listOf(
+            mapOf("angr" to JsonPrimitive(false)),
+            mapOf("angr" to JsonPrimitive("null")),
+            mapOf("retainedInputs" to Json.parseToJsonElement("""[{"id":7,"args":[],"stdinHex":""}]""")),
+            mapOf("retainedInputs" to Json.parseToJsonElement("""[{"id":"retained_case","args":[],"stdinHex":12}]""")),
+            mapOf("candidates" to Json.parseToJsonElement("""[{"id":7,"source":"SEED","args":[],"stdinHex":""}]""")),
+        )
+        for (fields in mistyped) {
+            // Complete: every field present. Partial: no `state`, one field absent, same mistyped value.
+            for (text in listOf(versioned(fields), versioned(fields, omit = setOf("state", "observations")))) {
+                assertTrue(text.contains("\"schemaVersion\":2"), text)
+                val result = report(text)
+                assertEquals("invalid", result.getValue("state").jsonPrimitive.content, text)
+                assertEquals(JsonNull, result.getValue("producerSchemaVersion"), text)
+                assertEquals(JsonNull, result.getValue("summary"), text)
+            }
+        }
+        // The legacy shape shares the same producer types.
+        assertEquals("invalid", report(valid.replace("\"angr\":null", "\"angr\":false")).getValue("state").jsonPrimitive.content)
+        assertEquals("invalid", report("""{"angr":false}""").getValue("state").jsonPrimitive.content)
+    }
+
+    @Test fun `available reports are always projectable for depth so rows are never silently empty`() {
+        val policy = WebRedactionPolicy.create(emptyMap(), emptyList(), emptyList())
+        val states = (WebReportProjection.MAXIMUM_REPORT_DEPTH - 3..WebReportProjection.MAXIMUM_REPORT_DEPTH + 3).map { levels ->
+            val nested = "{\"a\":".repeat(levels) + "null" + "}".repeat(levels)
+            val text = valid.replace("\"angr\":null", "\"angr\":$nested")
+            val presented = presentWebExploration(policy, text.toByteArray())
+            if (presented.state == "available") {
+                assertTrue(presented.downloadAvailable && presented.rows != null, "depth $levels")
+            } else {
+                assertEquals("invalid", presented.state, "depth $levels")
+                assertEquals("invalid", report(text).getValue("state").jsonPrimitive.content, "depth $levels")
+            }
+            presented.state
+        }
+        assertTrue("available" in states && "invalid" in states, states.toString())
+    }
+
+    @Test fun `an available report the projection cannot supply keeps its validated metrics and withholds rows`() {
+        val first = "configured-collision-credential-1a2b3c"
+        val second = "configured-collision-credential-4d5e6f"
+        val policy = WebRedactionPolicy.create(emptyMap(), listOf(first, second), emptyList())
+        // Two distinct legacy extension keys redact to one public key, so the projection withholds the whole object.
+        val text = valid.replace("\"baselineOutputSignatures\":0", "\"baselineOutputSignatures\":18446744073709551615")
+            .replace("{\"candidateCount\"", "{\"x-$first\":1,\"x-$second\":2,\"candidateCount\"")
+        assertEquals("[redacted]", Json.parseToJsonElement(WebReportProjection.project(false, text.toByteArray(), policy).decodeToString()).jsonPrimitive.content)
+        val presented = presentWebExploration(policy, text.toByteArray())
+        assertEquals("available", presented.state)
+        assertNull(presented.rows)
+        assertEquals(1, presented.candidateTotal)
+        assertEquals("18446744073709551615", presented.baselineOutputSignatures)
+        assertEquals("1", presented.summary?.getValue("candidateCount")?.jsonPrimitive?.content)
+    }
+
+    @Test fun `observations are paired by original identifiers even when distinct identifiers redact alike`() {
+        val first = "configured-attribution-credential-1a2b3c"
+        val second = "configured-attribution-credential-4d5e6f"
+        val policy = WebRedactionPolicy.create(emptyMap(), listOf(first, second), emptyList())
+        fun presented(candidates: String, observations: String, count: Int) = presentWebExploration(policy,
+            valid.replace("\"candidateCount\":1", "\"candidateCount\":$count").replace("\"candidates\":[{}]", "\"candidates\":$candidates")
+                .replace("\"observations\":[]", "\"observations\":$observations").toByteArray())
+        val unrelated = presented("""[{"id":"case-$first"}]""", """[{"candidateId":"case-$second","exitCode":7,"stdoutHex":"77726f6e67"}]""", 1)
+        val single = assertNotNull(unrelated.rows).single()
+        assertEquals("case-[redacted]", single.candidate?.getValue("id")?.jsonPrimitive?.content)
+        assertEquals(WebExplorationAttribution.UNMATCHED, single.attribution)
+        assertNull(single.observation); assertNull(single.stdout)
+        val both = assertNotNull(presented("""[{"id":"case-$first"},{"id":"case-$second"}]""",
+            """[{"candidateId":"case-$second","exitCode":7,"stdoutHex":"77726f6e67"}]""", 2).rows)
+        assertEquals(listOf(WebExplorationAttribution.UNMATCHED, WebExplorationAttribution.MATCHED), both.map { it.attribution })
+        assertEquals("7", both[1].observation?.getValue("exitCode")?.jsonPrimitive?.content)
+        assertEquals("wrong", both[1].stdout?.preview)
+        assertTrue(first !in both.toString() && second !in both.toString())
+    }
+
+    @Test fun `decoded program output is redacted before it is clipped`() {
+        val marker = "configured-stdout-credential-7f3a91"
+        val policy = WebRedactionPolicy.create(emptyMap(), listOf(marker), emptyList())
+        fun hex(text: String) = text.toByteArray().joinToString("") { "%02x".format(it.toInt() and 255) }
+        for ((output, expectedBytes) in listOf("token: $marker\n" to marker.length + 8,
+            "x".repeat(30) + marker to 30 + marker.length,
+            marker.substring(0, 10) + "\r" + marker.substring(10) to marker.length + 1)) {
+            val text = valid.replace("\"candidates\":[{}]", "\"candidates\":[{\"id\":\"case\"}]")
+                .replace("\"observations\":[]", "\"observations\":[{\"candidateId\":\"case\",\"exitCode\":0,\"stdoutHex\":\"${hex(output)}\"}]")
+            assertTrue(marker !in text)
+            val stdout = assertNotNull(assertNotNull(presentWebExploration(policy, text.toByteArray()).rows).single().stdout)
+            assertEquals(expectedBytes, stdout.byteCount)
+            assertTrue(marker.take(12) !in stdout.preview, stdout.toString())
+            assertTrue("[redacted]" in stdout.preview || stdout.preview.endsWith("[redac") || stdout.clipped, stdout.toString())
+        }
+        val empty = valid.replace("\"candidates\":[{}]", "\"candidates\":[{\"id\":\"case\"}]")
+            .replace("\"observations\":[]", "\"observations\":[{\"candidateId\":\"case\",\"exitCode\":0,\"stdoutHex\":\"\"}]")
+        assertEquals(WebExplorationOutput(0, "", false), presentWebExploration(policy, empty.toByteArray()).rows?.single()?.stdout)
     }
 
     private val failed = """{"schema":"decomp-exploration-failure","schemaVersion":1,"state":"partial","failure":{"phase":"expanded","candidateIndex":0,"kind":"timeout","code":"behavior-deadline-exceeded"},"samples":{"baselineInputs":1,"expandedInputs":1,"baselineObserved":1,"expandedObserved":0},"details":{"baselineInputs":[{"id":"seed","source":"SEED","args":[""],"stdinHex":"00"}],"expandedInputs":[{"id":"generated","source":"MUTATION","args":[],"stdinHex":""}],"baselineObservations":[{"candidateId":"seed","signature":"0::","exitCode":0,"stdoutHex":"","stderrHex":"","networkIsolated":false}],"expandedObservations":[]},"detailsOmitted":null,"coverage":null,"confidence":null}"""

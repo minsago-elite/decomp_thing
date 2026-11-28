@@ -697,20 +697,48 @@ state except `available`:
 | Evidence condition | `state` | Exploration adapter | Revision-validation adapter |
 | --- | --- | --- | --- |
 | Unavailable: bytes missing, unreadable or changed during the bounded read | `unknown` | no captured report bytes | no normal receipt, or receipt bytes not captured |
-| Incomplete: fewer observations than the declared scope | `partial` | absent producer fields, versioned failure records | missing required scope, diff or identity evidence |
-| Unsupported producer version | `unsupported` | declared `schema`/`schemaVersion` it does not support | unsupported producer schema |
-| Corrupt or inconsistent bytes | `invalid` | malformed JSON, count/array mismatch, non-decimal counts | malformed or inconsistent receipt evidence |
+| Incomplete: fewer observations than the declared scope | `partial` | absent producer fields, versioned failure records, a version-2 report without `state` | missing required scope, diff or identity evidence |
+| Unsupported producer version | `unsupported` | well-typed `schema`/`schemaVersion` it does not support | unsupported producer schema |
+| Corrupt or inconsistent bytes | `invalid` | malformed JSON, nesting deeper than 32, count/array mismatch, non-decimal counts, any present field of the wrong producer type, a mistyped `schema`/`schemaVersion`, a version-2 `state` other than `"complete"`, `"complete"` with missing fields, unknown version-2 fields | malformed or inconsistent receipt evidence |
 | Structurally checked observations | `available` | exact counts with `authority: observations` | checked normal receipt and result |
 
 `WebExplorationReportTest`, `WebExplorationPreparationReportTest`,
 `RecordedRepairValidationDiagnosticTest` and `RecordedRepairValidationCasesTest` cover each row.
 
+The exploration adapter recognizes success schema `decomp-exploration` version 2 by `schema` and
+`schemaVersion` alone; `state` is a payload value of that version, not part of recognition:
+
+- `state` absent: `partial`, even when every other field is present.
+- `state: "complete"` with every field: `available` when the fields are consistent.
+- `state: "complete"` with a missing field, or any other `state` value (another string, a number): `invalid`.
+- A `schema` that is not a JSON string or a `schemaVersion` that is not a JSON integer: `invalid`,
+  not `unsupported`. Only a well-typed declaration this adapter does not support is `unsupported`.
+- A field outside the version-2 set: `invalid`, in partial and complete reports alike.
+
+Every field a report carries must have the producer's JSON type, whether the report is complete
+or partial, and in the legacy unversioned shape as well as version 2. A present but mistyped field
+is `invalid`, never `partial`. For example: `angr` must be an object or `null`; counts are unsigned
+decimal integers; flags are literal booleans; version-2 candidate and retained-input `id` values are
+non-empty JSON strings; retained `stdinHex` is lowercase hexadecimal text. Presence and cross-field
+consistency (for example `candidateCount` equal to the candidate list length) are checked only
+when every field is present.
+
+The exploration classifier parses with the same nesting bound as the redacted report projection
+(`WebReportProjection.MAXIMUM_REPORT_DEPTH`, 32 levels). A report nested more deeply is `invalid`
+rather than `available`, so an available report cannot fail its JSON download for depth alone.
+
 The default legacy `GET /jobs/{J}` page uses the same exploration-state classifier on one bounded
 capture of the selected report. It distinguishes unknown, partial, unsupported and invalid data;
 only `available` data shows summary metrics and candidate rows. A legacy page's `available` label
 has the same limited meaning as the adapter state above: structure was checked, not acceptance or
-behavioral equivalence. Downloading the report performs a fresh bounded artifact read, separate
-from the capture used for classification. The legacy reconstruction-progress and repair-history
+behavioral equivalence. Summary metrics, including the baseline output-signature count, come from
+the validated captured bytes. Candidate rows come only from the redacted report projection that
+the JSON download serves. Candidates are paired with observations by their original identifiers,
+because distinct identifiers can redact to the same text. Recorded standard output is decoded from
+hexadecimal and the redaction policy is applied to the decoded text before it is clipped and
+escaped. When the projection cannot supply rows, the page shows summary metrics and states that
+candidate rows are withheld instead of showing an empty table. Downloading the report performs a
+fresh bounded artifact read, separate from the capture used for classification. The legacy reconstruction-progress and repair-history
 panels print recorded counts (completed/total units, attempted/maximum attempts, attempt index)
 as their exact canonical decimal values and label an absent or malformed count as not reported,
 never as zero.
@@ -740,6 +768,14 @@ A validation case page contains at most 20 rows.
 
 Each report carries its provenance: the `binding` (job, run, revision), `sourceArtifact`
 digest descriptor, `producerSchemaVersion`, `adapterVersion` and `limitations`.
+
+For exploration reports, `producerSchemaVersion` names a producer version only after the adapter
+validated the bytes as that version. It is `1` for a valid version-1 failure record (`partial`).
+It is `2` for a version-2 success report, both when the report is `available` and when it is
+`partial` because `state` is absent. It is `null` for the legacy unversioned shape, and for every
+`invalid`, `unsupported` and `unknown` result, including a malformed version-1 failure record or a
+malformed version-2 report. The SPA accepts version 2 as `available` with a summary or `partial`
+without one, and reads retained cases only from an `available` version-2 report.
 
 An exploration confidence score reports observed input/output breadth and active isolation,
 never universal equivalence. A graph root is an initial snapshot, not an accepted repair.

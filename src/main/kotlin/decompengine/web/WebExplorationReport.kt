@@ -5,6 +5,7 @@ import decompengine.exploration.EXPLORATION_PREPARATION_FAILURE_SCHEMA
 import decompengine.exploration.explorationFailureLimitation
 import decompengine.exploration.explorationPreparationFailureLimitation
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.*
 import java.security.MessageDigest
 
@@ -13,23 +14,46 @@ internal data class WebExplorationClassification(
     val producerSchemaVersion: Int?,
     val summary: JsonObject?,
     val limitation: String,
-    val root: JsonObject?,
     val bytesCaptured: Boolean,
     /** True only when the captured bytes pass the redacted report projection that the JSON download serves. */
     val downloadAvailable: Boolean = false,
+    /** Exact validated baseline count for the legacy page; the closed v1 exploration summary does not carry it. */
+    val baselineOutputSignatures: String? = null,
+    /** Legacy page rows for an `available` report; null when the redacted projection cannot supply them. */
+    val rows: List<WebExplorationRow>? = null,
+    val candidateTotal: Int = 0,
+)
+
+/** How a displayed candidate was paired with an observation; decided on the original, unredacted identifiers. */
+internal enum class WebExplorationAttribution { MATCHED, UNMATCHED, AMBIGUOUS_CANDIDATE, AMBIGUOUS_OBSERVATION }
+
+/** Program output prepared for display: decoded, redacted, then clipped. [byteCount] is the recorded output length. */
+internal data class WebExplorationOutput(val byteCount: Int, val preview: String, val clipped: Boolean)
+
+/** One legacy candidate row. Every field comes from the redacted projection; the pairing does not. */
+internal data class WebExplorationRow(
+    val candidate: JsonObject?,
+    val observation: JsonObject?,
+    val attribution: WebExplorationAttribution,
+    val stdout: WebExplorationOutput?,
 )
 
 /** Classifies the exact bounded capture without inventing attempt or artifact identity. */
-internal fun classifyWebExploration(bytes: ByteArray?): WebExplorationClassification {
+internal fun classifyWebExploration(bytes: ByteArray?): WebExplorationClassification = classifyCapturedExploration(bytes).first
+
+/** The classification and, for parsed bytes, the original root. The original root never leaves this file. */
+private fun classifyCapturedExploration(bytes: ByteArray?): Pair<WebExplorationClassification, JsonObject?> {
     var state = "unknown"
     var summary: JsonObject? = null
+    var baseline: String? = null
     var producerSchemaVersion: Int? = null
     var limitation = "Report bytes are missing, inaccessible or changed during the bounded read."
     var parsedRoot: JsonObject? = null
     if (bytes != null) {
         try {
             require(bytes.size <= 1_048_576)
-            val root = OracleJson.parse(bytes).jsonObject
+            // Parse with the projection's nesting bound: an `available` report must also be projectable for display.
+            val root = OracleJson.parse(bytes, StrictJsonLimits(maximumDepth = WebReportProjection.MAXIMUM_REPORT_DEPTH)).jsonObject
             parsedRoot = root
             // Declarations are closed syntax: schema and state are JSON strings, versions JSON numbers.
             fun declaredText(name: String): String? = root[name]?.let { require(it is JsonPrimitive && it.isString); it.content }
@@ -38,91 +62,75 @@ internal fun classifyWebExploration(bytes: ByteArray?): WebExplorationClassifica
             }
             val schema = declaredText("schema")
             val schemaVersion = declaredVersion("schemaVersion")
-            val legacyFields = setOf("candidateCount", "coverageIncreased", "baselineOutputSignatures", "expandedOutputSignatures",
-                "newOutputSignatures", "angr", "confidence", "candidates", "observations")
             // Recognize the producer by schema and version only; `state` is a payload value of a recognized version.
             val versionedSuccess = schema == "decomp-exploration" && schemaVersion == 2
-            val requiredFields = if (versionedSuccess)
-                legacyFields + setOf("schema", "schemaVersion", "state", "retainedInputs", "retainedInputsOmitted")
-            else legacyFields
+            val requiredFields = if (versionedSuccess) LEGACY_FIELDS + VERSIONED_FIELDS else LEGACY_FIELDS
             if (versionedSuccess) {
-                producerSchemaVersion = 2
                 // Only the producer's `complete` value is known; a missing state is incomplete, any other value malformed.
                 require(declaredText("state")?.let { it == "complete" } ?: true)
             }
             if (schema == EXPLORATION_FAILURE_SCHEMA || schema == EXPLORATION_PREPARATION_FAILURE_SCHEMA) {
                 if (schemaVersion == 1) {
-                    producerSchemaVersion = 1
                     limitation = if (schema == EXPLORATION_FAILURE_SCHEMA) explorationFailureLimitation(root)
                         else explorationPreparationFailureLimitation(root)
-                    state = "partial"
+                    // Report the producer version only once the failure record itself validated.
+                    state = "partial"; producerSchemaVersion = 1
                 } else {
                     state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
                 }
             } else if (("schema" in root || "schemaVersion" in root || "schema_version" in root) && !versionedSuccess) {
                 state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
-            } else if (!root.keys.containsAll(requiredFields)) {
-                // Present fields must still be well typed, and a producer that declares `complete` must carry every field.
-                checkPresentExplorationFields(root)
-                require(!versionedSuccess || "state" !in root)
-                state = "partial"; limitation = "Required producer fields are absent; no summary is inferred."
             } else {
-                if (versionedSuccess) {
-                    require(root.keys == requiredFields)
-                    val retained = root.getValue("retainedInputs").jsonArray
-                    val candidates = root.getValue("candidates").jsonArray
-                    require(retained.size <= 1000 && candidates.size + retained.size <= 1000)
-                    val candidateIds = candidates.map { candidate ->
-                        candidate.jsonObject.getValue("id").jsonPrimitive.content.also {
-                            require(it.isNotEmpty() && it.length <= 128)
-                        }
+                // One set of producer-type checks for every present field, whether or not the report is complete.
+                checkPresentExplorationFields(root, versionedSuccess)
+                if (versionedSuccess) require(root.keys.all { it in requiredFields })
+                if (!root.keys.containsAll(requiredFields)) {
+                    // A producer that declares `complete` must carry every field.
+                    require(!versionedSuccess || "state" !in root)
+                    state = "partial"; limitation = "Required producer fields are absent; no summary is inferred."
+                } else {
+                    if (versionedSuccess) {
+                        val retained = root.getValue("retainedInputs").jsonArray
+                        val candidates = root.getValue("candidates").jsonArray
+                        require(candidates.size + retained.size <= 1000)
+                        val candidateIds = candidates.map { it.jsonObject.getValue("id").jsonPrimitive.content }.toSet()
+                        retained.forEach { require("retained:${it.jsonObject.getValue("id").jsonPrimitive.content}" !in candidateIds) }
+                        require(retained.size.toULong() + count(root, "retainedInputsOmitted").toULong() <= 10_000u)
                     }
-                    require(candidateIds.distinct().size == candidateIds.size)
-                    val retainedIds = HashSet<String>()
-                    retained.forEach { item ->
-                        val input = item.jsonObject
-                        require(input.keys == setOf("id", "args", "stdinHex"))
-                        val id = input.getValue("id").jsonPrimitive.content
-                        require(id.isNotEmpty() && id.length <= 128 && retainedIds.add(id))
-                        require("retained:$id" !in candidateIds)
-                        val args = input.getValue("args").jsonArray
-                        require(args.size <= 256 && args.all { it.jsonPrimitive.isString && it.jsonPrimitive.content.length <= 8192 })
-                        val stdinHex = input.getValue("stdinHex").jsonPrimitive.content
-                        require(stdinHex.length % 2 == 0 && stdinHex.length <= 524_288 && stdinHex.matches(Regex("(?:[0-9a-f]{2})*")))
+                    val candidateCount = count(root, "candidateCount")
+                    require(candidateCount.toULong() == root.getValue("candidates").jsonArray.size.toULong())
+                    val newSignatures = root.getValue("newOutputSignatures").jsonArray
+                    val confidence = root.getValue("confidence").jsonObject
+                    require(count(confidence, "newOutputSignatureCount").toULong() == newSignatures.size.toULong())
+                    val score = confidence.getValue("score").jsonPrimitive
+                    summary = buildJsonObject {
+                        put("candidateCount", candidateCount)
+                        put("expandedOutputSignatures", count(root, "expandedOutputSignatures"))
+                        put("confidence", buildJsonObject {
+                            put("score", score)
+                            for (name in listOf("inputCount", "sourceCount", "outputSignatureCount", "newOutputSignatureCount")) put(name, count(confidence, name))
+                            for (name in listOf("sandboxed", "networkIsolated")) put(name, boolean(confidence, name))
+                        })
                     }
-                    val omitted = root.getValue("retainedInputsOmitted").jsonPrimitive
-                    val omittedCount = omitted.intOrNull
-                    require(!omitted.isString && omittedCount?.let { it in 0..10_000 } == true)
-                    require(retained.size + requireNotNull(omittedCount) <= 10_000)
+                    baseline = count(root, "baselineOutputSignatures")
+                    state = "available"; limitation = "Observed sample breadth and producer-reported isolation are not proof of equivalence or independent containment verification."
                 }
-                val candidateCount = count(root, "candidateCount")
-                require(candidateCount.toULong() == root.getValue("candidates").jsonArray.size.toULong())
-                root.getValue("observations").jsonArray
-                boolean(root, "coverageIncreased")
-                count(root, "baselineOutputSignatures")
-                val newSignatures = root.getValue("newOutputSignatures").jsonArray
-                newSignatures.forEach { require(it.jsonPrimitive.isString) }
-                val confidence = root.getValue("confidence").jsonObject
-                require(count(confidence, "newOutputSignatureCount").toULong() == newSignatures.size.toULong())
-                val score = confidence.getValue("score").jsonPrimitive
-                require(!score.isString && score.doubleOrNull?.let { it.isFinite() && it in 0.0..1.0 } == true)
-                summary = buildJsonObject {
-                    put("candidateCount", candidateCount)
-                    put("expandedOutputSignatures", count(root, "expandedOutputSignatures"))
-                    put("confidence", buildJsonObject {
-                        put("score", score)
-                        for (name in listOf("inputCount", "sourceCount", "outputSignatureCount", "newOutputSignatureCount")) put(name, count(confidence, name))
-                        for (name in listOf("sandboxed", "networkIsolated")) put(name, boolean(confidence, name))
-                    })
-                }
-                state = "available"; limitation = "Observed sample breadth and producer-reported isolation are not proof of equivalence or independent containment verification."
+                if (versionedSuccess) producerSchemaVersion = 2
             }
         } catch (_: Exception) {
-            state = "invalid"; summary = null; limitation = "Report bytes are malformed or exceed this adapter's structural limits."
+            // Malformed bytes are not evidence of any producer version, so `invalid` never reports one.
+            state = "invalid"; summary = null; baseline = null; producerSchemaVersion = null
+            limitation = "Report bytes are malformed or exceed this adapter's structural limits."
         }
     }
-    return WebExplorationClassification(state, producerSchemaVersion, summary, limitation, parsedRoot, bytes != null)
+    return WebExplorationClassification(state, producerSchemaVersion, summary, limitation, bytes != null,
+        baselineOutputSignatures = baseline) to parsedRoot
 }
+
+private val LEGACY_FIELDS = setOf("candidateCount", "coverageIncreased", "baselineOutputSignatures", "expandedOutputSignatures",
+    "newOutputSignatures", "angr", "confidence", "candidates", "observations")
+private val VERSIONED_FIELDS = setOf("schema", "schemaVersion", "state", "retainedInputs", "retainedInputsOmitted")
+private val LOWER_HEX = Regex("(?:[0-9a-f]{2})*")
 
 private fun count(objectValue: JsonObject, name: String): String {
     val value = objectValue.getValue(name).jsonPrimitive
@@ -136,15 +144,45 @@ private fun boolean(objectValue: JsonObject, name: String): Boolean {
     return requireNotNull(value.booleanOrNull)
 }
 
-/** A partial report withholds its summary, but any field it does carry must have the producer's JSON type. */
-private fun checkPresentExplorationFields(root: JsonObject) {
+private fun text(value: JsonElement): String {
+    require(value is JsonPrimitive && value.isString)
+    return value.content
+}
+
+private fun identity(value: JsonElement): String = text(value).also { require(it.isNotEmpty() && it.length <= 128) }
+
+/**
+ * The producer's JSON type for every field a report carries. A partial report withholds its summary, but a field it
+ * does carry is checked exactly as in a complete one; only presence and cross-field consistency are complete-only.
+ */
+private fun checkPresentExplorationFields(root: JsonObject, versioned: Boolean) {
     for (name in listOf("candidateCount", "baselineOutputSignatures", "expandedOutputSignatures")) if (name in root) count(root, name)
     if ("coverageIncreased" in root) boolean(root, "coverageIncreased")
-    root["newOutputSignatures"]?.let { values -> values.jsonArray.forEach { require(it.jsonPrimitive.isString) } }
-    root["candidates"]?.jsonArray
+    root["newOutputSignatures"]?.let { values -> values.jsonArray.forEach(::text) }
+    // The producer writes angr diagnostics as an object, or null when angr did not run.
+    root["angr"]?.let { require(it is JsonObject || it is JsonNull) }
+    root["candidates"]?.jsonArray?.let { candidates ->
+        // Versioned candidates carry distinct non-empty string identities; legacy rows stay display-tolerant.
+        if (versioned) {
+            val ids = candidates.map { identity(it.jsonObject.getValue("id")) }
+            require(ids.distinct().size == ids.size)
+        }
+    }
     root["observations"]?.jsonArray
-    root["retainedInputs"]?.jsonArray
-    root["retainedInputsOmitted"]?.let { count(root, "retainedInputsOmitted") }
+    root["retainedInputs"]?.jsonArray?.let { retained ->
+        require(retained.size <= 1000)
+        val ids = HashSet<String>()
+        retained.forEach { item ->
+            val input = item.jsonObject
+            require(input.keys == setOf("id", "args", "stdinHex"))
+            require(ids.add(identity(input.getValue("id"))))
+            val args = input.getValue("args").jsonArray
+            require(args.size <= 256 && args.all { text(it).length <= 8192 })
+            val stdinHex = text(input.getValue("stdinHex"))
+            require(stdinHex.length <= 524_288 && stdinHex.matches(LOWER_HEX))
+        }
+    }
+    if ("retainedInputsOmitted" in root) require(count(root, "retainedInputsOmitted").toULong() <= 10_000u)
     root["confidence"]?.jsonObject?.let { confidence ->
         confidence["score"]?.let { score ->
             require(score is JsonPrimitive && !score.isString && score.doubleOrNull?.let { it.isFinite() && it in 0.0..1.0 } == true)
@@ -160,21 +198,86 @@ internal fun captureWebExploration(read: () -> ByteArray): WebExplorationClassif
     return classifyWebExploration(bytes)
 }
 
-/**
- * Legacy HTML capture: classify the exact bytes, then display rows only from the redacted report projection that
- * the JSON download serves. When that projection is unavailable the rows and the download link are withheld.
- */
+/** Legacy HTML capture: one bounded read, then [presentWebExploration]. */
 internal fun captureWebExplorationPresentation(policy: WebRedactionPolicy, read: () -> ByteArray): WebExplorationClassification {
     val bytes = try { read() } catch (_: Exception) { null }
-    val classification = classifyWebExploration(bytes)
+    return presentWebExploration(policy, bytes)
+}
+
+/**
+ * Classifies the exact bytes, then builds display rows only from the redacted projection that the JSON download
+ * serves. Candidates are paired with observations by their original identifiers, because distinct identifiers can
+ * redact to the same text; the rows then carry only projected fields. Without a projection the rows are withheld.
+ */
+internal fun presentWebExploration(policy: WebRedactionPolicy, bytes: ByteArray?): WebExplorationClassification {
+    val (classification, original) = classifyCapturedExploration(bytes)
     val projected = bytes?.let {
         try { WebReportProjection.project(false, it, policy) } catch (failure: Exception) {
             if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
             null
         }
     }
-    val root = projected?.let { runCatching { OracleJson.parse(it) as? JsonObject }.getOrNull() }
-    return classification.copy(root = root, downloadAvailable = projected != null)
+    val rows = if (classification.state == "available" && original != null && projected != null)
+        explorationRows(original, projected, policy) else null
+    return classification.copy(downloadAvailable = projected != null, rows = rows,
+        candidateTotal = (original?.get("candidates") as? JsonArray)?.size ?: 0)
+}
+
+private const val DISPLAYED_CANDIDATES = 50
+private const val STDOUT_PREVIEW_CHARACTERS = 48
+
+private fun explorationRows(original: JsonObject, projectedBytes: ByteArray, policy: WebRedactionPolicy): List<WebExplorationRow>? {
+    val projected = try {
+        OracleJson.parse(projectedBytes, WebReportProjection.reportLimits(WebReportProjection.MAXIMUM_REPORT_BYTES.toInt())) as? JsonObject
+    } catch (failure: Exception) {
+        if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+        null
+    } ?: return null
+    val originalCandidates = original["candidates"] as? JsonArray ?: return null
+    val originalObservations = original["observations"] as? JsonArray ?: return null
+    val candidates = projected["candidates"] as? JsonArray ?: return null
+    val observations = projected["observations"] as? JsonArray ?: return null
+    // The projection rewrites values in place, so equal positions pair an original row with its redacted row.
+    if (candidates.size != originalCandidates.size || observations.size != originalObservations.size) return null
+    fun originalId(element: JsonElement, name: String): String? =
+        ((element as? JsonObject)?.get(name) as? JsonPrimitive)?.takeIf { it.isString && it.content.isNotEmpty() }?.content
+    val candidateIdCounts = originalCandidates.mapNotNull { originalId(it, "id") }.groupingBy { it }.eachCount()
+    val observationIndexes = originalObservations.withIndex()
+        .mapNotNull { (index, element) -> originalId(element, "candidateId")?.let { it to index } }
+        .groupBy({ it.first }, { it.second })
+    return originalCandidates.take(DISPLAYED_CANDIDATES).mapIndexed { index, element ->
+        val id = originalId(element, "id")
+        val matches = id?.let { observationIndexes[it] }.orEmpty()
+        val attribution = when {
+            id == null -> WebExplorationAttribution.UNMATCHED
+            candidateIdCounts.getValue(id) > 1 -> WebExplorationAttribution.AMBIGUOUS_CANDIDATE
+            matches.isEmpty() -> WebExplorationAttribution.UNMATCHED
+            matches.size > 1 -> WebExplorationAttribution.AMBIGUOUS_OBSERVATION
+            else -> WebExplorationAttribution.MATCHED
+        }
+        val observation = if (attribution == WebExplorationAttribution.MATCHED) observations[matches.single()] as? JsonObject else null
+        WebExplorationRow(candidates[index] as? JsonObject, observation, attribution,
+            observation?.let { explorationOutput(it["stdoutHex"], policy) })
+    }
+}
+
+private val DISPLAY_HEX = Regex("(?:[0-9a-fA-F]{2})*")
+private val DISPLAY_CONTROL = Regex("[\\p{Cntrl}&&[^\\t]]")
+
+/**
+ * Hexadecimal output is only an encoding: a configured value the program printed is plaintext once decoded, so the
+ * policy applies to the decoded text, again after control characters are mapped, and only then is the text clipped.
+ */
+private fun explorationOutput(value: JsonElement?, policy: WebRedactionPolicy): WebExplorationOutput? {
+    val hex = (value as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+    if (!hex.matches(DISPLAY_HEX)) return null
+    val bytes = ByteArray(hex.length / 2) { ((Character.digit(hex[it * 2], 16) shl 4) or Character.digit(hex[it * 2 + 1], 16)).toByte() }
+    val decoded = policy.text(bytes.decodeToString())
+    // Removing `\r` can join two halves of a configured value, so the mapped text is redacted again.
+    val display = policy.text(decoded.replace("\n", "↵").replace("\r", "").replace(DISPLAY_CONTROL, "·"))
+    if (display.length <= STDOUT_PREVIEW_CHARACTERS) return WebExplorationOutput(bytes.size, display, false)
+    val end = if (display[STDOUT_PREVIEW_CHARACTERS - 1].isHighSurrogate()) STDOUT_PREVIEW_CHARACTERS - 1 else STDOUT_PREVIEW_CHARACTERS
+    return WebExplorationOutput(bytes.size, display.substring(0, end), true)
 }
 
 /** Version-one presentation of legacy success and versioned failure records; never acceptance evidence. */

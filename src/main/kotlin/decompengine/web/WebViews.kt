@@ -362,7 +362,7 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
                 </ol>
               </section>
             </div>
-            ${renderExploration(job, reports, explorationClassification ?: classifyWebExploration(
+            ${renderExploration(job, reports, explorationClassification ?: presentWebExploration(WebRedactionPolicy.BASELINE,
                 explorationReport?.toString()?.encodeToByteArray()))}
             ${runCatching { renderReconstructionProgress(reconstructionProgress) }.getOrElse { renderReconstructionProgress(null) }}
             ${renderAgentProgress(progressSnapshot)}
@@ -530,7 +530,7 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
     else ""
     val heading = "<div class=\"section-heading compact\"><span class=\"step\">03</span><div><p class=\"kicker\">Evidence</p><h2>Exploration report</h2></div>$download</div>"
     val downloadNote = if (classification.bytesCaptured && !classification.downloadAvailable)
-        "<p>The JSON download is withheld because these report bytes cannot pass the redacted report projection.</p>" else ""
+        "<p>The JSON download is unavailable because this report could not be safely redacted.</p>" else ""
     if (classification.state != "available") {
         val (stateLabel, wording) = when (classification.state) {
             "unknown" -> "unknown" to "Report bytes are unavailable, inaccessible, or changed during the bounded read."
@@ -552,11 +552,9 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
     val scorePrimitive = confidence?.get("score") as? JsonPrimitive
     val score = scorePrimitive?.takeUnless { it.isString }?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
     val scoreText = scorePrimitive?.content ?: "Not reported"
-    fun count(objectValue: JsonObject?, name: String): String {
-        val value = objectValue?.get(name) as? JsonPrimitive ?: return "Not reported"
-        return value.content.takeIf { it.matches(Regex("0|[1-9][0-9]{0,19}")) && it.toULongOrNull() != null }
-            ?: "Not reported"
-    }
+    fun exact(value: String?): String =
+        value?.takeIf { it.matches(Regex("0|[1-9][0-9]{0,19}")) && it.toULongOrNull() != null } ?: "Not reported"
+    fun count(objectValue: JsonObject?, name: String): String = exact((objectValue?.get(name) as? JsonPrimitive)?.content)
     fun reportedBoolean(name: String): String = when ((confidence?.get(name) as? JsonPrimitive)?.booleanOrNull) {
         true -> "yes"
         false -> "no"
@@ -575,43 +573,42 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
         else args.mapNotNull { it.stringContentOrNull() }.joinToString(" ") { capped(it, 256) }
     } ?: "Not reported"
 
-    val candidates = classification.root?.get("candidates") as? JsonArray ?: JsonArray(emptyList())
-    val candidateObjects = candidates.map { it as? JsonObject }
-    val candidateIds = candidateObjects.mapNotNull { it?.get("id").stringContentOrNull() }.groupingBy { it }.eachCount()
-    val observations = (classification.root?.get("observations") as? JsonArray).orEmpty()
-    val observationGroups = observations.mapNotNull { element ->
-        val observation = element as? JsonObject ?: return@mapNotNull null
-        val id = observation["candidateId"].stringContentOrNull()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-        id to observation
-    }.groupBy({ it.first }, { it.second })
-    val rows = candidates.take(50).joinToString("") { element ->
-        val candidate = element as? JsonObject
-        val rawId = candidate?.get("id").stringContentOrNull()
-        val id = rawId?.takeIf { it.isNotEmpty() }?.let { capped(it, 128) } ?: "Not reported"
+    // Rows hold projected (redacted) fields only, already paired by the original identifiers.
+    val rows = classification.rows?.joinToString("") { row ->
+        val candidate = row.candidate
+        val id = candidate?.get("id").stringContentOrNull()?.takeIf { it.isNotEmpty() }?.let { capped(it, 128) } ?: "Not reported"
         val source = candidate?.get("source").stringContentOrNull()?.let { capped(it, 64) } ?: "Not reported"
         val sourceClass = when (source.lowercase()) {
             "angr", "mutation", "static_hint", "seed" -> source.lowercase()
             else -> "unknown"
         }
-        val observation = rawId?.takeIf { it.isNotEmpty() && candidateIds[it] == 1 }?.let { observationGroups[it]?.singleOrNull() }
-        val exitCode = (observation?.get("exitCode") as? JsonPrimitive)?.let { value ->
+        val exitCode = (row.observation?.get("exitCode") as? JsonPrimitive)?.let { value ->
             value.takeUnless { it.isString }?.intOrNull?.toString()
         } ?: "Not reported"
-        val output = observation?.get("stdoutHex").stringContentOrNull()?.let { hex ->
-            val encoded = hexBytes(hex, 48) ?: return@let "Not reported"
-            if (encoded.isEmpty()) "∅"
-            else {
-                val clipped = encoded.removeSuffix(" …").replace(" ", "")
-                clipped.hexPreview() + if (hex.length > 96) " …" else ""
-            }
-        } ?: if (rawId != null && candidateIds[rawId] != 1) "Not reported (ambiguous candidate id)" else "Not reported"
+        val output = row.stdout
+        val outputCell = when {
+            output != null && output.byteCount == 0 -> "<span aria-hidden=\"true\">∅</span><span class=\"sr-only\">empty output</span>"
+            output != null -> output.preview.escapeHtml() + if (output.clipped) " …" else ""
+            row.attribution == WebExplorationAttribution.AMBIGUOUS_CANDIDATE -> "Not reported (ambiguous candidate id)"
+            row.attribution == WebExplorationAttribution.AMBIGUOUS_OBSERVATION -> "Not reported (several observations)"
+            else -> "Not reported"
+        }
         val stdin = hexBytes(candidate?.get("stdinHex").stringContentOrNull(), 12)
             ?.let { if (it.isEmpty()) "—" else it } ?: "Not reported"
-        val outputCell = if (output == "∅") "<span aria-label=\"empty output\">∅</span>" else output.escapeHtml()
         "<tr><th scope=\"row\"><code>${id.escapeHtml()}</code></th><td><span class=\"source-tag $sourceClass\">${source.escapeHtml()}</span></td>" +
             "<td>${stringArray(candidate?.get("args")).escapeHtml()}</td><td><code>${stdin.escapeHtml()}</code></td>" +
             "<td>${exitCode.escapeHtml()}</td><td><code>$outputCell</code></td></tr>"
     }
+    val candidateRows = if (rows == null) {
+        // Classification checked the original bytes, but rows are shown only through the redacted projection.
+        val withheld = if (classification.downloadAvailable) "Candidate rows are withheld" else "Candidate rows and the JSON download are withheld"
+        "<p>$withheld because this report could not be safely redacted.</p>"
+    } else """
+        <div class="table-wrap" role="region" aria-labelledby="exploration-candidates-caption" tabindex="0">
+          <table class="exploration-table"><caption id="exploration-candidates-caption">Exploration candidates and recorded observations</caption><thead><tr><th scope="col">Case</th><th scope="col">Source</th><th scope="col">Arguments</th><th scope="col">stdin · hex</th><th scope="col">Exit</th><th scope="col">stdout</th></tr></thead><tbody>$rows</tbody></table>
+        </div>
+        ${if (classification.candidateTotal > classification.rows.orEmpty().size) "<p class=\"table-note\">Showing ${classification.rows.orEmpty().size} of ${classification.candidateTotal} candidates.${if (classification.downloadAvailable) " Download JSON for the full report." else ""}</p>" else ""}
+    """.trimIndent()
     return """
       <section class="panel evidence-panel">
         $heading
@@ -621,18 +618,14 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
         <div class="metric-grid">
           ${metric("Exploration heuristic", scoreText, "Uncalibrated", score)}
           ${metric("Candidates", count(summary, "candidateCount"), "Generated inputs")}
-          ${metric("Baseline output signatures", count(classification.root, "baselineOutputSignatures"), "Before exploration")}
+          ${metric("Baseline output signatures", exact(classification.baselineOutputSignatures), "Before exploration")}
           ${metric("Expanded output signatures", count(summary, "expandedOutputSignatures"), "After exploration")}
           ${metric("Reported inputs", count(confidence, "inputCount"), "Producer-reported")}
           ${metric("Reported sources", count(confidence, "sourceCount"), "Producer-reported")}
           ${metric("Reported output signatures", count(confidence, "outputSignatureCount"), "Producer-reported")}
           ${metric("Reported new output signatures", count(confidence, "newOutputSignatureCount"), "Producer-reported")}
         </div>
-        <div class="table-wrap" role="region" aria-label="Exploration candidate observations" tabindex="0">
-          <table class="exploration-table"><caption>Exploration candidates and recorded observations</caption><thead><tr><th scope="col">Case</th><th scope="col">Source</th><th scope="col">Arguments</th><th scope="col">stdin · hex</th><th scope="col">Exit</th><th scope="col">stdout</th></tr></thead><tbody>$rows</tbody></table>
-        </div>
-        ${if (candidates.size > 50) "<p class=\"table-note\">Showing 50 of ${candidates.size} candidates.${if (classification.downloadAvailable) " Download JSON for the full report." else ""}</p>" else ""}
-        $downloadNote
+        $candidateRows
       </section>
     """.trimIndent()
 }
@@ -1123,12 +1116,6 @@ $body
 private fun JsonObject.text(name: String): String = get(name)?.jsonPrimitive?.contentOrNull.orEmpty()
 private fun JsonElement?.stringContentOrNull(): String? = (this as? JsonPrimitive)?.takeIf { it.isString }?.content
 
-private fun String.hexPreview(): String = runCatching {
-    if (length % 2 != 0) return@runCatching this
-    chunked(2).map { it.toInt(16).toByte() }.toByteArray().decodeToString()
-        .replace("\n", "↵").replace("\r", "").replace(Regex("[\\p{Cntrl}&&[^\\t]]"), "·").take(48)
-}.getOrDefault(take(48))
-
 private fun String.escapeHtml(): String =
     replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
 
@@ -1246,6 +1233,7 @@ h1 em { color: var(--acid); font-style: normal; }
 .spinner { width: 12px; height: 12px; border: 2px solid rgba(0,0,0,.25); border-top-color: #111; border-radius: 50%; animation: spin .8s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .error-shell { display: grid; place-items: start; align-content: center; min-height: calc(100vh - 150px); max-width: 760px; }.error-shell h1 { font-size: 58px; margin: 5px 0 20px; }.error-shell > p:not(.error-code) { color: var(--muted); font-size: 17px; }.error-code { color: var(--danger); font: 700 12px ui-monospace, monospace; }.error-shell .button { margin-top: 20px; }
 footer { display: flex; justify-content: space-between; padding-block: 32px; margin-top: 60px; border-top: 1px solid var(--line); color: var(--muted); font: 700 10px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .history-panel code { overflow-wrap: anywhere; word-break: break-word; }.history-item > div { min-width: 0; }.history-item .history-title { flex-wrap: wrap; gap: 8px; }
 @media (max-width: 820px) { .dashboard-grid, .job-grid { grid-template-columns: 1fr; }.hero { padding-top: 58px; }.job-header { align-items: flex-start; flex-direction: column; }.job-actions { align-items: flex-start; flex-direction: column; }.metric-grid { grid-template-columns: 1fr 1fr; }.artifact-list { grid-template-columns: 1fr; }.build-label { display: none; } }
 @media (max-width: 520px) { .shell { width: min(100% - 24px, 1180px); }.upload-panel, .queue-panel, .overview-panel, .workflow-panel, .evidence-panel, .history-panel, .artifacts-panel, .source-tree-panel { padding: 19px; }.metric-grid, .metadata-grid { grid-template-columns: 1fr; }.datum:nth-child(odd) { padding-right: 0; }h1 { font-size: 3rem; }.job-row .status-pill { display: none; }.source-heading { align-items: flex-start; flex-direction: column; } }

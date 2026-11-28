@@ -87,6 +87,16 @@ The producer retains at most 1,000 rows and 256 KiB of estimated display data; t
 `RETAINED_REGRESSION` source, and continues to expose only a deliberate read of the
 same attempt-bound artifact. This is input inspection, not execution or validation.
 
+The web adapter recognizes version 2 by `schema` and `schemaVersion` alone. A report
+without `state` is `partial` with `producerSchemaVersion: 2` and no summary, and the SPA
+does not offer retained cases for it. `state: "complete"` with every field and consistent
+values is `available`. Any other `state`, `"complete"` with a missing field, an unknown
+field, a mistyped `schema`/`schemaVersion` or any present field of the wrong producer
+type (for example `angr: false`, or a numeric retained-input `id`) is `invalid` with
+`producerSchemaVersion: null`. Partial and complete reports share the same per-field
+type checks. [The web API reference](web-api.md#evidence-and-revision-adapters) lists
+the full state mapping.
+
 When candidate observation throws an exception, automatic exploration can retain
 `schema: "decomp-exploration-failure"`, `schemaVersion: 1` at its existing
 `exploration.json` path. The original exception is rethrown immediately: no later

@@ -1232,7 +1232,7 @@ class UploadServer(
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private enum class LegacyJsonReport(val filename: String) {
-        EXPLORATION("exploration.json"), REPAIR_HISTORY("repair_history.json"),
+        REPAIR_HISTORY("repair_history.json"),
         RECONSTRUCTION_PROGRESS("reconstruction_progress.json"),
     }
 
