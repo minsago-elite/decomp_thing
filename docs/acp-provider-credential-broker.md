@@ -161,6 +161,12 @@ within the policy bounds. Every byte of the head, including the final LF, counts
   one layer further and scanned again. That covers function-call and MCP `arguments` and MCP `output`, in
   deltas, in `*.done` events and in completed items, including the final text and arguments in
   `response.completed`.
+- The nested layer is scanned as the parser streams, so every decoded name, string and number is matched,
+  including duplicate keys. Its bound is the nested text's UTF-8 byte length, not its character count, and must
+  stay within the policy bound. Text that does not start like a JSON object or array, or is not well-formed JSON,
+  is a plain string. A nested document that is JSON but exceeds the byte, depth, token, name, string or number
+  limits cannot be verified, so it is refused (`MALFORMED_RESPONSE` for a response, `REQUEST_REFUSED` for a
+  request); it is never skipped. Request bodies get the same nested scan.
 - Deltas are joined as a consumer joins them, per event type and `item_id`, and for content deltas per
   (`item_id`, `content_index`) or (`item_id`, `summary_index`). When those keys are absent the deltas join in
   arrival order, because Codex emits text deltas without indexes. All deltas are also joined in arrival order.

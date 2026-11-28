@@ -254,6 +254,15 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, body = "[]") }
         refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, body = """{"a":1,"a":2}""") }
         refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, body = "") }
+        // A nested request document beyond the depth bound cannot be verified either.
+        refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) {
+            channelRequest(it, capability, body = "{\"model\":\"gpt-6\",\"input\":\"" + "[".repeat(70) + "]".repeat(70) + "\"}")
+        }
+        // Non-ASCII nested request JSON is decoded too: an escaped capability beside it is still found.
+        refused(AcpProviderBrokerFailureKind.SECRET_EXPOSURE) {
+            val inner = "{\\\"city\\\":\\\"$NON_ASCII\\\",\\\"q\\\":\\\"" + capabilityHex.map { "\\\\u%04x".format(it.code) }.joinToString("") + "\\\"}"
+            channelRequest(it, capability, body = "{\"model\":\"gpt-6\",\"input\":\"$inner\"}")
+        }
         // The capability and the credential cannot travel upstream, even behind JSON escapes or in a name.
         val escaped = capabilityHex.map { "\\u%04x".format(it.code) }.joinToString("")
         listOf(
@@ -384,6 +393,13 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             "escaped secret in a completed MCP result" to
                 event("{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"mcp_call\",\"id\":\"mcp_1\"," +
                     "\"arguments\":\"{}\",\"output\":\"${jsonString(escapedArguments)}\"}}"),
+            // Non-ASCII text is longer in UTF-8 than in characters, so the nested bound must count bytes.
+            "escaped secret beside non-ASCII text in the final arguments" to
+                event("{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"" +
+                    jsonString("{\"city\":\"$NON_ASCII\",\"query\":\"${escaped(token)}\"}") + "\"}"),
+            "escaped secret beside non-ASCII text split across arguments deltas" to
+                argumentsDelta("fc_1", "{\"city\":\"$NON_ASCII\",\"query\":\"" + escaped(token).take(24)) +
+                argumentsDelta("fc_1", escaped(token).drop(24) + "\"}"),
             "escaped secret in the completed response's final text" to
                 event("{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\"," +
                     "\"text\":\"${escaped(token)}\"}]}]}}"),
@@ -396,6 +412,8 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         }
         // The same shapes without a secret pass unchanged, including JSON arguments and unknown event types.
         val benign = argumentsDelta("fc_1", "{\"query\":") + argumentsDelta("fc_1", "\"a\\u0041\"}") +
+            argumentsDelta("fc_2", "{\"city\":\"$NON_ASCII\",\"note\":\"${NON_ASCII.repeat(40)}\"}") +
+            textDelta("{name} is a placeholder, not JSON") +
             event("{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"query\\\":\\\"aA\\\"}\"}") +
             event("{\"type\":\"response.vendor_extension\",\"anything\":[1,{\"x\":\"y\"}]}")
         val passing = server { sseResponse(benign) }
@@ -412,6 +430,9 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             event("{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"arguments\":{}}}"),
             event("{\"type\":\"response.completed\"}"),
             event("{\"type\":7}"),
+            // A nested document that is JSON but beyond the depth bound cannot be verified, so it is refused.
+            event("{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"" +
+                "[".repeat(70) + "]".repeat(70) + "\"}"),
         ).forEach { events ->
             val server = server { sseResponse(events) }
             val broker = broker(connector = connector(server))
@@ -814,6 +835,8 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
 
     companion object {
         const val ACCOUNT_ID = "acct_fixture-1"
+        /** Tokyo in kanji: six UTF-8 bytes for two characters. */
+        const val NON_ASCII = "\u6771\u4eac"
         const val BODY = """{"model":"gpt-6","input":[{"role":"user","content":"hello"}],"stream":true,"store":false}"""
     }
 }

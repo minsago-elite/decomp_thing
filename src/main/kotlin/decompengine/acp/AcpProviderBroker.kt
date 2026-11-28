@@ -2,6 +2,11 @@ package decompengine.acp
 
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
+import com.fasterxml.jackson.core.JsonFactory
+import com.fasterxml.jackson.core.JsonProcessingException
+import com.fasterxml.jackson.core.JsonToken
+import com.fasterxml.jackson.core.StreamReadConstraints
+import com.fasterxml.jackson.core.exc.StreamConstraintsException
 import decompengine.builtin.provider.parseProviderObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -415,7 +420,8 @@ internal class AcpProviderBroker private constructor(
         }
         // Decoded names and strings, so JSON escapes cannot carry the capability or a credential upstream.
         val secrets = synchronized(lock) { liveSecrets(credential) }
-        if (exposesSecret(document, secrets, NESTED_JSON_LAYERS)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+        val nested = NestedJsonBound(policy.bounds.maximumRequestBytes, AcpProviderBrokerFailureKind.REQUEST_REFUSED)
+        if (exposesSecret(document, secrets, NESTED_JSON_LAYERS, nested)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
         // #960 adds the model, token and budget checks here.
         return body
     }
@@ -594,26 +600,63 @@ private fun refuse(kind: AcpProviderBrokerFailureKind): Nothing = throw AcpProvi
 
 /**
  * Whether a decoded JSON value carries a secret in any name or string. A string that is itself a JSON object or
- * array is decoded and scanned again, up to [nestedLayers] more layers.
+ * array is scanned once more as a nested document ([nestedDocumentExposes]) while [nestedLayers] remain.
  */
-private fun exposesSecret(value: JsonElement, secrets: List<String>, nestedLayers: Int): Boolean = when (value) {
-    is JsonObject -> value.any { (name, child) ->
-        secrets.any { name.contains(it, ignoreCase = true) } || exposesSecret(child, secrets, nestedLayers)
+private fun exposesSecret(value: JsonElement, secrets: List<String>, nestedLayers: Int, bound: NestedJsonBound): Boolean =
+    when (value) {
+        is JsonObject -> value.any { (name, child) ->
+            secrets.any { name.contains(it, ignoreCase = true) } || exposesSecret(child, secrets, nestedLayers, bound)
+        }
+        is JsonArray -> value.any { exposesSecret(it, secrets, nestedLayers, bound) }
+        is JsonPrimitive -> secrets.any { value.content.contains(it, ignoreCase = true) } ||
+            value.isString && nestedLayers > 0 && nestedDocumentExposes(value.content, secrets, bound)
     }
-    is JsonArray -> value.any { exposesSecret(it, secrets, nestedLayers) }
-    is JsonPrimitive -> secrets.any { value.content.contains(it, ignoreCase = true) } ||
-        value.isString && nestedLayers > 0 && nestedJson(value.content)?.let { exposesSecret(it, secrets, nestedLayers - 1) } == true
-}
 
-/** A string's content as strict JSON when it is a JSON object or array, otherwise null. */
-private fun nestedJson(text: String): JsonElement? {
+/** A nested document's bound in UTF-8 bytes, and the refusal when it is JSON but cannot be verified. */
+private class NestedJsonBound(val maximumBytes: Int, val unverifiable: AcpProviderBrokerFailureKind)
+
+/**
+ * Scans [text] as one nested JSON document when it is a JSON object or array. Every decoded field name, string and
+ * number is matched as the parser streams, so a duplicate key cannot hide a value, and anything decoded before a
+ * later syntax error is still matched.
+ *
+ * Text that does not start like a JSON object or array, or that is not well-formed JSON, is a plain string and
+ * has no nested document: false. A document whose UTF-8 size exceeds the policy bound, or that exceeds a depth,
+ * token, name, string or number limit, cannot be verified and refuses with [NestedJsonBound.unverifiable]; it is
+ * never skipped.
+ */
+private fun nestedDocumentExposes(text: String, secrets: List<String>, bound: NestedJsonBound): Boolean {
     val trimmed = text.trim()
-    if (trimmed.isEmpty() || trimmed[0] != '{' && trimmed[0] != '[') return null
+    if (trimmed.isEmpty() || trimmed[0] != '{' && trimmed[0] != '[') return false
+    // Bytes, not UTF-16 characters: non-ASCII text is longer in UTF-8 than its character count.
+    val document = trimmed.toByteArray(StandardCharsets.UTF_8)
+    if (document.size > bound.maximumBytes) refuse(bound.unverifiable)
+    val factory = JsonFactory.builder().streamReadConstraints(
+        StreamReadConstraints.builder().maxNestingDepth(64).maxDocumentLength(bound.maximumBytes.toLong())
+            .maxStringLength(bound.maximumBytes).maxNameLength(minOf(bound.maximumBytes, 8192)).maxNumberLength(128)
+            .maxTokenCount(100_000).build(),
+    ).build()
     return try {
-        // Wrapping keeps the strict parser (duplicate keys, depth and size bounds) for arrays as well as objects.
-        parseProviderObject("{\"v\":$trimmed}", trimmed.length + 8)["v"]
+        factory.createParser(document).use { parser ->
+            var exposed = false
+            while (!exposed) {
+                val token = parser.nextToken() ?: break
+                val value = when (token) {
+                    JsonToken.FIELD_NAME -> parser.currentName()
+                    JsonToken.VALUE_STRING, JsonToken.VALUE_NUMBER_INT, JsonToken.VALUE_NUMBER_FLOAT -> parser.text
+                    else -> null
+                }
+                exposed = value != null && secrets.any { value.contains(it, ignoreCase = true) }
+            }
+            exposed
+        }
+    } catch (_: StreamConstraintsException) {
+        refuse(bound.unverifiable)
+    } catch (_: JsonProcessingException) {
+        // Not well-formed JSON: a plain string, already matched as text by the caller.
+        false
     } catch (_: Exception) {
-        null
+        refuse(bound.unverifiable)
     }
 }
 
@@ -648,6 +691,7 @@ private fun requireSafeEventStream(body: ByteArray, secrets: List<String>, bound
     if ('\r' in normalized || normalized.startsWith('\uFEFF') || !normalized.endsWith("\n\n")) {
         refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
     }
+    val nested = NestedJsonBound(bounds.maximumResponseBytes, AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
     val streams = LinkedHashMap<String, StringBuilder>()
     val allDeltas = StringBuilder()
     val data = StringBuilder()
@@ -661,7 +705,7 @@ private fun requireSafeEventStream(body: ByteArray, secrets: List<String>, bound
                     refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
                 }
                 requireSupportedEventShape(event)
-                if (exposesSecret(event, secrets, NESTED_JSON_LAYERS)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+                if (exposesSecret(event, secrets, NESTED_JSON_LAYERS, nested)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
                 (event["delta"] as? JsonPrimitive)?.takeIf { it.isString }?.let { delta ->
                     streams.getOrPut(deltaStreamKey(event)) { StringBuilder() }.append(delta.content)
                     allDeltas.append(delta.content)
@@ -687,7 +731,7 @@ private fun requireSafeEventStream(body: ByteArray, secrets: List<String>, bound
         }
     }
     (streams.values + allDeltas).forEach { joined ->
-        if (exposes(joined) || nestedJson(joined.toString())?.let { exposesSecret(it, secrets, NESTED_JSON_LAYERS - 1) } == true) {
+        if (exposes(joined) || NESTED_JSON_LAYERS > 0 && nestedDocumentExposes(joined.toString(), secrets, nested)) {
             refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
         }
     }
