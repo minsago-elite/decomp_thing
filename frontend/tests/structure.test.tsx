@@ -23,6 +23,16 @@ const revision = `/nested/jobs/${selected.jobId}/runs/${selected.runId}/revision
 const api = `/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
 beforeEach(() => { transport.get.mockReset(); });
 
+/** #619: each Structure table sits directly in the shared labelled, focusable scrolling region. */
+function expectTableRegion(table: HTMLElement, name: string) {
+  const region = table.parentElement!;
+  expect(region.className).toBe('retained-case-table');
+  expect(region.getAttribute('role')).toBe('region');
+  expect(region.tabIndex).toBe(0);
+  // The name is unique, so it never repeats the page region named by the same view title.
+  expect(screen.getByRole('region', { name })).toBe(region);
+}
+
 async function session() {
   const value = createBrowserSession({
     bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
@@ -40,6 +50,7 @@ it('keeps inventory filters, sorting and cursors in the URL and reads one bounde
   try {
     render(<App basePath="/nested" session={auth} />);
     const table = await screen.findByRole('table', { name: copy.functionsTitle });
+    expectTableRegion(table, copy.functionsTableRegion);
     expect(transport.get).toHaveBeenCalledWith('functionInventory', `${api}/functions?limit=100`, expect.anything());
     const rows = within(table).getAllByRole('row');
     expect(rows).toHaveLength(4);
@@ -299,6 +310,7 @@ it('shows module ownership, progress, source links and owned entities without re
   try {
     render(<App basePath="/nested" session={auth} />);
     const table = await screen.findByRole('table', { name: copy.ownedKinds.functions });
+    expectTableRegion(table, copy.ownedKinds.functions);
     expect(transport.get).toHaveBeenCalledWith('moduleDetail', `${api}/modules/extra?kind=functions&limit=50`, expect.anything());
     expect(within(table).getByText(copy.unrecordedEntity)).toBeTruthy();
     expect(within(table).getByText(copy.ownership.ambiguous)).toBeTruthy();
@@ -342,9 +354,11 @@ it('summarizes recorded totals and diagnostics in the module inventory', async (
   try {
     render(<App basePath="/nested" session={auth} />);
     const summary = await screen.findByRole('table', { name: copy.summaryTitle });
+    expectTableRegion(summary, copy.summaryTitle);
     expect(within(summary).getByRole('rowheader', { name: copy.summaryKinds.functions })).toBeTruthy();
     expect(screen.getByText(copy.unresolvedCalls).nextElementSibling?.textContent).toBe('1');
     const list = screen.getByRole('table', { name: copy.modulesTitle });
+    expectTableRegion(list, copy.modulesTableRegion);
     expect(within(list).getByRole('link', { name: 'core' }).getAttribute('href')).toBe(`${revision}/modules/core?structureVersion=${modules.structureVersion}`);
     expect(screen.getByText('Showing 1–2 of 2 modules.')).toBeTruthy();
   } finally { auth.dispose(); }

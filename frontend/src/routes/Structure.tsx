@@ -107,10 +107,10 @@ function Ownership({ entity, basePath, selected, version }: { entity: StructureE
     : <>{copy.ownership[entity.ownership]}</>;
 }
 
-function EntityTable({ items, basePath, selected, version, caption }: {
-  items: (StructureEntity | StructureUnrecordedEntity)[]; basePath: string; selected: SourceSelection; version: string; caption: string;
+function EntityTable({ items, basePath, selected, version, caption, region = caption }: {
+  items: (StructureEntity | StructureUnrecordedEntity)[]; basePath: string; selected: SourceSelection; version: string; caption: string; region?: string;
 }) {
-  return <div class="structure-table"><table>
+  return <div class="retained-case-table" role="region" aria-label={region} tabIndex={0}><table>
     <caption>{caption}</caption>
     <thead><tr>
       <th scope="col">{copy.columns.address}</th><th scope="col">{copy.columns.name}</th><th scope="col">{copy.columns.identity}</th>
@@ -198,7 +198,8 @@ function Functions({ selected, basePath, search }: { selected: SourceSelection; 
       <p role="status">{data.matchedFunctions === 0 ? message(copy.noResults, { total: data.totalFunctions })
         : message(copy.resultsRange, { first: offset + 1, last: offset + data.items.length,
           matched: data.matchedFunctions, total: data.totalFunctions })}</p>
-      {data.items.length > 0 && <EntityTable items={data.items} basePath={basePath} selected={selected} version={data.structureVersion} caption={copy.functionsTitle} />}
+      {data.items.length > 0 && <EntityTable items={data.items} basePath={basePath} selected={selected} version={data.structureVersion} caption={copy.functionsTitle}
+        region={copy.functionsTableRegion} />}
     </>}
     <nav class="job-actions" aria-label={copy.pages}>
       <button type="button" disabled={read.state === 'loading' || query.cursor === undefined} onClick={() => go(query)}>{copy.first}</button>
@@ -226,7 +227,7 @@ function Modules({ selected, basePath, search }: { selected: SourceSelection; ba
     if (cursor || version) { moveFocus.current = true; location.route(structureListPath(basePath, selected, 'modules')); } else refresh();
   }} navigation={<p><a href={structureListPath(basePath, selected, 'functions')}>{copy.browseFunctions}</a></p>}>
     {summary && <>
-      <div class="structure-table"><table>
+      <div class="retained-case-table" role="region" aria-label={copy.summaryTitle} tabIndex={0}><table>
         <caption>{copy.summaryTitle}</caption>
         <thead><tr><th scope="col">{copy.summaryColumns.kind}</th><th scope="col">{copy.summaryColumns.total}</th>
           {EVIDENCE_CLASSES.map(value => <th scope="col" key={value}>{copy.evidence[value]}</th>)}
@@ -252,7 +253,7 @@ function Modules({ selected, basePath, search }: { selected: SourceSelection; ba
     <h2 ref={results} tabIndex={-1}>{copy.moduleResults}</h2>
     {data?.state === 'available' && (data.totalModules === null ? <p>{copy.noModules}</p> : <>
       <p role="status">{message(copy.moduleRange, { first: data.items.length ? offset + 1 : 0, last: offset + data.items.length, total: data.totalModules })}</p>
-      <div class="structure-table"><table>
+      <div class="retained-case-table" role="region" aria-label={copy.modulesTableRegion} tabIndex={0}><table>
         <caption>{copy.modulesTitle}</caption>
         <thead><tr>{Object.values(copy.moduleColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
         <tbody>{data.items.map(module => <tr key={module.moduleId}>
