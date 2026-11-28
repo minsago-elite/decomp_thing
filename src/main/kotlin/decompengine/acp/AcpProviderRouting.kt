@@ -2,30 +2,16 @@ package decompengine.acp
 
 import java.net.InetAddress
 import java.net.URI
+import java.nio.charset.StandardCharsets
 import java.util.Locale
-import java.util.Properties
-import javax.net.ssl.SNIHostName
-import javax.net.ssl.SSLParameters
-
-/**
- * One HTTP/1.1 request head received from a contained agent on its provider channel. Every field
- * is untrusted. Header names keep their received case and order; nothing here selects a destination.
- */
-internal class AcpProviderRelayRequest(
-    val method: String,
-    val target: String,
-    headers: List<Pair<String, String>>,
-) {
-    val headers: List<Pair<String, String>> = headers.toList()
-
-    override fun toString(): String = "AcpProviderRelayRequest(<untrusted>)"
-}
 
 enum class AcpProviderRouteRefusal {
     TRANSPORT_DISABLED,
     MALFORMED_REQUEST,
     MALFORMED_RESPONSE,
     REQUEST_HEAD_TOO_LARGE,
+    REQUEST_FRAMING_UNSUPPORTED,
+    REQUEST_BODY_TOO_LARGE,
     CONNECT_REFUSED,
     PROXY_REQUEST_REFUSED,
     QUERY_REFUSED,
@@ -39,44 +25,73 @@ enum class AcpProviderRouteRefusal {
 }
 
 internal sealed interface AcpProviderRouteDecision {
-    /** The upstream target. [endpoint] is always the approved policy endpoint. */
+    /**
+     * An admitted request. [endpoint] is always the approved policy endpoint and [contentLength] is
+     * the exact body length the relay must read next. Nothing from the client head is retained.
+     */
     class Routed internal constructor(
         val operation: AcpProviderOperation,
         val endpoint: URI,
         val policyDescriptorSha256: String,
-    ) : AcpProviderRouteDecision
+        val contentLength: Int,
+    ) : AcpProviderRouteDecision {
+        /**
+         * The complete non-credential upstream header set, rebuilt from policy-owned values and the
+         * validated body length. The broker appends only its own credential headers (#959).
+         */
+        fun upstreamHeaders(): List<Pair<String, String>> = listOf(
+            "Host" to endpoint.host,
+            "Content-Type" to operation.requestMediaType,
+            "Accept" to operation.responseMediaType,
+            "Content-Length" to contentLength.toString(),
+        )
+    }
 
     data class Refused(val reason: AcpProviderRouteRefusal) : AcpProviderRouteDecision
 }
 
 /**
- * Routing decisions for the approved provider transport. Callers must refuse before forwarding
- * anything upstream: a relay request is matched only against the policy's declared operation, the
- * upstream destination always comes from the policy, and every resolved address and response status
- * is checked before it is used. There is no CONNECT, proxy, redirect, scheme or authority override.
+ * Routing decisions for the approved provider transport. Each check runs before anything is sent
+ * upstream. The relay passes the exact request-head bytes it received, ending with the empty line.
+ * An admitted request matches the policy's declared operation and uses a single canonical
+ * Content-Length; the relay then reads exactly that many body bytes and rebuilds the upstream
+ * request from [AcpProviderRouteDecision.Routed.upstreamHeaders]. Client headers and framing are
+ * never forwarded. There is no CONNECT, proxy, redirect, scheme or authority override.
+ *
+ * These are decisions only. They take effect when the #959 broker applies them to its relay.
  */
 internal object AcpProviderRouting {
-    fun route(policy: AcpProviderTransportPolicy, request: AcpProviderRelayRequest): AcpProviderRouteDecision {
+    fun route(policy: AcpProviderTransportPolicy, head: ByteArray): AcpProviderRouteDecision {
         val approved = policy as? AcpProviderTransportPolicy.Approved ?: return refused(AcpProviderRouteRefusal.TRANSPORT_DISABLED)
-        headRefusal(approved.bounds, request)?.let { return refused(it) }
+        val request = when (val parsed = parseRequestHead(approved.bounds, head)) {
+            is HeadParse.Parsed -> parsed
+            is HeadParse.Rejected -> return refused(parsed.reason)
+        }
         if (request.method == "CONNECT") return refused(AcpProviderRouteRefusal.CONNECT_REFUSED)
         // Absolute-form, authority-form and asterisk-form targets are proxy requests.
         if (!request.target.startsWith('/')) return refused(AcpProviderRouteRefusal.PROXY_REQUEST_REFUSED)
         if ('?' in request.target) return refused(AcpProviderRouteRefusal.QUERY_REFUSED)
 
-        val names = request.headers.map { (name, _) -> name.lowercase(Locale.ROOT) }
-        if (names.count { it == "host" } != 1 ||
-            names.count { it == "content-length" } > 1 ||
-            "content-length" in names && "transfer-encoding" in names
-        ) return refused(AcpProviderRouteRefusal.MALFORMED_REQUEST)
-        if (names.any(::isRoutingOverrideHeader)) return refused(AcpProviderRouteRefusal.ROUTING_OVERRIDE_REFUSED)
-        if (requestsProtocolUpgrade(request.headers)) return refused(AcpProviderRouteRefusal.PROTOCOL_UPGRADE_REFUSED)
+        val names = request.fields.map { (name, _) -> name.lowercase(Locale.ROOT) }
+        if (names.count { it == "host" } != 1 || names.count { it == "content-length" } > 1) {
+            return refused(AcpProviderRouteRefusal.MALFORMED_REQUEST)
+        }
+        // Only identity-encoded bodies delimited by one Content-Length are supported.
+        if (names.any { it in UNSUPPORTED_FRAMING_FIELDS }) return refused(AcpProviderRouteRefusal.REQUEST_FRAMING_UNSUPPORTED)
+        if (names.any(::isRoutingOverrideField)) return refused(AcpProviderRouteRefusal.ROUTING_OVERRIDE_REFUSED)
+        if (requestsProtocolUpgrade(request.fields)) return refused(AcpProviderRouteRefusal.PROTOCOL_UPGRADE_REFUSED)
 
         // Exact byte comparison: no decoding, normalization, case folding or prefix match.
         val operation = approved.operation.takeIf { it.relayPath == request.target }
             ?: return refused(AcpProviderRouteRefusal.OPERATION_UNSUPPORTED)
         if (request.method != operation.method) return refused(AcpProviderRouteRefusal.METHOD_UNSUPPORTED)
-        return AcpProviderRouteDecision.Routed(operation, approved.endpoint, approved.descriptorSha256)
+
+        val declaredLength = request.fields.singleOrNull { (name, _) -> name.equals("content-length", ignoreCase = true) }?.second
+            ?: return refused(AcpProviderRouteRefusal.REQUEST_FRAMING_UNSUPPORTED)
+        if (!declaredLength.matches(CANONICAL_CONTENT_LENGTH)) return refused(AcpProviderRouteRefusal.MALFORMED_REQUEST)
+        val contentLength = declaredLength.toLong()
+        if (contentLength > approved.bounds.maximumRequestBytes) return refused(AcpProviderRouteRefusal.REQUEST_BODY_TOO_LARGE)
+        return AcpProviderRouteDecision.Routed(operation, approved.endpoint, approved.descriptorSha256, contentLength.toInt())
     }
 
     /** The policy declares no redirect destinations, so every upstream 3xx is refused unfollowed. */
@@ -94,7 +109,7 @@ internal object AcpProviderRouting {
     fun destinationRefusal(policy: AcpProviderTransportPolicy, addresses: List<InetAddress>): AcpProviderRouteRefusal? {
         val approved = policy as? AcpProviderTransportPolicy.Approved ?: return AcpProviderRouteRefusal.TRANSPORT_DISABLED
         if (addresses.isEmpty()) return AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED
-        val classes = addresses.map(::classifyProviderAddress)
+        val classes = addresses.map { classifyProviderAddress(it, approved.addressTranslation) }
         return when {
             ProviderAddressClass.FORBIDDEN in classes -> AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED
             ProviderAddressClass.PRIVATE in classes &&
@@ -104,118 +119,130 @@ internal object AcpProviderRouting {
         }
     }
 
-    /** Upstream TLS parameters: HTTPS hostname verification, policy-host SNI and TLS 1.2 or later. */
-    fun upstreamSslParameters(policy: AcpProviderTransportPolicy.Approved, defaults: SSLParameters): SSLParameters {
-        val protocols = defaults.protocols.filter { it in PROVIDER_TLS_PROTOCOLS }
-        require(protocols.isNotEmpty()) { "provider TLS requires TLSv1.3 or TLSv1.2" }
-        return SSLParameters(defaults.cipherSuites, protocols.toTypedArray()).apply {
-            endpointIdentificationAlgorithm = "HTTPS"
-            serverNames = listOf(SNIHostName(policy.endpoint.host))
-        }
-    }
-
-    /** Refuses TLS settings or JVM properties that would weaken mandatory upstream verification. */
-    fun requireMandatoryUpstreamTls(
-        policy: AcpProviderTransportPolicy.Approved,
-        parameters: SSLParameters,
-        systemProperties: Properties = System.getProperties(),
-    ) {
-        check(policy.tlsVerification == AcpProviderTlsVerification.PLATFORM_TRUST_HOSTNAME_VERIFIED) {
-            "unsupported provider TLS verification mode"
-        }
-        check(parameters.endpointIdentificationAlgorithm == "HTTPS") { "provider TLS hostname verification is disabled" }
-        val protocols = parameters.protocols.orEmpty()
-        check(protocols.isNotEmpty() && protocols.all { it in PROVIDER_TLS_PROTOCOLS }) {
-            "provider TLS protocol set is not TLSv1.3 or TLSv1.2"
-        }
-        check(parameters.serverNames.orEmpty().map { (it as? SNIHostName)?.asciiName } == listOf(policy.endpoint.host)) {
-            "provider TLS server name does not match the approved endpoint"
-        }
-        // The JDK HTTP client skips hostname verification when this property is present.
-        check(systemProperties.getProperty(JDK_DISABLE_HOSTNAME_VERIFICATION_PROPERTY) == null) {
-            "provider TLS hostname verification is disabled by a JVM property"
-        }
-    }
-
     private fun refused(reason: AcpProviderRouteRefusal) = AcpProviderRouteDecision.Refused(reason)
 }
 
-private val PROVIDER_TLS_PROTOCOLS = setOf("TLSv1.3", "TLSv1.2")
-private const val JDK_DISABLE_HOSTNAME_VERIFICATION_PROPERTY = "jdk.internal.httpclient.disableHostnameVerification"
+private sealed interface HeadParse {
+    class Parsed(val method: String, val target: String, val fields: List<Pair<String, String>>) : HeadParse
+    class Rejected(val reason: AcpProviderRouteRefusal) : HeadParse
+}
+
+private val HEAD_TOO_LARGE = HeadParse.Rejected(AcpProviderRouteRefusal.REQUEST_HEAD_TOO_LARGE)
+private val MALFORMED_HEAD = HeadParse.Rejected(AcpProviderRouteRefusal.MALFORMED_REQUEST)
+
 private val HTTP_TOKEN = Regex("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-private val ROUTING_OVERRIDE_HEADERS = setOf(
+private val CANONICAL_CONTENT_LENGTH = Regex("0|[1-9][0-9]{0,9}")
+private val UNSUPPORTED_FRAMING_FIELDS = setOf("transfer-encoding", "te", "expect", "content-encoding", "trailer")
+private val ROUTING_OVERRIDE_FIELDS = setOf(
     "forwarded", "x-rewrite-url", "x-host", "x-http-host", "x-http-method", "x-http-method-override",
     "x-method-override", "proxy-authorization", "proxy-connection",
 )
-private val ROUTING_OVERRIDE_HEADER_PREFIXES = listOf("x-forwarded-", "x-original-")
+private val ROUTING_OVERRIDE_FIELD_PREFIXES = listOf("x-forwarded-", "x-original-")
 
-private fun headRefusal(bounds: AcpProviderTransportBounds, request: AcpProviderRelayRequest): AcpProviderRouteRefusal? {
-    if (request.headers.size > bounds.maximumHeaderFields) return AcpProviderRouteRefusal.REQUEST_HEAD_TOO_LARGE
-    var bytes = request.method.length.toLong() + request.target.length + 2
-    request.headers.forEach { (name, value) ->
-        bytes += name.length + value.length + 4
-        if (bytes > bounds.maximumHeaderBytes) return AcpProviderRouteRefusal.REQUEST_HEAD_TOO_LARGE
+/**
+ * Strict RFC 9112 request-head parser over the exact received bytes: request line, field lines and
+ * the terminating empty line. The byte bound covers all of them. Only US-ASCII, single-space
+ * request-line separators, HTTP/1.1, CRLF line endings, no obs-fold, no whitespace before a field
+ * colon and no control characters other than HTAB in field values are accepted.
+ */
+private fun parseRequestHead(bounds: AcpProviderTransportBounds, head: ByteArray): HeadParse {
+    if (head.size > bounds.maximumHeaderBytes) return HEAD_TOO_LARGE
+    if (head.any { it < 0 }) return MALFORMED_HEAD
+    val text = String(head, StandardCharsets.US_ASCII)
+    if (!text.endsWith("\r\n\r\n")) return MALFORMED_HEAD
+    val lines = text.substring(0, text.length - 4).split("\r\n")
+    if (lines.any { '\r' in it || '\n' in it }) return MALFORMED_HEAD
+    if (lines.size - 1 > bounds.maximumHeaderFields) return HEAD_TOO_LARGE
+
+    val requestLine = lines.first().split(' ')
+    if (requestLine.size != 3) return MALFORMED_HEAD
+    val (method, target, version) = requestLine
+    if (!method.matches(HTTP_TOKEN) || target.isEmpty() || target.any { it !in '!'..'~' } || '#' in target ||
+        version != "HTTP/1.1"
+    ) return MALFORMED_HEAD
+
+    val fields = ArrayList<Pair<String, String>>(lines.size - 1)
+    for (line in lines.drop(1)) {
+        val colon = line.indexOf(':')
+        if (colon <= 0) return MALFORMED_HEAD
+        val name = line.substring(0, colon)
+        val value = line.substring(colon + 1).trim { it == ' ' || it == '\t' }
+        // A leading space or tab (obs-fold) or whitespace before the colon fails the token check.
+        if (!name.matches(HTTP_TOKEN) || value.any { it != '\t' && it !in ' '..'~' }) {
+            return MALFORMED_HEAD
+        }
+        fields += name to value
     }
-    if (bytes > bounds.maximumHeaderBytes) return AcpProviderRouteRefusal.REQUEST_HEAD_TOO_LARGE
-    if (!request.method.matches(HTTP_TOKEN) || request.target.isEmpty() || request.target.any { it <= ' ' || it >= '\u007f' } ||
-        '#' in request.target
-    ) return AcpProviderRouteRefusal.MALFORMED_REQUEST
-    val malformedHeader = request.headers.any { (name, value) ->
-        !name.matches(HTTP_TOKEN) || value.any { it == '\r' || it == '\n' || it == '\u0000' || it >= '\u007f' }
-    }
-    return if (malformedHeader) AcpProviderRouteRefusal.MALFORMED_REQUEST else null
+    return HeadParse.Parsed(method, target, fields)
 }
 
-private fun isRoutingOverrideHeader(lowercaseName: String): Boolean =
-    lowercaseName in ROUTING_OVERRIDE_HEADERS || ROUTING_OVERRIDE_HEADER_PREFIXES.any(lowercaseName::startsWith)
+private fun isRoutingOverrideField(lowercaseName: String): Boolean =
+    lowercaseName in ROUTING_OVERRIDE_FIELDS || ROUTING_OVERRIDE_FIELD_PREFIXES.any(lowercaseName::startsWith)
 
-private fun requestsProtocolUpgrade(headers: List<Pair<String, String>>): Boolean = headers.any { (name, value) ->
+private fun requestsProtocolUpgrade(fields: List<Pair<String, String>>): Boolean = fields.any { (name, value) ->
     when (name.lowercase(Locale.ROOT)) {
         "upgrade", "http2-settings" -> true
-        "connection" -> value.split(',').any { it.trim().equals("upgrade", ignoreCase = true) }
+        "connection" -> value.split(',').any { it.trim(' ', '\t').equals("upgrade", ignoreCase = true) }
         else -> false
     }
 }
 
 private enum class ProviderAddressClass { PUBLIC, PRIVATE, FORBIDDEN }
 
-private fun classifyProviderAddress(address: InetAddress): ProviderAddressClass {
+private fun classifyProviderAddress(address: InetAddress, translation: AcpProviderAddressTranslation): ProviderAddressClass {
     val bytes = address.address
     return when (bytes.size) {
         4 -> classifyIpv4(bytes)
-        16 -> classifyIpv6(bytes)
+        16 -> classifyIpv6(bytes, translation)
         else -> ProviderAddressClass.FORBIDDEN
     }
 }
 
+/** IANA IPv4 special-purpose registry entries are refused; RFC 1918 and shared space are private. */
 private fun classifyIpv4(bytes: ByteArray): ProviderAddressClass {
     val a = bytes[0].toInt() and 0xff
     val b = bytes[1].toInt() and 0xff
     val c = bytes[2].toInt() and 0xff
     return when {
         a == 10 || a == 172 && b in 16..31 || a == 192 && b == 168 || a == 100 && b in 64..127 -> ProviderAddressClass.PRIVATE
-        a == 0 || a == 127 || a >= 224 || a == 169 && b == 254 ||
-            a == 192 && b == 0 && (c == 0 || c == 2) || a == 192 && b == 88 && c == 99 ||
-            a == 198 && (b == 18 || b == 19) || a == 198 && b == 51 && c == 100 || a == 203 && b == 0 && c == 113 ->
+        a == 0 || a == 127 || a >= 224 || a == 169 && b == 254 || a == 198 && (b == 18 || b == 19) ||
+            a == 192 && (b == 0 && (c == 0 || c == 2) || b == 31 && c == 196 || b == 52 && c == 193 ||
+                b == 88 && c == 99 || b == 175 && c == 48) ||
+            a == 198 && b == 51 && c == 100 || a == 203 && b == 0 && c == 113 ->
             ProviderAddressClass.FORBIDDEN
         else -> ProviderAddressClass.PUBLIC
     }
 }
 
-private fun classifyIpv6(bytes: ByteArray): ProviderAddressClass {
+/**
+ * Public IPv6 means an RIR-allocated global unicast block outside the IANA special-purpose
+ * registry. Unique-local space is private. Everything else, including reserved space inside
+ * 2000::/3, 6to4, Teredo, ORCHID, benchmarking, documentation, AS112, discard and local-use NAT64,
+ * is refused. The well-known NAT64 prefix is admitted only when the operator enabled it and the
+ * embedded IPv4 address is public; it is never treated as private.
+ */
+private fun classifyIpv6(bytes: ByteArray, translation: AcpProviderAddressTranslation): ProviderAddressClass {
     val word = IntArray(8) { ((bytes[it * 2].toInt() and 0xff) shl 8) or (bytes[it * 2 + 1].toInt() and 0xff) }
-    // IPv4-mapped, NAT64 well-known prefix and 6to4 embed an IPv4 destination; classify that destination.
-    if (word.slice(0..4).all { it == 0 } && word[5] == 0xffff ||
-        word[0] == 0x64 && word[1] == 0xff9b && word.slice(2..5).all { it == 0 }
-    ) return classifyIpv4(bytes.copyOfRange(12, 16))
-    if (word[0] == 0x2002) return classifyIpv4(bytes.copyOfRange(2, 6))
-    return when {
-        word[0] and 0xfe00 == 0xfc00 -> ProviderAddressClass.PRIVATE
-        // Outside global unicast: unspecified, loopback, IPv4-compatible, link-local, multicast and unallocated.
-        word[0] and 0xe000 != 0x2000 -> ProviderAddressClass.FORBIDDEN
-        // IETF protocol assignments (Teredo, ORCHID, benchmarking) and documentation prefixes.
-        word[0] == 0x2001 && (word[1] < 0x0200 || word[1] == 0x0db8) || word[0] == 0x3fff && word[1] < 0x1000 ->
-            ProviderAddressClass.FORBIDDEN
-        else -> ProviderAddressClass.PUBLIC
+    // An IPv4-mapped address is an IPv4 destination on the wire.
+    if ((0..4).all { word[it] == 0 } && word[5] == 0xffff) return classifyIpv4(bytes.copyOfRange(12, 16))
+    if (word[0] == 0x0064 && word[1] == 0xff9b && (2..5).all { word[it] == 0 }) {
+        val embedded = classifyIpv4(bytes.copyOfRange(12, 16))
+        return if (translation == AcpProviderAddressTranslation.WELL_KNOWN_NAT64 && embedded == ProviderAddressClass.PUBLIC) {
+            ProviderAddressClass.PUBLIC
+        } else ProviderAddressClass.FORBIDDEN
     }
+    if (word[0] and 0xfe00 == 0xfc00) return ProviderAddressClass.PRIVATE
+    val specialPurpose = word[0] == 0x2001 && (word[1] < 0x0200 || word[1] == 0x0db8) ||
+        word[0] == 0x2620 && word[1] == 0x004f && word[2] == 0x8000
+    return if (!specialPurpose && isAllocatedGlobalUnicast(word[0], word[1])) ProviderAddressClass.PUBLIC else ProviderAddressClass.FORBIDDEN
+}
+
+/** IANA IPv6 global unicast blocks delegated to regional registries (excluding 2002::/16 6to4). */
+private fun isAllocatedGlobalUnicast(first: Int, second: Int): Boolean = when (first) {
+    0x2001 -> true
+    0x2003 -> second < 0x4000
+    in 0x2400..0x240f, in 0x2600..0x260f, in 0x2630..0x263f, in 0x2800..0x280f,
+    in 0x2a00..0x2a1f, in 0x2c00..0x2c0f -> true
+    0x2610, 0x2611, 0x2620, 0x2621 -> true
+    else -> false
 }

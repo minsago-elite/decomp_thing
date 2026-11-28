@@ -12,10 +12,16 @@ internal const val MAXIMUM_PROVIDER_REQUEST_BYTES: Int = 8 * 1024 * 1024
 /**
  * Closed set of provider protocol operations. [method] and [relayPath] are the only request line
  * a contained agent may send on its provider channel for this operation; the upstream destination
- * always comes from the approved policy, never from the agent's request.
+ * always comes from the approved policy, never from the agent's request. The media types are the
+ * ones the relay sets upstream; client-supplied content and accept headers are never forwarded.
  */
-enum class AcpProviderOperation(val method: String, val relayPath: String) {
-    RESPONSES_CREATE("POST", "/responses"),
+enum class AcpProviderOperation(
+    val method: String,
+    val relayPath: String,
+    val requestMediaType: String,
+    val responseMediaType: String,
+) {
+    RESPONSES_CREATE("POST", "/responses", "application/json", "text/event-stream"),
 }
 
 /** Cached ChatGPT access token from the operator's local Codex login; there is no token refresh. */
@@ -55,6 +61,13 @@ enum class AcpProviderTlsVerification { PLATFORM_TRUST_HOSTNAME_VERIFIED }
  * Loopback, link-local, multicast, unspecified and reserved addresses are refused either way.
  */
 enum class AcpProviderPrivateDestinations { DENIED, PERMITTED }
+
+/**
+ * Whether the deployment translates IPv4 through the well-known NAT64 prefix 64:ff9b::/96. It is
+ * explicit operator policy; even when enabled, only a globally reachable embedded IPv4 address is
+ * admitted. Network-specific translation prefixes are not recognized and are never inferred.
+ */
+enum class AcpProviderAddressTranslation { NONE, WELL_KNOWN_NAT64 }
 
 /** Finite limits for one invocation. Requests are serialized, never queued or retried. */
 data class AcpProviderTransportBounds(
@@ -112,6 +125,7 @@ sealed class AcpProviderTransportPolicy private constructor() {
         val reasoning: AcpProviderReasoning,
         val tlsVerification: AcpProviderTlsVerification,
         val privateDestinations: AcpProviderPrivateDestinations,
+        val addressTranslation: AcpProviderAddressTranslation,
         val bounds: AcpProviderTransportBounds,
     ) : AcpProviderTransportPolicy() {
         init {
@@ -125,6 +139,7 @@ sealed class AcpProviderTransportPolicy private constructor() {
             require(credentialReference in runtimeAdapter.credentialReferences) {
                 "unsupported provider credential reference"
             }
+            // A model ID is public configuration, never a credential; the bounded charset keeps it a plain identifier.
             require(model.matches(PROVIDER_MODEL_SYNTAX)) { "provider model identifier is not canonical and bounded" }
         }
 
@@ -139,12 +154,15 @@ sealed class AcpProviderTransportPolicy private constructor() {
             "operation=${operation.name}",
             "method=${operation.method}",
             "relayPath=${operation.relayPath}",
+            "requestMediaType=${operation.requestMediaType}",
+            "responseMediaType=${operation.responseMediaType}",
             "authenticationMechanism=${authenticationMechanism.name}",
             "credentialReference=${credentialReference.name}",
             "model=$model",
             "reasoning=${reasoning.name}",
             "tlsVerification=${tlsVerification.name}",
             "privateDestinations=${privateDestinations.name}",
+            "addressTranslation=${addressTranslation.name}",
             "allowProxy=false", "allowRedirect=false",
             "maximumRequestBytes=${bounds.maximumRequestBytes}",
             "maximumResponseBytes=${bounds.maximumResponseBytes}",
@@ -173,10 +191,11 @@ sealed class AcpProviderTransportPolicy private constructor() {
                 reasoning: AcpProviderReasoning,
                 tlsVerification: AcpProviderTlsVerification,
                 privateDestinations: AcpProviderPrivateDestinations,
+                addressTranslation: AcpProviderAddressTranslation,
                 bounds: AcpProviderTransportBounds,
             ): Approved = Approved(
                 runtimeAdapter, endpoint, operation, authenticationMechanism, credentialReference,
-                model, reasoning, tlsVerification, privateDestinations, bounds,
+                model, reasoning, tlsVerification, privateDestinations, addressTranslation, bounds,
             )
         }
     }
@@ -221,6 +240,7 @@ sealed class AcpProviderTransportPolicy private constructor() {
                 reasoning = fields.enumValue("reasoning", "provider reasoning setting"),
                 tlsVerification = fields.enumValue("tlsVerification", "provider TLS verification mode"),
                 privateDestinations = fields.enumValue("privateDestinations", "provider private destination permission"),
+                addressTranslation = fields.enumValue("addressTranslation", "provider address translation mode"),
                 bounds = bounds,
             )
         }
@@ -232,7 +252,7 @@ private val PROVIDER_MODEL_SYNTAX = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 private val APPROVED_POLICY_KEYS = setOf(
     "mode", "runtimeAdapter", "endpoint", "operation", "authenticationMechanism", "credentialReference",
-    "model", "reasoning", "tlsVerification", "privateDestinations",
+    "model", "reasoning", "tlsVerification", "privateDestinations", "addressTranslation",
     "maximumRequestBytes", "maximumResponseBytes", "maximumHeaderBytes", "maximumHeaderFields", "maximumChunkBytes",
     "maximumQueuedChunks", "maximumRequests", "maximumOutputTokens", "overallTimeoutMillis", "idleTimeoutMillis",
     "cleanupTimeoutMillis",
