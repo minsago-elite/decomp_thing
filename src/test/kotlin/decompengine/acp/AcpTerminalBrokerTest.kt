@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import org.junit.jupiter.api.extension.ExtendWith
 import com.agentclientprotocol.model.EnvVariable
 import com.agentclientprotocol.model.SessionUpdate
 import com.agentclientprotocol.model.ToolCallContent
@@ -34,6 +35,7 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
+@ExtendWith(AcpHostMountChurnRestartReport::class)
 class AcpTerminalBrokerTest {
     @Test
     fun `capability is the immutable intersection of workflow policy and verified boundary`() {
