@@ -17,6 +17,7 @@ interface Selection {
   runId: string;
   after?: string;
   signal?: AbortSignal;
+  onConnected?: () => void;
 }
 const identifier = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
@@ -82,6 +83,7 @@ export function createEventStream(options: StreamOptions) {
       }
       if (!/^text\/event-stream(?:\s*;\s*charset=utf-8)?$/i.test(type) || !response.body) throw new ApiClientError('invalid_headers');
       reader = response.body.getReader();
+      selection.onConnected?.();
       const decoder = createSseDecoder(basePath);
       while (true) {
         if (controller.signal.aborted) throw cancellationError();

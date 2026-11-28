@@ -679,17 +679,24 @@ class WorkflowAttemptStore private constructor(
             ensureOpen()
             val directory = root.resolve(jobId)
             if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
-            var invalidate = true
+            var invalidate = !readOnly
             try {
                 val result = operation(directory)
-                invalidate = invalidateOnSuccess()
+                if (!readOnly) invalidate = invalidateOnSuccess()
                 result
             } finally {
                 // Invalidate even a failed/uncertain command, and conservatively include colliding
-                // jobs. Read-only status/replay calls do not invalidate concurrent listing rows.
-                if (!readOnly && invalidate) listingEpochs[stripe] = Any()
+                // jobs. Read-only calls and proven successful no-ops preserve the current epoch;
+                // never restore an earlier token after a nested mutation changed it.
+                if (invalidate) listingEpochs[stripe] = Any()
             }
         }
+    }
+    /** Must be called while the matching job stripe is held. */
+    private fun invalidateListingEpoch(jobId: String) {
+        val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
+        check(stripes[stripe].isHeldByCurrentThread)
+        listingEpochs[stripe] = Any()
     }
     private fun ensureOpen() {
         if (closed) fail("STORE_CLOSED", "Workflow storage ownership has been released.")

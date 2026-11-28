@@ -140,16 +140,17 @@ it('cancels only the paused instance when two views follow', async () => {
   expect(streams.opened.map(stream => stream.signal.aborted)).toEqual([true, false]);
 });
 
-it('cancels a scheduled poll when hidden before any paint', async () => {
+it('cancels the immediate live stream when hidden before any paint', async () => {
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(events);
   render(<Activity {...ids} basePath="/nested" />);
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Follow activity' })); await Promise.resolve(); });
   await advance(0);
   expect(transport.get).toHaveBeenCalledTimes(2);
-  expect(vi.getTimerCount()).toBeGreaterThan(0);
+  expect(streams.opened).toHaveLength(1);
   await commit(hide);
-  // The page was complete, so the pending timer would open a live stream.
+  expect(streams.opened[0]!.signal.aborted).toBe(true);
+  // Hiding cancels the owned connection and cannot open another one later.
   await vi.advanceTimersByTimeAsync(10_000);
   expect(transport.get).toHaveBeenCalledTimes(2);
-  expect(streams.opened).toHaveLength(0);
+  expect(streams.opened).toHaveLength(1);
 });

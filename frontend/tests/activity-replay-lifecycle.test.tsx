@@ -170,7 +170,12 @@ it('keeps job B activity isolated when a cancelled job A polling response comple
     const oldRequest = transport.get.mock.calls.find(call => call[0] === 'events' && call[1].startsWith(`/jobs/${sourceSnapshot.run.jobId}/`));
     if (!oldRequest) throw new Error('Old activity request was not admitted');
     expect(oldRequest[2].signal.aborted).toBe(false);
+    const nextStream = connection(); fetcher.mockResolvedValueOnce(nextStream.response);
     await changeJob();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(new Headers(fetcher.mock.calls[0]![1]?.headers).get('Last-Event-ID')).toBe(nextEvent.cursor);
+    expect(fetcher.mock.calls[0]![1]?.signal?.aborted).toBe(true);
+    expect(nextStream.cancel).toHaveBeenCalledOnce();
     expect(oldRequest[2].signal.aborted).toBe(true);
     const calls = transport.get.mock.calls.length;
     await act(async () => { finish(page([oldEvent])); await Promise.resolve(); }); await advance();
@@ -178,14 +183,15 @@ it('keeps job B activity isolated when a cancelled job A polling response comple
     await advance(10_000);
     expectOnlyNextJob();
     expect(transport.get).toHaveBeenCalledTimes(calls);
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0]![1]?.signal?.aborted).toBe(true);
   } finally { cleanup(); auth.dispose(); }
 });
 
 it('cancels a late job A stream response after job B navigation without publishing its queued old-job event', async () => {
-  const auth = await mockSession(); const late = connection();
+  const auth = await mockSession(); const late = connection(); const nextStream = connection();
   let finish: (value: Response) => void = () => undefined;
-  fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValueOnce(nextStream.response);
   routeReads();
   history.replaceState(null, '', `/nested/jobs/${sourceSnapshot.run.jobId}/runs/${sourceSnapshot.run.runId}`);
   try {
@@ -197,6 +203,10 @@ it('cancels a late job A stream response after job B navigation without publishi
     const signal = fetcher.mock.calls[0]![1]?.signal;
     expect(signal?.aborted).toBe(false);
     await changeJob();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetcher.mock.calls[1]![1]?.headers).get('Last-Event-ID')).toBe(nextEvent.cursor);
+    expect(fetcher.mock.calls[1]![1]?.signal?.aborted).toBe(true);
+    expect(nextStream.cancel).toHaveBeenCalledOnce();
     expect(signal?.aborted).toBe(true);
     const calls = transport.get.mock.calls.length;
     await act(async () => { late.send(oldEvent); finish(late.response); await Promise.resolve(); }); await advance();
@@ -205,6 +215,7 @@ it('cancels a late job A stream response after job B navigation without publishi
     await advance(10_000);
     expectOnlyNextJob();
     expect(transport.get).toHaveBeenCalledTimes(calls);
-    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1]![1]?.signal?.aborted).toBe(true);
   } finally { cleanup(); auth.dispose(); }
 });

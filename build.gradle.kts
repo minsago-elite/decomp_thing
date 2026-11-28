@@ -64,6 +64,9 @@ kotlin {
 application {
     mainClass.set("decompengine.MainKt")
     applicationName = "llm_bin_patch"
+    // Avoid committing the host's ergonomically selected multi-gigabyte heap at launch.
+    // Leave the maximum unset so non-web commands can still grow to their actual workload.
+    applicationDefaultJvmArgs = listOf("-Xms64m")
 }
 
 val frontendDirectory = layout.projectDirectory.dir("frontend")
