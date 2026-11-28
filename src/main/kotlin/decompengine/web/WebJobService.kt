@@ -2060,7 +2060,7 @@ class WebJobService(
                 synchronized(this@WebJobService) {
                     if (closed || stopping || (Thread.currentThread().isInterrupted && !cancellationRequested)) finish(interrupted())
                     else finish(when (outcome) {
-                        is DurableWebWorkflowOutcome.Completed -> WorkflowTransition.Finish(WorkflowRunState.COMPLETED, outcome.reason, outcome.candidate, outcome.usage, outcome.evidenceModel)
+                        is DurableWebWorkflowOutcome.Completed -> WorkflowTransition.Finish(WorkflowRunState.COMPLETED, outcome.reason, outcome.candidate, outcome.usage, outcome.evidenceModel, outcome.binding)
                         is DurableWebWorkflowOutcome.Failed -> WorkflowTransition.Finish(WorkflowRunState.FAILED, outcome.reason, outcome.candidate, outcome.usage, outcome.evidenceModel)
                     })
                 }

@@ -13,6 +13,7 @@ import decompengine.jobs.WorkflowAcceptanceReference
 import decompengine.jobs.WorkflowCandidate
 import decompengine.jobs.WorkflowEvidenceModel
 import decompengine.jobs.WorkflowExecutionLimits
+import decompengine.jobs.WorkflowRepairBinding
 import decompengine.jobs.WorkflowKind
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.oracle.core.OracleJson
@@ -21,6 +22,8 @@ import decompengine.project.ArchivalReconstructionService
 import decompengine.project.ProgramModelAnalyzer
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.repair.ModuleRevisionStatus
+import decompengine.repair.RepairPublicationCommitment
+import decompengine.repair.RepairPublicationOwner
 import decompengine.repair.RepairPublicationMode
 import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.RepairHistoryReadStatus
@@ -41,6 +44,10 @@ import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
 
+internal data class WebRepairResult(val status: RepairRunStatus, val publication: RepairPublicationCommitment? = null) {
+    init { require(publication == null || status == RepairRunStatus.FULLY_ACCEPTED) }
+}
+
 /**
  * The existing CLI/legacy implementations behind each production adapter. Tests substitute inert
  * engines; production engines are the same exploration, archival reconstruction and secure repair
@@ -51,7 +58,8 @@ internal interface WebWorkflowEngines {
     fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
     fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
         published: (String, ByteArray, String) -> Unit)
-    fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus
+    fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,
+        owner: RepairPublicationOwner?): WebRepairResult
 
     companion object {
         fun production(environment: Map<String, String>, sensitiveValues: Collection<String>): WebWorkflowEngines = object : WebWorkflowEngines {
@@ -80,11 +88,15 @@ internal interface WebWorkflowEngines {
                     profile = strategy.profile, progress = progress).reconstruct(binary, reportsDirectory)
             }
 
-            override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
+            override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,
+                owner: RepairPublicationOwner?): WebRepairResult {
                 val configuration = RepairRuntimeConfiguration("generated-c-make-v1", reportsDirectory.resolve("repair_history.json"),
                     harnessOverride = harness)
                 return SecureRepairRuntime.open(configuration).use { runtime ->
-                    runtime.runRepair(project, binary, listOf(ProcessInput("default")), reportsDirectory, REPAIR_ITERATIONS).runState.status
+                    val inputs = listOf(ProcessInput("default"))
+                    val result = if (owner == null) runtime.runRepair(project, binary, inputs, reportsDirectory, REPAIR_ITERATIONS)
+                        else runtime.runOwnedRepair(project, binary, inputs, reportsDirectory, REPAIR_ITERATIONS, owner)
+                    WebRepairResult(result.runState.status, result.publication)
                 }
             }
         }
@@ -301,14 +313,22 @@ internal class RepairWorkflowAdapter(
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             // The attempt owns a private copy; the selected revision's retained evidence is never modified.
             copyWebSourceTree(input, project)
-            engines.repair(project, context.job.binaryPath, context.reportsDirectory, harness)
+            val owner = context.attempt.repairPublicationNonce?.let {
+                RepairPublicationOwner(context.job.id, context.attempt.runId, it)
+            }
+            engines.repair(project, context.job.binaryPath, context.reportsDirectory, harness, owner)
         }
-        val candidate = repairCandidate(project, context.attempt.startedAt?.toEpochMilli(), acceptTestOnlyPublication)
-        return when (val completed = unwrap(result)) {
+        val completed = unwrap(result)
+        val binding = (completed as? BoundedWorkflowResult.Returned)?.value?.publication?.let {
+            WorkflowRepairBinding.from(context.attempt, it)
+        }
+        val candidate = binding?.let { WorkflowCandidate(webSourceRevisionId(it.sourceSha256), it.sourceSha256) }
+            ?: repairCandidate(project, context.attempt.startedAt?.toEpochMilli(), acceptTestOnlyPublication)
+        return when (completed) {
             is BoundedWorkflowResult.Exhausted -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)
             is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage)
-            is BoundedWorkflowResult.Returned -> when (completed.value) {
-                RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID -> DurableWebWorkflowOutcome.Completed(candidate, usage)
+            is BoundedWorkflowResult.Returned -> when (completed.value.status) {
+                RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID -> DurableWebWorkflowOutcome.Completed(candidate, usage, binding = binding)
                 RepairRunStatus.NO_CHANGES -> DurableWebWorkflowOutcome.Completed(candidate, usage, WorkflowTerminalReason.NO_CHANGES)
                 RepairRunStatus.ITERATION_EXHAUSTED, RepairRunStatus.RESOURCE_EXHAUSTED ->
                     DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.LIMIT_EXHAUSTED, candidate, usage)

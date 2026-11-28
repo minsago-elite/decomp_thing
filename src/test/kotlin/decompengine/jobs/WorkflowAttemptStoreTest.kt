@@ -4,6 +4,8 @@ import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import org.junit.jupiter.api.extension.ExtendWith
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -906,6 +908,62 @@ class WorkflowAttemptStoreTest {
         WorkflowAttemptStore.open(root, CLOCK).use { store ->
             val recovered = store.recoverAfterRestart(job) as WorkflowJobInspection.Available
             assertTrue(recovered.snapshot.attempts.single().progressRetentionPinned)
+        }
+    }
+
+    @Test fun `repair publication keeps older completed repairs without a nonce or binding unpublished`() = withRoot { root ->
+        val job = upload(root)
+        val metadata = stateJson(root, job)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val created = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.REPAIR, LIMITS)).attempt
+            val running = store.transition(job, created.runId, created.version, WorkflowTransition.Start).attempt
+            store.transition(job, running.runId, running.version, WorkflowTransition.Finish(WorkflowRunState.COMPLETED,
+                WorkflowTerminalReason.COMPLETED, WorkflowCandidate("source_$SHA", SHA)))
+        }
+        val document = Json.parseToJsonElement(metadata.readText()).jsonObject
+        val oldAttempt = JsonObject(document.getValue("attempts").jsonArray.single().jsonObject - "repairPublicationNonce")
+        val legacy = JsonObject(document + ("attempts" to JsonArray(listOf(oldAttempt)))).toString()
+        metadata.writeText(legacy)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val recovered = (store.recoverAfterRestart(job) as WorkflowJobInspection.Available).snapshot.attempts.single()
+            assertEquals(WorkflowRecoveryDisposition.COMPLETED_UNPUBLISHED, recovered.recoveryDisposition)
+            assertNull(recovered.repairPublicationNonce)
+            assertNull(recovered.repairBinding)
+        }
+        assertEquals(legacy, metadata.readText())
+    }
+
+    @Test fun `repair publication commits its binding with completion at every crash boundary`() {
+        for (boundary in WorkflowStoreFaultPoint.entries) withRoot { root ->
+            val job = upload(root)
+            var armed = false
+            lateinit var binding: WorkflowRepairBinding
+            WorkflowAttemptStore.open(root, CLOCK, WorkflowStoreFaultInjector {
+                if (armed && it == boundary) throw SimulatedCrash()
+            }).use { store ->
+                val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.REPAIR, LIMITS)).attempt
+                val run = store.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+                val owner = decompengine.repair.RepairPublicationOwner(job, run.runId, assertNotNull(run.repairPublicationNonce))
+                val invocation = decompengine.repair.RepairValidationInvocation("validation_" + "a".repeat(32),
+                    "run_00000001", "root_" + "b".repeat(24), SHA, SHA, SHA, SHA)
+                binding = assertNotNull(WorkflowRepairBinding.from(run,
+                    decompengine.repair.RepairPublicationCommitment(owner, SHA, invocation, SHA)))
+                val finish = WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED,
+                    WorkflowCandidate("source_$SHA", SHA), repairBinding = binding)
+                assertFailsWith<IllegalArgumentException> {
+                    store.transition(job, run.runId, run.version, finish.copy(candidate = WorkflowCandidate("different", SHA)))
+                }
+                armed = true
+                assertFailsWith<SimulatedCrash> { store.transition(job, run.runId, run.version, finish) }
+            }
+            WorkflowAttemptStore.open(root, CLOCK).use { reopened ->
+                val inspection = reopened.recoverAfterRestart(job) as WorkflowJobInspection.Available
+                val attempt = inspection.snapshot.attempts.single()
+                val committed = boundary in setOf(WorkflowStoreFaultPoint.AFTER_RENAME, WorkflowStoreFaultPoint.AFTER_DIRECTORY_FSYNC)
+                assertEquals(if (committed) WorkflowRunState.COMPLETED else WorkflowRunState.INTERRUPTED, attempt.state)
+                assertEquals(binding.takeIf { committed }, attempt.repairBinding)
+                assertNull(attempt.acceptedRevision)
+            }
         }
     }
 

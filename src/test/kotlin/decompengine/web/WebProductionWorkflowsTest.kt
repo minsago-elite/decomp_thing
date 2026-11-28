@@ -11,6 +11,10 @@ import decompengine.project.sha256
 import decompengine.repair.DeclarativeRepairIndexProfile
 import decompengine.repair.ModuleRevisionGraph
 import decompengine.repair.open
+import decompengine.repair.RepairPublicationOwner
+import decompengine.repair.RepairPublicationCommitment
+import decompengine.repair.RepairValidationObservedOutcome
+import decompengine.repair.repairValidationPublishedTextArtifact
 import decompengine.repair.RepairEvidence
 import decompengine.repair.RepairHistoryReadStatus
 import decompengine.repair.RepairIndexLayout
@@ -49,6 +53,99 @@ import kotlin.test.*
 /** Inert engines only: no binary, Ghidra, sandbox or model agent runs in these controls. */
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebProductionWorkflowsTest {
+    @Test
+    fun `repair publication binds identical projects to the live dispatch and refuses a copied graph`() = withRoot { root ->
+        val source = root.resolve("template")
+        writeSourceTree(source, "identical")
+        val jobStore = JobStore(root.resolve("jobs"))
+        val job = jobStore.createFromUpload("same.elf", elfFixture())
+        val engines = FakeEngines()
+        val adapter = RepairWorkflowAdapter(engines, FAST, "agent-acp")
+        fun run(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome.Completed =
+            assertIs<DurableWebWorkflowOutcome.Completed>(adapter.execute(context))
+        fun contextFor(runId: String, nonce: String): DurableWebWorkflowContext {
+            val reports = root.resolve(runId)
+            val initial = context(root, reports, WebWorkflowDefaults.REPAIR)
+            return initial.copy(job = job, inputSourceTree = source, attempt = initial.attempt.copy(jobId = job.id,
+                workflow = WorkflowKind.REPAIR, runId = runId, repairPublicationNonce = nonce))
+        }
+        val first = contextFor("run_first", "publication_first")
+        val second = contextFor("run_second", "publication_second")
+        engines.ownedRepair = ::commitFixtureObservation
+        val a = assertNotNull(run(first).binding)
+        val b = assertNotNull(run(second).binding)
+        assertEquals(a.sourceSha256, b.sourceSha256)
+        assertEquals(a.graphRunId, b.graphRunId)
+        assertEquals(a.receiptSha256, b.receiptSha256)
+        assertNotEquals(a.invocationId, b.invocationId)
+        assertNotEquals(a.graphSha256, b.graphSha256)
+
+        val copied = root.resolve("copied")
+        copyWebSourceTree(first.reportsDirectory.resolve("source-tree"), copied)
+        ModuleRevisionGraph.open(copied, PROFILE).use { graph ->
+            assertNull(graph.capturePublication(a.graphRunId))
+        }
+        val stale = assertNotNull(engines.lastPublication)
+        engines.ownedRepair = { _, _ -> stale }
+        assertFailsWith<IllegalArgumentException> { run(contextFor("run_third", "publication_third")) }
+    }
+
+    @Test
+    fun `repair publication survives service restart without publishing acceptance or executing again`() = withRoot { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("pipeline.elf", elfFixture())
+        val engines = FakeEngines().also { it.ownedRepair = ::commitFixtureObservation }
+        val binding = service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val input = service.requestDurableStart(job.id, version(service, job.id),
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "binding_reconstruct_01").attempt
+            val repair = service.requestDurableStart(job.id, version(service, job.id),
+                NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, input.candidate!!.revisionId,
+                    "agent-acp"), "binding_repair_start_01").attempt
+            assertEquals(WorkflowRecoveryDisposition.COMPLETED_UNPUBLISHED, repair.recoveryDisposition)
+            val result = assertNotNull(repair.repairBinding)
+            val graph = readProjectRecordedRepairHistory(store.runReportsDirectory(job.id, repair.runId).resolve("source-tree"))
+            assertEquals(assertNotNull(graph.snapshot).graphSha256, result.graphSha256)
+            result
+        }
+        val metadata = root.resolve(job.id).resolve("workflow-state.json")
+        val before = metadata.readBytes()
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val stored = assertNotNull(service.presentation(job.id).snapshot).attempts.last()
+            assertEquals(binding, stored.repairBinding)
+            assertNull(stored.acceptedRevision)
+            assertNull(service.startupReconciliation(), "production has no registered acceptance publisher")
+        }
+        assertContentEquals(before, metadata.readBytes())
+        assertEquals(2, engines.calls.get())
+    }
+
+    /** Inert owner-side graph metadata. The receipt is deliberately opaque to a binding producer. */
+    private fun commitFixtureObservation(project: Path, owner: RepairPublicationOwner): RepairPublicationCommitment =
+        ModuleRevisionGraph.open(project, PROFILE).use { graph ->
+            graph.enableRunContract()
+            graph.retainRegressionInputs(INPUTS)
+            val run = graph.beginRun(1, 60_000, owner)
+            val binary = sha256("original".toByteArray())
+            graph.bindOriginalBinary(binary)
+            graph.bindExpectedObservations(sha256("expected".toByteArray()))
+            val invocation = graph.validationInvocation(null)
+            val receipt = "{}"
+            val path = project.resolve("reports/fixture.validation.json")
+            path.writeText(receipt)
+            val artifact = repairValidationPublishedTextArtifact(path, receipt)
+            val proof = RepairValidationProof(invocation.sourceRevisionSha256, invocation.profileSha256,
+                invocation.indexSha256, invocation.regressionCorpusSha256, binary, sha256("rebuilt".toByteArray()),
+                sha256("runtime".toByteArray()), artifact.sha256, true, RepairValidationAssurance.STRICT_CONTAINED)
+            graph.recordValidationObservation(invocation, proof, RepairValidationObservedOutcome.BEHAVIOR_CHECKED, artifact, null)
+            assertNull(graph.capturePublication(run.id))
+            graph.acceptAssessedBaseline(proof, RepairEvidence("valid", "fixture baseline"))
+            graph.synchronizeRepairHistory()
+            assertNotNull(graph.capturePublication(run.id))
+        }
+
     @Test
     fun `explore enforces wall-clock, idle and output limits and stops its child before returning`() = withRoot { root ->
         val engines = FakeEngines()
@@ -840,6 +937,8 @@ class WebProductionWorkflowsTest {
         var reconstructBody: (Path, WebReconstructionMode, AgentWorkflowProgress) -> Unit = { reports, mode, _ ->
             modes += mode; writeSourceTree(reports.resolve("source-tree"), "base")
         }
+        var ownedRepair: ((Path, RepairPublicationOwner) -> RepairPublicationCommitment)? = null
+        var lastPublication: RepairPublicationCommitment? = null
         var repairBody: (Path) -> Unit = { project -> acceptRepairGraph(project) }
         var modelBytes: ByteArray? = null
         var modelInputDigest = sha256(elfFixture())
@@ -852,8 +951,14 @@ class WebProductionWorkflowsTest {
             modelBytes?.let { published(modelInputDigest, it, "f".repeat(64)) }
             calls.incrementAndGet(); reconstructBody(reportsDirectory, mode, progress)
         }
-        override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
-            calls.incrementAndGet(); check(harness == "acp"); repairBody(project); return RepairRunStatus.FULLY_ACCEPTED
+        override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,
+        owner: decompengine.repair.RepairPublicationOwner?): WebRepairResult {
+            calls.incrementAndGet()
+            check(harness == "acp")
+            val publication = ownedRepair?.invoke(project, requireNotNull(owner))
+            if (publication == null) repairBody(project)
+            lastPublication = publication
+            return WebRepairResult(RepairRunStatus.FULLY_ACCEPTED, publication)
         }
     }
 
