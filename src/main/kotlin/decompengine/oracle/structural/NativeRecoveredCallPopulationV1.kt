@@ -56,6 +56,7 @@ class FrozenNativeRecoveredCallPopulationV1 internal constructor(
     private val evidenceSnapshot: ByteArray
     val observationsSha256: String
     val programModelSha256: String
+    val programModelBytes: Long
     val inputSha256: String
     val rawRecordCount: Long
     val rawSiteCount: Int
@@ -91,6 +92,7 @@ class FrozenNativeRecoveredCallPopulationV1 internal constructor(
         require(summary.observationsBytes == observationSnapshot.size.toLong())
         observationsSha256 = summary.observationsSha256
         programModelSha256 = model.sha256
+        this.programModelBytes = model.sizeBytes.toLong()
         inputSha256 = model.model.inputSha256
         rawRecordCount = summary.records
         val byAddress = model.model.functions.groupBy { it.address }

@@ -7,6 +7,9 @@ import decompengine.acp.permissions
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.project.*
+import decompengine.oracle.structural.FrozenNativeRecoveredCallPopulationV1
+import decompengine.oracle.structural.NativeRecoveredCallPopulationLimitsV1
+import decompengine.oracle.structural.NativeRecoveredCallPopulationV1
 import java.nio.channels.Channels
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -220,6 +223,69 @@ internal object GccBundledNativeCallCapture {
             }
         }
         checkpoint()
+    }
+
+    /** Recovery-only freeze from the original owned capture; this reader grants no capability. */
+    fun freezeRecoveredClaims(
+        run: LinuxDescriptor,
+        captured: GccBundledNativeCallSnapshot,
+        model: GccBundledFullExportSnapshot,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: NativeRecoveredCallPopulationLimitsV1 = NativeRecoveredCallPopulationLimitsV1(),
+        checkpoint: () -> Unit,
+    ): FrozenNativeRecoveredCallPopulationV1 {
+        require(captured.summary.observationsBytes in 1..limits.maximumObservationBytes.toLong() &&
+            size(captured.files.getValue("observations")) == captured.summary.observationsBytes &&
+            model.programModelBytes in 1..limits.maximumModelBytes.toLong() &&
+            captured.summary.scanSummary.sites <= limits.maximumSites) { "native claim freeze exceeds its selected population bounds" }
+        val frozenRunIdentity = LinuxFilesystemSyscalls.identity(run.fd)
+        require(frozenRunIdentity.copy(linkCount = run.identity.linkCount) == run.identity)
+        requirePrivateDirectory(frozenRunIdentity, frozenRunIdentity)
+        checkpoint()
+        requireUnchanged(run, captured, model, artifacts, checkpoint)
+        val observations = LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
+            requireNamedDirectory(run, "reports", captured.reportsIdentity)
+            LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, DIRECTORY).use { native ->
+                requireNamedDirectory(reports, DIRECTORY, captured.nativeIdentity)
+                requireNames(native, NATIVE_NAMES)
+                readSmallFile(native, "native-calls.json", captured.files.getValue("observations"),
+                    limits.maximumObservationBytes, checkpoint).also { bytes ->
+                    require(OracleArtifacts.sha256(bytes) == captured.summary.observationsSha256) {
+                        "native claim freeze substitutes the retained observation bytes"
+                    }
+                }
+            }
+        }
+        val frozen = NativeRecoveredCallPopulationV1.freeze(captured.manifestBytes, observations,
+            model.programModel, captured.summary.bindings, limits, checkpoint)
+        require(frozen.rawRecordCount == captured.summary.records &&
+            frozen.rawSiteCount.toLong() == captured.summary.scanSummary.sites) { "native claim freeze loses source census" }
+        requireUnchanged(run, captured, model, artifacts, checkpoint)
+        // No mutation-capable checkpoint follows this final named-identity/metadata check.
+        // The coordinator retains the lease and separately rechecks the snapshot during replay.
+        requirePinnedMetadata(run, captured, frozenRunIdentity)
+        return frozen
+    }
+
+    private fun requirePinnedMetadata(run: LinuxDescriptor, captured: GccBundledNativeCallSnapshot,
+        frozenRunIdentity: LinuxFileIdentity) {
+        require(LinuxFilesystemSyscalls.identity(run.fd) == frozenRunIdentity) { "native claim run root changed" }
+        LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
+            requireNamedDirectory(run, "reports", captured.reportsIdentity)
+            requireNamedDirectory(run, captured.controlName, captured.controlIdentity)
+            requireNames(reports, REPORT_NAMES)
+            LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, DIRECTORY).use { native ->
+                requireNamedDirectory(reports, DIRECTORY, captured.nativeIdentity)
+                requireNames(native, NATIVE_NAMES)
+                LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "program_model.json.export").use { export ->
+                    requireNamedDirectory(reports, "program_model.json.export", captured.exportIdentity)
+                    captured.files.forEach { (key, pin) ->
+                        val (directory, name) = locate(key, reports, native, export)
+                        requireFileUnchanged(directory, name, pin)
+                    }
+                }
+            }
+        }
     }
 
     private data class FileToPin(val directory: LinuxDescriptor, val name: String, val key: String, val digest: String)

@@ -5,6 +5,8 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.gcc.GccKotlinBootClasspathReference
 import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole
+import decompengine.oracle.gcc.gccIndependentMachineCallJvmArguments
+import decompengine.oracle.fulltree.OracleNativeLibraries
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.net.URLClassLoader
@@ -214,6 +216,54 @@ class IndependentMachineCallWorkerV1Test {
         }
     }
 
+    @Test fun `contained worker authenticates requests in a fresh JVM without native extraction`() = fixture { root ->
+        val native = Path.of(checkNotNull(System.getProperty("decompengine.oracle.nativeLibraryDirectory")))
+        val bootRoot = Path.of(checkNotNull(System.getProperty("decompengine.oracle.gcc.bootKeeperClasspathRoot")))
+        val classpath = GccKotlinBootClasspathReference.open().use { reference ->
+            reference.entries.joinToString(File.pathSeparator) { bootRoot.resolve(it.logicalName).toString() }
+        }
+        Files.createDirectory(root.resolve("state"))
+        // A regular file is a deterministic extraction trap, even on an executable test filesystem.
+        // Production scratch stays noexec; this regression must not depend on host mount privileges.
+        val temporary = Files.write(root.resolve("tmp"), byteArrayOf(42))
+        val requestPath = Files.write(root.resolve("request.json"), request(root).canonicalBytes)
+        val arguments = gccIndependentMachineCallJvmArguments(root, native)
+        assertTrue("-Djna.nounpack=true" in arguments)
+        assertTrue("-Djna.nosys=true" in arguments)
+        assertTrue("-Djna.boot.library.path=$native" in arguments)
+        assertTrue("-Dorg.sqlite.lib.path=$native" in arguments)
+        assertFailsWith<IllegalArgumentException> { gccIndependentMachineCallJvmArguments(root, root.resolve("native")) }
+        fun launch(name: String, jvmArguments: List<String>): Pair<Int, String> {
+            val log = root.resolve("$name.log")
+            val process = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin/java").toString(),
+                "-Xmx256m", "-XX:-UsePerfData") + jvmArguments + listOf("-cp", classpath,
+                IndependentMachineCallWorkerV1::class.java.name, requestPath.toString(), "0".repeat(64)))
+                .directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).apply {
+                    environment().clear()
+                    environment()["HOME"] = root.resolve("state").toString()
+                    environment()["TMPDIR"] = temporary.toString()
+                    environment()["LANG"] = "C.UTF-8"
+                }.start()
+            try {
+                process.outputStream.close()
+                assertTrue(process.waitFor(30, TimeUnit.SECONDS), "worker bootstrap timed out")
+                return process.exitValue() to Files.readString(log).takeLast(12000)
+            } finally {
+                if (process.isAlive) { process.destroyForcibly(); assertTrue(process.waitFor(5, TimeUnit.SECONDS)) }
+                process.inputStream.close(); process.errorStream.close()
+            }
+        }
+        val unpinned = launch("unpinned", arguments.filterNot { it in OracleNativeLibraries.jvmArguments(native) } +
+            "-Djna.nosys=true")
+        assertTrue(unpinned.first != 0 && unpinned.second.contains("UnsatisfiedLinkError"), unpinned.second)
+        val pinned = launch("pinned", arguments)
+        assertTrue(pinned.first != 0 && pinned.second.contains("machine-call request SHA-256 differs"), pinned.second)
+        assertFalse(pinned.second.contains("UnsatisfiedLinkError"), pinned.second)
+        assertContentEquals(byteArrayOf(42), Files.readAllBytes(temporary))
+        assertFalse(Files.exists(root.resolve("output.json")))
+        assertTrue(Files.list(root.resolve("state")).use { !it.findAny().isPresent })
+    }
+
     @Test fun `pinned bundled runtime initializes and decodes bytes in a fresh worker JVM`() = fixture { root ->
         val bundle = Path.of(requireNotNull(System.getProperty("decompengine.ghidra.bundle"))).toAbsolutePath().normalize()
         val archive = Path.of(requireNotNull(System.getProperty("decompengine.ghidra.provenanceArchive"))).toAbsolutePath().normalize()
@@ -222,7 +272,7 @@ class IndependentMachineCallWorkerV1Test {
         val classpath = GccKotlinBootClasspathReference.open().use { reference ->
             reference.entries.joinToString(File.pathSeparator) { bootRoot.resolve(it.logicalName).toString() }
         }
-        val home = Files.createDirectory(root.resolve("home"))
+        val home = Files.createDirectory(root.resolve("state"))
         val temporary = Files.createDirectory(root.resolve("tmp"))
         val log = Files.createTempDirectory(root.parent, "runtime-evidence-").resolve("worker.log")
         withMachineCallWorkerFixtureV1 { rich, oracle, inputSha, oracleSha, manifestSha ->
@@ -233,10 +283,11 @@ class IndependentMachineCallWorkerV1Test {
                 reports.resolve("independent-machine-call-observations.json"))
             val requestPath = Files.write(root.resolve("request.json"), request.canonicalBytes)
             val requestSha = OracleArtifacts.sha256(request.canonicalBytes)
-            val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx512m",
-                "-XX:-UsePerfData", "-XX:+DisableAttachMechanism", "-Duser.home=$home", "-Djava.io.tmpdir=$temporary",
-                "-Djna.tmpdir=$temporary", "-cp", classpath, IndependentMachineCallWorkerV1::class.java.name,
-                requestPath.toString(), requestSha).directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).apply {
+            val process = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx512m",
+                "-XX:-UsePerfData") + gccIndependentMachineCallJvmArguments(root,
+                    Path.of(checkNotNull(System.getProperty("decompengine.oracle.nativeLibraryDirectory")))) +
+                listOf("-cp", classpath, IndependentMachineCallWorkerV1::class.java.name,
+                    requestPath.toString(), requestSha)).directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).apply {
                     environment().clear()
                     environment()["HOME"] = home.toString()
                     environment()["TMPDIR"] = temporary.toString()
