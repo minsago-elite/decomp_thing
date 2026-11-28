@@ -796,7 +796,19 @@ jobs:
       - name: Verify bounded Gradle plugin resolution for archival builds
         timeout-minutes: 12
         run: JAVA_HOME="$JAVA_HOME_21_X64" python3 -B scripts/test-archival-gradle-resolution.py
+      # Restore-only: this job never publishes. It reuses the dependency family manifest
+      # written by default-branch jobs, then seeds the image build from it (#2013).
+      - name: Restore the runner Gradle dependency cache for the archival image seed
+        uses: minsago-elite/gradle-cache-action@6dea8fd64949676aa3da5d1e107d8efaaca7e05a
+        with:
+          gradle-user-home: ${{ github.workspace }}/build/archival-runner-gradle-home
+          cache-family: decomp-gradle-dependencies-v1
+          cache-key-prefix: decomp-gradle-v1
+          cache-read-only: 'true'
+          cache-cleanup: never
       - run: scripts/validate-archival-docker.sh
+        env:
+          DECOMP_ARCHIVAL_GRADLE_SEED: ${{ github.workspace }}/build/archival-runner-gradle-home
       - uses: actions/upload-artifact@v7
         if: always()
         with:

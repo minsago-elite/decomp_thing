@@ -35,6 +35,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     ' -- "angr==${ANGR_VERSION}"
 RUN python3 -c 'import angr, sys; assert angr.__version__ == sys.argv[1]; print("angr import:", angr.__version__)' "$ANGR_VERSION"
 
+# Runner dependency seed (#2013). scripts/validate-archival-docker.sh replaces this
+# stage with `--build-context gradle-seed=build/archival-gradle-seed`. The default
+# has no /modules-2, so a plain `docker build` resolves cold as before.
+FROM toolchain AS gradle-seed
+
 FROM toolchain AS build
 
 WORKDIR /workspace
@@ -45,15 +50,11 @@ RUN bash scripts/install-frontend-node.sh /opt/frontend-node
 ENV PATH="/opt/frontend-node/bin:${PATH}"
 COPY . .
 # Gradle's native HTTP retry is intentionally limited to transient repository
-# failures; timeout bounds the one complete archival build invocation.
-RUN --mount=type=cache,target=/root/.gradle \
-    timeout --signal=TERM --kill-after=30s 45m \
-    ./gradlew --no-daemon \
-      -Dorg.gradle.internal.repository.max.tentatives=5 \
-      -Dorg.gradle.internal.repository.initial.backoff=2000 \
-      -Dorg.gradle.internal.http.connectionTimeout=30000 \
-      -Dorg.gradle.internal.http.socketTimeout=60000 \
-      installDist
+# failures; the script documents its jittered window and bounds the one complete
+# archival build invocation. The seed is a read-only Gradle dependency cache.
+RUN --mount=type=bind,from=gradle-seed,target=/gradle-seed \
+    --mount=type=cache,target=/root/.gradle \
+    sh scripts/archival-gradle-install.sh /gradle-seed
 
 FROM toolchain AS runtime
 
