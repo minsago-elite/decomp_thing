@@ -12,6 +12,8 @@ internal class WebUploadStorage(
     private val available: () -> Long = { Files.getFileStore(root).usableSpace },
 ) {
     init { require(maximumBytes >= RESERVATION_BYTES) }
+    /** Test seam for holding quota measurement while unrelated HTTP reads are exercised. */
+    @Volatile internal var beforeMeasureObserver: () -> Unit = {}
     private var baseline: Long? = null
     private var charged = 0L
     private var active = 0
@@ -19,7 +21,7 @@ internal class WebUploadStorage(
     @Synchronized fun reserve(): AutoCloseable {
         check(!Thread.currentThread().isInterrupted) { "Upload admission interrupted" }
         try {
-            val used = baseline ?: measure()
+            val used = baseline ?: run { beforeMeasureObserver(); measure() }
             if (used < 0 || used > maximumBytes || charged > maximumBytes - used ||
                 RESERVATION_BYTES > maximumBytes - used - charged) {
                 throw WebJobServiceException("UPLOAD_STORAGE", "Retained storage has no room for another upload reservation.")

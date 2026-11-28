@@ -12,7 +12,12 @@ import Runtime from '../src/routes/Runtime';
 
 const sample = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
 const sessions: ReturnType<typeof createBrowserSession>[] = [];
-afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+
+/** Live paragraphs take text only after they have been in the document for a paint. */
+async function liveReady() {
+  await act(() => new Promise<void>(resolve => { setTimeout(resolve, 40); }));
+}
 
 function setup() {
   const data = { ...structuredClone(sample.data), sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
@@ -118,6 +123,29 @@ it('renders connection and explicit logout without displaying or storing credent
   expect(session.csrf()).toBeNull();
 });
 
+it('disables Sign out only in the development fixture mode, without sending a logout', async () => {
+  vi.stubEnv('MODE', 'fixtures');
+  try {
+    const { session, gateway } = setup();
+    await session.initialize({ kind: 'token', token: 'synthetic_non_secret_bootstrap_fixture_1234567890' });
+    const signOut = await screen.findByRole('button', { name: 'Sign out' });
+    expect((signOut as HTMLButtonElement).disabled).toBe(true);
+    expect(signOut.getAttribute('aria-describedby')).toBe('decomp-development-notice');
+    fireEvent.click(signOut);
+    expect(gateway.logout).not.toHaveBeenCalled();
+    expect(session.snapshot().status).toBe('authenticated');
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it('keeps Sign out active outside fixture mode', async () => {
+  expect(import.meta.env.MODE).not.toBe('fixtures');
+  const { session } = setup();
+  await session.initialize({ kind: 'token', token: 'synthetic_non_secret_bootstrap_fixture_1234567890' });
+  const signOut = await screen.findByRole('button', { name: 'Sign out' });
+  expect((signOut as HTMLButtonElement).disabled).toBe(false);
+  expect(signOut.hasAttribute('aria-describedby')).toBe(false);
+});
+
 it('offers a read-only check after expiry without replaying an exchange', async () => {
   const { session, gateway } = setup();
   gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'SESSION_EXPIRED', status: 401 }));
@@ -176,8 +204,353 @@ it('keeps the connected session in header chrome and every other state in the pa
   await act(async () => { await session.initialize({ kind: 'absent' }); });
   expect(screen.getByTestId('header').textContent).toContain('Local session connected');
   expect(screen.getByTestId('page').textContent).toBe('');
+  const connectedGroup = screen.getByRole('group', { name: 'Local session' });
+  expect(connectedGroup.tagName).toBe('DIV');
+  expect(screen.queryByRole('complementary', { name: 'Local session' })).toBeNull();
+  expect(connectedGroup.closest('header')).toBe(screen.getByTestId('header'));
+  // The quiet header keeps an empty, visually hidden live region ready for a later instance change.
+  const headerStatus = connectedGroup.querySelector('[role="status"]');
+  expect(headerStatus?.textContent).toBe('');
+  expect(headerStatus?.classList.contains('sr-only')).toBe(true);
+  expect(connectedGroup.querySelector('button')?.textContent).toBe('Sign out');
+  const connectedAxe = await axeSummary(connectedGroup);
+  expect(connectedAxe.violations).toEqual([]);
+  expect(connectedAxe.incomplete).toEqual([]);
+  expect(connectedAxe.passes).toEqual(expect.arrayContaining(['aria-allowed-role', 'aria-roles', 'aria-valid-attr', 'aria-valid-attr-value']));
+  expect(connectedAxe.inapplicable).toContain('landmark-complementary-is-top-level');
   await act(async () => { await session.logout(); });
   expect(screen.getByTestId('header').textContent).toBe('');
   expect(screen.getByTestId('page').textContent).toContain('signed out');
   expect(screen.getAllByRole('button').map(button => button.textContent)).not.toContain('Sign out');
+});
+
+const SESSION_AXE_RULES = ['aria-allowed-role', 'aria-required-children', 'aria-valid-attr', 'aria-valid-attr-value',
+  'aria-roles', 'nested-interactive', 'landmark-unique', 'landmark-complementary-is-top-level'];
+
+async function axeSummary(root: Element) {
+  const { default: axe } = await import('axe-core');
+  const result = await axe.run(root, { runOnly: { type: 'rule', values: SESSION_AXE_RULES }, resultTypes: ['violations', 'passes', 'incomplete'] });
+  return { violations: result.violations.map(item => item.id), passes: result.passes.map(item => item.id),
+    incomplete: result.incomplete.map(item => item.id), inapplicable: result.inapplicable.map(item => item.id) };
+}
+
+async function axeViolations(root: Element) {
+  return (await axeSummary(root)).violations;
+}
+
+/** Returns the non-empty live regions; idle placements keep an empty region in the tree. */
+function expectStatusOnlyText() {
+  const all = screen.getAllByRole('status');
+  for (const status of all) {
+    expect(status.tagName).toBe('P');
+    expect(status.querySelector('button, a, input, [tabindex]')).toBeNull();
+  }
+  for (const aside of document.querySelectorAll('aside')) {
+    if (aside.getAttribute('role') === 'none') expect(aside.hasAttribute('aria-label')).toBe(false);
+    else {
+      expect(aside.hasAttribute('role')).toBe(false);
+      expect(aside.getAttribute('aria-label')).toBe('Local session');
+    }
+  }
+  expect(document.querySelectorAll('[id]').length).toBe(0);
+  return all.filter(status => status.textContent !== '');
+}
+
+it('keeps live status semantics on text-only regions through every session transition', async () => {
+  let release!: () => void;
+  const { session, gateway, data } = setup();
+  gateway.bootstrap.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(data); }));
+  await liveReady();
+  expect(gateway.bootstrap).not.toHaveBeenCalled();
+  expect(gateway.logout).not.toHaveBeenCalled();
+  let pending!: Promise<void>;
+  void act(() => { pending = session.initialize({ kind: 'absent' }); });
+  expect(session.snapshot().status).toBe('checking');
+  expect(expectStatusOnlyText().map(status => status.textContent)).toEqual(['Checking local session…']);
+  expect(screen.queryByRole('button')).toBeNull();
+  const pageNotice = screen.getByRole('complementary', { name: 'Local session' });
+  expect(pageNotice).toBeTruthy();
+  const pageAxe = await axeSummary(pageNotice);
+  expect(pageAxe.violations).toEqual([]);
+  expect(pageAxe.incomplete).toEqual([]);
+  expect(pageAxe.passes).toEqual(expect.arrayContaining(['aria-allowed-role', 'aria-roles', 'aria-valid-attr',
+    'aria-valid-attr-value', 'landmark-complementary-is-top-level']));
+  expect(await axeViolations(document.body)).toEqual([]);
+  await act(async () => { release(); await pending; });
+
+  const signOut = screen.getByRole('button', { name: 'Sign out' });
+  expect(signOut.closest('[role="status"]')).toBeNull();
+  expect(expectStatusOnlyText()).toEqual([]);
+  expect(gateway.logout).not.toHaveBeenCalled();
+  expect(await axeViolations(document.body)).toEqual([]);
+  signOut.focus();
+  expect(document.activeElement).toBe(signOut);
+  fireEvent.keyDown(signOut, { key: 'Enter' });
+  fireEvent.click(signOut);
+  expect(await screen.findByText(/You signed out of this browser/)).toBeTruthy();
+  expect(gateway.logout).toHaveBeenCalledOnce();
+  const [required] = expectStatusOnlyText();
+  expect(required?.textContent).toContain('You signed out of this browser');
+  const check = screen.getByRole('button', { name: 'Check session' });
+  expect(check.closest('[role="status"]')).toBeNull();
+  expect(await axeViolations(document.body)).toEqual([]);
+  const before = gateway.bootstrap.mock.calls.length;
+  check.focus();
+  expect(document.activeElement).toBe(check);
+  fireEvent.click(check);
+  expect(await screen.findByRole('button', { name: 'Sign out' })).toBeTruthy();
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(before + 1);
+  expect(gateway.exchange).not.toHaveBeenCalled();
+});
+
+it('announces an application instance change as text only beside the Sign out action', async () => {
+  const { session, gateway, data } = setup();
+  await liveReady();
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: `${data.serverInstanceId ?? 'instance'}-changed` });
+  await act(async () => { await session.refresh(); });
+  expect(session.snapshot()).toMatchObject({ status: 'authenticated', serverChanged: true });
+  const [status] = expectStatusOnlyText();
+  expect(status?.textContent).toMatch(/^Application instance changed\./);
+  const connectedGroup = screen.getByRole('group', { name: 'Local session' });
+  expect(connectedGroup.querySelector('[role="status"]')).toBe(status);
+  expect(connectedGroup.querySelector('button')?.closest('[role="status"]')).toBeNull();
+  const changedAxe = await axeSummary(connectedGroup);
+  expect(changedAxe.violations).toEqual([]);
+  expect(changedAxe.passes).toContain('aria-allowed-role');
+  expect(screen.getByText('Local session connected.').getAttribute('role')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Sign out' }).closest('[role="status"]')).toBeNull();
+  expect(gateway.logout).not.toHaveBeenCalled();
+  expect(await axeViolations(document.body)).toEqual([]);
+});
+
+for (const reason of ['removal-failed', 'incompatible'] as const) {
+  it(`suppresses the refresh action for ${reason} while keeping a valid text status`, async () => {
+    const { session, gateway } = setup();
+    if (reason === 'removal-failed') await act(async () => { await session.initialize({ kind: 'removal-failed' }); });
+    else {
+      gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('unsupported_contract'));
+      await act(async () => { await session.initialize({ kind: 'absent' }); });
+    }
+    expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason });
+    expectStatusOnlyText();
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(await axeViolations(document.body)).toEqual([]);
+  });
+}
+
+it('permits an explicit refresh for a connection failure outside the status region', async () => {
+  const { session, gateway } = setup();
+  gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('network_error'));
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+  expectStatusOnlyText();
+  const check = screen.getByRole('button', { name: 'Check session' });
+  expect(check.closest('[role="status"]')).toBeNull();
+  expect(gateway.bootstrap).toHaveBeenCalledOnce();
+  expect(await axeViolations(document.body)).toEqual([]);
+  fireEvent.click(check);
+  expect(await screen.findByRole('button', { name: 'Sign out' })).toBeTruthy();
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+});
+
+it('negative control: axe rejects the former aside[role=status] native-role override', async () => {
+  const host = document.createElement('div');
+  host.innerHTML = '<aside class="session-notice notice" aria-label="Local session" role="status"><p>Checking</p><button type="button">Check session</button></aside>';
+  document.body.append(host);
+  try {
+    expect(await axeViolations(host)).toContain('aria-allowed-role');
+  } finally { host.remove(); }
+});
+
+it('negative control: rejects a complementary session landmark nested inside the app banner', async () => {
+  const host = document.createElement('div');
+  host.innerHTML = '<header><aside class="session-notice is-connected" aria-label="Local session"><p>Local session connected.</p><button type="button">Sign out</button></aside></header>';
+  document.body.append(host);
+  try {
+    expect(await axeViolations(host)).toContain('landmark-complementary-is-top-level');
+  } finally { host.remove(); }
+});
+
+function shell() {
+  const data = { ...structuredClone(sample.data), sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = {
+    exchange: vi.fn(() => Promise.resolve({ csrfToken: data.csrfToken, expiresAt: data.sessionExpiresAt })),
+    bootstrap: vi.fn(() => Promise.resolve(data)),
+    logout: vi.fn(() => Promise.resolve()),
+  };
+  const session = createBrowserSession(gateway, '/');
+  sessions.push(session);
+  const view = render(<>
+    <header data-testid="header"><SessionStatus session={session} placement="header" /></header>
+    <button type="button">Elsewhere</button>
+    <div data-testid="page"><SessionStatus session={session} placement="page" /></div>
+  </>);
+  const region = (id: string) => screen.getByTestId(id).querySelector<HTMLElement>(`[role="status"][data-session-announcement="${id}"]`);
+  return { session, gateway, data, view, region };
+}
+
+it('keeps the same live node in each placement across every transition, with text in exactly one', async () => {
+  let releaseLogout!: () => void;
+  const { session, gateway, data, region } = shell();
+  await liveReady();
+  const header = region('header'); const page = region('page');
+  expect(header).not.toBeNull(); expect(page).not.toBeNull();
+  const spoken = () => [header, page].filter(node => node?.textContent !== '').map(node => node?.textContent);
+  expect(spoken()).toEqual([]);
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  expect(spoken()).toEqual([]);
+  gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: `${data.serverInstanceId ?? 'instance'}-changed` });
+  await act(async () => { await session.refresh(); });
+  expect(spoken()).toEqual([expect.stringMatching(/^Application instance changed\./)]);
+  expect(region('header')).toBe(header);
+  expect(header?.classList.contains('sr-only')).toBe(false);
+  gateway.logout.mockImplementationOnce(() => new Promise(resolve => { releaseLogout = () => resolve(); }));
+  let pending!: Promise<void>;
+  void act(() => { pending = session.logout(); });
+  expect(spoken()).toEqual(['Signing out…']);
+  expect(region('page')).toBe(page); expect(region('header')).toBe(header);
+  expect([...document.querySelectorAll('.session-notice')]).toEqual([page?.parentElement]);
+  expect(header?.parentElement?.className).toBe('sr-only');
+  await act(async () => { releaseLogout(); await pending; });
+  expect(spoken()).toEqual([expect.stringMatching(/^You signed out of this browser/)]);
+  expect(region('page')).toBe(page); expect(region('header')).toBe(header);
+  expect(page?.querySelector('button')).toBeNull();
+  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Elsewhere', 'Check session']);
+  fireEvent.click(screen.getByRole('button', { name: 'Check session' }));
+  await screen.findByRole('button', { name: 'Sign out' });
+  expect(spoken()).toEqual([expect.stringMatching(/^Application instance changed\./)]); // fixture id reverted, so header alone speaks
+  expect(region('page')).toBe(page); expect(region('header')).toBe(header);
+  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Sign out', 'Elsewhere']);
+  expect(document.querySelectorAll('[id]').length).toBe(0);
+  expect(screen.queryAllByRole('complementary')).toEqual([]);
+  expect([...document.querySelectorAll('.session-notice')].map(node => node.className)).toEqual(['session-notice is-connected']);
+  expect(page?.parentElement?.className).toBe('sr-only');
+  expect([...document.querySelectorAll('[data-session-announcement]')]).toEqual([header, page]);
+  expect(await axeViolations(document.body)).toEqual([]);
+});
+
+it('moves focus from an activated Sign out button to the page notice', async () => {
+  const { session, gateway } = shell();
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  const signOut = screen.getByRole('button', { name: 'Sign out' });
+  signOut.focus();
+  fireEvent.click(signOut);
+  const notice = screen.getByRole('complementary', { name: 'Local session' });
+  expect(document.activeElement).toBe(notice);
+  expect(notice.textContent).toBe('Signing out…');
+  await screen.findByText(/You signed out of this browser/);
+  expect(document.activeElement).toBe(screen.getByRole('complementary', { name: 'Local session' }));
+  expect(gateway.logout).toHaveBeenCalledOnce();
+  expect(await axeViolations(document.body)).toEqual([]);
+});
+
+it('preserves focus placed elsewhere and does not move focus on passive transitions', async () => {
+  const { session } = shell();
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+  elsewhere.focus();
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out' })); // pointer activation without focus
+  await screen.findByText(/You signed out of this browser/);
+  expect(document.activeElement).toBe(elsewhere);
+  fireEvent.click(screen.getByRole('button', { name: 'Check session' }));
+  await screen.findByRole('button', { name: 'Sign out' });
+  (document.activeElement as HTMLElement | null)?.blur();
+  await act(async () => { await session.logout(); }); // programmatic/other-tab style transition
+  expect(document.activeElement).toBe(document.body);
+});
+
+it('negative control: a conditionally mounted status replaces the live node, which the identity check detects', () => {
+  function Former({ text }: { text: string }) { return text ? <aside aria-label="Local session"><p role="status">{text}</p></aside> : null; }
+  const view = render(<div data-testid="former"><Former text="" /></div>);
+  expect(screen.getByTestId('former').querySelector('[role="status"]')).toBeNull();
+  view.rerender(<div data-testid="former"><Former text="Signing out…" /></div>);
+  const born = screen.getByTestId('former').querySelector('[role="status"]');
+  expect(born?.textContent).toBe('Signing out…'); // region was born populated
+});
+
+for (const [kind, expected] of [['absent', 'Checking local session…'], ['invalid', /incomplete or invalid/], ['removal-failed', /could not be cleared/]] as const) {
+  it(`cold startup (${kind}) inserts an empty live paragraph before giving it text`, async () => {
+    const data = { ...structuredClone(sample.data), sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+    const gateway = {
+      exchange: vi.fn(() => Promise.resolve({ csrfToken: data.csrfToken, expiresAt: data.sessionExpiresAt })),
+      bootstrap: vi.fn(() => new Promise<typeof data>(() => {})),
+      logout: vi.fn(() => Promise.resolve()),
+    };
+    const session = createBrowserSession(gateway, '/');
+    sessions.push(session);
+    // Same order as main.tsx: the session publishes its first state before the first App render.
+    void session.initialize({ kind });
+    const firstState = session.snapshot();
+    render(<SessionStatus session={session} placement="page" />);
+    const live = document.querySelector<HTMLElement>('[data-session-announcement="page"]');
+    expect(live?.getAttribute('role')).toBe('status');
+    expect(live?.textContent).toBe('');
+    const notice = screen.getByRole('complementary', { name: 'Local session' });
+    expect(notice.textContent).toMatch(expected); // first screen still shows the message
+    await liveReady();
+    expect(document.querySelector('[data-session-announcement="page"]')).toBe(live);
+    expect(live?.textContent).toMatch(expected);
+    expect(notice.textContent?.match(new RegExp(typeof expected === 'string' ? expected : expected.source, 'g'))?.length).toBe(1);
+    expect(session.snapshot()).toEqual(firstState);
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(kind === 'absent' ? 1 : 0); // no extra checks
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(await axeViolations(document.body)).toEqual([]);
+  });
+}
+
+async function checkFrom(outcome: 'connected' | 'expired' | 'connection', focus: 'button' | 'elsewhere' | 'programmatic') {
+  const { session, gateway, data } = shell();
+  gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'SESSION_EXPIRED', status: 401 }));
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  let release!: () => void;
+  gateway.bootstrap.mockImplementationOnce(() => new Promise((resolve, reject) => {
+    release = () => {
+      if (outcome === 'connected') resolve(data);
+      else reject(outcome === 'expired' ? new ApiClientError('http_error', { serverCode: 'SESSION_EXPIRED', status: 401 }) : new ApiClientError('network_error'));
+    };
+  }));
+  const check = screen.getByRole('button', { name: 'Check session' });
+  const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+  if (focus === 'programmatic') { check.focus(); check.blur(); void act(() => { void session.refresh(); }); }
+  else { (focus === 'button' ? check : elsewhere).focus(); fireEvent.click(check); }
+  const duringChecking = document.activeElement;
+  const landmark = screen.getByRole('complementary', { name: 'Local session' }); // captured while checking
+  await act(async () => { release(); await Promise.resolve(); await Promise.resolve(); });
+  await screen.findByText(outcome === 'connected' ? 'Local session connected.' : outcome === 'expired' ? /Your local session expired/ : /could not be checked/);
+  return { duringChecking, landmark, after: document.activeElement, elsewhere, gateway };
+}
+
+for (const outcome of ['connected', 'expired', 'connection'] as const) {
+  it(`moves focus from an activated Check session button to a surviving target (${outcome})`, async () => {
+    vi.stubEnv('MODE', 'production');
+    const { duringChecking, landmark, after, gateway } = await checkFrom(outcome, 'button');
+    expect(landmark.tagName).toBe('ASIDE');
+    expect(duringChecking).toBe(landmark);
+    if (outcome === 'connected') expect(after).toBe(screen.getByRole('button', { name: 'Sign out' }));
+    else expect(after).toBe(screen.getByRole('complementary', { name: 'Local session' }));
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    expect(gateway.exchange).not.toHaveBeenCalled();
+  });
+}
+
+it('moves focus to the connected session group when fixture mode disables Sign out', async () => {
+  vi.stubEnv('MODE', 'fixtures');
+  const { after } = await checkFrom('connected', 'button');
+  const group = screen.getByRole('group', { name: 'Local session' });
+  expect(screen.getByRole('button', { name: 'Sign out' })).toHaveProperty('disabled', true);
+  expect(after).toBe(group);
+  expect(group.textContent).toContain('Local session connected.');
+});
+
+it('keeps intentional focus elsewhere while a Check session request runs', async () => {
+  const { duringChecking, after, elsewhere } = await checkFrom('connected', 'elsewhere');
+  expect(duringChecking).toBe(elsewhere);
+  expect(after).toBe(elsewhere);
+});
+
+it('does not move focus for a programmatic or peer-triggered check', async () => {
+  const { duringChecking, after } = await checkFrom('connected', 'programmatic');
+  expect(duringChecking).toBe(document.body);
+  expect(after).toBe(document.body);
 });

@@ -1,0 +1,189 @@
+package decompengine.web
+
+import com.sun.net.httpserver.HttpExchange
+import java.security.MessageDigest
+
+/**
+ * Records one audit entry around each sensitive HTTP action, including refused and failed
+ * requests. Attribution, target identity and outcome come only from the authorization-owned
+ * session, the canonical route and the response the server actually sent: request bodies,
+ * filenames and raw requested versions are never persisted. Requested versions are
+ * domain-separated commitments, since even a syntactically valid precondition can be a credential.
+ */
+internal class WebAuditRecorder(
+    private val access: LocalWebAccess,
+    private val log: WebAuditLog?,
+) {
+    /** Run [handle] and record its outcome when [action] names a sensitive action. */
+    fun <T> around(exchange: HttpExchange, action: WebAuditAction?, target: WebAuditTarget, handle: () -> T): T {
+        if (action == null || log == null) return handle()
+        val before = try { access.auditSessionId(exchange) } catch (_: Exception) { null }
+        val traced = WebDeniedResponseTrace.begin()
+        WebAuditSourceTarget.open()
+        var thrown = false
+        try {
+            return handle()
+        } catch (failure: Throwable) {
+            thrown = true
+            throw failure
+        } finally {
+            // Auditing never changes the response or turns a handled request into a failure.
+            try { record(exchange, action, target, before, thrown) } catch (_: Exception) { }
+            WebAuditSourceTarget.close()
+            WebDeniedResponseTrace.end(traced)
+        }
+    }
+
+    private fun record(exchange: HttpExchange, action: WebAuditAction, target: WebAuditTarget, before: String?, thrown: Boolean) {
+        val log = log ?: return
+        run {
+            val reason = WebDeniedResponseTrace.current()
+            val sessionId = before ?: access.auditIssuedSessionId(exchange)
+            val status = exchange.responseCode.takeIf { it in 100..599 } ?: 500
+            val headers = exchange.responseHeaders
+            val replayed = headers.getFirst("Idempotency-Replayed") == "true"
+            val location = headers.getFirst("Location")?.let(::locationTarget)
+            val outcome = if (thrown && status < 400) WebAuditOutcome.FAILED else WebAuditOutcome.of(status, replayed)
+            val policy = WebRedactionPolicy.of(exchange)
+            // Route syntax alone is not provenance: an unknown run ID can be a session token.
+            // Keep server-generated identities, commit other requested IDs, and never append
+            // configured-sensitive target/version bytes even when they fit opaque syntax.
+            val jobId = (target.jobId ?: location?.first)?.takeUnless(policy::leaks)
+            // A body-bound source (managed `git.init`) is kept only when the handler reported that the server
+            // confirmed it for this response; a refused or unconfirmed request keeps commitments instead.
+            val source = WebAuditSourceTarget.current()
+            val confirmed = source?.confirmed == true && status < 400
+            fun confirmedOr(value: String, commit: (String) -> String) = if (confirmed && !policy.leaks(value)) value else commit(value)
+            val runId = source?.runId?.let { confirmedOr(it, ::runCommitment) } ?: (target.runId ?: location?.second)?.let { value ->
+                if (SERVER_RUN.matches(value) && !policy.leaks(value)) value else runCommitment(value)
+            }
+            // Revision IDs have no server-generated syntax, so a route value is only an identity once the
+            // server confirmed it in the operation Location it sent; refused requests keep a commitment.
+            val revisionId = source?.revisionId?.let { confirmedOr(it, ::revisionCommitment) }
+                ?: location?.third?.takeIf { it == target.revisionId && !policy.leaks(it) }
+                ?: target.revisionId?.let(::revisionCommitment)
+            log.record(
+                actor = sessionId?.let(WebAuditActor::browserSession) ?: WebAuditActor.UNAUTHENTICATED,
+                action = action,
+                target = WebAuditTarget(
+                    jobId = jobId,
+                    runId = runId,
+                    expectedVersion = strongVersion(exchange.requestHeaders["If-Match"])?.let(::versionCommitment),
+                    resultVersion = if (status < 400) strongVersion(headers["ETag"])?.takeUnless(policy::leaks) else null,
+                    revisionId = revisionId,
+                ),
+                outcome = outcome,
+                status = status,
+                reasonCode = reason ?: if (outcome == WebAuditOutcome.FAILED) "INTERNAL_ERROR" else null,
+                requestId = headers.getFirst("X-Request-ID"),
+            )
+        }
+    }
+
+    private fun strongVersion(values: List<String>?): String? =
+        values?.singleOrNull()?.takeIf { it.length in 3..130 && it.startsWith('"') && it.endsWith('"') }?.removeSurrounding("\"")
+
+    private fun locationTarget(location: String): Triple<String?, String?, String?>? {
+        val match = LOCATION.find(location) ?: return null
+        return Triple(match.groupValues[1], match.groupValues[2].takeIf(String::isNotEmpty), match.groupValues[3].takeIf(String::isNotEmpty))
+    }
+
+    companion object {
+        // Commitments are unkeyed, domain-separated SHA-256 hashes for correlating entries, not secrecy:
+        // anyone holding the log can confirm a guessed value offline, so low-entropy IDs stay guessable.
+        /** A commitment, not validation that caller-controlled bytes identify a server version. */
+        internal fun versionCommitment(value: String): String = commitment("if-match", "ifmatch_", value)
+        internal fun runCommitment(value: String): String = commitment("requested-run", "requested_run_", value)
+        internal fun revisionCommitment(value: String): String = commitment("requested-revision", "requested_revision_", value)
+        private fun commitment(domain: String, prefix: String, value: String): String = prefix + MessageDigest.getInstance("SHA-256")
+            .digest("decomp-web-audit-$domain-v1\u0000$value".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+        private val SERVER_RUN = Regex("run_[a-f0-9]{32}")
+        private val LOCATION = Regex("/(?:api/v1/)?jobs/([a-f0-9]{32})(?:/runs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})" +
+            "(?:/revisions/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/archive-verifications/[A-Za-z0-9][A-Za-z0-9_-]{0,127})?)?$")
+        private val JOB = Regex("[a-f0-9]{32}")
+        private val RUN = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+
+        /** Versioned routes relative to `api/v1/`. Unknown and read-only routes are not audited. */
+        fun versionedAction(method: String, resource: String): Pair<WebAuditAction, WebAuditTarget>? {
+            val parts = resource.split('/')
+            fun job() = parts.getOrNull(1)?.takeIf(JOB::matches)
+            fun run() = parts.getOrNull(3)?.takeIf(RUN::matches)
+            val action = when {
+                resource == "session" && method == "POST" -> WebAuditAction.SESSION_START
+                resource == "session" && method == "DELETE" -> WebAuditAction.SESSION_END
+                resource == "jobs" && method == "POST" -> WebAuditAction.JOB_UPLOAD
+                resource == "agent/preflight" && method == "POST" -> WebAuditAction.AGENT_PREFLIGHT
+                resource == "support-export" && method == "GET" -> WebAuditAction.SUPPORT_EXPORT
+                parts.size == 3 && parts[0] == "jobs" && parts[2] == "repositories" && method == "POST" -> WebAuditAction.GIT_REPOSITORY_MUTATION
+                parts.size == 2 && parts[0] == "jobs" && method == "PATCH" -> WebAuditAction.JOB_UPDATE
+                parts.size == 2 && parts[0] == "jobs" && method == "DELETE" -> WebAuditAction.JOB_DELETE
+                parts.size == 3 && parts[0] == "jobs" && parts[2] == "runs" && method == "POST" -> WebAuditAction.RUN_START
+                parts.size == 7 && parts[0] == "jobs" && parts[2] == "runs" && parts[4] == "revisions" &&
+                    parts[6] == "archive-verifications" && method == "POST" -> WebAuditAction.ARCHIVE_VERIFY
+                parts.size == 5 && parts[0] == "jobs" && parts[2] == "runs" -> when {
+                    parts[4] == "cancel" && method == "POST" -> WebAuditAction.RUN_CANCEL
+                    parts[4] == "recover" && method == "POST" -> WebAuditAction.RUN_RECOVER
+                    parts[4] == "progress-pin" && method == "PUT" -> WebAuditAction.PROGRESS_PIN
+                    else -> null
+                }
+                else -> null
+            } ?: return null
+            val revision = if (action == WebAuditAction.ARCHIVE_VERIFY) parts[5].takeIf(RUN::matches) else null
+            return action to WebAuditTarget(jobId = job(), runId = if (parts.size >= 4) run() else null, revisionId = revision)
+        }
+
+        /** Legacy presentation mutations, by path segment. */
+        fun legacyAction(method: String, segments: List<String>): Pair<WebAuditAction, WebAuditTarget>? {
+            if (segments == listOf("api", "v1", "session")) return when (method) {
+                "POST" -> WebAuditAction.SESSION_START to WebAuditTarget()
+                "DELETE" -> WebAuditAction.SESSION_END to WebAuditTarget()
+                else -> null
+            }
+            if (method != "POST") return null
+            return when {
+                segments == listOf("jobs") -> WebAuditAction.JOB_UPLOAD to WebAuditTarget()
+                segments.size == 3 && segments[0] == "jobs" && segments[2] in setOf("explore", "reconstruct") ->
+                    WebAuditAction.RUN_START to WebAuditTarget(jobId = segments[1].takeIf(JOB::matches))
+                segments == listOf("api", "operator", "auth-methods") ->
+                    WebAuditAction.OPERATOR_INSPECTION to WebAuditTarget()
+                segments == listOf("api", "operator", "auth-methods", "cancel") ->
+                    WebAuditAction.OPERATOR_INSPECTION_CANCEL to WebAuditTarget()
+                else -> null
+            }
+        }
+    }
+}
+
+/**
+ * Target identities a handler read from a sensitive request body (managed `git.init`'s source run and
+ * revision), reported for that request's audit entry. [confirmed] means the server resolved them for the
+ * response it sent; otherwise the recorder stores commitments. Notes outside an audited request are ignored.
+ */
+internal object WebAuditSourceTarget {
+    data class Source(val runId: String, val revisionId: String, val confirmed: Boolean)
+    private val active = ThreadLocal<Boolean>()
+    private val source = ThreadLocal<Source?>()
+    fun open() { active.set(true); source.remove() }
+    fun note(runId: String, revisionId: String, confirmed: Boolean) {
+        if (active.get() == true) source.set(Source(runId, revisionId, confirmed))
+    }
+    fun current(): Source? = source.get()
+    fun close() { source.remove(); active.remove() }
+}
+
+/** The public error code of the denial sent on this request thread, for audit outcome only. */
+internal object WebDeniedResponseTrace {
+    private val code = ThreadLocal<String?>()
+    private val active = ThreadLocal<Boolean>()
+    /** Opens a request scope unless one is already open; returns whether this caller owns it. */
+    fun begin(): Boolean {
+        if (active.get() == true) return false
+        active.set(true); code.remove()
+        return true
+    }
+    fun note(value: String) { if (active.get() == true) code.set(value) }
+    fun current(): String? = code.get()
+    fun end(owned: Boolean) { if (owned) { code.remove(); active.remove() } }
+}

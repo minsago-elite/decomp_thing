@@ -1,4 +1,4 @@
-import type { AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { Artifact, AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceArchive, SourceChunk, SourceDiff, SourceFileDiff, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -253,6 +253,55 @@ export function checkSourceChunk(data: SourceChunk): void {
 }
 
 const codePoints = (value: string): number => Array.from(value).length;
+const ARTIFACT_CODES = { 'exploration-report': 'exploration', 'progress-journal': 'progress', 'source-manifest': 'manifest',
+  'build-contract': 'contract', 'source-archive': 'archive' } as const;
+
+/** Mirrors verify.py: counts partition the changed total and modifications keep their path. */
+export function checkSourceDiff(data: SourceDiff): void {
+  const { counts, items, page } = data;
+  requireValue(counts.added + counts.removed + counts.modified + counts.renamed === data.totalChanged);
+  requireValue(items.length <= page.limit && items.length <= data.totalChanged);
+  for (const item of items) {
+    if (item.status === 'renamed') requireValue(item.baseFile!.sha256 === item.headFile!.sha256);
+    // A declared content-kind change of identical bytes is a modification too.
+    if (item.status === 'modified') requireValue(item.baseFile!.displayName === item.headFile!.displayName
+      && (item.baseFile!.sha256 !== item.headFile!.sha256 || item.baseFile!.declaredUtf8Text !== item.headFile!.declaredUtf8Text));
+  }
+}
+
+/** Hunk pages are contiguous, line numbers sequential per side and truncation explicit. */
+export function checkSourceFileDiff(data: SourceFileDiff): void {
+  const end = data.hunkOffset + data.hunks.length;
+  requireValue(data.nextHunk === null || data.nextHunk === end);
+  requireValue((data.nextHunk === null) === (end === data.totalHunks || data.totalHunks === 0));
+  requireValue(data.representation !== 'text' || data.totalHunks === 0 || data.hunks.length > 0);
+  for (const hunk of data.hunks) {
+    let base = hunk.baseStart, head = hunk.headStart;
+    for (const line of hunk.lines) {
+      if (line.baseLine !== null) { requireValue(line.baseLine === base && base <= (data.baseLines ?? 0)); base++; }
+      if (line.headLine !== null) { requireValue(line.headLine === head && head <= (data.headLines ?? 0)); head++; }
+      requireValue(line.characters >= line.text.length && line.truncated === line.characters > line.text.length);
+    }
+    requireValue(base - hunk.baseStart === hunk.baseCount && head - hunk.headStart === hunk.headCount);
+  }
+}
+
+/** Mirrors verify.py: the download is this job's digest-bound archive and states agree with the retained file. */
+export function checkSourceArchive(data: SourceArchive, basePath = '/'): void {
+  const { archive, verification } = data;
+  if (archive.state === 'present') {
+    requireValue(new RegExp(`^archive_[a-f0-9]{32}_${archive.sha256}$`).test(archive.artifactId!));
+    try {
+      validateResourceHref(basePath, archive.contentHref!, { kind: 'artifact-content', jobId: data.binding.jobId, artifactId: archive.artifactId! });
+    } catch { throw new ApiClientError('invalid_response'); }
+  }
+  requireValue((archive.state === 'present') === (verification.state !== 'missing' && verification.state !== 'too-large'));
+  requireValue(archive.state === 'present' || verification.state === archive.state);
+  requireValue(verification.state !== 'stale' || verification.previousVerifiedSha256 !== archive.sha256);
+  if (data.git.state === 'mapped') {
+    requireValue(data.git.mapping.revisionId === data.binding.revisionId && data.git.mapping.sourceSha256 === data.sourceSha256);
+  }
+}
 
 export function checkSourceSearch(data: SourceSearch): void {
   const { page, limits, scope, progress, query, items } = data;
@@ -293,6 +342,20 @@ export function checkSourceSearch(data: SourceSearch): void {
 export function checkSemantics(document: ContractDocument, basePath = '/'): void {
   function checkHref(href: string, resource: ApiResource) {
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
+  }
+  // Catalog entries carry family, verification and content together; only revision-bound source metadata is verified.
+  function checkCatalogArtifact(item: Artifact) {
+    checkHref(item.contentHref, { kind: 'artifact-content', jobId: item.binding.jobId, artifactId: item.artifactId });
+    requireValue((item.family === undefined) === (item.verification === undefined));
+    if (item.family === undefined) return;
+    // Reports are served only as the redacted projection (or refused); source families are verbatim.
+    const report = item.family === 'exploration-report' || item.family === 'progress-journal';
+    requireValue(item.content !== undefined && (item.content.projection === 'verbatim') !== report);
+    requireValue(item.artifactId === `${ARTIFACT_CODES[item.family]}_${item.artifactId.split('_')[1] ?? ''}_${item.sha256}`
+      && /^[a-z]+_[a-f0-9]{32}_[a-f0-9]{64}$/u.test(item.artifactId) && item.binding.runId !== null);
+    if (item.verification === 'source-inventory-checked') {
+      requireValue((item.family === 'source-manifest' || item.family === 'build-contract') && item.binding.revisionId !== null);
+    }
   }
   switch (document.kind) {
     case 'validationHistory':
@@ -347,6 +410,23 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'sourceSearch':
       checkSourceSearch(document.data);
       break;
+    case 'sourceDiff':
+      checkSourceDiff(document.data);
+      break;
+    case 'sourceFileDiff':
+      checkSourceFileDiff(document.data);
+      break;
+    case 'sourceArchive':
+      checkSourceArchive(document.data, basePath);
+      break;
+    case 'operation': {
+      // Mirrors verify.py: archive verification has no repository, worktree or result object.
+      const operation = document.data;
+      if (operation.action === 'archive.verify') {
+        requireValue(operation.repositoryId === null && operation.worktreeId === null && operation.resultObjectId === null);
+      }
+      break;
+    }
     case 'revisionFile': {
       const { item, parentDirectoryId } = document.data;
       requireValue(item.displayName.split('/').every(part => part.length <= 255 && isDirectoryLabel(part)));
@@ -394,6 +474,25 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         requireValue(BigInt(sample.ahead) === BigInt(sample.position) - 1n);
         requireValue(BigInt(sample.position) <= BigInt(sample.queuedTasks));
         requireValue(BigInt(sample.activeWorkers) <= BigInt(sample.workerLimit));
+      }
+      break;
+    }
+    case 'logRange': {
+      const log = document.data;
+      if (log.state === 'available') {
+        const total = BigInt(log.totalLines), first = BigInt(log.range.firstLine), count = BigInt(log.range.lineCount);
+        requireValue(count === BigInt(log.lines.length));
+        log.lines.forEach((line, index) => requireValue(BigInt(line.number) === first + BigInt(index)));
+        requireValue(first <= total + 1n);
+        requireValue(log.range.truncatedBefore === first > 1n);
+        requireValue(log.range.truncatedAfter === first + count - 1n < total);
+        requireValue(BigInt(log.redactedLines) <= total && BigInt(log.lines.filter(line => line.redacted).length) <= BigInt(log.redactedLines));
+        if (log.search) {
+          const matches = log.search.matches.map(value => BigInt(value));
+          matches.forEach((value, index) => requireValue(value <= total && (index === 0 || value > matches[index - 1]!)));
+          requireValue(BigInt(matches.length) <= BigInt(log.search.matchCount));
+          requireValue(log.search.matchesTruncated === BigInt(log.search.matchCount) > BigInt(matches.length));
+        }
       }
       break;
     }
@@ -452,10 +551,20 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'artifact':
-      checkHref(document.data.contentHref, {
-        kind: 'artifact-content', jobId: document.data.binding.jobId, artifactId: document.data.artifactId,
-      });
+      checkCatalogArtifact(document.data);
       break;
+    case 'artifacts': {
+      const { binding, items, page, catalogedFamilies } = document.data;
+      requireValue((binding.revisionId === null || binding.runId !== null) && items.length <= page.limit
+        && new Set(items.map(item => item.artifactId)).size === items.length);
+      for (const item of items) {
+        checkCatalogArtifact(item);
+        requireValue(item.family !== undefined && catalogedFamilies.includes(item.family) && item.binding.jobId === binding.jobId
+          && (binding.runId === null || item.binding.runId === binding.runId)
+          && (binding.revisionId === null || item.binding.revisionId === binding.revisionId));
+      }
+      break;
+    }
     case 'event':
       if (document.type === 'retention.gap') checkHref(document.payload.snapshotHref, {
         kind: 'snapshot', jobId: document.jobId, runId: document.runId,
