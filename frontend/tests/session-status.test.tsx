@@ -12,7 +12,7 @@ import Runtime from '../src/routes/Runtime';
 
 const sample = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
 const sessions: ReturnType<typeof createBrowserSession>[] = [];
-afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 /** Live paragraphs take text only after they have been in the document for a paint. */
 async function liveReady() {
@@ -515,22 +515,33 @@ async function checkFrom(outcome: 'connected' | 'expired' | 'connection', focus:
   if (focus === 'programmatic') { check.focus(); check.blur(); void act(() => { void session.refresh(); }); }
   else { (focus === 'button' ? check : elsewhere).focus(); fireEvent.click(check); }
   const duringChecking = document.activeElement;
+  const landmark = screen.getByRole('complementary', { name: 'Local session' }); // captured while checking
   await act(async () => { release(); await Promise.resolve(); await Promise.resolve(); });
   await screen.findByText(outcome === 'connected' ? 'Local session connected.' : outcome === 'expired' ? /Your local session expired/ : /could not be checked/);
-  return { duringChecking, after: document.activeElement, elsewhere, gateway };
+  return { duringChecking, landmark, after: document.activeElement, elsewhere, gateway };
 }
 
 for (const outcome of ['connected', 'expired', 'connection'] as const) {
   it(`moves focus from an activated Check session button to a surviving target (${outcome})`, async () => {
-    const { duringChecking, after, gateway } = await checkFrom(outcome, 'button');
-    expect(duringChecking).toBe(screen.queryByRole('complementary', { name: 'Local session' }) ?? duringChecking);
-    expect((duringChecking as HTMLElement).tagName).toBe('ASIDE');
+    vi.stubEnv('MODE', 'production');
+    const { duringChecking, landmark, after, gateway } = await checkFrom(outcome, 'button');
+    expect(landmark.tagName).toBe('ASIDE');
+    expect(duringChecking).toBe(landmark);
     if (outcome === 'connected') expect(after).toBe(screen.getByRole('button', { name: 'Sign out' }));
     else expect(after).toBe(screen.getByRole('complementary', { name: 'Local session' }));
     expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
     expect(gateway.exchange).not.toHaveBeenCalled();
   });
 }
+
+it('moves focus to the connected session group when fixture mode disables Sign out', async () => {
+  vi.stubEnv('MODE', 'fixtures');
+  const { after } = await checkFrom('connected', 'button');
+  const group = screen.getByRole('group', { name: 'Local session' });
+  expect(screen.getByRole('button', { name: 'Sign out' })).toHaveProperty('disabled', true);
+  expect(after).toBe(group);
+  expect(group.textContent).toContain('Local session connected.');
+});
 
 it('keeps intentional focus elsewhere while a Check session request runs', async () => {
   const { duringChecking, after, elsewhere } = await checkFrom('connected', 'elsewhere');

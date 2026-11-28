@@ -81,6 +81,7 @@ export function SessionStatus({ session, placement = 'any' }: { session: Browser
   const [state, setState] = useState(session.snapshot);
   const notice = useRef<HTMLElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
+  const group = useRef<HTMLDivElement>(null);
   const ready = useLiveReady();
   useLayoutEffect(() => {
     const unsubscribe = session.subscribe(setState);
@@ -91,7 +92,8 @@ export function SessionStatus({ session, placement = 'any' }: { session: Browser
   const pageActive = state.status !== 'public' && !connected;
   const transient = state.status === 'checking' || state.status === 'signing-out';
   useLayoutEffect(() => {
-    if (placement !== 'page' && connected) handOff(session, signOut.current, true);
+    // A disabled Sign out (development fixtures) cannot take focus; the named group receives it.
+    if (placement !== 'page' && connected) handOff(session, signOut.current?.disabled ? group.current : signOut.current, true);
     else if (placement !== 'header' && !connected) {
       if (pageActive) handOff(session, notice.current, !transient);
       else handOff(session, null, true);
@@ -99,8 +101,8 @@ export function SessionStatus({ session, placement = 'any' }: { session: Browser
   }, [session, placement, state]);
 
   const headerText = connected && state.serverChanged ? copy.applicationInstanceChanged : '';
-  const header = placement !== 'page' && <div class={connected ? 'session-notice is-connected' : 'sr-only'}
-    {...(connected ? { role: 'group', 'aria-label': copy.localSession } : {})}>
+  const header = placement !== 'page' && <div ref={group} class={connected ? 'session-notice is-connected' : 'sr-only'}
+    {...(connected ? { role: 'group', 'aria-label': copy.localSession, tabIndex: -1 } : {})}>
     {connected && <p>{copy.localSessionConnected}</p>}
     {!ready && headerText && <p>{headerText}</p>}
     <p role="status" data-session-announcement="header" class={ready && headerText ? undefined : 'sr-only'}>
