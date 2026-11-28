@@ -1343,7 +1343,7 @@ val buildExportSupervisor = tasks.register<Exec>("buildExportSupervisor") {
         }
         val output = exportSupervisorBinary.get().asFile.toPath()
         Files.createDirectories(output.parent)
-        commandLine(compiler.toString(), "-std=c11", "-O2", "-static", "-Wall", "-Wextra", "-Werror",
+        commandLine(compiler.toString(), "-std=c11", "-O2", "-static", "-no-pie", "-Wall", "-Wextra", "-Werror",
             "-Wl,--build-id=none", exportSupervisorSource.asFile.absolutePath, "-o", output.toString())
     }
     doLast {
@@ -1539,7 +1539,8 @@ val verifyExportSupervisor = tasks.register("verifyExportSupervisor") {
             return process.exitValue()
         }
         require(probe(emptyList()) == 121) { "export supervisor accepted a missing worker" }
-        require(probe(listOf("/bin/true")) == 120) { "export supervisor started a worker without its launch permit" }
+        require(probe(listOf("1001", "/bin/true")) == 121) { "export supervisor accepted an unbounded leftover grace" }
+        require(probe(listOf("1000", "/bin/true")) == 120) { "export supervisor started a worker without its launch permit" }
     }
 }
 

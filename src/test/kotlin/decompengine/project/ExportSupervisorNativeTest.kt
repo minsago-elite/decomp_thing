@@ -50,16 +50,26 @@ class ExportSupervisorNativeTest {
     }
 
     @Test
-    fun `descendants left after the worker exits are killed`() = inControlTemporaryDirectory { root ->
-        val orphanFile = root.resolve("orphan")
-        val supervisor = start("/bin/sh", "-c", "(trap '' TERM; exec sleep 30) & echo \$! > '$orphanFile'; exit 0")
-        supervisor.outputStream.write("1\n".toByteArray())
-        supervisor.outputStream.flush()
+    fun `descendants left after the worker exits get SIGTERM, then SIGKILL after the leftover grace`() =
+        inControlTemporaryDirectory { root ->
+            val politeFile = root.resolve("polite")
+            val stubbornFile = root.resolve("stubborn")
+            val politeExit = root.resolve("polite-exited")
+            val supervisor = startWithGrace(400, "/bin/sh", "-c",
+                "(trap 'touch \"$politeExit\"; exit 0' TERM; while :; do sleep 0.05; done) & echo \$! > '$politeFile'; " +
+                    "(trap '' TERM; exec sleep 30) & echo \$! > '$stubbornFile'; exit 0")
+            val started = System.nanoTime()
+            supervisor.outputStream.write("1\n".toByteArray())
+            supervisor.outputStream.flush()
 
-        assertEquals(0, awaitExit(supervisor))
-        assertFalse(alive(awaitPid(orphanFile)))
-        supervisor.outputStream.close()
-    }
+            assertEquals(0, awaitExit(supervisor))
+            val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            assertTrue(politeExit.exists(), "a leftover first receives SIGTERM")
+            assertFalse(alive(awaitPid(politeFile)))
+            assertFalse(alive(awaitPid(stubbornFile)), "a TERM-ignoring leftover is killed after the grace")
+            assertTrue(elapsedMillis >= 400, "the stubborn leftover kept the supervisor alive for the grace: $elapsedMillis ms")
+            supervisor.outputStream.close()
+        }
 
     @Test
     fun `closing the control channel kills the whole tree`() = inControlTemporaryDirectory { root ->
@@ -100,7 +110,7 @@ class ExportSupervisorNativeTest {
             set -eu
             sup=${'$'}1 work=${'$'}2
             mkfifo "${'$'}work/go" "${'$'}work/reaped"
-            { printf '1\n'; read release < "${'$'}work/go"; printf K; } | "${'$'}sup" /bin/sh -c '
+            { printf '1\n'; read release < "${'$'}work/go"; printf K; } | "${'$'}sup" 0 /bin/sh -c '
                 w=${'$'}1
                 /bin/sh -c "f=\${'$'}1; read -r st < /proc/\${'$'}\${'$'}/stat; set -- \${'$'}st; echo \"\${'$'}{22}\" > \"\${'$'}f\"" x "${'$'}w/xstart" & x=${'$'}!
                 wait ${'$'}x
@@ -144,9 +154,11 @@ class ExportSupervisorNativeTest {
         "the built export supervisor is not configured"
     })
 
-    private fun start(vararg worker: String): Process =
-        ProcessBuilder(listOf(supervisor().toString()) + worker).redirectError(ProcessBuilder.Redirect.DISCARD)
-            .redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+    private fun start(vararg worker: String): Process = startWithGrace(0, *worker)
+
+    private fun startWithGrace(leftoverGraceMillis: Int, vararg worker: String): Process =
+        ProcessBuilder(listOf(supervisor().toString(), leftoverGraceMillis.toString()) + worker)
+            .redirectError(ProcessBuilder.Redirect.DISCARD).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
 
     private fun run(vararg worker: String): Int {
         val supervisor = start(*worker)
