@@ -1645,6 +1645,8 @@ class LinuxBubblewrapBoundaryTest {
             }
             assertEquals("sandbox runtime closure crosses a mount boundary", reached.message)
             assertEquals(1, coveringMounts)
+            // Only the discarded attempt's refusal: the closure refusal itself was never restarted.
+            assertEquals(1, reached.suppressed.size)
             assertEquals(1, reached.suppressed.count { it.message == refusal })
             requireEventWitness(witnesses(reached).single(), "ADMITTED")
             assertEquals(recorded, AcpHostMountChurnRestarts.total())
@@ -2986,6 +2988,37 @@ class LinuxBubblewrapBoundaryTest {
             }
             units.forEach(::assertUnitAbsent)
             scopes.forEach { assertFalse(Files.exists(it.cgroupPath, LinkOption.NOFOLLOW_LINKS)) }
+        }
+    }
+
+    @Test
+    fun `setup restart permission ends before the first authorization decision and never returns`() {
+        requireLiveHost()
+        val refuseFirst = AtomicBoolean(true)
+        val boundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            launchHook = AcpSandboxLaunchHook {
+                if (it == AcpSandboxLaunchStage.BEFORE_SCOPE_START && refuseFirst.compareAndSet(true, false)) {
+                    throw IOException("injected pre-start refusal")
+                }
+            },
+        )
+        try {
+            val permit = boundary.javaClass.getDeclaredField("setupRestart").apply { isAccessible = true }
+                .get(boundary) as AcpSetupRestartPermit
+            assertTrue(permit.beforeUntrustedExecution())
+            assertFailsWith<IOException> { boundary.launch(probeLaunch(listOf("netns")), true) {} }
+            assertTrue(permit.beforeUntrustedExecution(), "a launch refused before authorization keeps restarts")
+            var revokedBeforeAuthorization = false
+            val process = boundary.launch(probeLaunch(listOf("netns")), true, {}) {
+                revokedBeforeAuthorization = !permit.beforeUntrustedExecution()
+            }
+            assertTrue(revokedBeforeAuthorization, "restarts must end before the broker authorization decision")
+            assertTrue(process.process.waitFor(8, TimeUnit.SECONDS), "sandbox probe timed out")
+            process.awaitCleanup(Duration.ofSeconds(5))
+            assertFalse(permit.beforeUntrustedExecution(), "a proved cleanup never restores setup restarts")
+        } finally {
+            boundary.close()
         }
     }
 
