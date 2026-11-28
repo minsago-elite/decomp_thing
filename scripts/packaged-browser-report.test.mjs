@@ -298,10 +298,12 @@ test('F1: refusal record keeps tool pins and auditVerdict with original status, 
   assert.equal(record.error, 'audit failed [redacted]');
   assert.equal(record.workCleanupConfirmed, true);
   assert.equal(record.shutdownConfirmed, true);
+  assert.equal(record.installationUnchanged, true);
   assert.ok(Array.isArray(record.reportPublication.memberBytes));
   const huge = await fresh('f1-huge');
-  await publishReport(huge, { status: 'passed', tools: { node: 'n'.repeat(40000) }, auditVerdict: { failures: Array(4000).fill('f') } }, [], { limits: { ...REPORT_LIMITS, primaryBytes: 1024 } });
+  await publishReport(huge, { status: 'passed', tools: { node: 'n'.repeat(40000) }, auditVerdict: { failures: Array(4000).fill('f') }, installationUnchanged: false }, [], { limits: { ...REPORT_LIMITS, primaryBytes: 1024 } });
   const bounded = await readPrimary(huge);
+  assert.equal(bounded.installationUnchanged, false, 'the observed installation fact survives the over-bound record');
   assert.equal(bounded.tools.truncated, true);
   assert.match(bounded.tools.sha256, /^[0-9a-f]{64}$/);
   assert.equal(bounded.auditVerdict.truncated, true);

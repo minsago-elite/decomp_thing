@@ -162,7 +162,7 @@ const boundedValue = value => {
 };
 
 export const FAILURE_COPIED_KEYS = Object.freeze(['mode', 'testDirectory', 'driverNode', 'driverCommit', 'tools', 'auditVerdict',
-  'shutdownConfirmed', 'forcedShutdown', 'workRetained', 'workCleanupConfirmed', 'workCleanupError', 'cleanupErrors', 'error',
+  'installationUnchanged', 'shutdownConfirmed', 'forcedShutdown', 'workRetained', 'workCleanupConfirmed', 'workCleanupError', 'cleanupErrors', 'error',
   'applicationError', 'browserError', 'viteError']);
 
 /**
@@ -182,6 +182,7 @@ export function failureRecord(report, reason, totals = null, limits = REPORT_LIM
   if (bytesOf(text) > limits.primaryBytes) {
     const small = value => { const json = JSON.stringify(value) ?? 'null'; return bytesOf(json) <= 1024 ? value : { truncated: true, bytes: bytesOf(json), sha256: digest(json) }; };
     text = emitPrimary({ status: 'failed', originalStatus: small(source.status ?? null), error: small(source.error ?? null),
+      ...(typeof source.installationUnchanged === 'boolean' ? { installationUnchanged: source.installationUnchanged } : {}),
       shutdownConfirmed: small(source.shutdownConfirmed ?? null), workCleanupConfirmed: small(source.workCleanupConfirmed ?? null),
       tools: small(source.tools ?? null), auditVerdict: small(source.auditVerdict ?? null),
       reportPublication: { outcome: 'failed', evidenceRetained: false, reason: small(String(reason)), note: 'Failure record exceeded its bound', recordSha256: digest(text) } });

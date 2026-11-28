@@ -106,8 +106,8 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, onDel
       return { listing, workspace: null, candidate: run.jobId === binding.jobId && run.runId === latestRunId
         ? { kind: 'verified', revisionId: run.resultRevisionId } : { kind: 'unread' } };
     } catch (failure: unknown) {
-      // Session loss, denial and cancellation stop the whole read; other run failures leave a partial listing.
-      if (signal.aborted || ['session', 'denied'].includes(failureKind(failure))) throw failure;
+      // Session loss, denial, confirmed job deletion and cancellation stop the whole read; other run failures leave a partial listing.
+      if (signal.aborted || isDeletedJob(failure) || ['session', 'denied'].includes(failureKind(failure))) throw failure;
       return { listing, workspace: null, candidate: { kind: 'unread' } };
     }
   }

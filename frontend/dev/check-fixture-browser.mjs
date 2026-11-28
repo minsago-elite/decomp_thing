@@ -3,6 +3,7 @@
 // Exits nonzero on any failed assertion. It sends no credential and drives only the simulated catalogue.
 // The fixture server must already be running. Chrome's TMPDIR is a short repo-relative directory under --work.
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -26,8 +27,17 @@ if (parsedOrigin.protocol !== 'http:' || parsedOrigin.hostname !== '127.0.0.1' |
   throw new Error('--origin must be an exact http://127.0.0.1:<port> development origin.');
 }
 if (!/^\/(?:[A-Za-z0-9_-]+\/)*$/.test(base)) throw new Error('--base must be a normalized path ending in /.');
-// The fixture generator's intended display states; unsupported and partial are deliberately not their names.
-const expectedStates = { running: 'Running', failed: 'Failed', interrupted: 'Interrupted', unsupported: 'Completed', partial: 'Running' };
+// The fixture generator's intended rows, derived here independently of the served catalogue. Display states:
+// unsupported and partial are deliberately not their names. Job IDs follow generate-fixtures.py fixture_job_id;
+// the responsive (#619) fixture has a fixed job ID and a long Unicode/RTL filename.
+const fixtureJobId = (name) => createHash('sha256').update(`SIMULATED_DEVELOPMENT_DATA/job/${name}`).digest('hex').slice(0, 32);
+const responsiveFilename = 'SIMULATED-\u05e7\u05d5\u05d1\u05e5-\u0645\u0644\u0641-\u00e9\u0301\u4e2d\u6587-\u{1f600}-' +
+  'unbroken_identifier_'.repeat(8) + '.elf';
+const expectedFixtures = [
+  ...[['running', 'Running'], ['failed', 'Failed'], ['interrupted', 'Interrupted'], ['unsupported', 'Completed'], ['partial', 'Running']]
+    .map(([name, state]) => ({ name, filename: `SIMULATED-${name}.elf`, state, jobId: fixtureJobId(name) })),
+  { name: 'responsive', filename: responsiveFilename, state: 'Completed', jobId: 'f619f619f619f619f619f619f619f619' },
+];
 await mkdir(work, { recursive: false });
 await mkdir(join(work, 'tmp'));
 const report = { origin, base, control, checks: [], plannedChecks: 0, mutations: [], status: 'failed' };
@@ -97,19 +107,21 @@ try {
   await send('DOM.enable');
 
   const catalogue = await fetch(`${origin}${base}__fixtures/catalogue.json`).then((response) => response.json());
-  check('catalogue lists the five expected scenarios', JSON.stringify(catalogue.scenarios.map((s) => s.name)) ===
-    JSON.stringify(Object.keys(expectedStates)), catalogue.scenarios.map((s) => s.name));
-  const expected = (name) => control === 'row-state' && name === 'unsupported' ? 'Unsupported' : expectedStates[name];
-  // checks: 1 catalogue + 1 list + 1 notice + 5x(link, row state) + 5 upload + 3 sign-out + 5x(row visible, detail) + 1 final.
-  report.plannedChecks = 1 + 1 + 1 + 10 + 5 + 3 + 10 + 1;
+  const served = catalogue.scenarios.map((s) => ({ name: s.name, jobId: s.jobId }));
+  check(`catalogue lists the ${String(expectedFixtures.length)} expected scenarios and job IDs`, JSON.stringify(served) ===
+    JSON.stringify(expectedFixtures.map(({ name, jobId }) => ({ name, jobId }))), served);
+  const expected = (fixture) => control === 'row-state' && fixture.name === 'unsupported' ? 'Unsupported' : fixture.state;
+  // checks: 1 catalogue + 1 list + 1 notice + N x (link, row state) + 5 upload + 3 sign-out + N x (row visible, detail) + 1 final.
+  report.plannedChecks = 1 + 1 + 1 + 2 * expectedFixtures.length + 5 + 3 + 2 * expectedFixtures.length + 1;
+  const allRows = expectedFixtures.map((fixture) => `${row(fixture.filename)} !== undefined`).join(' && ');
   await send('Page.navigate', { url: `${origin}${base}` });
-  await waitFor('dashboard lists all five fixture jobs', catalogue.scenarios.map((s) => text(`SIMULATED-${s.name}.elf`)).join(' && '));
+  await waitFor(`dashboard lists all ${String(expectedFixtures.length)} fixture jobs`, allRows);
   check('read-only guidance notice is visible', await evaluate(text('Read-only fixture server: upload and sign-out are unavailable.')));
-  for (const scenario of catalogue.scenarios) {
-    const href = await evaluate(`[...document.querySelectorAll('a')].find((a) => a.textContent.includes(${JSON.stringify(`SIMULATED-${scenario.name}.elf`)}))?.getAttribute('href') ?? null`);
-    check(`${scenario.name} row links to its job route`, href === `${base}jobs/${scenario.jobId}`, href);
-    const state = await evaluate(fact(row(`SIMULATED-${scenario.name}.elf`), 'Workflow state'));
-    check(`${scenario.name} row shows workflow state ${expected(scenario.name)}`, state === expected(scenario.name), state);
+  for (const fixture of expectedFixtures) {
+    const href = await evaluate(`${row(fixture.filename)}?.querySelector('h4 > a')?.getAttribute('href') ?? null`);
+    check(`${fixture.name} row links to its job route`, href === `${base}jobs/${fixture.jobId}`, href);
+    const state = await evaluate(fact(row(fixture.filename), 'Workflow state'));
+    check(`${fixture.name} row shows workflow state ${expected(fixture)}`, state === expected(fixture), state);
   }
 
   // Upload: the production view reports no upload support; a selected file still cannot be submitted.
@@ -134,24 +146,23 @@ try {
   await evaluate(`${signOut}.click(), true`);
   await delay(500);
   check('Sign out activation sent no request', report.mutations.length === 0, report.mutations);
-  check('session stays connected', !(await evaluate(text('Sign-out could not be confirmed'))) &&
-    await evaluate(catalogue.scenarios.map((s) => text(`SIMULATED-${s.name}.elf`)).join(' && ')));
+  check('session stays connected', !(await evaluate(text('Sign-out could not be confirmed'))) && await evaluate(allRows));
 
   // Every row opens its production job route through ordinary link navigation.
-  for (const scenario of catalogue.scenarios) {
+  for (const fixture of expectedFixtures) {
     await send('Page.navigate', { url: `${origin}${base}` });
-    await waitFor(`${scenario.name} row visible before navigation`, `${row(`SIMULATED-${scenario.name}.elf`)} !== undefined`);
-    const target = `${base}jobs/${scenario.jobId}`;
+    await waitFor(`${fixture.name} row visible before navigation`, `${row(fixture.filename)} !== undefined`);
+    const target = `${base}jobs/${fixture.jobId}`;
     if (control === 'shell-only') await evaluate(`history.pushState(null, '', ${JSON.stringify(target)}), true`);
     else await evaluate(`[...document.querySelectorAll('a')].find((a) => a.getAttribute('href') === ${JSON.stringify(target)}).click(), true`);
-    const identity = control === 'detail-identity' ? '0'.repeat(32) : scenario.jobId;
+    const identity = control === 'detail-identity' ? '0'.repeat(32) : fixture.jobId;
     const region = 'document.querySelector(\'section[aria-labelledby="job-title"]\')';
-    await waitFor(`${scenario.name} job detail shows heading, identity, ${expected(scenario.name)} state and filename`,
+    await waitFor(`${fixture.name} job detail shows heading, identity, ${expected(fixture)} state and filename`,
       `location.pathname === ${JSON.stringify(target)} && document.querySelector('ul.job-list') === null && ` +
       `${region}?.querySelector('h1#job-title')?.textContent.trim() === 'Job overview' && ` +
-      `${region}.querySelector('h2')?.textContent.trim() === ${JSON.stringify(`SIMULATED-${scenario.name}.elf`)} && ` +
+      `${region}.querySelector('h2')?.textContent.trim() === ${JSON.stringify(fixture.filename)} && ` +
       `[...${region}.querySelectorAll('code')].some((c) => c.textContent.trim() === ${JSON.stringify(identity)}) && ` +
-      `${fact(region, 'Workflow state')} === ${JSON.stringify(expected(scenario.name))} && !${text('This view could not be opened')}`);
+      `${fact(region, 'Workflow state')} === ${JSON.stringify(expected(fixture))} && !${text('This view could not be opened')}`);
   }
   check('no mutation request was sent', report.mutations.length === 0, report.mutations);
   if (report.checks.length !== report.plannedChecks) throw new Error(`Ran ${String(report.checks.length)} of ${String(report.plannedChecks)} planned checks.`);

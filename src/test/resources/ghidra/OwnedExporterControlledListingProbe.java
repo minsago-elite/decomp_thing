@@ -151,6 +151,280 @@ public final class OwnedExporterControlledListingProbe {
         System.out.println("owned addressed primitive and indirect origin controls passed");
     }
 
+    static void check(boolean condition, Object detail) { OwnedExporterReferencedBytesProbe.check(condition, detail); }
+    static Object get(Object object, String name) throws Exception { return OwnedExporterReferencedBytesProbe.get(object, name); }
+    static Class<?> nested(String name) {
+        return Arrays.stream(ExportProgramModelOwned.class.getDeclaredClasses()).filter(c -> c.getSimpleName().equals(name)).findFirst().orElseThrow();
+    }
+    static ghidra.program.model.symbol.Reference readReference(ProgramDB program, Address from, Address to, int operand) {
+        for (ghidra.program.model.symbol.Reference reference : program.getReferenceManager().getReferencesFrom(from))
+            if (reference.getToAddress().equals(to) && reference.getReferenceType().isData()) return reference;
+        // Raw listing setup only: this is the operand READ that auto-analysis records. Provenance is checked below.
+        return program.getReferenceManager().addMemoryReference(from, to, RefType.READ, SourceType.ANALYSIS, operand);
+    }
+    static ExportProgramModelOwned switchExporter(ProgramDB program) throws Exception {
+        ExportProgramModelOwned exporter = new ExportProgramModelOwned();
+        OwnedExporterReferencedBytesProbe.field(exporter, "currentProgram", program);
+        OwnedExporterReferencedBytesProbe.field(exporter, "monitor", TaskMonitor.DUMMY);
+        OwnedExporterReferencedBytesProbe.field(exporter, "phaseObservation", new ExporterPhaseObservationOwnedV1());
+        return exporter;
+    }
+    static Object switchMetadata(ExportProgramModelOwned exporter, Function function, Path work, String label) throws Exception {
+        OwnedExporterReferencedBytesProbe.invoke(exporter, "collectReferencedByteEvidence", new Class<?>[]{List.class}, List.of(function));
+        return OwnedExporterReferencedBytesProbe.invoke(exporter, "collectFunctionMetadata",
+            new Class<?>[]{Function.class, Path.class, Path.class, nested("PlanningBatchEvidence")}, function,
+            Files.createDirectories(work.resolve(label + "-globals")), Files.createDirectories(work.resolve(label + "-types")), null);
+    }
+    static Object candidate(ExportProgramModelOwned exporter, Function function, Address reader,
+                            ghidra.program.model.symbol.Reference read, int limit) throws Exception {
+        Constructor<?> budget = nested("SwitchProvenanceBudget").getDeclaredConstructor(int.class);
+        budget.setAccessible(true);
+        Listing listing = function.getProgram().getListing();
+        return OwnedExporterReferencedBytesProbe.invoke(exporter, "switchSlotCandidate",
+            new Class<?>[]{Function.class, Instruction.class, ghidra.program.model.symbol.Reference.class, Data.class, String.class,
+                nested("SwitchProvenanceBudget")},
+            function, listing.getInstructionAt(reader), read, listing.getDataAt(read.getToAddress()), "authored refusal", budget.newInstance(limit));
+    }
+    static boolean proven(ghidra.program.model.pcode.HighFunction high, Object slots, int limit) throws Exception {
+        Method method = ExportProgramModelOwned.class.getDeclaredMethod("decompilerSwitchSlotsProven",
+            ghidra.program.model.pcode.HighFunction.class, List.class, int.class, TaskMonitor.class);
+        method.setAccessible(true);
+        return (boolean)method.invoke(null, high, slots, limit, TaskMonitor.DUMMY);
+    }
+    interface Admits { boolean at(int limit) throws Exception; }
+    /** The smallest allowance that admits the evidence. One unit less must keep the refusal. */
+    static int exactLimit(Admits admits, String label) throws Exception {
+        int limit = 0;
+        while (!admits.at(limit)) check(++limit <= 4096, label + " is admitted within the production allowance");
+        check(limit > 0 && !admits.at(limit - 1), label + ": one unit below the exact limit keeps the refusal");
+        return limit;
+    }
+    static Object worker(ExportProgramModelOwned exporter) throws Exception {
+        Constructor<?> constructor = nested("NativeWorker").getDeclaredConstructor(ExportProgramModelOwned.class, int.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(exporter, 0);
+    }
+    static Object execute(Object worker, Object metadata) throws Exception {
+        Method method = worker.getClass().getDeclaredMethod("execute", nested("FunctionMetadata"), boolean.class);
+        method.setAccessible(true);
+        return method.invoke(worker, metadata, false);
+    }
+    static void dispose(Object worker) throws Exception {
+        Method method = worker.getClass().getDeclaredMethod("dispose");
+        method.setAccessible(true);
+        method.invoke(worker);
+    }
+    static ExportProgramModelOwned.NativeOutcome decompile(Function function, ghidra.app.decompiler.DecompInterface decompiler, Object metadata) throws Exception {
+        Method method = ExportProgramModelOwned.class.getDeclaredMethod("decompileFunction", Function.class, String.class,
+            ghidra.app.decompiler.DecompInterface.class, int.class, TaskMonitor.class, ExportProgramModelOwned.TargetContext.class, List.class);
+        method.setAccessible(true);
+        return (ExportProgramModelOwned.NativeOutcome)method.invoke(null, function, function.getName(), decompiler, 30, TaskMonitor.DUMMY,
+            get(metadata, "target"), get(metadata, "switchSlots"));
+    }
+    static Object render(Object metadata, ExportProgramModelOwned.NativeOutcome outcome, boolean full) throws Exception {
+        return OwnedExporterReferencedBytesProbe.invoke(new ExportProgramModelOwned(), "renderFunction",
+            new Class<?>[]{nested("FunctionMetadata"), ExportProgramModelOwned.NativeOutcome.class, boolean.class}, metadata, outcome, full);
+    }
+    static final String MISSING = "data-reference recovery refused: metadataRefusal=NULL_TYPE;detail=MISSING_DATA_TYPE_POINTER_TARGET_DEPTH_1";
+    static void refused(Object metadataOrExport, String label) throws Exception {
+        String failure = (String)get(metadataOrExport, "failure");
+        check(failure != null && failure.contains(MISSING), label + " keeps the missing-target refusal: " + failure);
+        for (Field field : metadataOrExport.getClass().getDeclaredFields()) {
+            if (field.getName().equals("evidenceComplete")) check(!(boolean)get(metadataOrExport, "evidenceComplete"), label + " metadata is incomplete");
+            if (field.getName().equals("status")) check(!get(metadataOrExport, "status").equals("recovered"), label + " is not recovered");
+        }
+    }
+    static Function switchFunction(ProgramDB program, String name, Address entry, Address last, byte[] bytes) throws Exception {
+        program.getMemory().setBytes(entry, bytes);
+        check(new DisassembleCommand(entry, null, true).applyTo(program, TaskMonitor.DUMMY), name + " disassembly");
+        Function function = program.getFunctionManager().createFunction(name, entry, new AddressSet(entry, last), SourceType.USER_DEFINED);
+        IntegerDataType integer = new IntegerDataType(program.getDataTypeManager());
+        function.setReturnType(integer, SourceType.USER_DEFINED);
+        function.replaceParameters(Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED,
+            new ParameterImpl("selector", integer, program));
+        function.setCallingConvention("__stdcall");
+        return function;
+    }
+    /** Ghidra's own switch analysis, as auto-analysis runs it: it types the table slots as untyped pointers. */
+    static void switchAnalysis(ProgramDB program, Function function, int tables) throws Exception {
+        ghidra.app.decompiler.DecompInterface decompiler = new ghidra.app.decompiler.DecompInterface();
+        try {
+            new ghidra.app.plugin.core.analysis.SwitchAnalysisDecompileConfigurer(program).configure(decompiler);
+            check(decompiler.openProgram(program), decompiler.getLastMessage());
+            ghidra.app.decompiler.DecompileResults results = decompiler.decompileFunction(function, 30, TaskMonitor.DUMMY);
+            check(results.decompileCompleted() && results.getHighFunction() != null &&
+                results.getHighFunction().getJumpTables().length == tables, function.getName() + " switch recovery: " + results.getErrorMessage());
+            if (tables == 0) return;
+            var analysis = new ghidra.app.cmd.function.DecompilerSwitchAnalysisCmd(results);
+            check(analysis.applyTo(program, TaskMonitor.DUMMY), analysis.getStatusMsg());
+        } finally { decompiler.dispose(); }
+    }
+    static void untypedSlot(Data slot, Address value, String label) {
+        check(slot != null && slot.getDataType() instanceof Pointer && ((Pointer)slot.getDataType()).getDataType() == null &&
+            slot.getValue().equals(value), label + " is an untyped pointer holding " + value + ": " + slot);
+    }
+    static void switchProvenanceControls(ProgramDB program, Path work) throws Exception {
+        AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+        program.getMemory().createInitializedBlock("switch-code", space.getAddress(0x4000), 0x2000, (byte)0, TaskMonitor.DUMMY, false);
+        program.getMemory().createInitializedBlock("switch-data", space.getAddress(0x9000), 0x400, (byte)0, TaskMonitor.DUMMY, false).setWrite(false);
+        program.getMemory().createInitializedBlock("switch-writable", space.getAddress(0xa000), 0x100, (byte)0, TaskMonitor.DUMMY, false);
+        int maximum = (int)ExportProgramModelOwned.class.getDeclaredField("MAXIMUM_SWITCH_PROVENANCE_WORK").get(null);
+        check(maximum == 4096, "production provenance allowance");
+
+        // A: cmp edi,2; ja default; mov eax,edi; mov rax,[rax*8+0x9000]; jmp rax;
+        // case0: mov eax,10; ret; case1: mov rax,[0x9100]; ret; case2: mov eax,30; ret; default: xor eax,eax; ret
+        Address table = space.getAddress(0x9000), ordinary = space.getAddress(0x9100);
+        Address tableRead = space.getAddress(0x4007), jump = space.getAddress(0x400f), ordinaryRead = space.getAddress(0x4017);
+        long[] cases = {0x4011, 0x4017, 0x4020};
+        for (int index = 0; index < cases.length; index++) program.getMemory().setLong(table.add(index * 8L), cases[index]);
+        program.getMemory().setLong(ordinary, cases[0]);
+        Function function = switchFunction(program, "switch_probe", space.getAddress(0x4000), space.getAddress(0x4028), new byte[]{
+            (byte)0x83,(byte)0xff,0x02, 0x77,0x21, (byte)0x89,(byte)0xf8, 0x48,(byte)0x8b,0x04,(byte)0xc5,0x00,(byte)0x90,0x00,0x00, (byte)0xff,(byte)0xe0,
+            (byte)0xb8,0x0a,0x00,0x00,0x00,(byte)0xc3, 0x48,(byte)0x8b,0x04,0x25,0x00,(byte)0x91,0x00,0x00,(byte)0xc3,
+            (byte)0xb8,0x1e,0x00,0x00,0x00,(byte)0xc3, 0x31,(byte)0xc0,(byte)0xc3});
+        switchAnalysis(program, function, 1);
+        Set<Address> destinations = new TreeSet<>();
+        for (ghidra.program.model.symbol.Reference flow : program.getReferenceManager().getReferencesFrom(jump))
+            if (flow.getReferenceType().isComputed() && flow.getReferenceType().isJump()) destinations.add(flow.getToAddress());
+        check(destinations.size() == 3 && destinations.contains(space.getAddress(cases[0])), "Ghidra switch analysis owns the table: " + destinations);
+        untypedSlot(program.getListing().getDataAt(table), space.getAddress(cases[0]), "Ghidra-typed table slot");
+        ghidra.program.model.symbol.Reference slotRead = readReference(program, tableRead, table, 1);
+        ghidra.program.model.symbol.Reference pointerRead = readReference(program, ordinaryRead, ordinary, 1);
+        program.getListing().createData(ordinary, new PointerDataType(VoidDataType.dataType, 8));
+
+        // Positive: the table load is bound by the listing, then confirmed by this decompile's own JumpTable.
+        ExportProgramModelOwned exporter = switchExporter(program);
+        Object metadata = switchMetadata(exporter, function, work, "switch-proven");
+        List<?> slots = (List<?>)get(metadata, "switchSlots");
+        check((boolean)get(metadata, "evidenceComplete") && get(metadata, "failure") == null && slots.size() == 1 &&
+            get(slots.get(0), "reader").equals(tableRead) && get(slots.get(0), "jump").equals(jump) && get(slots.get(0), "slot").equals(table) &&
+            get(slots.get(0), "value").equals(space.getAddress(cases[0])) && get(slots.get(0), "refusal").equals(MISSING) &&
+            ((String)get(metadata, "evidence")).contains("global_0000000000009000"), "the table slot's refusal is deferred, not waived: " + slots);
+        Object worker = worker(exporter);
+        try {
+            Object exported = execute(worker, metadata);
+            check(get(exported, "status").equals("recovered") &&
+                (get(exported, "failure") == null || !((String)get(exported, "failure")).contains("MISSING_DATA_TYPE")),
+                "a decompiler-confirmed switch slot needs no typed declaration: " + get(exported, "status") + " " + get(exported, "failure"));
+            var decompiler = (ghidra.app.decompiler.DecompInterface)get(worker, "decompiler");
+            var results = decompiler.decompileFunction(function, 30, TaskMonitor.DUMMY);
+            var high = results.getHighFunction();
+            var tables = high.getJumpTables();
+            check(tables.length == 1 && tables[0].getSwitchAddress().equals(jump) && tables[0].getLoadTables().length == 1 &&
+                tables[0].getLoadTables()[0].getAddress().equals(table) && tables[0].getLoadTables()[0].getSize() == 8 &&
+                tables[0].getLoadTables()[0].getNum() == 3, "production decompiler reports the switch LoadTable");
+            boolean finalLoad = false;
+            for (var ops = high.getPcodeOps(tableRead); ops.hasNext();) finalLoad |= ops.next().getOpcode() == PcodeOp.LOAD;
+            System.out.println("owned switch HighFunction retains the table LOAD at the reader=" + finalLoad);
+            int decompilerLimit = exactLimit(limit -> proven(high, slots, limit), "decompiler provenance");
+            int listingLimit = exactLimit(limit -> candidate(exporter, function, tableRead, slotRead, limit) != null, "listing provenance");
+            check(get(candidate(exporter, function, tableRead, slotRead, listingLimit), "jump").equals(jump), "listing candidate binds the jump");
+
+            // (d) No decompile (planning), a decompile that proves nothing, a failed decompile and no HighFunction all keep the refusal.
+            Object planning = render(metadata, null, false);
+            check(get(planning, "status").equals("failed"), "planning without a decompile does not admit the slot");
+            refused(planning, "planning without a decompile");
+            var real = decompile(function, decompiler, metadata);
+            check(real.provenSwitchSlots.equals(slots) && get(render(metadata, real, true), "status").equals("recovered"), "the production native path proves the slot");
+            refused(render(metadata, new ExportProgramModelOwned.NativeOutcome(real.source, real.nativeFailure, real.prototype), true), "a native outcome without switch proof");
+            var failing = new ghidra.app.decompiler.DecompInterface() {
+                @Override public synchronized ghidra.app.decompiler.DecompileResults decompileFunction(Function target, int timeout, TaskMonitor monitor) { return null; }
+            };
+            var failed = decompile(function, failing, metadata);
+            check(failed.provenSwitchSlots.isEmpty(), "a failed decompile proves no slot");
+            refused(render(metadata, failed, true), "a failed decompile");
+            check(!proven(null, slots, maximum), "a missing HighFunction proves no slot");
+            System.out.println("owned switch provenance exact limits listing=" + listingLimit + " decompiler=" + decompilerLimit + " of " + maximum);
+
+            // (b) An ordinary untyped pointer holding a case address is read by a non-switch load.
+            program.getListing().clearCodeUnits(ordinary, ordinary.add(7), false);
+            untypedSlot(program.getListing().createData(ordinary, PointerDataType.dataType), space.getAddress(cases[0]), "ordinary pointer");
+            check(candidate(exporter, function, ordinaryRead, pointerRead, maximum) == null, "an ordinary pointer with a case value is not a switch slot");
+            Object ordinaryMetadata = switchMetadata(switchExporter(program), function, work, "switch-ordinary");
+            refused(ordinaryMetadata, "an ordinary pointer with a case value");
+            refused(execute(worker, ordinaryMetadata), "an ordinary pointer with a case value, after a decompile");
+            program.getListing().clearCodeUnits(ordinary, ordinary.add(7), false);
+            program.getListing().createData(ordinary, new PointerDataType(VoidDataType.dataType, 8));
+
+            // (c) A stray read of the real table slot that does not supply any branch target.
+            ghidra.program.model.symbol.Reference strayRead = program.getReferenceManager().addMemoryReference(
+                space.getAddress(cases[2]), table, RefType.READ, SourceType.USER_DEFINED, 1);
+            check(candidate(exporter, function, space.getAddress(cases[2]), strayRead, maximum) == null, "a stray table read is not the switch's load");
+            Object strayMetadata = switchMetadata(switchExporter(program), function, work, "switch-stray");
+            refused(strayMetadata, "a stray table read");
+            refused(execute(worker, strayMetadata), "a stray table read, after a decompile");
+            program.getReferenceManager().delete(strayRead);
+        } finally { dispose(worker); }
+
+        // (a) B: a separate read of the real table on the same fall-through path, between the table load and the jump.
+        // cmp edi,2; ja default; mov eax,edi; mov rax,[rax*8+0x9200]; mov rcx,[0x9200]; jmp rax; three cases; default
+        Address separateTable = space.getAddress(0x9200), genuineRead = space.getAddress(0x4107), separateRead = space.getAddress(0x410f);
+        long[] separateCases = {0x4119, 0x411f, 0x4125};
+        for (int index = 0; index < separateCases.length; index++) program.getMemory().setLong(separateTable.add(index * 8L), separateCases[index]);
+        Function separate = switchFunction(program, "switch_separate", space.getAddress(0x4100), space.getAddress(0x412d), new byte[]{
+            (byte)0x83,(byte)0xff,0x02, 0x77,0x26, (byte)0x89,(byte)0xf8, 0x48,(byte)0x8b,0x04,(byte)0xc5,0x00,(byte)0x92,0x00,0x00,
+            0x48,(byte)0x8b,0x0c,0x25,0x00,(byte)0x92,0x00,0x00, (byte)0xff,(byte)0xe0,
+            (byte)0xb8,0x0a,0x00,0x00,0x00,(byte)0xc3, (byte)0xb8,0x14,0x00,0x00,0x00,(byte)0xc3, (byte)0xb8,0x1e,0x00,0x00,0x00,(byte)0xc3,
+            0x31,(byte)0xc0,(byte)0xc3});
+        switchAnalysis(program, separate, 1);
+        untypedSlot(program.getListing().getDataAt(separateTable), space.getAddress(separateCases[0]), "separate-read table slot");
+        ghidra.program.model.symbol.Reference genuine = readReference(program, genuineRead, separateTable, 1);
+        ghidra.program.model.symbol.Reference extra = readReference(program, separateRead, separateTable, 1);
+        ExportProgramModelOwned separateExporter = switchExporter(program);
+        check(candidate(separateExporter, separate, genuineRead, genuine, maximum) != null, "the genuine table load in B is bound");
+        check(candidate(separateExporter, separate, separateRead, extra, maximum) == null, "a separate table read that falls through to J is not the switch's load");
+        Object separateMetadata = switchMetadata(separateExporter, separate, work, "switch-separate");
+        refused(separateMetadata, "a separate read of the real table on the fall-through path");
+        Object separateWorker = worker(separateExporter);
+        try { refused(execute(separateWorker, separateMetadata), "a separate read of the real table, after a decompile"); }
+        finally { dispose(separateWorker); }
+
+        // D: an ordinary pointer whose indexed load does supply an indirect jump, with forged switch labels. The listing
+        // half passes, but labels are not evidence, and the decompiler recovers no table for the unguarded index, so the
+        // refusal stays. A direct [0xa000] read lifts to COPY from a ram varnode, not a LOAD, so it never gets this far.
+        // mov rax,[rdi*8+0xa000]; jmp rax; target: mov eax,1; ret
+        Address pointer = space.getAddress(0xa000), indirectRead = space.getAddress(0x4200), indirectJump = space.getAddress(0x4208);
+        program.getMemory().setLong(pointer, 0x420a);
+        Function indirect = switchFunction(program, "switch_ordinary_jump", space.getAddress(0x4200), space.getAddress(0x420f), new byte[]{
+            0x48,(byte)0x8b,0x04,(byte)0xfd,0x00,(byte)0xa0,0x00,0x00, (byte)0xff,(byte)0xe0, (byte)0xb8,0x01,0x00,0x00,0x00,(byte)0xc3});
+        check(new DisassembleCommand(space.getAddress(0x420a), null, true).applyTo(program, TaskMonitor.DUMMY), "indirect target disassembly");
+        switchAnalysis(program, indirect, 0);
+        untypedSlot(program.getListing().createData(pointer, PointerDataType.dataType), space.getAddress(0x420a), "indirect-jump pointer");
+        ghidra.program.model.symbol.Reference indirectLoad = readReference(program, indirectRead, pointer, 1);
+        var forged = program.getSymbolTable().createNameSpace(null, "switchD_" + indirectJump, SourceType.ANALYSIS);
+        program.getSymbolTable().createLabel(indirectJump, "switchD", forged, SourceType.ANALYSIS);
+        program.getSymbolTable().createLabel(pointer, "switchdataD_" + pointer, forged, SourceType.ANALYSIS);
+        ExportProgramModelOwned indirectExporter = switchExporter(program);
+        check(candidate(indirectExporter, indirect, indirectRead, indirectLoad, maximum) != null, "the ordinary pointer's load does supply J");
+        Object indirectMetadata = switchMetadata(indirectExporter, indirect, work, "switch-indirect");
+        check(((List<?>)get(indirectMetadata, "switchSlots")).size() == 1, "the forged-label slot is only a deferred candidate");
+        Object indirectWorker = worker(indirectExporter);
+        try { refused(execute(indirectWorker, indirectMetadata), "an ordinary pointer feeding an indirect jump with forged switch labels"); }
+        finally { dispose(indirectWorker); }
+
+        // E: the production allowance is reached by a 1024-instruction straight-line run between the table load and J.
+        // The run alternates two moves, because Ghidra's disassembler stops after 16 identical repeated instructions.
+        // cmp edi,2; ja.rel32 default; mov eax,edi; mov rax,[rax*8+0x9300]; 512 x (mov ecx,ecx; mov edx,edx); jmp rax; three cases; default
+        Address longTable = space.getAddress(0x9300), longRead = space.getAddress(0x430b);
+        java.io.ByteArrayOutputStream longCode = new java.io.ByteArrayOutputStream();
+        longCode.writeBytes(new byte[]{(byte)0x83,(byte)0xff,0x02, 0x0f,(byte)0x87,0x1e,0x08,0x00,0x00, (byte)0x89,(byte)0xf8,
+            0x48,(byte)0x8b,0x04,(byte)0xc5,0x00,(byte)0x93,0x00,0x00});
+        for (int index = 0; index < 512; index++) longCode.writeBytes(new byte[]{(byte)0x89,(byte)0xc9, (byte)0x89,(byte)0xd2});
+        longCode.writeBytes(new byte[]{(byte)0xff,(byte)0xe0, (byte)0xb8,0x0a,0x00,0x00,0x00,(byte)0xc3, (byte)0xb8,0x14,0x00,0x00,0x00,(byte)0xc3,
+            (byte)0xb8,0x1e,0x00,0x00,0x00,(byte)0xc3, 0x31,(byte)0xc0,(byte)0xc3});
+        long[] longCases = {0x4b15, 0x4b1b, 0x4b21};
+        for (int index = 0; index < longCases.length; index++) program.getMemory().setLong(longTable.add(index * 8L), longCases[index]);
+        Function longRun = switchFunction(program, "switch_long_run", space.getAddress(0x4300), space.getAddress(0x4b29), longCode.toByteArray());
+        switchAnalysis(program, longRun, 1);
+        untypedSlot(program.getListing().getDataAt(longTable), space.getAddress(longCases[0]), "long-run table slot");
+        ghidra.program.model.symbol.Reference longLoad = readReference(program, longRead, longTable, 1);
+        ExportProgramModelOwned longExporter = switchExporter(program);
+        check(candidate(longExporter, longRun, longRead, longLoad, 1 << 16) != null, "the long-run table load is bound with a larger allowance");
+        check(candidate(longExporter, longRun, longRead, longLoad, maximum) == null, "the production allowance is reached before J");
+        refused(switchMetadata(longExporter, longRun, work, "switch-long"), "a slot whose provenance exceeds the production allowance");
+        System.out.println("owned switch-table slot provenance and ordinary pointer refusal controls passed");
+    }
+
     public static void main(String[] args) throws Exception {
         Application.initializeApplication(new GhidraApplicationLayout(Path.of(args[0]).toFile()),
             new HeadlessGhidraApplicationConfiguration());
@@ -210,6 +484,7 @@ public final class OwnedExporterControlledListingProbe {
                     OwnedExporterReferencedBytesProbe.check(data[index].getLength() == 1 && data[index].getDefaultValueRepresentation().equals("00h"), "export must not rewrite listing data");
                 }
                 addressedControls(program, function, code, exporter, Path.of(args[1]));
+                switchProvenanceControls(program, Path.of(args[1]));
                 System.out.println("controlled real listing passed: MOVSD/COPY, ADDSD/FLOAT_ADD and MULSD/FLOAT_MULT retain one-byte 00h initializers and exact leading-zero eight-byte evidence");
             } finally { program.endTransaction(transaction, false); }
         } finally { program.release(consumer); }
