@@ -116,6 +116,31 @@ class WebAuthenticationInspectionTest {
         } finally { server.stop(0) }
     }
 
+    @Test fun `quoted credentials never survive inventory capture or web authentication previews`() {
+        val parent = java.nio.file.Files.createDirectories(java.nio.file.Path.of("build/test-tmp/web-auth-quoted"))
+        val root = java.nio.file.Files.createTempDirectory(parent, "store-")
+        // No configured literal: this exercises syntax redaction at the earlier inventory boundary too.
+        val inventory = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("password=\"alpha bravo charlie\""), "password=\"alpha\\\"bravo charlie\"",
+            "client_secret='alpha bravo charlie'")), emptyList())
+        val server = UploadServer("127.0.0.1", 0, root, authenticationInspector = { inventory },
+            sensitiveValues = emptyList(), redactionEnvironment = emptyMap())
+        try {
+            server.start()
+            assertEquals("password=[redacted]", inventory.methods.single().idPreview)
+            assertEquals("password=[redacted]", inventory.methods.single().namePreview)
+            assertEquals("client_secret=[redacted]", inventory.methods.single().descriptionPreview)
+            assertEquals(202, request(server, "/api/operator/auth-methods", true).statusCode())
+            val result = awaitResult(server)
+            assertEquals(200, result.statusCode())
+            val method = Json.parseToJsonElement(result.body()).jsonObject.getValue("methods").jsonArray.single().jsonObject
+            assertEquals("password=[redacted]", method.getValue("idPreview").jsonPrimitive.content)
+            assertEquals("password=[redacted]", method.getValue("namePreview").jsonPrimitive.content)
+            assertEquals("client_secret=[redacted]", method.getValue("descriptionPreview").jsonPrimitive.content)
+            assertFalse(result.body().contains("alpha") || result.body().contains("bravo") || result.body().contains("charlie"))
+        } finally { server.stop(0); root.toFile().deleteRecursively() }
+    }
+
     @Test fun `dashboard surfaces an advertised logout when no methods are advertised`() {
         val server = UploadServer("127.0.0.1", 0, createTempDirectory("web-auth-logout-"),
             authenticationInspector = {

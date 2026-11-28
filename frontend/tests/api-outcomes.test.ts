@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { decodeContract, decodeResponse } from '../src/api/decode';
+import '../src/structure/contract';
 import type { ResponseOf } from '../src/api/generated';
 
 const root = resolve(process.cwd(), '../contracts/web/v1');

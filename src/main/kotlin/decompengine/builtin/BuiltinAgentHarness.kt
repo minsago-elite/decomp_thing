@@ -268,7 +268,8 @@ class BuiltinAgentHarness(
             if (definitions.map { it.name }.distinct().size != definitions.size) throw BuiltinAbort(BuiltinStop.INVALID_ACTION)
             if (resume == null) {
                 val context = BuiltinContextAssembler.assemble(request, limits.maxContextBytes - limits.contextHistoryReserveBytes,
-                limits.maximumEvidenceBytes, tools.supportsContextRetrieval && definitions.map { it.name }.containsAll(listOf("list_evidence", "read_evidence")),
+                limits.maximumEvidenceBytes, limits.maxToolResultBytes,
+                tools.supportsContextRetrieval && definitions.map { it.name }.containsAll(listOf("list_evidence", "read_evidence")),
                 control) { candidate -> contextBytes(definitions, candidate) }
                 messages.clear(); messages += context.messages
                 contextEntries = context.entries
