@@ -32,8 +32,14 @@ export function apiFailureReference(error: unknown): string | undefined {
     ? error.requestId : undefined;
 }
 
+/** Append a syntactically vetted request ID when a valid response itself violates its expected identity. */
+export function withValidatedRequestReference(message: string, requestId: unknown): string {
+  return typeof requestId === 'string' && canonicalRequestId.test(requestId)
+    ? textMessage(commonCopy.failureReference, { message, reference: requestId }) : message;
+}
+
 /** Append only a vetted correlation ID to a fixed, locally authored message. */
 export function withApiFailureReference(message: string, error: unknown): string {
   const requestId = apiFailureReference(error);
-  return requestId ? textMessage(commonCopy.failureReference, { message, reference: requestId }) : message;
+  return withValidatedRequestReference(message, requestId);
 }

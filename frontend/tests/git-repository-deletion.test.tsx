@@ -104,7 +104,8 @@ for (const action of ['initialize', 'poll'] as const) {
 
   for (const [name, failure, text] of [
     ['ordinary 410', gone('EVENT_GAP'), gitRepositoryCopy.initializationUnconfirmed],
-    ['503', new ApiClientError('http_error', { status: 503 }), gitRepositoryCopy.unavailableNow],
+    // After the acknowledgement a failed poll leaves the accepted init unconfirmed, never a pre-acceptance refusal (#629).
+    ['503', new ApiClientError('http_error', { status: 503 }), action === 'poll' ? gitRepositoryCopy.initializationUnconfirmed : gitRepositoryCopy.unavailableNow],
   ] as const) {
     it(`keeps an unrelated ${action} failure (${name}) local to the Git panel`, async () => {
       const auth = await session();
@@ -122,6 +123,50 @@ for (const action of ['initialize', 'poll'] as const) {
     });
   }
 }
+
+// The candidate run read follows a successful listing on mount. A confirmed RESOURCE_GONE there also ends the routed
+// job; any other run failure keeps the listing with an unverified candidate inside the panel.
+function routeCandidateRead(auth: BrowserSession, failure: ApiClientError) {
+  transport.get.mockImplementation((kind: string) => {
+    if (kind === 'job') return Promise.resolve({ data: job });
+    if (kind === 'gitRepositories') return Promise.resolve({ data: empty });
+    if (kind === 'run') return Promise.reject(failure);
+    return Promise.reject(new Error(`Unexpected read: ${kind}`));
+  });
+  history.replaceState(null, '', `/nested/jobs/${job.jobId}`);
+  render(<App basePath="/nested" session={auth} />);
+}
+
+it('ends the routed job when the candidate run read confirms RESOURCE_GONE after the listing succeeded', async () => {
+  const auth = await session();
+  sessionStorage.setItem(slot, JSON.stringify(command(job.jobId)));
+  try {
+    routeCandidateRead(auth, gone());
+    const notice = await screen.findByText(jobCopy.thisJobWasDeleted, { exact: false });
+    expect(notice.textContent).toContain(`Reference ID: ${reference}.`);
+    expect(screen.queryByText(gitRepositoryCopy.candidateUnread)).toBeNull();
+    expect(screen.queryByRole('button', { name: gitRepositoryCopy.refresh })).toBeNull();
+    expect(screen.queryByRole('button', { name: jobOrganizationCopy.save })).toBeNull();
+    expect(recovery().read()).toEqual({ kind: 'empty' });
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'gitRepositories')).toHaveLength(1);
+    expect(transport.post).not.toHaveBeenCalled();
+  } finally { auth.dispose(); }
+});
+
+it('keeps an ordinary 410 from the candidate run read as an unverified candidate in the Git panel', async () => {
+  const auth = await session();
+  const own = command(job.jobId);
+  sessionStorage.setItem(slot, JSON.stringify(own));
+  try {
+    routeCandidateRead(auth, gone('EVENT_GAP'));
+    await screen.findByText(gitRepositoryCopy.candidateUnread);
+    expect(screen.queryByText(jobCopy.thisJobWasDeleted, { exact: false })).toBeNull();
+    expect(screen.getByRole('heading', { name: job.displayFilename })).toBeTruthy();
+    expect(screen.getByRole('button', { name: gitRepositoryCopy.refresh })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: gitRepositoryCopy.initialize })).toBeNull();
+    expect(recovery().read()).toEqual({ kind: 'pending', command: own });
+  } finally { auth.dispose(); }
+});
 
 // The real session publishes `signing-out` synchronously inside logout(). The held tombstone is rejected first in the
 // same task, so the panel's catch (a microtask queued before Preact's debounced re-render) calls markDeleted while the

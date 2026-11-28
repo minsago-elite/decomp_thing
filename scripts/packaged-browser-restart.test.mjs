@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import vm from 'node:vm';
+import { finalizePublication, loadReport, scrubReport } from './packaged-browser-report.mjs';
 import { recordCleanupTruth } from './packaged-browser-capture.mjs';
 import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, publishReport, scrubTokens, summarizeRequests, MAX_REPORT_BYTES, MAX_REPORT_PARTS, REPORT_PART_BYTES } from './packaged-browser-restart.mjs';
 
@@ -584,18 +585,23 @@ async function runDriverFinalizer({ report, root, sensitiveValues, values = { mo
   const calls = [];
   const logs = [];
   const process = { exitCode: report.status === 'failed' ? 1 : undefined };
-  const context = vm.createContext({ report, root, sensitiveValues, values, process, join, publishReport, boundReport, scrubTokens, recordCleanupTruth,
+  const stderr = [];
+  // The driver publishes through #1882's finalizePublication; route its streams and exit status into this fake process.
+  const publish = (...args) => finalizePublication(...args, { stdout: text => context.console.log(text), stderr: text => stderr.push(String(text)),
+    fail: () => { process.exitCode = 1; } });
+  // #1895's cleanup truth and CDP late-settlement evidence run in the same finalizer block.
+  const context = vm.createContext({ report, root, sensitiveValues, values, process, join, finalizePublication: publish, boundReport, scrubTokens, recordCleanupTruth,
     cdp: { call: async method => { calls.push(`cdp ${method}`); }, lateEvidence: () => ({ settlements: [], dropped: 0 }) },
     stop: async child => { calls.push(`stop ${child}`); if (rejectStop && child === 'application') throw new Error(`stuck ${sensitiveValues[0]}`); },
     browser: 'browser', application: 'application', vite: null, forcedKill: new Set(), profile: '/fake/profile', browserTmp: null,
     safeDiagnostic: value => scrubTokens(String(value), sensitiveValues),
     cdpDiagnostics: { snapshot: () => ({ calls: calls.length }) },
     removeOwnedWork: async () => { calls.push('remove work'); },
-    fs: { rm: async path => { calls.push(`rm ${path}`); }, writeFile: async () => { throw new Error('driver must publish through publishReport'); } },
+    fs: { rm: async path => { calls.push(`rm ${path}`); }, writeFile: async () => { throw new Error('driver must publish through finalizePublication'); } },
     console: { log: text => { calls.push('log'); logs.push(String(text)); } } });
   let failure = null;
   await vm.runInContext(`(async () => {${block}\n})()`, context).catch(error => { failure = error; });
-  return { calls, logs, process, failure };
+  return { calls, logs, process, failure, stderr };
 }
 
 test('actual driver finalizer keeps cleanup order and facts, then publishes bounded lossless evidence', () => scratch(async root => {
@@ -607,7 +613,12 @@ test('actual driver finalizer keeps cleanup order and facts, then publishes boun
     'No added browser call, and publication only after confirmed cleanup');
   assert.equal(process.exitCode, 1);
   const result = { primaryText: await readFile(join(root, 'report.json'), 'utf8') };
-  const { primary } = await assertLosslessPublication(root, report, result, 512 * KiB);
+  assert.ok(Buffer.byteLength(result.primaryText) <= 512 * KiB);
+  const all = await files(root);
+  for (const bytes of Object.values(all)) assertSecretFree(bytes);
+  assert.ok(Object.keys(all).some(name => name.endsWith('.jsonpart')), 'Large evidence is retained in parts');
+  const primary = await loadReport(root);
+  assert.deepEqual(primary, scrubReport(report, [token]), 'Read-back is the exact scrubbed report');
   assert.equal(primary.status, 'failed');
   assert.equal(primary.shutdownConfirmed, true);
   assert.equal(primary.workCleanupConfirmed, true);
@@ -635,10 +646,15 @@ test('actual driver finalizer preserves unconfirmed cleanup and passes small rep
   });
   await scratch(async parent => {
     const root = join(parent, 'missing');
-    const { calls, logs, failure } = await runDriverFinalizer({ report: sourceShapedReport('passed', 10), root, sensitiveValues: [token] });
-    assert.match(failure?.message ?? '', /Report publication failed \(no failure record written/);
-    assertSecretFree(failure.message);
-    assert.deepEqual(logs, [], 'A failed publication must not print a report or a confirmed-report line');
+    const { calls, logs, failure, process, stderr } = await runDriverFinalizer({
+      report: { ...sourceShapedReport('passed', 10), installationUnchanged: true }, root, sensitiveValues: [token] });
+    assert.equal(failure, null);
+    assert.equal(process.exitCode, 1, 'A failed publication forces a failing exit');
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0], /Report publication failed \(failure record NOT written\)/);
+    for (const line of [...stderr, ...logs]) assertSecretFree(line);
+    assert.equal(JSON.parse(logs[0]).status, 'failed', 'Only the bounded failure record is printed');
+    assert.equal(JSON.parse(logs[0]).installationUnchanged, true, 'The observed installation fact survives publication failure');
     assert.equal(calls.filter(call => call.startsWith('cdp ')).length, 1);
   });
 });

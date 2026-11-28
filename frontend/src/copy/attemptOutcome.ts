@@ -36,5 +36,14 @@ export const queuePositionCopy = {
   notQueued: 'This attempt is no longer queued; its recorded state is {state}.',
   external: 'Queue position is unavailable: an externally supplied executor runs this service\'s workflows.',
   notInQueue: 'Queue position is unavailable: the attempt is not in this process\'s queue. It may be starting or waiting for recovery.',
-  failed: 'Queue position could not be read. The attempt state above remains the authority.',
+  failures: {
+    session: 'Queue position was not checked because the local session is no longer valid. Sign in again, then check queue position.',
+    denied: 'This session is not permitted to check the queue position of this attempt. Use a session with access to this job. The attempt state above remains the authority.',
+    missing: 'No queue position is recorded for this attempt; it may have been removed. The attempt state above remains the authority.',
+    unsupported: 'This queue position uses a format this interface does not support, so no sample is shown. The attempt state above remains the authority.',
+    unverified: 'The queue position could not be verified for this attempt, so no sample is shown. The attempt state above remains the authority. Check queue position again; if this repeats, check the job storage.',
+    sizeLimit: 'The queue position exceeds the size this interface reads, so no sample is shown. The attempt state above remains the authority.',
+    transient: 'Queue position is temporarily unavailable. Wait a moment, then check queue position again. The attempt state above remains the authority.',
+    failed: 'Queue position could not be read. The attempt state above remains the authority.',
+  },
 } as const;

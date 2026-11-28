@@ -25,8 +25,12 @@ data class GhidraAnalysis(
     val metadata: ElfMetadata,
     val symbolInventory: SymbolInventory,
     val programModel: RecoveredProgramModel,
+    /** Compatibility projection of qualified invocation evidence, or empty when unavailable/custom. */
     val mainClass: String,
+    /** Compatibility analysis-only arguments, or empty when invocation evidence is unavailable/custom. */
     val args: List<String>,
+    /** Deprecated logical wrapper success code; use the report invocation exitCode for observed process status. */
+    @Deprecated("Logical wrapper success only; inspect invocation.exitCode in the report")
     val returnCode: Int,
 ) {
     val reportPath: Path = reportsDir.resolve("ghidra_analysis.json")
@@ -86,11 +90,13 @@ class GhidraJvmAnalyzer internal constructor(
             // adapters that need this directory retain their own preparation responsibility.
             val reportsDir = outputDir.resolve("reports")
             checkpoint("before export")
-            val programModel = if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
-                analyzer.analyzeWithDeadline(binaryPath, outputDir, deadline)
+            val modelWithReceipt = if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
+                analyzer.analyzeWithInvocationReceipt(binaryPath, outputDir, deadline)
             } else {
-                analyzer.analyze(binaryPath, outputDir)
+                ModelWithInvocationReceipt(analyzer.analyze(binaryPath, outputDir), null)
             }
+            val programModel = modelWithReceipt.model
+            val receipt = modelWithReceipt.receipt
             checkpoint("after export")
             val inspection = try {
                 metadataInspectionProcess.inspect(binaryPath, metadataLimits, ::checkpoint)
@@ -109,13 +115,15 @@ class GhidraJvmAnalyzer internal constructor(
                 metadata = inspection.metadata,
                 symbolInventory = inspection.symbolInventory,
                 programModel = programModel,
-                mainClass = BundledGhidra.WORKER_CLASS,
-                args = listOf("analyze", outputDir.resolve("ghidra_project").toAbsolutePath().toString(),
-                    "archival_reconstruction", binaryPath.toAbsolutePath().toString()),
+                mainClass = receipt?.takeIf { it.prepared.kind != GhidraCommandKind.CUSTOM }
+                    ?.let { it.prepared.command[it.prepared.mainClassIndex!!] }.orEmpty(),
+                args = receipt?.takeIf { it.prepared.kind != GhidraCommandKind.CUSTOM }?.let {
+                    it.prepared.command.drop(it.prepared.analysisArgumentsIndex!!)
+                } ?: emptyList(),
                 returnCode = 0,
             )
             checkpoint("before analysis report")
-            analysis.writeReport(inspection, metadataLimits, ::checkpoint, reportOutputStreamFactory)
+            analysis.writeReport(inspection, metadataLimits, ::checkpoint, reportOutputStreamFactory, receipt)
             analysis
         }
     }
@@ -126,13 +134,45 @@ private fun GhidraAnalysis.writeReport(
     limits: BoundedElfMetadataLimits,
     checkpoint: (String) -> Unit,
     outputStreamFactory: (Path) -> OutputStream,
+    receipt: GhidraInvocationReceipt?,
 ) {
     val publication = JsonReportLimits(maximumBytes = 1024 * 1024L)
     JsonReportPublisher.write(reportPath, publication, checkpoint, outputStreamFactory) {
         objectValue {
+            field("schemaVersion", 2L)
+            field("analysisOutcome", "succeeded")
+            objectField("invocation") {
+                if (receipt == null) {
+                    field("status", "unavailable")
+                    field("reason", "adapter-did-not-supply-invocation-evidence")
+                } else {
+                    val prepared = receipt.prepared
+                    field("status", "captured")
+                    field("commandKind", when (prepared.kind) {
+                        GhidraCommandKind.BUNDLED_JAVA -> "bundled-java"
+                        GhidraCommandKind.CUSTOM -> "custom"
+                        GhidraCommandKind.CONTROLLED_TEST_JAVA -> "controlled-test-java"
+                    })
+                    field("processStarterKind", when (receipt.starterKind) {
+                        GhidraProcessStarterKind.DEFAULT_PROCESS_BUILDER -> "default-process-builder"
+                        GhidraProcessStarterKind.INJECTED -> "injected"
+                    })
+                    field("observation", "process-starter-returned-and-exit-value")
+                    field("workingDirectory", receipt.workingDirectory)
+                    field("exitCode", receipt.exitCode.toLong())
+                    if (prepared.kind == GhidraCommandKind.CUSTOM) {
+                        field("commandDisclosure", "withheld-custom-command")
+                    } else {
+                        field("commandDisclosure", "qualified-worker-fields-only")
+                        field("executable", prepared.command.first())
+                        field("mainClass", prepared.command[prepared.mainClassIndex!!])
+                        val args = prepared.command.drop(prepared.mainClassIndex + 1)
+                        arrayField("workerArguments") { for (argument in args) value(argument) }
+                        field("analysisArgumentOffset", (prepared.analysisArgumentsIndex!! - prepared.mainClassIndex - 1).toLong())
+                    }
+                }
+            }
             field("tool", "ghidra-jvm")
-            field("mainClass", mainClass)
-            field("returnCode", returnCode.toLong())
             field("binary", binaryPath.pathString)
             field("metadataInputSha256", inspection.inputSha256)
             field("metadataInputBytes", inspection.inputBytes)
@@ -161,7 +201,6 @@ private fun GhidraAnalysis.writeReport(
                     field("workUnits", inspection.usage.workUnits)
                 }
             }
-            arrayField("args") { for (argument in args) value(argument) }
             objectField("metadata") {
                 field("format", metadata.format)
                 field("endianness", metadata.endianness)

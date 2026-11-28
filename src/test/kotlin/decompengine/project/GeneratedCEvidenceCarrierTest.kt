@@ -210,7 +210,22 @@ class GeneratedCEvidenceCarrierTest {
         assertContentEquals(model.toJson().toByteArray(), project.resolve("reports/program_model.json").readBytes())
         assertFailsWith<BuildException> { MakeProjectBuilder.build(project) }
         val log = project.resolve("reports/build.log").readText()
-        assertTrue(log.contains("undefined8") && log.contains("pointer"), log)
+        assertTrue(log.contains("undefined8"), log)
+        for (global in model.globals) {
+            val owner = OWNERS.getValue(global.id)
+            val detail = "${global.id} @ 0x${global.address.toString(16)}; refusal=UNDECLARED_TYPE_NAME; type-name=${global.type}"
+            val comment = "/* declaration-refused $detail; extraction-status=recovered; recovery-assessment=unassessed */"
+            assertTrue(comment in project.resolve("include/modules/$owner.h").readText().lines())
+            val source = project.resolve("src/modules/$owner.c").readText()
+            assertTrue(comment in source.lines())
+            assertFalse(source.contains(global.name))
+            val issues = json(project.resolve("reports/modules/$owner.json")).getValue("issues").jsonArray
+            assertTrue(issues.map { it.jsonObject }.any {
+                it.getValue("code").jsonPrimitive.content == "global-declaration-refused" &&
+                    it.getValue("message").jsonPrimitive.content == detail &&
+                    it.getValue("entityIds").jsonArray.map { id -> id.jsonPrimitive.content } == listOf(global.id)
+            })
+        }
         assertFailsWith<IllegalArgumentException> { ArchivalPackager.create(project, root.resolve("strict.zip")) }
         assertFalse(root.resolve("strict.zip").exists())
     }

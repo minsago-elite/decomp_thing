@@ -1,0 +1,58 @@
+{
+  "schema": "packaged-real-zoom-54f-replay/v1",
+  "purpose": "Replay controls for the real-zoom document-DIP gate (#619 C1). Historical evidence only: these records stay failed; nothing here qualifies zoom or relabels a PNG.",
+  "source": {
+    "zipSha256": "1d88cb1898a0c5b1a74609adb9df22cdf9eeedfeafea98b52554ba8c8e89da60",
+    "zipArtifactId": 13387311390,
+    "runId": 41962908027,
+    "head": "54f1fd2a4",
+    "reportMember": "packaged-browser-tRT6U0/report.json",
+    "reportSha256": "2033008c59f93b2710a3ecf188e4163de05e53a0ba7b22f220fe1f155b8f858d",
+    "chrome": "Chrome/149.0.7827.55"
+  },
+  "calibration": { "innerHeight": 657, "provenance": "recorded: auditRealZoom calibration probe 'calibration about:blank'" },
+  "diagnosticProbeGutterCss": { "value": 15, "provenance": "recorded: flag-on auditRealZoomGeometryProbe calibration gutterCss; diagnostic only, never authoritative" },
+  "records": [
+    {
+      "recorded": {
+        "name": "responsive-zoom200-preferences-disclosure.png", "bytes": 10747,
+        "sha256": "a9c36b25745a807b7d9f3b29788413ddf499ff74695330878141cc1f02e08185", "width": 576, "height": 226,
+        "clip": { "x": 16, "y": 101, "width": 576, "height": 226, "scale": 1 },
+        "elementRect": { "left": 16, "top": 101.594, "width": 576, "height": 225.367 },
+        "viewport": { "scrollX": 0, "scrollY": 0, "innerWidth": 640, "innerHeight": 328, "devicePixelRatio": 2 }
+      },
+      "rectRaw": { "left": 16, "top": 101.59375, "width": 576, "height": 225.3671875 },
+      "rectRawProvenance": "derived: the unique 1/64 or 1/128 px value within 5e-4 of each recorded 3-decimal elementRect value",
+      "expectedDipClip": { "x": 32, "y": 203, "width": 1152, "height": 451, "scale": 1 }
+    },
+    {
+      "recorded": {
+        "name": "responsive-zoom200-navigation-disclosure.png", "bytes": 5343,
+        "sha256": "01b42b0bc12b261a4f28ba29799aa860ff54c2447f32b739b2bb69aee5ce1630", "width": 601, "height": 133,
+        "clip": { "x": 16, "y": 177, "width": 601, "height": 133, "scale": 1 },
+        "elementRect": { "left": 16, "top": 177.781, "width": 600.5, "height": 132 },
+        "viewport": { "scrollX": 0, "scrollY": 0, "innerWidth": 640, "innerHeight": 328, "devicePixelRatio": 2 }
+      },
+      "rectRaw": { "left": 16, "top": 177.78125, "width": 600.5, "height": 132 },
+      "rectRawProvenance": "derived: the unique 1/64 or 1/128 px value within 5e-4 of each recorded 3-decimal elementRect value",
+      "expectedDipClip": { "x": 32, "y": 355, "width": 1201, "height": 265, "scale": 1 }
+    }
+  ],
+  "zoomViewport": {
+    "value": {
+      "scrollX": 0, "scrollY": 0, "innerWidth": 640, "innerHeight": 328, "devicePixelRatio": 2, "clientWidth": 632, "clientHeight": 328, "scrollHeight": 2000,
+      "visualViewport": { "scale": 1, "width": 632.5, "height": 328.5, "offsetLeft": 0, "offsetTop": 0, "pageLeft": 0, "pageTop": 0 }
+    },
+    "provenance": "recorded: scroll/inner/dpr (screenshot viewport) and visualViewport width/height (zoom200 'responsive job' probes). Synthetic, NOT recorded in 54f: clientWidth (floor rule), clientHeight, scrollHeight (overflow), vv offsets/page offsets."
+  },
+  "historicalFailedSha256": [
+    { "sha256": "a9c36b25745a807b7d9f3b29788413ddf499ff74695330878141cc1f02e08185", "what": "54f/6a zoom200 preferences: CSS-unit clip on a DIP surface, wrong region at half size" },
+    { "sha256": "01b42b0bc12b261a4f28ba29799aa860ff54c2447f32b739b2bb69aee5ce1630", "what": "54f/6a zoom200 navigation: CSS-unit clip on a DIP surface, wrong region at half size" },
+    { "sha256": "1abc2aec377504d7cda1402f27f5f23664603c1b7117a2e9684fa9e73119ccbc", "what": "f109/54f zoom200 viewport-dip probe crop (pure white)" },
+    { "sha256": "0b0d9d8b2ea2be381e1eb3003b2bff4140580807efc297e37575a00fda09188c", "what": "f109/54f zoom400 viewport-dip probe crop" }
+  ],
+  "processFailures": {
+    "zoom200": { "failure": "viewport scroll offset or size is not integral CSS pixels", "observations": 2, "lastProbeLabel": "exploration-partial at real zoom 200% of 1280x800 window", "lastProbeScrollY": 0, "offendingValueRetained": false, "digestControl": null },
+    "zoom400": { "failure": "viewport scroll offset or size is not integral CSS pixels", "observations": 0, "postNavigationProbe": { "scrollY": 274.25, "innerWidth": 320, "innerHeight": 164, "visualViewport": { "width": 316.25, "height": 164.25 } }, "digestControl": null }
+  }
+}

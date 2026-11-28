@@ -20,6 +20,8 @@ type FixtureSet = {
   scenarios: { name: string; description: string; jobId: string; jobPath: string; runPath: string; reportPath: string }[];
   errors: Record<string, unknown>;
   download: { path: string; body: string; sha256: string };
+  /** Exact raw-evidence JSON bytes, served as the private artifact-content octet stream. */
+  artifactContents?: Record<string, { body: string; sha256: string }>;
 };
 
 const frontendRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -89,10 +91,12 @@ function serveFixture(request: IncomingMessage, response: ServerResponse, url: U
     json(response, 405, fixtures.errors.METHOD_NOT_ALLOWED);
     return;
   }
-  const document = fixtures.routes[url.pathname];
+  // A generated route may name one exact query (bounded read-only fixture); other queries stay rejected.
+  const exact = url.search ? fixtures.routes[url.pathname + url.search] : undefined;
+  const document = exact ?? fixtures.routes[url.pathname];
   // The generated job listing is one complete page recorded at the default limit, so only that exact query matches it.
-  const defaultListing = document?.kind === 'jobs' && url.search === `?limit=${String(document.data?.page?.limit)}`;
-  if (url.search && !defaultListing && !(document?.kind === 'events' && url.search === '?transport=poll')) {
+  const defaultListing = !exact && document?.kind === 'jobs' && url.search === `?limit=${String(document.data?.page?.limit)}`;
+  if (url.search && !exact && !defaultListing && !(document?.kind === 'events' && url.search === '?transport=poll')) {
     json(response, 400, fixtures.errors.VALIDATION_FAILED, head);
   } else if (url.pathname === fixtures.download.path) {
     response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8',
@@ -100,6 +104,12 @@ function serveFixture(request: IncomingMessage, response: ServerResponse, url: U
       'Content-Length': Buffer.byteLength(fixtures.download.body), 'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff', ETag: `"${fixtures.download.sha256}"` });
     response.end(head ? undefined : fixtures.download.body);
+  } else if (!url.search && fixtures.artifactContents && Object.hasOwn(fixtures.artifactContents, url.pathname)) {
+    const content = fixtures.artifactContents[url.pathname]!;
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'X-Request-ID': 'request_simulated_artifact',
+      'Content-Length': Buffer.byteLength(content.body), 'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff', ETag: `"${content.sha256}"` });
+    response.end(head ? undefined : content.body);
   } else if (document?.kind === 'events' && !url.search) {
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff' });

@@ -28,6 +28,8 @@ const operation = (jobId = job.jobId): Operation => ({
   version: 'opv2_00112233445566778899aabbccddeeff', createdAt: '2026-10-25T00:00:00Z', endedAt: null, resultObjectId: null,
   recoveryRequired: false, message: 'Purging retained storage.',
 });
+/** A confirming organization acknowledgement: the same job at a newer version carrying the submitted change (#629). */
+const confirmed = (change: Partial<Job>): Job => ({ ...job, ...change, version: `${job.version.slice(0, -1)}${job.version.endsWith('0') ? '1' : '0'}` });
 const gone = (serverCode: 'RESOURCE_GONE' | 'EVENT_GAP') => new ApiClientError('http_error', { status: 410, serverCode });
 const unavailable = () => new ApiClientError('http_error', { status: 503 });
 function deferred<T>() {
@@ -154,11 +156,24 @@ it('keeps the original acknowledgement when a job refresh returns the tombstone 
     transport.get.mockRejectedValue(goneWith(canonicalId));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
     const notice = await screen.findByText(`${jobCopy.thisJobWasDeleted} Reference ID: ${canonicalId}.`);
-    expect(screen.queryByText(operation().message!)).toBeNull();
+    expect(screen.queryByText(jobDeletionCopy.operationStates.running)).toBeNull();
     await del.settle({ ok: operation() });
-    expect(screen.getByText(operation().message!)).toBeTruthy();
+    // Fixed state copy, never the server's operation message (#1891).
+    expect(screen.getByText(jobDeletionCopy.operationStates.running)).toBeTruthy(); expect(screen.queryByText(operation().message!)).toBeNull();
     expect(notice.textContent).toContain(canonicalId);
     expect(transport.put).toHaveBeenCalledOnce();
+  } finally { auth.dispose(); }
+});
+
+it('reports required recovery when a completed DELETE still needs storage recovery', async () => {
+  const del = deferred<Operation>();
+  const { auth } = await jobRoute(del);
+  try {
+    await arm();
+    await del.settle({ ok: { ...operation(), state: 'completed', recoveryRequired: true } });
+    expect(await screen.findByText(jobDeletionCopy.operationStates['recovery-required'])).toBeTruthy();
+    expect(screen.queryByText(jobDeletionCopy.operationStates.completed)).toBeNull();
+    expect(screen.queryByText(jobDeletionCopy.cleanupFinished)).toBeNull();
   } finally { auth.dispose(); }
 });
 
@@ -205,7 +220,8 @@ it('keeps one original DELETE through settlement when the same authenticated vie
     expect(review.hasAttribute('disabled')).toBe(true);
     expect(screen.getAllByRole('status').some(node => /Deleting/i.test(node.textContent ?? ''))).toBe(true);
     await del.settle({ ok: operation() });
-    expect(screen.getByText(operation().message!)).toBeTruthy();
+    // Fixed state copy, never the server's operation message (#1891).
+    expect(screen.getByText(jobDeletionCopy.operationStates.running)).toBeTruthy(); expect(screen.queryByText(operation().message!)).toBeNull();
     expect(transport.put).toHaveBeenCalledOnce();
   } finally { auth.dispose(); }
 });
@@ -221,7 +237,7 @@ it('never hands a pending DELETE, its acknowledgement or focus to a newer authen
     expect(review.hasAttribute('disabled')).toBe(false);
     review.focus();
     await del.settle({ ok: operation() });
-    expect(screen.queryByText(operation().message!)).toBeNull();
+    expect(screen.queryByText(jobDeletionCopy.operationStates.running)).toBeNull();
     expect(screen.queryByText(jobCopy.thisJobWasDeleted)).toBeNull();
     expect(document.activeElement).toBe(review);
     expect(transport.put).toHaveBeenCalledOnce();
@@ -242,7 +258,8 @@ it('delivers an acknowledgement when the same job route is already remounted but
     await del.settle({ ok: operation() });
     await read.settle({ err: gone('RESOURCE_GONE') });
     await screen.findAllByText(jobCopy.thisJobWasDeleted);
-    expect(screen.getByText(operation().message!)).toBeTruthy();
+    // Fixed state copy, never the server's operation message (#1891).
+    expect(screen.getByText(jobDeletionCopy.operationStates.running)).toBeTruthy(); expect(screen.queryByText(operation().message!)).toBeNull();
   } finally { auth.dispose(); }
 });
 
@@ -477,12 +494,14 @@ it('ends the whole attempt when the progress pin read confirms RESOURCE_GONE whi
   } finally { auth.dispose(); }
 });
 
-for (const [name, failure] of [['EVENT_GAP', gone('EVENT_GAP')], ['an unverified 410', new ApiClientError('invalid_headers', { status: 410 })]] as const) {
+// Each non-tombstone failure keeps its own fixed pin-read category (#1891); neither is a deletion (#512).
+for (const [name, failure, shown] of [['EVENT_GAP', gone('EVENT_GAP'), progressPinCopy.attemptUnavailable],
+  ['an unverified 410', new ApiClientError('invalid_headers', { status: 410 }), progressPinCopy.policyResponseUnverified]] as const) {
   it(`keeps the attempt and its pin controls for ${name} from the progress pin read`, async () => {
     const auth = await pinRoute(failure);
     try {
       fireEvent.click(screen.getByRole('button', { name: progressPinCopy.readProgressPin }));
-      await waitFor(() => expect(document.body.textContent).toContain(progressPinCopy.theCurrentPinPolicyCouldNotBeVerifiedCheckThe));
+      await waitFor(() => expect(document.body.textContent).toContain(shown));
       expect(screen.queryByText(runCopy.thisJobWasDeleted)).toBeNull();
       expect(screen.getByRole('button', { name: runCopy.refreshAttempt })).toBeTruthy();
       expect(screen.getByRole('button', { name: progressPinCopy.readProgressPin })).toBeTruthy();
@@ -682,7 +701,8 @@ it.each(['save', 'read after save', 'read after conflict', 'ordinary 410'] as co
     let reads = 0;
     transport.get.mockImplementation((kind: string) => kind !== 'job' ? Promise.reject(unavailable())
       : ++reads === 1 ? Promise.resolve({ data: job }) : Promise.reject(goneWith(canonicalId)));
-    if (stage === 'read after save') transport.put.mockResolvedValue({ data: job });
+    // Only an exact, confirming acknowledgement (new version, both submitted fields) leads to the readback (#629).
+    if (stage === 'read after save') transport.put.mockResolvedValue({ data: confirmed({ label: 'Updated label', archived: !(job.archived ?? false) }) });
     else if (stage === 'read after conflict') transport.put.mockRejectedValue(new ApiClientError('http_error', { status: 412 }));
     else transport.put.mockRejectedValue(stage === 'save' ? goneWith(canonicalId) : gone('EVENT_GAP'));
     history.replaceState(null, '', `/nested/jobs/${job.jobId}`);
@@ -757,7 +777,7 @@ async function organizedJob() {
   let reads = 0; let saved = false;
   transport.get.mockImplementation((kind: string) => kind !== 'job' ? Promise.reject(unavailable())
     : saved ? (++reads, reread.promise) : Promise.resolve({ data: job }));
-  transport.put.mockImplementation(() => { saved = true; return Promise.resolve({ data: {} }); });
+  transport.put.mockImplementation(() => { saved = true; return Promise.resolve({ data: confirmed({ label: 'Renamed' }) }); });
   history.replaceState(null, '', `/nested/jobs/${job.jobId}`);
   render(<App basePath="/nested" session={auth} />);
   const save = await screen.findByRole('button', { name: jobOrganizationCopy.save });

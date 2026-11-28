@@ -17,7 +17,7 @@ import type { ReceiptTime } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
-import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
+import { JobDeletion, JobOrganization, jobDeletionStateMessage } from '../jobs/JobLifecycle';
 import { pendingDeletion } from '../jobs/deletionAcknowledgement';
 import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
 import { onLibraryChange } from '../jobs/libraryChannel';
@@ -145,7 +145,8 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
    * failure rejects (a deletion still ends the overview), and its job is returned unapplied, except that a `retry`
    * read, whose caller needs an applied observation, rejects with the newest failure instead. An aborted read rejects.
    */
-  const readJob = async (signal: AbortSignal, mode: 'observe' | 'retry' | 'confirm' = 'observe'): Promise<JobData | null> => {
+  const readJob = async (signal: AbortSignal, mode: 'observe' | 'retry' | 'confirm' = 'observe',
+    accepts?: (data: JobData) => boolean): Promise<JobData | null> => {
     const ticket = issue();
     const replaced = () => ticket < order.current.observed;
     let data: JobData;
@@ -168,6 +169,8 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       clearObservation(ticket, copy.theServerReturnedADifferentJobIdentity);
       return null;
     }
+    // A caller-rejected response (an organization readback that does not confirm its save) is returned unapplied.
+    if (accepts && !accepts(data)) return data;
     if (mode !== 'confirm') apply(ticket, data);
     else if (ticket === order.current.issued && data.version === order.current.current?.version) {
       // The retained overview is current again. This newest read supersedes every earlier one, such as a held Refresh,
@@ -205,7 +208,8 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
     return () => { controller.abort(); };
   }, [binding, client, jobId, refresh, deleted]);
   if (deleted) return <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{deletionMessage}</p>
-    {operation && <p>{operation.message}</p>}
+    {/* Fixed copy for the accepted state; server text never becomes UI copy. */}
+    {operation && <p>{jobDeletionStateMessage(operation)}</p>}
     <p>{cleanupNotice(operation)}</p>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
   return <>
@@ -239,7 +243,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} onDeleted={markDeleted} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
-        readJob={readJob} onDeleted={markDeleted} />
+        readJob={(signal, mode, accepts) => readJob(signal, mode ?? 'observe', accepts)} onDeleted={markDeleted} />
       <JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
         onDeleted={(result, failure) => { if (result) setOperation(result); confirmDeletion(issue(), failure); }} />
     </>}

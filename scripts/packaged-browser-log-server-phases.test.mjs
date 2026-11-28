@@ -442,7 +442,8 @@ async function runFinalizer(body, { mode = 'logs', collector = null, rejectAppli
     removeOwnedWork: async () => { log.push('removeOwnedWork'); },
     fs: { rm: async (path) => { log.push(`rm:${path}`); } },
     profile: 'profile', browserTmp: 'tmp', root: 'root', sensitiveValues: [],
-    publishReport: async (root, value) => { log.push('publishReport'); published.push(JSON.parse(JSON.stringify(value))); return { primaryText: '{}\n' }; },
+    // The driver publishes through #1882's finalizePublication.
+    finalizePublication: async (root, value) => { log.push('finalizePublication'); published.push(JSON.parse(JSON.stringify(value))); return { ok: true, primaryText: '{}\n' }; },
     console: { log: () => {} }, join: (...parts) => parts.join('/'),
     applicationPhases: collector, serverPhaseReport,
   });

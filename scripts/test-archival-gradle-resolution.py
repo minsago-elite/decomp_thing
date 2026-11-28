@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -160,14 +161,31 @@ def window_controls(base, env):
     return tentatives
 
 
+def packaged_command(gradle):
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    # Join shell continuations so the later archive/evidence commands stay outside the Gradle invocation.
+    lines = workflow.replace(chr(92) + "\n", " ").splitlines()
+    line, = (line.strip() for line in lines if line.lstrip().startswith("./gradlew ")
+             and "decompengine.web.BrowserSessionExpiryTest" in line)
+    argv = shlex.split(line)
+    argv[0] = str(gradle)
+    return argv
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gradle", type=Path, default=ROOT / "gradlew", help="pinned Gradle wrapper or distribution executable")
-    parser.add_argument("--target", choices=("archival", "builtin"), default="archival")
+    parser.add_argument("--target", choices=("archival", "builtin", "packaged"), default="archival")
     args = parser.parse_args()
     gradle = args.gradle.resolve()
     builtin = args.target == "builtin"
-    command = [sys.executable, "scripts/validate-builtin-contract.py"] if builtin else archival_command()
+    packaged = args.target == "packaged"
+    if builtin:
+        command = [sys.executable, "scripts/validate-builtin-contract.py"]
+    elif packaged:
+        command = packaged_command(gradle)
+    else:
+        command = archival_command()
     build = ROOT / "build"
     build.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="archival-gradle-", dir=build) as work:
@@ -181,7 +199,14 @@ def main():
                "JAVA_TOOL_OPTIONS": os.environ.get("JAVA_TOOL_OPTIONS", "") + f" -XX:-UsePerfData -Djava.io.tmpdir={tmp}"}
         # A host read-only dependency cache would let scenarios skip the loopback repository.
         env.pop("GRADLE_RO_DEP_CACHE", None)
-        tentatives = 5 if builtin else window_controls(base, env)
+        if builtin:
+            tentatives = 5
+        elif packaged:
+            # The packaged CI step passes its own resolver bounds instead of the archival install script's.
+            tentatives = int(next(arg.split("=", 1)[1] for arg in command
+                                  if arg.startswith("-Dorg.gradle.internal.repository.max.tentatives=")))
+        else:
+            tentatives = window_controls(base, env)
         artifacts = fixture()
         cases = {"recover": [429, 429, 429, 200], "persistent": [429] * tentatives,
                  "401": [401], "403": [403], "404": [404], "malformed": [200], "task-failure": [200]}
@@ -192,6 +217,7 @@ def main():
                 (project / "scripts").mkdir()
                 shutil.copyfile(ROOT / "scripts/validate-builtin-contract.py", project / "scripts/validate-builtin-contract.py")
                 (project / "gradlew").symlink_to(gradle)
+            if builtin or packaged:
                 test_sources = project / "src/test/java"
                 test_sources.mkdir(parents=True)
                 (test_sources / "FixtureProbe.java").write_text("class FixtureProbe {}\n")
@@ -206,7 +232,7 @@ def main():
 }}
 rootProject.name = 'archival-resolver-control'
 """)
-                task = "tasks.named('test') {\n    filter { failOnNoMatchingTests = false }" if builtin else "tasks.register('installDist') {"
+                task = "tasks.named('test') {\n    filter { failOnNoMatchingTests = false }" if builtin or packaged else "tasks.register('installDist') {"
                 (project / "build.gradle").write_text("plugins { id 'fixture.archival' version '1.0' }\n" + task + """
     doLast {
         file('task-runs').append('ran\\n')
@@ -216,6 +242,14 @@ rootProject.name = 'archival-resolver-control'
     }
 }
 """)
+                if packaged:
+                    # The fixture applies the Java plugin. Supply the packaging tasks that exist in the real project.
+                    tasks = ("installDist", "distZip", "distTar", "verifyPackagedWeb", "verifyGhidraDistributionArchives",
+                             "verifyAcpGateHelperDistribution", "verifyLlvmBehaviorHelperDistribution",
+                             "verifyKotlinBootClasspathDistribution")
+                    with (project / "build.gradle").open("a") as script:
+                        for name in tasks:
+                            script.write(f"tasks.register('{name}')\n")
                 result = subprocess.run(command, cwd=project, env={**env, "GRADLE_USER_HOME": str(gradle_home)},
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, text=True, timeout=150)

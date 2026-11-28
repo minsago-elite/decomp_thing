@@ -124,7 +124,7 @@ it('keeps quarantined job errors visible even when the separate recovery-file in
     ? Promise.reject(new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_LEGACY_JOB' }))
     : Promise.resolve({ data: empty }));
   render(<Dashboard basePath="" />);
-  expect((await screen.findByRole('alert')).textContent).toContain('Stored jobs could not be listed completely.');
+  expect((await screen.findByRole('alert')).textContent).toContain('The job listing could not be verified');
   await flush();
   expect(screen.queryByText('No uploaded jobs yet.')).toBeNull();
   expect(screen.queryByRole('region', { name: 'Retained recovery files' })).toBeNull();

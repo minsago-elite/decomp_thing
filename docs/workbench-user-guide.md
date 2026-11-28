@@ -49,17 +49,20 @@ build/install/llm_bin_patch/bin/llm_bin_patch web --data-dir /srv/decomp/jobs   
 build/install/llm_bin_patch/bin/llm_bin_patch web --ui spa --data-dir /srv/decomp/jobs  # embedded preview
 ```
 
-> **Choose a data directory whose absolute path has no component starting with `.`**, for example not
-> `.decomp_engine/jobs` (the default) and not anything under `~/.local`. Bundled Ghidra refuses such project paths, so
-> every reconstruction in that directory fails with *"Path element starting with '.' is not permitted"* in
-> `reports/analysis/reports/ghidra_stderr.log`. Uploading and browsing still work. Tracked in
-> [#1785](https://github.com/minsago-elite/decomp_thing/issues/1785).
+> **Dot-prefixed data directories** such as the default `.decomp_engine/jobs`, anything under `~/.local`, or a
+> `.claude/worktrees/...` checkout are supported. Ghidra itself rejects a project path with a component that starts with
+> `.` or uses a character outside letters, digits and `.-=@ _()[]~`, so when the job's real path is rejected the bundled
+> analysis worker is handed the same job-owned directory through its own working directory (`/proc/self/cwd/<relative>`,
+> Linux only). The project stays inside the job directory; nothing is copied, linked or staged elsewhere. If that route
+> is unavailable the job is refused before Ghidra starts, with the message listed under
+> [When something goes wrong](#when-something-goes-wrong). No `GHIDRA_HOME` or external Ghidra install is involved.
+> See [#1785](https://github.com/minsago-elite/decomp_thing/issues/1785).
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--host` | `127.0.0.1` | Interface to bind. Keep the default. The preview refuses any non-loopback host. Remote or proxied operation is not supported on `master`. |
 | `--port` | `8000` | TCP port. |
-| `--data-dir` | `.decomp_engine/jobs` | Where jobs are stored (see [Your data](#your-data) and the warning above). |
+| `--data-dir` | `.decomp_engine/jobs` | Where jobs are stored (see [Your data](#your-data) and the note above). |
 | `--ui` | `legacy` | `legacy` or `spa`. |
 | `--base-path` | `/` | Serve under a prefix such as `/workbench/`. **Only with `--ui spa`**: the legacy workbench refuses to start with `--base-path is supported by --ui spa`. |
 
@@ -255,7 +258,7 @@ Exploration adds `reports/exploration.json`. Durable attempts (not created by a 
 `workflow-state.json` and per-attempt reports under `reports/runs/<run>/`.
 
 - **Location.** Keep the data directory **outside** the installed distribution; the application files are immutable.
-  Avoid dot-prefixed path components (see [Launch](#launch)). `job.json` records the job's absolute input path, so a job
+  Dot-prefixed path components are supported (see [Launch](#launch)). `job.json` records the job's absolute input path, so a job
   directory is tied to where it was created. Do not move or rename the data directory.
 - **One server per data directory.** Ownership is enforced with a lock file (`.web-owner.lock`). If the directory
   already exists, a second server is refused at start-up with `Job store already has a live web server owner` (checked in
@@ -342,7 +345,8 @@ that matters.
 | `the SPA preview currently requires a loopback host` | `--ui spa` was started with a non-loopback `--host`. Use the default `127.0.0.1`. |
 | `--base-path is supported by --ui spa` | `--base-path` was given to the legacy workbench. Add `--ui spa` or drop the option. |
 | `--help requires a value` | `web --help` is not an option. Use `llm_bin_patch --help`. |
-| Reconstruction ends `FAILED`; `ghidra_stderr.log` says *"Path element starting with '.' is not permitted"* | The data directory path has a dot-prefixed component ([#1785](https://github.com/minsago-elite/decomp_thing/issues/1785)). Stop the server and start it on a directory without one. Existing jobs stay where they are. |
+| Reconstruction ends `FAILED`; `reports/analysis/reports/ghidra_stderr.log` says *"Path element starting with '.' is not permitted"* | The distribution predates the [#1785](https://github.com/minsago-elite/decomp_thing/issues/1785) fix and passes the dot-prefixed data directory to Ghidra verbatim. Update the distribution; until then, start the server on a `--data-dir` without a dot-prefixed component. Existing jobs stay where they are. |
+| `Ghidra cannot open a project at …: a path component starts with '.' or uses a character outside letters, digits and .-=@ _()[]~` | The job directory could not be handed to Ghidra through the worker's working directory (that route needs Linux `/proc/self/cwd`, and the part of the path inside the job directory must itself be valid). The job was refused before Ghidra started. Choose a `--data-dir` (or `reconstruct --output`) whose absolute path uses only those characters and has no component starting with `.`. This is not fixed by setting `GHIDRA_HOME`. |
 | Exploration ends `FAILED` on a host without angr | `doctor --tools-only` reports `[failed] angr`. Install angr or set `ANGR_PYTHON`, restart the launcher and start exploration again. |
 | *"Stored diagnostic details are withheld because they may contain private data."* | Expected for every failed legacy job. Use `doctor` and, if you must, the job's report logs on the server. |
 | `BOOTSTRAP_REQUIRED` / "Open a newly issued local browser link." | The link was already used (or does not match). Restart the launcher and open the new link. |

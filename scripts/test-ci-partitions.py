@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -347,7 +348,8 @@ class CiPartitionRoutingTest(unittest.TestCase):
         self.assertEqual([
             [":verifyAnalysisIoHelperInstalled", ":testClasses", ":installDist", ":stageOracleNativeLibraries", "--no-daemon"],
             ["cleanTest", "test", "--tests", "decompengine.project.GeneratedCValidationSnapshotFixtureTest",
-             "-x", ":buildLlvmBehaviorHelper", "-x", ":buildAnalysisIoHelper", "--no-daemon", *extra],
+             "-x", ":buildLlvmBehaviorHelper", "-x", ":buildAnalysisIoHelper",
+             "-x", ":c4aShutdownIsolated", "--no-daemon", *extra],
         ], invocations)
 
     def test_quota_followup_keeps_main_partition_and_host_preparation(self):
@@ -363,6 +365,18 @@ class CiPartitionRoutingTest(unittest.TestCase):
                 self.assertEqual(2, result.returncode)
                 self.assertIn("unsupported repair snapshot CI partition", result.stderr)
                 self.assertEqual([], invocations)
+
+
+class OperatorWorkflowRoutingTest(unittest.TestCase):
+    def test_operator_regression_command_is_owned_by_core_main(self):
+        workflow = (REPOSITORY / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        commands = [shlex.split(line) for line in workflow.splitlines()
+                    if line.lstrip().startswith("./gradlew ") and "decompengine.chatgpt.operator.*" in line]
+        self.assertEqual(1, len(commands))
+        args = commands[0]
+        self.assertIn("test", args)
+        self.assertEqual("decompengine.chatgpt.operator.*", args[args.index("--tests") + 1])
+        self.assertEqual(["-PciTestShard=core-main"], [arg for arg in args if arg.startswith("-PciTestShard=")])
 
 
 class CiPartitionReportTest(unittest.TestCase):

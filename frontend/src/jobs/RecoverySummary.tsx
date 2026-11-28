@@ -3,6 +3,7 @@ import { message as displayMessage } from '../shared/messages';
 import { useEffect, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { createApiClient } from '../api/client';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import type { Recovery } from '../api/generated';
 
 import { receive } from '../shared/receiptTime';
@@ -10,6 +11,18 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 
 type RecoveryClient = ReturnType<typeof createApiClient>;
+
+type Failure = keyof typeof copy.failures;
+
+/** Fixed panel-local categories: storage refusals stay unverified, local binding refusals are invalid responses, never outages. */
+function failureKind(failure: unknown): Failure {
+  if (!(failure instanceof ApiClientError)) return 'unverified';
+  const kind = metadataFailureKind(failure);
+  if (kind !== 'unverified' && kind !== 'failed') return kind;
+  if (kind === 'unverified') return failure.code === 'response_too_large' && failure.serverCode === undefined ? 'sizeLimit' : kind;
+  if (failure.status === 413) return 'sizeLimit';
+  return canRetainMetadata(failure) ? 'transient' : 'failed';
+}
 
 /** Independent display-only snapshot: one bounded read on entry and each explicit refresh. */
 export function RecoverySummary({ client, refresh }: {
@@ -27,8 +40,7 @@ export function RecoverySummary({ client, refresh }: {
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       const busy = failure instanceof ApiClientError && failure.serverCode === 'RECOVERY_INSPECTION_BUSY';
-      setState({ client, refresh, data: null, busy, error: busy ? '' : withApiFailureReference(
-        copy.recoveryFilesCouldNotBeInspectedRecoveryStateIsUnknown, failure) });
+      setState({ client, refresh, data: null, busy, error: busy ? '' : withApiFailureReference(copy.failures[failureKind(failure)], failure) });
     });
     return () => { controller.abort(); };
   }, [client, refresh]);

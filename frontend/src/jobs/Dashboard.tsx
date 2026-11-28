@@ -16,6 +16,7 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { RecoverySummary } from './RecoverySummary';
 import { onLibraryChange } from './libraryChannel';
+import { metadataFailureKind } from '../shared/retainMetadata';
 
 function currentFilters() {
   try { return { ...jobLocation(location.search), valid: true }; }
@@ -117,11 +118,20 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   }, [binding, client, selection]);
   const failRead = useCallback((failure: unknown) => {
     setPhase('error');
+    const kind = metadataFailureKind(failure);
     if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
       firstPage.current = null;
       setData(null); setDisplayedPageIndex(null); setError(withApiFailureReference(copy.accessToThisJobLibraryIsUnavailableCheckYourLocal, failure));
-    } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
+    } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE'].includes(failure.serverCode ?? '')) {
+      // A page-level refusal: earlier rows were verified at their own read and stay qualified as a snapshot.
       setError(withApiFailureReference(copy.storedJobsCouldNotBeListedCompletelyTheServerHas, failure));
+    } else if (kind === 'unsupported' || kind === 'unverified') {
+      // Unsupported, malformed, damaged, unreconciled or over-limit storage cannot vouch for earlier rows.
+      firstPage.current = null; setData(null); setDisplayedPageIndex(null);
+      const message = kind === 'unsupported' ? copy.incompatibleJobListingResponse
+        : failure instanceof ApiClientError && failure.serverCode === 'STORE_LIMIT' ? copy.jobLibraryExceedsAStorageLimit
+          : copy.jobListingCouldNotBeVerified;
+      setError(withApiFailureReference(message, failure));
     } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
       setError(withApiFailureReference(copy.anotherJobListingIsInProgressWaitAMomentThen, failure));
     } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_LIMIT') {

@@ -971,7 +971,7 @@ it('an organization change applied after a pending Refresh is not rewound by it'
   const auth = await session();
   let reads = 0;
   let releaseRefresh: ((value: unknown) => void) | undefined;
-  transport.put.mockResolvedValue({ data: {} });
+  transport.put.mockResolvedValue(acceptedJob({ label: 'Router firmware', version: v('labelled') }));
   transport.get.mockImplementation((kind) => {
     if (kind === 'job') {
       reads += 1;
@@ -1043,7 +1043,7 @@ it.each([
   let historyNewest = false;
   let held: { resolve: (value: unknown) => void; reject: (reason: unknown) => void } | undefined;
   let holdNext = false;
-  transport.put.mockImplementation(() => { server = saved; holdNext = true; return Promise.resolve({ data: {} }); });
+  transport.put.mockImplementation(() => { server = saved; holdNext = true; return Promise.resolve(saved); });
   transport.get.mockImplementation((kind) => {
     if (kind === 'job') {
       if (holdNext) { holdNext = false; return new Promise((resolve, reject) => { held = { resolve, reject }; }); }
@@ -1086,7 +1086,9 @@ it.each([
 it('applies an unopposed organization reread and still reports a current failure', async () => {
   const auth = await session();
   let fail = false;
-  transport.put.mockResolvedValue({ data: {} });
+  transport.put
+    .mockResolvedValueOnce(acceptedJob({ label: 'Router firmware', version: v('labelled') }))
+    .mockResolvedValueOnce(acceptedJob({ label: 'Other', version: v('other') }));
   let reads = 0;
   transport.get.mockImplementation((kind) => {
     if (kind === 'job') {
@@ -1109,8 +1111,43 @@ it('applies an unopposed organization reread and still reports a current failure
     fail = true;
     fireEvent.input(field, { target: { value: 'Other' } });
     fireEvent.submit(field.closest('form')!);
-    expect((await screen.findByText(/could not be confirmed/)).textContent).toContain(jobOrganizationCopy.failed);
+    // The PATCH was acknowledged, so a failed readback reports an unconfirmed write, never a pre-write refusal.
+    expect((await screen.findByText(/could not be confirmed/)).textContent).toContain(jobOrganizationCopy.unconfirmed);
+    expect(screen.queryByText(jobOrganizationCopy.failed)).toBeNull();
     expect(screen.getByRole('heading', { name: 'Router firmware' })).toBeTruthy();
+    expect(transport.put).toHaveBeenCalledTimes(2);
+  } finally { auth.dispose(); }
+});
+
+it('a confirmed organization ack whose readback does not confirm it never changes the shown job', async () => {
+  const auth = await session();
+  let reads = 0;
+  transport.put.mockResolvedValue(acceptedJob({ label: 'Router firmware', version: v('labelled') }));
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'job') {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(acceptedJob());
+      // The readback names this job at a new version but without the submitted label.
+      if (reads === 2) return Promise.resolve(acceptedJob({ label: 'Someone else', version: v('other') }));
+      // This tab's own library notice reads again; it is held so no later observation can mask the readback.
+      return new Promise(() => undefined);
+    }
+    return Promise.resolve(page([latestRunning, accepted('run_accepted')]));
+  });
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'Open the accepted attempt run_accepted' });
+    const heading = screen.getByRole('heading', { level: 2 }).textContent;
+    const field = screen.getByRole('textbox', { name: /label/i });
+    fireEvent.input(field, { target: { value: 'Router firmware' } });
+    fireEvent.submit(field.closest('form')!);
+    expect((await screen.findByText(/could not be confirmed/)).textContent).toContain(jobOrganizationCopy.unconfirmed);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe(heading);
+    expect(screen.queryByRole('heading', { name: 'Someone else' })).toBeNull();
+    expect((field as HTMLInputElement).value).toBe('Router firmware');
+    expect([reads, transport.put.mock.calls.length]).toEqual([3, 1]);
   } finally { auth.dispose(); }
 });
 
@@ -1765,7 +1802,7 @@ it('R11: an organization save whose reread a failed Refresh overtook is still re
   const saved = acceptedJob({ label: 'Router firmware', latestRunId: 'run_b', version: v('labelled') });
   let held: (() => void) | undefined;
   let saving = false;
-  transport.put.mockImplementation(() => { saving = true; return Promise.resolve({ data: {} }); });
+  transport.put.mockImplementation(() => { saving = true; return Promise.resolve(saved); });
   transport.get.mockImplementation(kind => {
     if (kind === 'runs') return Promise.resolve(page([accepted('run_b')], null, v('A')));
     if (!saving) return Promise.resolve(before);

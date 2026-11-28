@@ -9,6 +9,12 @@ import decompengine.analysis.BoundedProgramModelAcquisitionProcess
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
+import decompengine.analysis.GhidraProjectLocation
+import decompengine.analysis.PreparedGhidraCommand
+import decompengine.analysis.GhidraCommandKind
+import decompengine.analysis.GhidraProcessStarterKind
+import decompengine.analysis.GhidraInvocationReceipt
+import decompengine.analysis.ModelWithInvocationReceipt
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -75,33 +81,35 @@ data class GhidraProgramModelExportLimits(
 }
 
 class GhidraHeadlessProgramModelAnalyzer private constructor(
-    private val commandFactory: (GhidraInvocation, (String) -> Unit) -> List<String>,
+    private val commandFactory: (GhidraInvocation, (String) -> Unit) -> PreparedGhidraCommand,
     private val limits: GhidraProgramModelExportLimits,
     private val analysisToolSha256: String,
     private val recoveryMode: GhidraProgramModelRecoveryMode,
     private val processStarter: (List<String>, Path) -> Process,
+    private val processStarterKind: GhidraProcessStarterKind,
     private val requiresLaunchPermit: Boolean,
     private val processLaunch: BoundedAnalysisProcessLaunch,
-    private val processTreeFactory: (Process, Duration) -> ExportProcessTree,
+    private val processTreeFactory: ((Process, Duration) -> ExportProcessTree)?,
     private val streamCloseSubmitter: (Runnable) -> CompletableFuture<*> = { task -> CompletableFuture.runAsync(task) },
     private val analysisTaskExecutor: Executor = ForkJoinPool.commonPool(),
+    private val prePermitObserver: ((Process) -> Unit)? = null,
 ) : ExportBudgetedProgramModelAnalyzer {
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
         analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
-    ) : this({ invocation, _ -> commandFactory(invocation) }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, false,
-        EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
+    ) : this({ invocation, checkpoint -> PreparedGhidraCommand.custom(commandFactory(invocation), { checkpoint("while snapshotting custom Ghidra command") }) }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, GhidraProcessStarterKind.DEFAULT_PROCESS_BUILDER, false,
+        EXPORT_PROCESS_LAUNCH, null)
 
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
         limits: GhidraProgramModelExportLimits,
         processStarter: (List<String>, Path) -> Process,
         requiresLaunchPermit: Boolean = false,
-    ) : this({ invocation, _ -> commandFactory(invocation) }, limits,
-        UNAUTHENTICATED_ANALYSIS_TOOL_SHA256, GhidraProgramModelRecoveryMode.FULL, processStarter, requiresLaunchPermit,
-        EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
+    ) : this({ invocation, checkpoint -> PreparedGhidraCommand.custom(commandFactory(invocation), { checkpoint("while snapshotting custom Ghidra command") }) }, limits,
+        UNAUTHENTICATED_ANALYSIS_TOOL_SHA256, GhidraProgramModelRecoveryMode.FULL, processStarter, GhidraProcessStarterKind.INJECTED, requiresLaunchPermit,
+        EXPORT_PROCESS_LAUNCH, null)
 
     constructor(
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
@@ -109,7 +117,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
     ) : this({ invocation, checkpoint ->
         BundledGhidra.locate().analysisCommandForOwnedLaunch(invocation, checkpoint)
-    }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, true, EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
+    }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, GhidraProcessStarterKind.DEFAULT_PROCESS_BUILDER, true, EXPORT_PROCESS_LAUNCH, null)
 
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
@@ -127,11 +135,19 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             analysisToolSha256 = analysisToolSha256,
             recoveryMode = recoveryMode,
             processStarter = processStarter,
+            processStarterKind = processStarterKind,
             requiresLaunchPermit = requiresLaunchPermit,
             processLaunch = processLaunch,
             processTreeFactory = processTreeFactory,
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = analysisTaskExecutor,
+            prePermitObserver = prePermitObserver,
+        )
+
+    internal fun withPrePermitObserverForTests(observer: (Process) -> Unit) =
+        GhidraHeadlessProgramModelAnalyzer(
+            commandFactory, limits, analysisToolSha256, recoveryMode, processStarter, processStarterKind,
+            requiresLaunchPermit, processLaunch, processTreeFactory, streamCloseSubmitter, analysisTaskExecutor, observer,
         )
 
     internal fun withProcessLifecycleForTests(
@@ -143,11 +159,13 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         analysisToolSha256 = analysisToolSha256,
         recoveryMode = recoveryMode,
         processStarter = processStarter,
+        processStarterKind = processStarterKind,
         requiresLaunchPermit = requiresLaunchPermit,
         processLaunch = controller,
         processTreeFactory = treeFactory,
         streamCloseSubmitter = streamCloseSubmitter,
         analysisTaskExecutor = analysisTaskExecutor,
+        prePermitObserver = prePermitObserver,
     )
 
     internal fun withStreamCloseSubmitterForTests(
@@ -158,11 +176,13 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         analysisToolSha256 = analysisToolSha256,
         recoveryMode = recoveryMode,
         processStarter = processStarter,
+        processStarterKind = processStarterKind,
         requiresLaunchPermit = requiresLaunchPermit,
         processLaunch = processLaunch,
         processTreeFactory = processTreeFactory,
         streamCloseSubmitter = submitter,
         analysisTaskExecutor = analysisTaskExecutor,
+        prePermitObserver = prePermitObserver,
     )
 
     internal fun withAnalysisTaskExecutorForTests(executor: Executor): GhidraHeadlessProgramModelAnalyzer =
@@ -172,22 +192,29 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             analysisToolSha256 = analysisToolSha256,
             recoveryMode = recoveryMode,
             processStarter = processStarter,
+            processStarterKind = processStarterKind,
             requiresLaunchPermit = requiresLaunchPermit,
             processLaunch = processLaunch,
             processTreeFactory = processTreeFactory,
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = executor,
+            prePermitObserver = prePermitObserver,
         )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
-        analyzeInternal(binaryPath, workDir, false, null).first
+        analyzeInternal(binaryPath, workDir, false, null).model
 
     internal fun analyzeWithDeadline(binaryPath: Path, workDir: Path, deadline: AnalysisDeadline): RecoveredProgramModel =
-        analyzeInternal(binaryPath, workDir, false, deadline).first
+        analyzeInternal(binaryPath, workDir, false, deadline).model
+
+    internal fun analyzeWithInvocationReceipt(binaryPath: Path, workDir: Path, deadline: AnalysisDeadline): ModelWithInvocationReceipt {
+        val result = analyzeInternal(binaryPath, workDir, false, deadline)
+        return ModelWithInvocationReceipt(result.model, result.invocationReceipt)
+    }
 
     fun analyzeWithCallSites(binaryPath: Path, workDir: Path): RecoveredProgramWithCallSites {
-        val (model, calls) = analyzeInternal(binaryPath, workDir, true, null)
-        return RecoveredProgramWithCallSites(model, checkNotNull(calls))
+        val result = analyzeInternal(binaryPath, workDir, true, null)
+        return RecoveredProgramWithCallSites(result.model, checkNotNull(result.callSites))
     }
 
     private fun analyzeInternal(
@@ -195,7 +222,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         workDir: Path,
         includeCallSites: Boolean,
         parentDeadline: AnalysisDeadline?,
-    ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
+    ): ExportResult {
         val deadline = AnalysisDeadline.start(
             limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
             AnalysisDeadline.RECOVERY_TIMEOUT_ADVICE,
@@ -223,7 +250,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val callCandidate = callScriptBytes?.let { uniqueExportCandidate(callOutput, "calls") }
             callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
             deadline.checkpoint("before creating export project")
-            val project = workDir.resolve("ghidra_project").createDirectories()
+            val project = GhidraProjectLocation.forWorker(workDir.resolve("ghidra_project").createDirectories(), workDir)
             val postScripts = listOf(GhidraPostScript("ExportProgramModelOwned.java", listOf(
                 exporterSha256, analysisToolSha256, recoveryMode.wireName, output.toAbsolutePath().normalize().pathString,
                 OWNED_MODEL_CANDIDATE_ARGUMENT,
@@ -237,8 +264,14 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             deadline.checkpoint("before constructing export command")
             val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
             deadline.checkpoint("after constructing export command")
-            val exitCode = executeExport(command, workDir, reports, deadline,
+            val launchDirectory = workDir.toAbsolutePath()
+            val directoryText = launchDirectory.toString()
+            PreparedGhidraCommand.validateWorkingDirectory(directoryText, command) {
+                deadline.checkpoint("while snapshotting Ghidra working directory")
+            }
+            val execution = executeExport(command, launchDirectory, directoryText, reports, deadline,
                 listOfNotNull(modelCandidate, callCandidate))
+            val exitCode = execution.exitCode
             deadline.checkpoint("before export result validation")
             require(exitCode == 0) {
                 "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
@@ -282,24 +315,31 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 deadline.checkpoint("before publishing validated call-site evidence")
                 moveExportCandidate(callCandidate, callOutput)
             }
-            model to calls?.copy(path = callOutput.toAbsolutePath().normalize())
+            ExportResult(model, calls?.copy(path = callOutput.toAbsolutePath().normalize()), execution.receipt)
         }
     }
 
+    private data class ExportResult(
+        val model: RecoveredProgramModel,
+        val callSites: RecoveredCallSiteReceipt?,
+        val invocationReceipt: GhidraInvocationReceipt,
+    )
+
     private fun executeExport(
-        command: List<String>,
+        command: PreparedGhidraCommand,
         workDir: Path,
+        directoryText: String,
         reports: Path,
         deadline: AnalysisDeadline,
         outputCandidates: List<Path>,
-    ): Int {
+    ): ExportExecution {
         val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
         val process = processLaunch.start(
             deadline::checkpoint,
-            { processStarter(command, workDir) },
+            { processStarter(command.command, workDir) },
             { lateProcess -> stopLateExportProcess(lateProcess, limits.terminationGrace, processLaunch, outputCandidates) },
         )
-        val processTree = processTreeFactory(process, limits.terminationGrace)
+        var processTree = ExportProcessTree(process, limits.terminationGrace)
         val taskSettlements = ArrayList<AtomicBoolean>()
         val captureSettlements = ArrayList<AtomicBoolean>()
         val taskFailures = ConcurrentLinkedQueue<Throwable>()
@@ -329,8 +369,58 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             )
             diagnosticsPublished = true
         }
+        var callbackSettlement: AtomicBoolean? = null
+        fun <T> awaitLifecycleCallback(name: String, action: () -> T): T {
+            deadline.checkpoint("before pre-permit $name")
+            val settled = AtomicBoolean()
+            val result = CompletableFuture<T>()
+            val actor = Thread({
+                try {
+                    result.complete(action())
+                } catch (failure: Throwable) {
+                    result.completeExceptionally(failure)
+                } finally {
+                    settled.set(true)
+                }
+            }, "ghidra-pre-permit-$name").apply { isDaemon = true }
+            // Only one callback can be outstanding. A cancelled result never acknowledges its actor.
+            callbackSettlement = settled
+            taskSettlements += settled
+            tasks += result
+            try {
+                actor.start()
+            } catch (failure: Throwable) {
+                settled.set(actor.state == Thread.State.NEW)
+                throw failure
+            }
+            try {
+                TimeUnit.NANOSECONDS.timedJoin(actor, minOf(TimeUnit.SECONDS.toNanos(5),
+                    deadline.remainingNanos("during pre-permit $name")))
+                if (actor.isAlive) throw GhidraAnalysisException("Pre-permit $name did not settle")
+                val value = try { result.join() } catch (failed: java.util.concurrent.CompletionException) {
+                    throw failed.cause ?: failed
+                }
+                deadline.checkpoint("after pre-permit $name")
+                return value
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
+            } finally {
+                if (actor.isAlive) {
+                    result.cancel(false)
+                    actor.interrupt()
+                }
+            }
+        }
         try {
             deadline.checkpoint("after worker launch")
+            processTreeFactory?.let { factory ->
+                // The caller alone can replace the fallback owner, after a timely, settled return.
+                processTree = awaitLifecycleCallback("tree-factory") { factory(process, limits.terminationGrace) }
+            }
+            prePermitObserver?.let { observe ->
+                awaitLifecycleCallback("observer") { observe(process) }
+            }
             if (requiresLaunchPermit) {
                 // A newly started bundled worker stays inert until its handle is owned here.
                 // The two-byte permit fits in the fresh stdin pipe without a child-side read.
@@ -427,7 +517,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 )
             }
             deadline.checkpoint("after export diagnostics")
-            return process.exitValue()
+            val exitCode = process.exitValue()
+            return ExportExecution(exitCode, GhidraInvocationReceipt.captured(command, directoryText, exitCode, processStarterKind))
         } catch (failure: Throwable) {
             val reported = if (failure is java.util.concurrent.TimeoutException) {
                 try {
@@ -525,10 +616,16 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     taskCleanupInterrupted = true
                 }
             }
+            val callbackUnsettled = callbackSettlement?.get() == false
             val allSettlementsConfirmed = taskSettlements.all { it.get() }
             preserveTaskFailures()
             val captureTasksConfirmed = captureSettlements.all { it.get() }
             val streamClosuresConfirmed = streamSettlements.all { it.get() }
+            if (callbackUnsettled) {
+                recordCleanupFailure(GhidraAnalysisException(
+                    "Ghidra export cleanup could not prove pre-permit callback completion within its original window",
+                ))
+            }
             if (!captureTasksConfirmed) {
                 recordCleanupFailure(GhidraAnalysisException(
                     "Ghidra export cleanup could not prove bounded capture/monitor completion within its original window",
@@ -613,6 +710,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         }
     }
 
+    private data class ExportExecution(val exitCode: Int, val receipt: GhidraInvocationReceipt)
+
     private fun readStableProgramModel(path: Path, deadline: AnalysisDeadline): ByteArray {
         return MODEL_ACQUISITION.read(path, path.toAbsolutePath().normalize().parent,
             limits.maximumProgramModelBytes, limits.maximumResidentBytes, deadline)
@@ -621,6 +720,43 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     companion object {
         private val EXPORT_PROCESS_LAUNCH = BoundedAnalysisProcessLaunch()
         private val MODEL_ACQUISITION = BoundedProgramModelAcquisitionProcess()
+
+        internal fun forInvocationReceiptTests(
+            command: PreparedGhidraCommand,
+            limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
+            processStarter: (List<String>, Path) -> Process,
+        ): GhidraHeadlessProgramModelAnalyzer {
+            require(command.kind != GhidraCommandKind.CUSTOM && command.mainClassIndex != null && command.analysisArgumentsIndex != null) {
+                "Invocation receipt test command must have a typed Java layout"
+            }
+            val mainClassIndex = checkNotNull(command.mainClassIndex)
+            val analysisArgumentsIndex = checkNotNull(command.analysisArgumentsIndex)
+            return GhidraHeadlessProgramModelAnalyzer(
+                { invocation, checkpoint ->
+                    PreparedGhidraCommand.controlledTest(
+                        command.command.take(analysisArgumentsIndex) + invocation.arguments(),
+                        mainClassIndex,
+                        analysisArgumentsIndex,
+                    ) { checkpoint("while snapshotting controlled test Ghidra command") }
+                }, limits, UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
+                GhidraProgramModelRecoveryMode.FULL, processStarter, GhidraProcessStarterKind.INJECTED,
+                false, EXPORT_PROCESS_LAUNCH, null,
+            )
+        }
+
+        /** Admission seam for malformed/layout boundary controls. Always downgrades to controlled test evidence. */
+        internal fun forInvocationReceiptFactoryTests(
+            factory: (GhidraInvocation, (String) -> Unit) -> PreparedGhidraCommand,
+            processStarter: (List<String>, Path) -> Process,
+        ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(
+            { invocation, checkpoint ->
+                val command = factory(invocation, checkpoint)
+                PreparedGhidraCommand.controlledTest(command.command, checkNotNull(command.mainClassIndex),
+                    checkNotNull(command.analysisArgumentsIndex)) { checkpoint("while snapshotting controlled command") }
+            }, GhidraProgramModelExportLimits(), UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
+            GhidraProgramModelRecoveryMode.FULL, processStarter, GhidraProcessStarterKind.INJECTED,
+            false, EXPORT_PROCESS_LAUNCH, null,
+        )
 
         internal const val UNAUTHENTICATED_ANALYSIS_TOOL_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"

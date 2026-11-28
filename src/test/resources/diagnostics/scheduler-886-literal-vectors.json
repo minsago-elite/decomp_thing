@@ -1,0 +1,244 @@
+{
+  "authority": "Independent Python hashlib/struct/JSON framing calculation only; no subject execution, tests, model, native or browser calls. ASCII preimages match OracleJson pretty canonical form.",
+  "header": {
+    "path": "source/shared/h.h",
+    "id": "header-1116449ebd0f4ac316c1a49fd5ea6629191dc4d1dae0f003cf2813043cdf90ba"
+  },
+  "modules": {
+    "A": "cu-00000000000000000000000000000001",
+    "B": "cu-00000000000000000000000000000002",
+    "C": "cu-00000000000000000000000000000003",
+    "D": "cu-00000000000000000000000000000004",
+    "E": "cu-00000000000000000000000000000005",
+    "F": "cu-00000000000000000000000000000006",
+    "G": "cu-00000000000000000000000000000007"
+  },
+  "componentBindingField": "sortedMemberNodeIds",
+  "components": {
+    "H": "component-8743f8f65ae3a1019e216e14d5ce448fb069db9f121b3dc152bf03a8b65c8da2",
+    "A": "component-9fd9ddb5a9bd880da2bea13741f6c2dd86053fbf3972f4c55f5d7b42da4283ae",
+    "B": "component-cce4a5ea4ce90e232970e11db86e06b06733b76d045b21531c385371eefd6585",
+    "CD": "component-86847593b920f7bbb4e2e3662a156a1dbbc122f2a840a29ae819d145240d82d8",
+    "E": "component-66708917eb65b367f68c1204e09ddf3340bbaddc97c707ba9d30d11c04577a05",
+    "F": "component-ca041958f2c22b80e1f1adeeb1e0253471af6b8cea4217c2cedeb26b29a0ea96",
+    "G": "component-02ca03d820ba50a42e27f13232e88ebe5766a761e788ed97a297e2399feb7e99"
+  },
+  "rootPolicy": {
+    "id": "root-first-scc-v1",
+    "rank": "longest-dependency-path",
+    "impact": "distinct-downstream-module-set",
+    "roots": "dependency-minimal-interface-ownership-seeds",
+    "classRanks": [
+      "ownership",
+      "interface",
+      "other",
+      "unclassified"
+    ],
+    "ties": [
+      "rank-asc",
+      "class-asc",
+      "impact-desc",
+      "shard-codepoint",
+      "diagnostic-key",
+      "group-id"
+    ]
+  },
+  "rootPolicySha256": "b70c27d089a0dd65451806d75b73e03ce7f270b9a2e1715907e41181e4d2948d",
+  "occurrenceBinding": {
+    "key": "diagnostic-f264b5cb18fa64264c270558051422f5690e0b43c6a1e20fe0cae24b5505ac4d",
+    "validationInvocation": {
+      "id": "validation_00000000000000000000000000000001",
+      "runId": "run_00000001",
+      "candidateRevisionId": "root_000000000000000000000000",
+      "sourceRevisionSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "profileSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "indexSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "regressionCorpusSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "ownerModuleId": "cu-00000000000000000000000000000001",
+    "shardId": "a",
+    "planningArtifactSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "dependencyPlanSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "occurrenceId": "diagnostic-occurrence-facc6ba3b866a334e82b31ebf6153f9685193835b46f89db07e5464c03ae8cf4",
+  "baseExpected": {
+    "sccs": [
+      [
+        "H"
+      ],
+      [
+        "A"
+      ],
+      [
+        "B"
+      ],
+      [
+        "C",
+        "D"
+      ],
+      [
+        "E"
+      ],
+      [
+        "F"
+      ],
+      [
+        "G"
+      ]
+    ],
+    "ranks": {
+      "H": 0,
+      "A": 1,
+      "B": 1,
+      "CD": 2,
+      "E": 0,
+      "F": 1,
+      "G": 0
+    },
+    "impact": {
+      "H": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "A": [
+        "C",
+        "D"
+      ],
+      "B": [
+        "C",
+        "D"
+      ],
+      "CD": [],
+      "E": [
+        "F"
+      ],
+      "F": [],
+      "G": []
+    },
+    "roots": {
+      "H": [
+        "h"
+      ],
+      "A": [
+        "h"
+      ],
+      "B": [
+        "h"
+      ],
+      "CD": [
+        "h"
+      ],
+      "E": [
+        "e"
+      ],
+      "F": [
+        "e"
+      ],
+      "G": [
+        "g"
+      ]
+    },
+    "rowOrder": [
+      "h",
+      "e",
+      "g",
+      "a",
+      "b",
+      "f",
+      "c",
+      "d"
+    ]
+  },
+  "G2Expected": {
+    "rootsCD": [
+      "h",
+      "e"
+    ],
+    "sameKeyRoots": [
+      "h",
+      "e"
+    ],
+    "impactE": [
+      "C",
+      "D",
+      "F"
+    ],
+    "rowOrder": [
+      "h",
+      "e",
+      "g",
+      "a",
+      "b",
+      "f",
+      "c",
+      "d"
+    ]
+  },
+  "G3Expected": {
+    "sccs": [
+      [
+        "A"
+      ],
+      [
+        "B"
+      ],
+      [
+        "C",
+        "D"
+      ],
+      [
+        "E"
+      ],
+      [
+        "F"
+      ],
+      [
+        "G"
+      ]
+    ],
+    "ranks": {
+      "A": 0,
+      "B": 0,
+      "CD": 1,
+      "E": 0,
+      "F": 1,
+      "G": 0
+    },
+    "rootsCD": [
+      "c",
+      "d"
+    ],
+    "rowOrder": [
+      "e",
+      "a",
+      "b",
+      "g",
+      "c",
+      "d",
+      "f"
+    ]
+  },
+  "G4Expected": {
+    "rankQ": 0,
+    "impactQ": [
+      "R",
+      "S",
+      "T",
+      "U",
+      "V"
+    ],
+    "rowOrder": [
+      "q",
+      "h",
+      "e",
+      "g",
+      "a",
+      "b",
+      "f",
+      "c",
+      "d"
+    ]
+  }
+}

@@ -4,7 +4,8 @@ import { queuePositionCopy as copy } from '../copy/attemptOutcome';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from './metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { withApiFailureReference, type createApiClient } from '../api/client';
+import { ApiClientError, withApiFailureReference, type createApiClient } from '../api/client';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import type { QueuePosition as QueueSample } from '../api/generated';
 import { isDeletedJob } from '../shared/retainMetadata';
 import { restoreSettledFocus, useDepartingFocus } from '../shared/departingFocus';
@@ -31,7 +32,7 @@ export function useQueueObservation(client: Client, jobId: string, runId: string
         const controller = current = new AbortController();
         return client.get('queuePosition', `/jobs/${jobId}/runs/${runId}/queue-position`, { signal: controller.signal }).then(({ data }): QueueOutcome => {
           if (controller.signal.aborted) return null;
-          if (data.jobId !== jobId || data.runId !== runId) throw new Error('binding');
+          if (data.jobId !== jobId || data.runId !== runId) throw new ApiClientError('invalid_response');
           return { sample: data };
         }).catch((failure: unknown): QueueOutcome => {
           if (controller.signal.aborted) return null;
@@ -45,6 +46,18 @@ export function useQueueObservation(client: Client, jobId: string, runId: string
   }, [client, jobId, runId]);
   useLayoutEffect(() => () => { owner.close(); }, [owner]);
   return owner;
+}
+
+type Failure = keyof typeof copy.failures;
+
+/** Fixed panel-local categories: storage refusals stay unverified, local binding refusals are invalid responses, never outages. */
+function failureKind(failure: unknown): Failure {
+  if (!(failure instanceof ApiClientError)) return 'unverified';
+  const kind = metadataFailureKind(failure);
+  if (kind !== 'unverified' && kind !== 'failed') return kind;
+  if (kind === 'unverified') return failure.code === 'response_too_large' && failure.serverCode === undefined ? 'sizeLimit' : kind;
+  if (failure.status === 413) return 'sizeLimit';
+  return canRetainMetadata(failure) ? 'transient' : 'failed';
 }
 
 /** A sampled, approximate observation of one queued attempt; never scheduling authority. */
@@ -73,7 +86,8 @@ export function QueuePosition({ jobId, runId, basePath, onDeleted, observation, 
     // Read only on request: the sample is a point-in-time observation, never polled.
     if (read === 0) return;
     let live = true;
-    setState(previous => ({ ...previous, loading: true, error: '' }));
+    // A pending check never presents the earlier sample as current.
+    setState({ sample: null, loading: true, error: '' });
     const settle = () => { const from = departingFocus(); settledFrom.current = from && section.current?.contains(from) ? from : null; };
     void owner.read().then(outcome => {
       // A reply for a panel that is gone (the attempt left the queue or changed version) is obsolete.
@@ -81,7 +95,7 @@ export function QueuePosition({ jobId, runId, basePath, onDeleted, observation, 
       settle();
       // An older sample would misstate the queue, so a failed read discards it.
       setState('sample' in outcome ? { sample: outcome.sample, loading: false, error: '' }
-        : { sample: null, loading: false, error: withApiFailureReference(copy.failed, outcome.failure) });
+        : { sample: null, loading: false, error: withApiFailureReference(copy.failures[failureKind(outcome.failure)], outcome.failure) });
     });
     return () => { live = false; };
   }, [owner, read]);

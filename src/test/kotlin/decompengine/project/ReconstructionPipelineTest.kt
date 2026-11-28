@@ -35,15 +35,24 @@ class ReconstructionPipelineTest {
 
     @Test
     fun `Ghidra analysis delegates to the program model adapter and captures report`() {
-        val tempDir = createTempDirectory("reconstruction-ghidra-")
+        val tempDir = java.nio.file.Files.createTempDirectory(Path("build/orchestration/reconstruction-controls").createDirectories(), "reconstruction-ghidra-")
         val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
-        val analyzer = testAnalyzer()
+        var calls = 0
+        val analyzer = testAnalyzer { calls++ }
 
-        val analysis = analyzer.analyze(binary, tempDir.resolve("analysis"))
+        val output = tempDir.resolve(".decomp_engine/jobs/invalid#job/reports/analysis")
+        val analysis = analyzer.analyze(binary, output)
+        assertEquals(1, calls)
+        assertTrue(!output.resolve("scripts").exists())
+        assertTrue(!output.resolve("ghidra_project").exists())
+        assertEquals("", analysis.mainClass)
+        assertTrue(analysis.args.isEmpty())
 
         assertEquals(0, analysis.returnCode)
         assertEquals("x86-64", analysis.metadata.machine)
         assertTrue(analysis.reportPath.readText().contains("\"tool\": \"ghidra-jvm\""))
+        assertTrue(analysis.reportPath.readText().contains("\"status\": \"unavailable\""))
+        assertTrue(analysis.reportPath.readText().contains("adapter-did-not-supply-invocation-evidence"))
         assertTrue(analysis.reportsDir.resolve("ghidra_stdout.log").readText().startsWith("fake ghidra analyzed"))
     }
 
@@ -129,8 +138,9 @@ class ReconstructionPipelineTest {
         assertTrue(report.contains("does not imply behavioral equivalence"))
     }
 
-    private fun testAnalyzer(): GhidraJvmAnalyzer =
+    private fun testAnalyzer(invoked: () -> Unit = {}): GhidraJvmAnalyzer =
         GhidraJvmAnalyzer { binary, output ->
+            invoked()
             val reports = output.resolve("reports").createDirectories()
             reports.resolve("ghidra_stdout.log").writeText("fake ghidra analyzed test fixture\n")
             reports.resolve("ghidra_stderr.log").writeText("")

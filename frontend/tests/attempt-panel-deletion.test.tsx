@@ -69,14 +69,17 @@ function chromeBlurOnRemoval() {
 const slot = 'decomp.attempt-command.v1:/nested';
 const recovery = () => createAttemptCommandRecovery('/nested');
 
-type Panel = { name: string; view: '' | '/evidence'; kind: string; button: string; panelError: string; otherErrors?: string[] };
+type Panel = { name: string; view: '' | '/evidence'; kind: string; button: string; panelErrors: readonly string[] };
+// Each panel's fixed failure categories (#1891); any one of them is that panel's own failure, never the deletion notice.
+const shows = (texts: readonly string[]) => texts.some(text => document.body.textContent?.includes(text) ?? false);
+const queueFailures = Object.values(queuePositionCopy.failures);
 const panels: Panel[] = [
   { name: 'exploration evidence', view: '/evidence', kind: 'report', button: explorationEvidenceCopy.readExplorationEvidence,
-    panelError: explorationEvidenceCopy.explorationEvidenceCouldNotBeReadCheckTheSessionAnd },
-  { name: 'available actions', view: '', kind: 'attemptControls', button: attemptControlsCopy.read, panelError: attemptControlsCopy.unverified },
-  { name: 'validation evidence', view: '/evidence', kind: 'validationHistory', button: recordedValidationCopy.read, panelError: recordedValidationCopy.failed },
+    panelErrors: Object.values(explorationEvidenceCopy.failures) },
+  { name: 'available actions', view: '', kind: 'attemptControls', button: attemptControlsCopy.read, panelErrors: [attemptControlsCopy.unverified] },
+  { name: 'validation evidence', view: '/evidence', kind: 'validationHistory', button: recordedValidationCopy.read, panelErrors: Object.values(recordedValidationCopy.failures) },
   // #1805's catalog: a deletion tombstone is not an expired catalog page.
-  { name: 'artifact catalog', view: '/evidence', kind: 'artifacts', button: artifactCopy.read, panelError: artifactCopy.expired, otherErrors: [artifactCopy.failed] },
+  { name: 'artifact catalog', view: '/evidence', kind: 'artifacts', button: artifactCopy.read, panelErrors: [artifactCopy.expired, artifactCopy.failed] },
 ];
 
 it('ends the Build log view when its log read confirms RESOURCE_GONE, and keeps an ordinary 410 in the panel', async () => {
@@ -122,7 +125,7 @@ for (const panel of panels) {
       expect(screen.queryByRole('button', { name: panel.button })).toBeNull();
       expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
       expect(screen.queryByRole('button', { name: attemptControlsCopy.read })).toBeNull();
-      expect(screen.queryByText(panel.panelError, { exact: false })).toBeNull();
+      expect(shows(panel.panelErrors)).toBe(false);
       expect(screen.getByRole('link', { name: 'Return to jobs' })).toBeTruthy();
       expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
       expect(document.activeElement).not.toBe(document.body);
@@ -148,7 +151,7 @@ for (const panel of panels) {
       const auth = await route(panel, () => Promise.reject(failure));
       try {
         fireEvent.click(screen.getByRole('button', { name: panel.button }));
-        await waitFor(() => expect([panel.panelError, ...panel.otherErrors ?? []].some(text => document.body.textContent?.includes(text))).toBe(true));
+        await waitFor(() => expect(shows(panel.panelErrors)).toBe(true));
         expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
         expect(screen.getByRole('button', { name: runCopy.refreshAttempt })).toBeTruthy();
         const again = screen.getAllByRole('button').find(node => node.textContent && [panel.button,
@@ -589,7 +592,8 @@ it.each(['focused', 'moved', 'other job', 'ordinary 410', 'signed out'] as const
       if (scenario === 'signed out') {
         expect(screen.queryByText(jobCopy.thisJobWasDeleted, { exact: false })).toBeNull();
       } else if (scenario === 'ordinary 410') {
-        await screen.findByText(gitRepositoryCopy.readFailed, { exact: false });
+        // A decoded non-tombstone 410 is the panel's own fixed 'missing' category (#1891), never a deletion (#512).
+        await screen.findByText(gitRepositoryCopy.failures.missing, { exact: false });
         expect(screen.getByRole('button', { name: jobOrganizationCopy.save })).toBeTruthy();
       } else {
         const notice = screen.getByText(jobCopy.thisJobWasDeleted, { exact: false });
@@ -649,7 +653,7 @@ it('a queue-position read that confirms RESOURCE_GONE ends the stale queued atte
     expect(notice.textContent).toContain(`Reference ID: ${reference}.`);
     expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
     expect(screen.queryByRole('button', { name: queuePositionCopy.read })).toBeNull();
-    expect(screen.queryByText(queuePositionCopy.failed, { exact: false })).toBeNull();
+    expect(shows(queueFailures)).toBe(false);
     expect(screen.getByRole('link', { name: 'Return to jobs' })).toBeTruthy();
     expect(document.activeElement).toBe(notice);
     expect(recovery().read()).toEqual({ kind: 'empty' });
@@ -676,7 +680,7 @@ for (const [label, failure] of [['EVENT_GAP 410', gone('EVENT_GAP')], ['unverifi
     const { auth, read } = await queuedRoute(() => Promise.reject(failure));
     try {
       fireEvent.click(read);
-      await screen.findByText(queuePositionCopy.failed, { exact: false });
+      await waitFor(() => expect(shows(queueFailures)).toBe(true));
       expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
       expect(screen.getByRole('button', { name: runCopy.refreshAttempt })).toBeTruthy();
       expect(recovery().read()).toEqual({ kind: 'pending', command });
@@ -1007,7 +1011,7 @@ for (const [label, outcome] of [
       expect(focused).toBe(screen.getByRole('button', { name: runCopy.refreshAttempt }));
       await queue.settle(outcome);
       expect(notice()).toBeNull(); expect(queuePanel()).toBeNull();
-      expect(screen.queryByText(queuePositionCopy.failed, { exact: false })).toBeNull();
+      expect(shows(queueFailures)).toBe(false);
       expect(screen.queryAllByRole('alert')).toEqual([]);
       expect(screen.getByRole('button', { name: attemptControlsCopy.read })).toBeTruthy();
       expect(document.activeElement).toBe(focused);
@@ -1041,7 +1045,7 @@ for (const [label, outcome] of [['sample', { ok: sample }], ['503', { err: unava
     try {
       await first.settle(outcome);
       expect(screen.queryByText(/About \d+ of \d+ queued tasks/)).toBeNull();
-      expect(screen.queryByText(queuePositionCopy.failed, { exact: false })).toBeNull();
+      expect(shows(queueFailures)).toBe(false);
       expect(screen.getByText(queuePositionCopy.onRequest)).toBeTruthy();
       expect(notice()).toBeNull();
       expect(reads('run')).toBe(2); expect(reads('queuePosition')).toBe(1);

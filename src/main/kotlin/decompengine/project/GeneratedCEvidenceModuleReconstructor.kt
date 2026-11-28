@@ -9,11 +9,18 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
         val declarationContext = declarationContexts.forTypes(request.model.types)
         val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
         val globals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
+        val refusals = mutableListOf<ModuleReconstructionIssue>()
         val source = buildString {
             append("#include <stddef.h>\n#include \"modules/${request.module.id}.h\"\n#include \"${request.module.id}_internal.h\"\n")
             request.dependencyHeaders.keys.sorted().forEach { header -> append("#include \"").append(header.removePrefix("include/")).append("\"\n") }
             append('\n')
             globals.forEach { global ->
+                val refusal = globalDeclarationRefusal(global, declarationContext, external = false)
+                if (refusal != null) {
+                    appendLine(refusal.comment).appendLine()
+                    refusals += refusal.issue()
+                    return@forEach
+                }
                 append("/* ${global.id}; recovered global @ 0x${global.address.toString(16)} */\n")
                 append(globalDeclaration(global, external = false, context = declarationContext)).append("\n\n")
             }
@@ -52,7 +59,7 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
             source = source,
             generator = if (includeRecoveredC) "recovered-c" else "evidence-only",
             promptSha256 = sha256(source.toByteArray()),
-            issues = unresolved,
+            issues = unresolved + refusals,
             retryable = false,
         )
     }

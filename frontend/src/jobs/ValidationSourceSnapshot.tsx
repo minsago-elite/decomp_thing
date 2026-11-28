@@ -3,6 +3,7 @@ import { sourceDirectoryPath } from '../app/paths';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { isDeletedJob } from '../shared/retainMetadata';
 import { recordedValidationCopy as copy } from '../copy/attempt';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import { commonCopy } from '../copy/common';
 import { message } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -11,6 +12,18 @@ import { bindDirectory, directoryReadRoute } from '../sources/navigation';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+
+type Failure = keyof typeof copy.sourceFailures;
+
+/** Fixed panel-local categories: storage refusals stay unverified, local binding refusals are invalid responses, never outages. */
+function failureKind(failure: unknown): Failure {
+  if (!(failure instanceof ApiClientError)) return 'unverified';
+  const kind = metadataFailureKind(failure);
+  if (kind !== 'unverified' && kind !== 'failed') return kind;
+  if (kind === 'unverified') return failure.code === 'response_too_large' && failure.serverCode === undefined ? 'sizeLimit' : kind;
+  if (failure.status === 413) return 'sizeLimit';
+  return canRetainMetadata(failure) ? 'transient' : 'failed';
+}
 
 /** Resolve the durable workflow candidate by its exact source commitment, without equating revision namespaces. */
 export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, sourceSha256, basePath, onDeleted }: {
@@ -44,7 +57,7 @@ export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, s
       if (controller.signal.aborted) return;
       if (isDeletedJob(failure) && onDeleted) { onDeleted(failure); return; }
       setStored(current => current?.binding === binding ? { binding, data: null, loading: false,
-        error: withApiFailureReference(copy.sourceUnavailable, failure) } : current);
+        error: withApiFailureReference(copy.sourceFailures[failureKind(failure)], failure) } : current);
     }
   }
   return <section aria-label={copy.sourceTitle}>

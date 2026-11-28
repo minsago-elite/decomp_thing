@@ -14,9 +14,10 @@ internal object GeneratedCCandidateValidation {
         generator: String,
         source: String,
     ): List<ModuleReconstructionIssue> {
+        val issues = interfaceRefusals(module, model).toMutableList()
         val lexical = attributionLexicalView(source)
         preprocessorAttributionIssue(lexical)?.let { reason ->
-            return (module.functionIds + module.globalIds).map { id ->
+            return issues + (module.functionIds + module.globalIds).map { id ->
                 ModuleReconstructionIssue(
                     "unsupported-preprocessor-attribution",
                     "candidate definition attribution for $id requires unconditional retained syntax: $reason",
@@ -24,7 +25,6 @@ internal object GeneratedCCandidateValidation {
                 )
             }
         }
-        val issues = mutableListOf<ModuleReconstructionIssue>()
         val declarationContext = declarationContexts.forTypes(model.types)
         val codeOnly = lexical.code
         // The compiler gate resolves type names; spelling-only checks reject valid
@@ -75,6 +75,34 @@ internal object GeneratedCCandidateValidation {
             }
         }
         return issues.distinctBy { Triple(it.code, it.message, it.entityIds.sorted()) }
+    }
+
+    /** Each reachable function and referenced global is visited at most once. One nonlocal
+     * witness suffices to refuse a module, even across mutually recursive callers. */
+    fun interfaceRefusals(module: PlannedModule, model: RecoveredProgramModel): List<ModuleReconstructionIssue> {
+        if (model.globals.isEmpty()) return emptyList()
+        val context = declarationContexts.forTypes(model.types)
+        val globals = model.globals.associateBy { it.id }
+        val examined = module.globalIds.toMutableSet()
+        val issues = module.globalIds.mapNotNullTo(mutableListOf()) {
+            globalDeclarationRefusal(globals.getValue(it), context, external = true)?.issue()
+        }
+        val functions = model.functions.associateBy { it.id }
+        val pending = ArrayDeque(module.functionIds.sorted())
+        val origin = module.functionIds.associateWith { it }.toMutableMap()
+        while (pending.isNotEmpty()) {
+            val function = functions[pending.removeFirst()] ?: continue
+            val caller = origin.getValue(function.id)
+            for (id in function.referencedGlobals.sorted()) {
+                if (!examined.add(id)) continue
+                val global = globals[id] ?: continue
+                val refusal = globalDeclarationRefusal(global, context, external = true) ?: continue
+                issues += ModuleReconstructionIssue("dependency-declaration-refused", refusal.detail, listOf(caller))
+                return issues
+            }
+            for (id in function.calls.sorted()) if (origin.putIfAbsent(id, caller) == null) pending.addLast(id)
+        }
+        return issues
     }
 
     private fun findFunctionBody(source: String, code: String, functionName: String): String? {
