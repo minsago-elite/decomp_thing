@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise CI Gradle dependency resolution against a loopback plugin repository."""
+"""Exercise CI Gradle dependency resolution against a loopback plugin repository.
+
+The archival target also checks that the jittered retry window of the image build's
+install script stays within its documented bounds (#2013).
+"""
 import argparse
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -7,7 +11,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
-import shlex
+import re
 import shutil
 import subprocess
 import sys
@@ -20,6 +24,11 @@ PLUGIN = ("fixture", "archival-plugin", "1.0")
 MARKER = ("fixture.archival", "fixture.archival.gradle.plugin", "1.0")
 BOM = ("org.jetbrains.kotlin", "kotlin-gradle-plugins-bom", "2.4.0")
 API = ("org.jetbrains.kotlin", "kotlin-gradle-plugin-api", "2.4.0")
+INSTALL = ROOT / "scripts/archival-gradle-install.sh"
+# Scaled-down initial backoff for loopback controls; the tentative count is the real one.
+CONTROL_BACKOFF_MS = "100"
+# The documented minimum per-resource window for riding out HTTP 429 throttling.
+MINIMUM_WINDOW_MS = 300_000
 
 
 def coordinate(group, artifact, version=None):
@@ -108,16 +117,47 @@ def serve(scenario, artifacts, statuses):
             thread.join()
 
 
-def archival_command(gradle):
-    # Exercise the same timeout, resolver options and single task invocation as Docker.
-    joined = (ROOT / "Dockerfile").read_text().replace(chr(92) + "\n", " ")
-    prefix = "RUN --mount=type=cache,target=/root/.gradle "
-    line, = [line for line in joined.splitlines() if line.startswith(prefix)]
-    argv = shlex.split(line.removeprefix(prefix))
-    argv[argv.index("./gradlew")] = str(gradle)
-    if argv[-1] != "installDist":
+def install_constants():
+    text = INSTALL.read_text()
+    values = {name: int(re.search(rf"^{name}=(\d+)$", text, re.M).group(1))
+              for name in ("MAX_TENTATIVES", "BACKOFF_FLOOR_MS", "BACKOFF_JITTER_MS")}
+    if not text.rstrip().endswith("installDist"):
         raise ValueError("expected the archival installDist task")
-    return argv
+    return values
+
+
+def archival_command():
+    # The image build runs this script as its one installDist step; check that wiring first.
+    dockerfile = re.sub(r"\s*\\\n\s*", " ", (ROOT / "Dockerfile").read_text())
+    run = "RUN --mount=type=cache,target=/root/.gradle sh scripts/archival-gradle-install.sh"
+    if not re.search(re.escape(run) + r"\s*\n", dockerfile):
+        raise ValueError("Dockerfile no longer runs the archival install script")
+    return ["sh", str(INSTALL)]
+
+
+def window_controls(base, env):
+    constants = install_constants()
+    tentatives, floor, jitter = (constants[k] for k in ("MAX_TENTATIVES", "BACKOFF_FLOOR_MS", "BACKOFF_JITTER_MS"))
+    shortest = floor * (2 ** (tentatives - 1) - 1)
+    if shortest < MINIMUM_WINDOW_MS:
+        raise AssertionError(f"retry window {shortest} ms is below the documented {MINIMUM_WINDOW_MS} ms")
+    stub = base / "print-gradle-arguments"
+    stub.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    stub.chmod(0o755)
+    picks = set()
+    env = {key: value for key, value in env.items() if key != "ARCHIVAL_GRADLE_INITIAL_BACKOFF_MS"}
+    for _ in range(6):
+        result = subprocess.run(archival_command(), cwd=base, text=True, capture_output=True,
+                                env={**env, "ARCHIVAL_GRADLEW": str(stub)}, timeout=20, check=True)
+        flags = dict(line.removeprefix("-D").split("=", 1) for line in result.stdout.splitlines() if line.startswith("-D"))
+        picks.add(int(flags["org.gradle.internal.repository.initial.backoff"]))
+        if int(flags["org.gradle.internal.repository.max.tentatives"]) != tentatives:
+            raise AssertionError(f"tentatives flag differs: {flags}")
+    if not all(floor <= pick < floor + jitter for pick in picks) or len(picks) < 2:
+        raise AssertionError(f"initial backoff picks {sorted(picks)} are not jittered within [{floor}, {floor + jitter})")
+    print(f"window: {tentatives} tentatives, jittered initial backoff {sorted(picks)} ms, "
+          f"at least {shortest // 1000} s per throttled resource", flush=True)
+    return tentatives
 
 
 def main():
@@ -127,7 +167,7 @@ def main():
     args = parser.parse_args()
     gradle = args.gradle.resolve()
     builtin = args.target == "builtin"
-    command = [sys.executable, "scripts/validate-builtin-contract.py"] if builtin else archival_command(gradle)
+    command = [sys.executable, "scripts/validate-builtin-contract.py"] if builtin else archival_command()
     build = ROOT / "build"
     build.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="archival-gradle-", dir=build) as work:
@@ -136,10 +176,14 @@ def main():
         tmp.mkdir()
         wrapper_cache = base / "wrapper"
         wrapper_cache.mkdir()
-        env = {**os.environ, "TMPDIR": str(tmp),
+        env = {**os.environ, "TMPDIR": str(tmp), "ARCHIVAL_GRADLEW": str(gradle),
+               "ARCHIVAL_GRADLE_INITIAL_BACKOFF_MS": CONTROL_BACKOFF_MS,
                "JAVA_TOOL_OPTIONS": os.environ.get("JAVA_TOOL_OPTIONS", "") + f" -XX:-UsePerfData -Djava.io.tmpdir={tmp}"}
+        # A host read-only dependency cache would let scenarios skip the loopback repository.
+        env.pop("GRADLE_RO_DEP_CACHE", None)
+        tentatives = 5 if builtin else window_controls(base, env)
         artifacts = fixture()
-        cases = {"recover": [429, 429, 429, 200], "persistent": [429] * 5,
+        cases = {"recover": [429, 429, 429, 200], "persistent": [429] * tentatives,
                  "401": [401], "403": [403], "404": [404], "malformed": [200], "task-failure": [200]}
         for scenario, expected in cases.items():
             project = base / scenario
