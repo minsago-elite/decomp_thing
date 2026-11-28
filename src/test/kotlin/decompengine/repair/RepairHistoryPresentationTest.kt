@@ -138,6 +138,11 @@ class RepairHistoryPresentationTest {
         assertTrue(html.contains("1234567/2000000000 attempts"), html)
         assertTrue(html.contains("aria-label=\"Attempt 150001\">150001</div>"), html)
         assertFalse(html.contains("0/0 attempts"), html)
+        val unindexed = JsonObject(payload + ("iterations" to JsonArray(payload.getValue("iterations").jsonArray.map {
+            JsonObject(it.jsonObject + ("index" to JsonPrimitive(0))) })))
+        val unindexedHtml = renderRepairHistory(job, payload = unindexed)
+        assertTrue(unindexedHtml.contains("aria-label=\"Attempt index not reported\">?</div>"), unindexedHtml)
+        assertFalse(unindexedHtml.contains("aria-label=\"Attempt ?\""), unindexedHtml)
     }
 
     @Test fun `pending and resolved rollback failures are run level and shared by CLI and web`() {

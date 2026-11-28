@@ -1035,7 +1035,7 @@ class UploadServer(
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, reports.runId) }.getOrNull()
-        val explorationClassification = captureWebExploration {
+        val explorationClassification = captureWebExplorationPresentation(redaction) {
             jobs.readArtifact(jobId, "${reports.artifactPrefix}/exploration.json", 1_048_576).bytes
         }
         // The fixed reader already captured diagnostic H once. Never reread it as display input.

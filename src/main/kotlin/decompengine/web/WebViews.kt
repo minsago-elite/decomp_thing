@@ -260,7 +260,9 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
-        "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${value.toString().trim('"').escapeHtml()}</dd></div>"
+        // The legacy JSON keeps a signed numeric entry point; HTML shows the unsigned address.
+        val display = if (key == "entry_point") "0x" + job.metadata.entryPoint.toString(16) else value.toString().trim('"')
+        "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${display.escapeHtml()}</dd></div>"
     }
     val action = if (reports.runId != null) {
         "<span class=\"status-note\">Legacy workflow actions are unavailable for jobs with durable attempts.</span>"
@@ -523,21 +525,25 @@ private fun renderJobList(jobs: List<Job>): String {
 }
 
 private fun renderExploration(job: Job, reports: WebReportContext, classification: WebExplorationClassification): String {
-    val download = if (classification.bytesCaptured)
+    val download = if (classification.downloadAvailable)
         "<a class=\"text-link\" href=\"${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}\">Download JSON ↓</a>"
     else ""
     val heading = "<div class=\"section-heading compact\"><span class=\"step\">03</span><div><p class=\"kicker\">Evidence</p><h2>Exploration report</h2></div>$download</div>"
+    val downloadNote = if (classification.bytesCaptured && !classification.downloadAvailable)
+        "<p>The JSON download is withheld because these report bytes cannot pass the redacted report projection.</p>" else ""
     if (classification.state != "available") {
         val (stateLabel, wording) = when (classification.state) {
             "unknown" -> "unknown" to "Report bytes are unavailable, inaccessible, or changed during the bounded read."
-            "partial" -> "partial" to "The producer reported an incomplete exploration result; summary metrics are withheld."
+            "partial" -> "partial" to "The report is incomplete; summary metrics are withheld."
             "unsupported" -> "unsupported" to "The declared producer schema is not supported by this presentation."
             "invalid" -> "invalid" to "The captured report is malformed or internally inconsistent."
             else -> "unknown" to "The report state is not recognized; summary metrics are withheld."
         }
+        // The unknown wording already states the read limitation; do not repeat it.
+        val limitation = if (stateLabel == "unknown") "" else "<p>${classification.limitation.escapeHtml()}</p>"
         return "<section class=\"panel evidence-panel pending-evidence\">$heading" +
             "<p>Evidence state: ${stateLabel.escapeHtml()}.</p><p>${wording.escapeHtml()}</p>" +
-            "<p>${classification.limitation.escapeHtml()}</p></section>"
+            "$limitation$downloadNote</section>"
     }
 
     val summary = classification.summary ?: return "<section class=\"panel evidence-panel pending-evidence\">$heading" +
@@ -581,7 +587,7 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
     val rows = candidates.take(50).joinToString("") { element ->
         val candidate = element as? JsonObject
         val rawId = candidate?.get("id").stringContentOrNull()
-        val id = rawId?.let { capped(it, 128) } ?: "Not reported"
+        val id = rawId?.takeIf { it.isNotEmpty() }?.let { capped(it, 128) } ?: "Not reported"
         val source = candidate?.get("source").stringContentOrNull()?.let { capped(it, 64) } ?: "Not reported"
         val sourceClass = when (source.lowercase()) {
             "angr", "mutation", "static_hint", "seed" -> source.lowercase()
@@ -601,9 +607,10 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
         } ?: if (rawId != null && candidateIds[rawId] != 1) "Not reported (ambiguous candidate id)" else "Not reported"
         val stdin = hexBytes(candidate?.get("stdinHex").stringContentOrNull(), 12)
             ?.let { if (it.isEmpty()) "—" else it } ?: "Not reported"
-        "<tr><td><code>${id.escapeHtml()}</code></td><td><span class=\"source-tag $sourceClass\">${source.escapeHtml()}</span></td>" +
+        val outputCell = if (output == "∅") "<span aria-label=\"empty output\">∅</span>" else output.escapeHtml()
+        "<tr><th scope=\"row\"><code>${id.escapeHtml()}</code></th><td><span class=\"source-tag $sourceClass\">${source.escapeHtml()}</span></td>" +
             "<td>${stringArray(candidate?.get("args")).escapeHtml()}</td><td><code>${stdin.escapeHtml()}</code></td>" +
-            "<td>${exitCode.escapeHtml()}</td><td><code>${output.escapeHtml()}</code></td></tr>"
+            "<td>${exitCode.escapeHtml()}</td><td><code>$outputCell</code></td></tr>"
     }
     return """
       <section class="panel evidence-panel">
@@ -614,17 +621,18 @@ private fun renderExploration(job: Job, reports: WebReportContext, classificatio
         <div class="metric-grid">
           ${metric("Exploration heuristic", scoreText, "Uncalibrated", score)}
           ${metric("Candidates", count(summary, "candidateCount"), "Generated inputs")}
-          ${metric("Baseline output paths", count(classification.root, "baselineOutputSignatures"), "Before exploration")}
-          ${metric("Output paths", count(summary, "expandedOutputSignatures"), "Distinct signatures")}
+          ${metric("Baseline output signatures", count(classification.root, "baselineOutputSignatures"), "Before exploration")}
+          ${metric("Expanded output signatures", count(summary, "expandedOutputSignatures"), "After exploration")}
           ${metric("Reported inputs", count(confidence, "inputCount"), "Producer-reported")}
           ${metric("Reported sources", count(confidence, "sourceCount"), "Producer-reported")}
-          ${metric("Reported output paths", count(confidence, "outputSignatureCount"), "Producer-reported")}
-          ${metric("New paths", count(confidence, "newOutputSignatureCount"), "Beyond baseline")}
+          ${metric("Reported output signatures", count(confidence, "outputSignatureCount"), "Producer-reported")}
+          ${metric("Reported new output signatures", count(confidence, "newOutputSignatureCount"), "Producer-reported")}
         </div>
-        <div class="table-wrap">
-          <table><thead><tr><th>Case</th><th>Source</th><th>Arguments</th><th>stdin · hex</th><th>Exit</th><th>stdout</th></tr></thead><tbody>$rows</tbody></table>
+        <div class="table-wrap" role="region" aria-label="Exploration candidate observations" tabindex="0">
+          <table class="exploration-table"><caption>Exploration candidates and recorded observations</caption><thead><tr><th scope="col">Case</th><th scope="col">Source</th><th scope="col">Arguments</th><th scope="col">stdin · hex</th><th scope="col">Exit</th><th scope="col">stdout</th></tr></thead><tbody>$rows</tbody></table>
         </div>
-        ${if (candidates.size > 50) "<p class=\"table-note\">Showing 50 of ${candidates.size} candidates. Download JSON for the full report.</p>" else ""}
+        ${if (candidates.size > 50) "<p class=\"table-note\">Showing 50 of ${candidates.size} candidates.${if (classification.downloadAvailable) " Download JSON for the full report." else ""}</p>" else ""}
+        $downloadNote
       </section>
     """.trimIndent()
 }
@@ -889,7 +897,9 @@ fun renderRepairHistory(
     }
     if (iterations.isEmpty() && runs.isEmpty()) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No repair attempts are recorded.</p></section>"
     val items = iterations.joinToString("") { iteration ->
-        val index = iteration.historyCount("index", allowZero = false).let { if (it == "not reported") "?" else it }
+        val reportedIndex = iteration.historyCount("index", allowZero = false).takeUnless { it == "not reported" }
+        val index = reportedIndex ?: "?"
+        val indexLabel = reportedIndex?.let { "Attempt $it" } ?: "Attempt index not reported"
         val failureKind = safeRepairFailureKind(iteration.historyText("failureKind"))
         val regressions = (iteration["retainedRegressionIds"] as? JsonArray)?.size ?: 0
         val before = renderEvidence("Before", iteration["before"] as? JsonObject, job, reports, authorizedArtifacts, artifactStates)
@@ -898,7 +908,7 @@ fun renderRepairHistory(
         val revision = safeRevisionIdentity(iteration.historyText("revisionId"))
         val rollback = repairRollbackLabel(iteration)
         val assurance = repairEvidenceAssurance(iteration, receiptBindingStates)
-        """<article class="history-item"><div class="history-index" aria-label="Attempt $index">$index</div><div>
+        """<article class="history-item"><div class="history-index" aria-label="$indexLabel">$index</div><div>
           <div class="history-title"><strong>$failureKind — ${outcome.escapeHtml()}</strong>${statusPill(outcome)}</div>
           <p>Attempt revision: <code>${revision.escapeHtml()}</code></p>
           <p>Rollback: ${rollback.escapeHtml()}</p><p>Evidence assurance: ${assurance.escapeHtml()}</p>
@@ -1129,7 +1139,8 @@ internal fun formatBytes(bytes: Int): String = formatBytes(bytes.toLong())
 internal fun formatBytes(bytes: Long): String = when {
     bytes >= 1024 * 1024 -> "%.1f MiB (%d bytes)".format(java.util.Locale.ROOT, bytes / (1024.0 * 1024.0), bytes)
     bytes >= 1024 -> "%.1f KiB (%d bytes)".format(java.util.Locale.ROOT, bytes / 1024.0, bytes)
-    else -> "$bytes B ($bytes bytes)"
+    bytes == 1L -> "1 byte"
+    else -> "$bytes bytes"
 }
 private fun jsString(value: String): String = "'" + value
     .replace("\\", "\\\\")
@@ -1226,9 +1237,9 @@ h1 em { color: var(--acid); font-style: normal; }
 .workflow-list { list-style: none; padding: 0; margin: 0; }.workflow-list li { display: flex; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--line); }.workflow-list li:last-child { border: 0; }.workflow-list li > span { color: var(--acid); font: 700 11px ui-monospace, monospace; }.workflow-list strong { font-size: 14px; }.workflow-list p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .evidence-panel, .history-panel, .artifacts-panel { margin-top: 18px; }.pending-evidence { color: var(--muted); }
 .text-link { margin-left: auto; color: var(--acid); font-size: 12px; text-decoration: none; }
-.metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }.metric { min-height: 126px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: rgba(8,11,9,.35); }.metric p, .metric small { color: var(--muted); font-size: 11px; }.metric strong { display: block; margin: 12px 0 4px; font-size: 30px; letter-spacing: -.05em; }.gauge { display: block; width: 100%; height: 6px; margin-top: 13px; accent-color: var(--acid); }
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }table { width: 100%; border-collapse: collapse; font-size: 12px; }th { color: var(--muted); background: #101411; font: 700 9px ui-monospace, monospace; letter-spacing: .07em; text-transform: uppercase; text-align: left; }th, td { padding: 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }tbody tr:last-child td { border: 0; }code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d0ca; }.source-tag.angr { color: var(--cyan); }.source-tag.mutation { color: var(--warning); }.source-tag.static_hint { color: #ba9cff; }.source-tag.seed { color: var(--acid); }.table-note { color: var(--muted); font-size: 11px; margin: 12px 0 0; }
-.history-list { display: grid; gap: 10px; }.history-item { display: grid; grid-template-columns: 40px 1fr; gap: 15px; padding: 17px; border: 1px solid var(--line); border-radius: 8px; }.history-index { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: #252d28; color: var(--acid); font: 700 11px ui-monospace, monospace; }.history-title { display: flex; align-items: center; justify-content: space-between; }.history-item p { color: var(--muted); font-size: 12px; }.evidence-line { display: grid; gap: 5px; padding: 9px 11px; border-left: 2px solid var(--cyan); background: rgba(114,215,208,.04); }.evidence-line b { color: var(--ink); }.regressions { margin-bottom: 0; }
+.metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }.metric { min-height: 126px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: rgba(8,11,9,.35); }.metric p, .metric small { color: var(--muted); font-size: 11px; }.metric strong { display: block; margin: 12px 0 4px; font-size: 30px; letter-spacing: -.05em; overflow-wrap: anywhere; }.gauge { display: block; width: 100%; height: 6px; margin-top: 13px; accent-color: var(--acid); }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }table { width: 100%; border-collapse: collapse; font-size: 12px; }th { color: var(--muted); background: #101411; font: 700 9px ui-monospace, monospace; letter-spacing: .07em; text-transform: uppercase; text-align: left; }th, td { padding: 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }tbody tr:last-child td { border: 0; }.exploration-table tbody tr:last-child th { border: 0; }.exploration-table tbody th { color: inherit; background: none; font: inherit; letter-spacing: normal; text-transform: none; }.exploration-table caption { padding: 10px 12px; color: var(--muted); font-size: 11px; text-align: left; }code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d0ca; }.source-tag.angr { color: var(--cyan); }.source-tag.mutation { color: var(--warning); }.source-tag.static_hint { color: #ba9cff; }.source-tag.seed { color: var(--acid); }.table-note { color: var(--muted); font-size: 11px; margin: 12px 0 0; }
+.history-list { display: grid; gap: 10px; }.history-item { display: grid; grid-template-columns: minmax(40px, max-content) 1fr; gap: 15px; padding: 17px; border: 1px solid var(--line); border-radius: 8px; }.history-index { display: grid; place-items: center; min-width: 32px; width: max-content; height: 32px; padding: 0 6px; box-sizing: border-box; border-radius: 16px; background: #252d28; color: var(--acid); font: 700 11px ui-monospace, monospace; }.history-title { display: flex; align-items: center; justify-content: space-between; }.history-item p { color: var(--muted); font-size: 12px; }.evidence-line { display: grid; gap: 5px; padding: 9px 11px; border-left: 2px solid var(--cyan); background: rgba(114,215,208,.04); }.evidence-line b { color: var(--ink); }.regressions { margin-bottom: 0; }
 .artifact-list { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }.artifact-row { display: flex; align-items: center; gap: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; transition: .15s; }.artifact-row:hover { border-color: #526157; background: #202722; }.artifact-row > span:last-child { margin-left: auto; color: var(--acid); }.artifact-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 5px; background: #252d28; color: var(--cyan); font: 700 9px ui-monospace, monospace; }.artifact-row strong, .artifact-row small { display: block; }.artifact-row small { margin-top: 4px; color: var(--muted); font-size: 10px; }
 .source-tree-panel { margin-top: 18px; }.tree-note { color: var(--muted); font-size: 13px; }.source-tree { list-style: none; padding: 0; margin: 18px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }.source-tree li + li { border-top: 1px solid var(--line); }.source-tree a { display: grid; grid-template-columns: 42px 1fr 20px; gap: 11px; align-items: center; min-height: 43px; padding: 7px 12px; text-decoration: none; background: rgba(8,11,9,.25); }.source-depth-1 a { padding-left: 30px; }.source-depth-2 a { padding-left: 48px; }.source-depth-3 a { padding-left: 66px; }.source-depth-4 a { padding-left: 84px; }.source-depth-5 a { padding-left: 102px; }.source-depth-6 a { padding-left: 120px; }.source-depth-7 a { padding-left: 138px; }.source-depth-8 a { padding-left: 156px; }.source-depth-9 a { padding-left: 174px; }.source-depth-10 a { padding-left: 192px; }.source-depth-11 a { padding-left: 210px; }.source-depth-12 a { padding-left: 228px; }.source-tree a:hover { background: #202722; }.source-tree span { color: var(--cyan); font: 700 9px ui-monospace, monospace; }.source-tree i { color: var(--acid); font-style: normal; }.archive-download { width: max-content; }.source-shell { padding-block: 44px 80px; }.source-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 42px 0 24px; }.source-heading h1 { margin: 8px 0 0; font: 700 clamp(1.8rem,4vw,3.5rem)/1.05 ui-monospace, monospace; letter-spacing: -.05em; }.source-view { overflow: auto; min-height: 420px; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: #080b09; line-height: 1.55; tab-size: 4; }.source-view code { font-size: 12px; color: #dbe2dc; }
 .reconstruction-progress { margin-top: 18px; padding: 20px 28px; display: flex; align-items: center; justify-content: space-between; }.reconstruction-progress h2 { margin: 5px 0 0; }.source-provenance { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 16px; }.source-provenance span { padding: 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font: 11px ui-monospace,monospace; }.source-provenance b { display: block; margin-bottom: 6px; color: var(--cyan); text-transform: uppercase; font-size: 9px; }

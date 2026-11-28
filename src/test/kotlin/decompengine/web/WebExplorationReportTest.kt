@@ -68,6 +68,49 @@ class WebExplorationReportTest {
         }
     }
 
+    @Test fun `version two is recognized by schema and version before its state value`() {
+        val v2 = """{"schema":"decomp-exploration","schemaVersion":2"""
+        for ((text, expected, version) in listOf(
+            Triple("$v2}", "partial", 2),
+            Triple("$v2,\"candidateCount\":1}", "partial", 2),
+            Triple("$v2,\"state\":7}", "invalid", 2),
+            Triple("$v2,\"state\":\"partial\"}", "invalid", 2),
+            Triple("$v2,\"state\":\"complete\"}", "invalid", 2),
+            Triple("$v2,\"candidateCount\":\"1\"}", "invalid", 2),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":"2"}""", "invalid", null),
+            Triple("""{"schema":2,"schemaVersion":2}""", "invalid", null),
+            Triple("""{"confidence":[]}""", "invalid", null),
+            Triple("""{"candidateCount":"1"}""", "invalid", null),
+            Triple("""{"confidence":{"score":0.5}}""", "partial", null),
+        )) {
+            val result = report(text)
+            assertEquals(expected, result.getValue("state").jsonPrimitive.content, text)
+            assertEquals(version, result.getValue("producerSchemaVersion").jsonPrimitive.intOrNull, text)
+            assertEquals(JsonNull, result.getValue("summary"), text)
+        }
+        assertEquals("Required producer fields are absent; no summary is inferred.",
+            report("$v2}").getValue("limitations").jsonArray.single().jsonPrimitive.content)
+    }
+
+    @Test fun `legacy presentation rows come from the redacted projection while the classification uses the original bytes`() {
+        val marker = "configured-exploration-credential-7f3a91"
+        val policy = WebRedactionPolicy.create(emptyMap(), listOf(marker), emptyList())
+        val text = valid.replace("\"candidates\":[{}]", "\"candidates\":[{\"id\":\"one\",\"args\":[\"$marker\"]}]")
+        val presented = captureWebExplorationPresentation(policy) { text.toByteArray() }
+        assertEquals("available", presented.state)
+        assertTrue(presented.downloadAvailable)
+        assertTrue(marker !in presented.root.toString())
+        assertTrue(marker in classifyWebExploration(text.toByteArray()).root.toString())
+        for (bytes in listOf("{".toByteArray(), byteArrayOf(0xff.toByte()))) {
+            val withheld = captureWebExplorationPresentation(policy) { bytes }
+            assertEquals("invalid", withheld.state)
+            assertTrue(withheld.bytesCaptured && !withheld.downloadAvailable && withheld.root == null)
+        }
+        val unavailable = captureWebExplorationPresentation(policy) { throw IllegalStateException("read unavailable") }
+        assertEquals("unknown", unavailable.state)
+        assertTrue(!unavailable.bytesCaptured && !unavailable.downloadAvailable)
+    }
+
     @Test fun `every captured nonavailable state retains exact raw byte provenance without numeric fallback`() {
         for ((saved, expectedState) in listOf("{}" to "partial", "{" to "invalid",
             "{\"schemaVersion\":999}" to "unsupported")) {

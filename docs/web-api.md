@@ -1077,7 +1077,10 @@ public projection: `id`, `filename`, `status`, `created_at`, `updated_at`, `size
 are removed for privacy: stored diagnostic text can contain host paths, environment values or
 raw exceptions, including records predating redaction. No placeholder diagnostic is invented.
 ELF metadata keeps its existing field names and numeric types, including signed/numeric
-`entry_point`; its five categorical strings must exactly match `ElfMetadataReader` output,
+`entry_point`. Known limitation: `entry_point` is a signed 64-bit JSON integer, so an
+address at or above 2^63 (for example `0xffffffff81000000`) is encoded as its negative
+two's-complement value; the legacy job HTML instead shows `0x` plus lowercase hexadecimal.
+Its five categorical strings must exactly match `ElfMetadataReader` output,
 otherwise the historical job is unavailable with a fixed diagnostic. This legacy shape is not
 a v1 DTO. Execution POSTs still redirect.
 The persistence serializer and stored `job.json` format are unchanged.

@@ -50,6 +50,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.net.URI
 import java.nio.ByteBuffer
@@ -148,7 +149,8 @@ class UploadServerTest {
         val response = request(server, "GET", "/jobs/$id")
         assertEquals(200, response.status)
         assertTrue(response.body.decodeToString().contains("reports/stored.txt"))
-        assertTrue(response.body.decodeToString().contains("6 B (6 bytes)"))
+        assertTrue(response.body.decodeToString().contains("6 bytes"))
+        assertTrue(!response.body.decodeToString().contains("6 B (6 bytes)"))
         assertTrue(!response.body.decodeToString().contains("excluded-source.txt"))
         assertTrue(!response.body.decodeToString().contains("excluded-run.txt"))
         var nested = reports
@@ -226,13 +228,19 @@ class UploadServerTest {
         assertTrue(actual.body.decodeToString().contains("network isolated no"))
         assertTrue(actual.body.decodeToString().contains("Uncalibrated"))
         assertContentEquals(bytes, report.readBytes())
-        for ((invalid, expectedState) in listOf(
-            "PRIVATE_REPORT {".toByteArray() to "invalid",
-            "x".repeat(1_048_577).toByteArray() to "unknown",
-            """{"schema":"decomp-exploration","schemaVersion":3,"state":"complete"}""".toByteArray() to "unsupported",
-            "{\"confidence\":[]}".toByteArray() to "partial",
-            "{\"confidence\":{},\"confidence\":{}}".toByteArray() to "invalid",
-            byteArrayOf(0xff.toByte()) to "invalid",
+        // The download link is offered exactly when the redacted projection behind it can be served.
+        for ((invalid, expectedState, downloadable) in listOf(
+            Triple("PRIVATE_REPORT {".toByteArray(), "invalid", false),
+            Triple("x".repeat(1_048_577).toByteArray(), "unknown", false),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":3,"state":"complete"}""".toByteArray(), "unsupported", true),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":2,"candidateCount":1}""".toByteArray(), "partial", true),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":2,"state":7,"candidateCount":1}""".toByteArray(), "invalid", true),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":2,"state":"complete"}""".toByteArray(), "invalid", true),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":"2"}""".toByteArray(), "invalid", true),
+            Triple("{}".toByteArray(), "partial", true),
+            Triple("{\"confidence\":[]}".toByteArray(), "invalid", true),
+            Triple("{\"confidence\":{},\"confidence\":{}}".toByteArray(), "invalid", false),
+            Triple(byteArrayOf(0xff.toByte()), "invalid", false),
         )) {
             Files.write(report, invalid)
             val response = request(server, "GET", "/jobs/$id")
@@ -241,6 +249,17 @@ class UploadServerTest {
             assertTrue(html.contains("Evidence state: $expectedState."), html)
             val section = html.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
             assertTrue(!section.contains("metric-grid") && !section.contains("<tbody>"), html)
+            val href = "/jobs/$id/artifacts/reports/exploration.json"
+            assertEquals(downloadable, html.contains("href=\"$href\">Download JSON"), html)
+            if (expectedState != "unknown") {
+                assertEquals(!downloadable, section.contains("The JSON download is withheld"), section)
+                assertEquals(if (downloadable) 200 else 409, request(server, "GET", href).status)
+            }
+            if (expectedState == "partial") {
+                assertTrue(section.contains("The report is incomplete; summary metrics are withheld."), section)
+                assertTrue(section.contains("Required producer fields are absent; no summary is inferred."), section)
+                assertTrue(!section.contains("producer reported"), section)
+            }
             assertTrue(!html.contains("PRIVATE_REPORT"))
             assertContentEquals(invalid, report.readBytes())
         }
@@ -248,13 +267,18 @@ class UploadServerTest {
         Files.write(report, failed)
         val failedHtml = request(server, "GET", "/jobs/$id").body.decodeToString()
         assertTrue(failedHtml.contains("Evidence state: partial."))
+        assertTrue(failedHtml.contains("The report is incomplete; summary metrics are withheld."))
         assertTrue(failedHtml.contains("timeout"))
+        assertTrue(!failedHtml.contains("Required producer fields are absent"))
         val failedSection = failedHtml.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
         assertTrue(!failedSection.contains("metric-grid") && !failedSection.contains("<tbody>"))
         Files.delete(report)
         val absent = request(server, "GET", "/jobs/$id").body.decodeToString()
         assertTrue(absent.contains("Evidence state: unknown."))
         assertTrue(absent.contains("Report bytes are unavailable"))
+        val absentSection = absent.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
+        assertEquals(1, Regex("changed during the bounded read").findAll(absentSection).count(), absentSection)
+        assertTrue(!absentSection.contains("Download JSON") && !absentSection.contains("The JSON download is withheld"))
         assertTrue(!report.exists())
     }
 
@@ -295,6 +319,52 @@ class UploadServerTest {
     }
 
     @Test
+    fun `legacy exploration rows and download both withhold a configured sensitive argument`() {
+        val dataDir = createTempDirectory(Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories(), "redaction-")
+        val marker = "configured-exploration-credential-7f3a91" // Opaque: letters and digits, no whitespace.
+        val server = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> }, JobReconstructor { _, _ -> },
+            Executor { it.run() }, sensitiveValues = listOf(marker))
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            val report = dataDir.resolve(id).resolve("reports").createDirectories().resolve("exploration.json")
+            report.writeText("""{"candidateCount":1,"coverageIncreased":false,"baselineOutputSignatures":0,"expandedOutputSignatures":1,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.5,"inputCount":1,"sourceCount":1,"outputSignatureCount":1,"newOutputSignatureCount":0,"sandboxed":true,"networkIsolated":true},"candidates":[{"id":"case_one","source":"SEED","args":["--token","$marker"],"stdinHex":""}],"observations":[{"candidateId":"case_one","exitCode":0,"stdoutHex":""}]}""")
+            val before = report.readBytes()
+            val html = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue(html.contains("Evidence state: available."), html)
+            assertTrue(html.contains("case_one") && html.contains("--token [redacted]"), html)
+            assertTrue(!html.contains(marker), html)
+            assertTrue(html.contains("<span aria-label=\"empty output\">∅</span>"), html)
+            assertTrue(html.contains("role=\"region\" aria-label=\"Exploration candidate observations\" tabindex=\"0\""), html)
+            assertTrue(html.contains("<th scope=\"row\"><code>case_one</code></th>"), html)
+            val href = "/jobs/$id/artifacts/reports/exploration.json"
+            assertTrue(html.contains("href=\"$href\">Download JSON"), html)
+            val download = request(server, "GET", href)
+            assertEquals(200, download.status)
+            assertTrue(!download.body.decodeToString().contains(marker))
+            assertTrue(download.body.decodeToString().contains("[redacted]"))
+            assertContentEquals(before, report.readBytes())
+        } finally {
+            server.stop(0)
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy job page shows a high-half entry address as hexadecimal without changing the legacy JSON`() = withServer { server, _ ->
+        val elf = elfFixture()
+        java.nio.ByteBuffer.wrap(elf, 24, 8).order(java.nio.ByteOrder.LITTLE_ENDIAN).putLong(0xffffffff81000000uL.toLong())
+        val uploaded = upload(server, "kernel.elf", elf, acceptJson = true)
+        assertEquals(201, uploaded.status, uploaded.body.decodeToString())
+        val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").jsonPrimitive.content
+        val html = request(server, "GET", "/jobs/$id").body.decodeToString()
+        assertTrue(html.contains("<dt>Entry Point</dt><dd>0xffffffff81000000</dd>"), html)
+        assertTrue(!html.contains("-2130706432"), html)
+        val api = Json.parseToJsonElement(request(server, "GET", "/api/jobs/$id").body.decodeToString()).jsonObject
+        assertEquals("-2130706432", api.getValue("metadata").jsonObject.getValue("entry_point").toString())
+    }
+
+    @Test
     fun `available exploration classification tolerates malformed rows and keeps the candidate display bounded`() {
         val root = createTempDirectory("web-exploration-render-")
         try {
@@ -332,7 +402,9 @@ class UploadServerTest {
     fun `legacy byte sizes and malformed reconstruction counts stay exact and explicit`() {
         assertEquals("1.5 MiB (1572864 bytes)", formatBytes(1_572_864L))
         assertEquals("1.5 KiB (1536 bytes)", formatBytes(1536))
-        assertEquals("1 B (1 bytes)", formatBytes(1))
+        assertEquals("1 byte", formatBytes(1))
+        assertEquals("1023 bytes", formatBytes(1023))
+        assertEquals("0 bytes", formatBytes(0))
         val root = createTempDirectory("web-progress-counts-")
         try {
             val job = decompengine.jobs.JobStore(root).createFromUpload("fixture.elf", elfFixture())
