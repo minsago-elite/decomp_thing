@@ -768,7 +768,8 @@ private fun validateSandbox(sandbox: JsonObject, label: String) {
     requireExactString(engine, "volumePlugin", "local", "$label engine profile")
 }
 
-private fun validateExecutionLimits(value: JsonObject, label: String) {
+/** Shared with the qualification tier policy so a tighter smoke tier stays executable and consistent. */
+internal fun validateExecutionLimits(value: JsonObject, label: String) {
     value.requireExactFields(EXECUTION_LIMIT_FIELDS, label)
     value.requireLong("timeoutMilliseconds", 1, 30_000, label)
     value.requireLong("stdoutBytes", 0, 16L * 1024 * 1024, label)
