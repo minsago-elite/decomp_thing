@@ -35,7 +35,8 @@ The loop records:
 Declared secrets are admitted fail closed. Configuration is refused, before any journal file,
 provider call or tool effect, when a secret has fewer than 8 or more than 4096 characters, is a JSON
 literal (`true`, `false`, `null`), contains only digits, contains or is contained in the
-`[REDACTED]` marker, consists only of the `*` evidence mask, or is not valid Unicode text. These
+`[REDACTED]` marker, consists only of the `*` evidence mask, contains or is contained in a redaction
+alias spelling (below), or is not valid Unicode text. These
 shapes would let redaction rewrite evidence vocabulary (versions, booleans, counts) or let the
 marker or mask itself spell a declared secret.
 
@@ -59,9 +60,20 @@ object keys of the harness schema, tool parameter schemas, enum names, hashes, c
 record kind and the envelope (`version`, `sequence`, `previous`, `sha256`), keeps its exact value.
 Before any byte is written, the complete signed record is checked against the active policy, and a
 declared spelling anywhere fails the append closed. This also catches redaction output that would
-itself spell a declared secret. Reopening a checkpoint, and exporting an archive, first check every
-committed record, envelope included, and refuse a prefix written under older or weaker rules without
-rewriting it. Overlapping matches are covered; colliding redacted keys fail closed. A full
+itself spell a declared secret. Because serialization can create a spelling the record tree never
+contained (a real tab written as `\t`, or characters joined across a record separator), the exact
+UTF-8 bytes of each frame, joined to the end of the previous frame, are scanned as well. Reopening a
+checkpoint scans the exact committed bytes it rehashes under its lock, and archive export scans both
+the raw committed journal bytes and the final archive bytes. Each also checks every committed record,
+envelope included, and refuses a prefix written under older or weaker rules without rewriting it.
+
+Tool-call IDs and tool names are correlation keys, so redaction never collapses two of them into one
+`[REDACTED]`. An ID or name that redaction would change is persisted as a stable alias,
+`[REDACTED-call-N]` or `[REDACTED-tool-N]`, numbered by first appearance within the invocation
+(`N` has at most six digits, above any journal's 100,000-record bound) and
+reused for every definition, proposal, policy decision, request, result and checkpoint reference to
+it. An original value can never take an alias form, and each alias must itself pass the policy.
+Aliases do not survive suspension: any redacted checkpoint is refused for continuation. Overlapping matches are covered; colliding redacted keys fail closed. A full
 assembled model response is redacted as one payload, so a secret split across streamed deltas cannot
 leak through separate journal records. An interrupted response leaves a pending request without raw
 partial text. Exceptions, credentials, runtime endpoints and environment maps are never recorded.

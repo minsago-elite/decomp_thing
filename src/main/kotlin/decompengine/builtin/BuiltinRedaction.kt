@@ -13,6 +13,25 @@ internal const val MAXIMUM_BUILTIN_SECRET_LENGTH = 4096
 private const val MAXIMUM_JSON_ESCAPE_DEPTH = 3
 
 /**
+ * Stable journal alias for a redacted call ID or tool name, numbered by first appearance. Ordinals are
+ * bounded to six digits; a journal holds at most 100,000 records, so no invocation can exceed them.
+ */
+internal val BUILTIN_REDACTION_ALIAS = Regex("""\[REDACTED-(call|tool)-[1-9][0-9]{0,5}]""")
+private const val MAXIMUM_ALIAS_ORDINAL = 999_999
+internal fun builtinRedactionAlias(kind: String, ordinal: Int): String {
+    check((kind == "call" || kind == "tool") && ordinal in 1..MAXIMUM_ALIAS_ORDINAL)
+    return "[REDACTED-$kind-$ordinal]"
+}
+
+/** True when the secret is a fragment of some alias spelling, so an alias could contain it. */
+private fun aliasFragment(secret: String): Boolean = listOf("call", "tool").any { kind ->
+    val prefix = "[REDACTED-$kind-"
+    val tail = Regex("[0-9]{1,6}]?")
+    prefix.contains(secret) || tail.matches(secret) ||
+        (1..prefix.length).any { length -> secret.startsWith(prefix.takeLast(length)) && tail.matches(secret.drop(length)) }
+}
+
+/**
  * Declared secrets must be distinguishable from evidence vocabulary and from redaction output.
  * Refused shapes would otherwise rewrite schema-owned values (versions, booleans, counts), or let the
  * marker or evidence mask itself spell a declared secret. Refusal messages never contain the value.
@@ -30,6 +49,9 @@ internal fun admitBuiltinSecrets(secrets: Collection<String>): List<String> {
             "Declared built-in secrets must not contain or be contained in the redaction marker"
         }
         require(!secret.all { it == BUILTIN_EVIDENCE_MASK }) { "Declared built-in secrets must not consist only of the evidence mask" }
+        require(!aliasFragment(secret) && !BUILTIN_REDACTION_ALIAS.containsMatchIn(secret)) {
+            "Declared built-in secrets must not contain or be contained in a redaction alias"
+        }
         require(secret.indices.all { index ->
             val character = secret[index]
             when {
@@ -70,6 +92,8 @@ private fun builtinWriterEscaped(value: String) =
 internal class BuiltinRedactor(secrets: Collection<String>) {
     private val patterns = builtinRedactionPatterns(admitBuiltinSecrets(secrets))
     private val longest = patterns.firstOrNull()?.length ?: 0
+    /** Characters of already-scanned output that a later write could complete into a match. */
+    val carry get() = maxOf(0, longest - 1)
 
     /**
      * Coverage of [start, end) by any declared spelling. Only occurrences that can intersect the

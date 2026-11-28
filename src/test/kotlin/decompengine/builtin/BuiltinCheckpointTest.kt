@@ -212,6 +212,23 @@ class BuiltinCheckpointTest {
         BuiltinJournal.inspect(fresh.journal, AgentExecutionRequestBinding.capture(request()), committed)
     }
 
+    @Test fun `continuation scans the exact committed bytes of the prefix`() {
+        val fixture = fixture("bytes")
+        val escaped = "ED]\\tTAIL"
+        // The record tree holds a real tab; only its serialized bytes spell the secret.
+        val reference = assertNotNull(assertIs<BuiltinLoopEvidence>(harness(fixture,
+            ModelProvider { _, _ -> answer(listOf(edit(text = "candidate [REDACTED]\tTAIL"))) }).executeReceipt(request()) {}.providerEvidence).checkpoint)
+        val before = Files.readAllBytes(fixture.journal.path)
+        assertTrue(before.decodeToString().contains(escaped))
+        var calls = 0
+        val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }, secrets = listOf(escaped))
+            .resumeReceipt(request(), reference) {}
+        assertIs<AgentExecutionOutcome.Failed>(rejected.outcome); assertEquals(0, calls)
+        assertContentEquals(before, Files.readAllBytes(fixture.journal.path))
+        val resumed = harness(fixture, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), reference) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
+    }
+
     @Test fun `continuation refuses a committed prefix written under weaker redaction rules`() {
         val fixture = fixture("weaker")
         val secret = "q\"uoted-token"

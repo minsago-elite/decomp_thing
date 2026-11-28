@@ -85,7 +85,7 @@ internal class BuiltinCapturedContextTools(
 ) {
     private val paths = paths.sorted()
     private val evidence = request.contextInputs.associateBy { it.id }
-    /** Whole-body digests are computed once per input, not once per page of a large body. */
+    /** Whole-body digests come from context assembly when available, else are computed once per input. */
     private val bodyHashes = mutableMapOf<String, String>()
     private val records = mutableListOf<BuiltinContextToolAudit>()
     val definitions = listOf(
@@ -235,7 +235,7 @@ internal class BuiltinCapturedContextTools(
         // UTF-16 unit, so offsets and page bounds are unchanged.
         val text = redactor.maskSlice(item.content, offset, end) { control?.checkpoint() } ?: return null
         return boundedProviderJson(maximumResultBytes) { out ->
-            writeEvidencePage(out, item, bodyHashes.getOrPut(item.id) { hash(item.content) }, offset, text,
+            writeEvidencePage(out, item, bodyHashes.getOrPut(item.id) { control?.evidenceDigests?.get(item.id) ?: hash(item.content) }, offset, text,
                 end.takeIf { it < item.content.length })
         }
     }

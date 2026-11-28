@@ -41,6 +41,8 @@ class BuiltinExecutionControl internal constructor(private val request: AgentExe
         if (System.nanoTime() >= deadline) throw BuiltinAbort(BuiltinStop.EXHAUSTED)
     }
     fun remaining(): Duration { checkpoint(); return Duration.ofNanos(maxOf(1, deadline - System.nanoTime())) }
+    /** Whole-body digests computed once by context assembly, reused by retrieval tools for every page. */
+    internal var evidenceDigests: Map<String, String> = emptyMap()
     internal fun constrainRemaining(nanos: Long) {
         require(nanos > 0 && nanos <= Duration.ofDays(1).toNanos())
         deadline = minOf(deadline, System.nanoTime() + nanos)
@@ -274,6 +276,7 @@ class BuiltinAgentHarness(
                 control) { candidate -> contextBytes(definitions, candidate) }
                 messages.clear(); messages += context.messages
                 contextEntries = context.entries
+                control.evidenceDigests = context.entries.associate { it.id to it.sha256 }
             } else {
                 check(journalContext(definitions) == restoredContext)
                 check(tools.checkpointAuthoritySha256(control) == restoredAuthoritySha256)
@@ -441,7 +444,7 @@ class BuiltinAgentHarness(
                     if (result.content.length > limits.maxToolResultBytes || result.content.toByteArray().size > limits.maxToolResultBytes)
                         throw BuiltinAbort(BuiltinStop.EXHAUSTED)
                     journal?.append(BuiltinJournalKind.TOOL_RESULT, buildJsonObject {
-                        put("callId", content(call.id)); put("content", content(result.content)); put("failed", result.failed)
+                        put("callId", identifier("call", call.id)); put("content", content(result.content)); put("failed", result.failed)
                     })
                     control.checkpoint()
                     chargeOutput(result.content)
@@ -579,9 +582,26 @@ class BuiltinAgentHarness(
         fun content(value: JsonElement, redact: Boolean = true): JsonElement = if (redact) journal?.content(value) ?: value else value
         fun content(value: String?, redact: Boolean = true): JsonElement = content(JsonPrimitive(value), redact)
 
-        /** Tool calls are provider-originated: id, name and argument keys/values are content. */
+        /**
+         * Call IDs and tool names are correlation keys. One changed by redaction is persisted as a stable
+         * alias numbered by first appearance in this invocation, so distinct values never collapse.
+         */
+        val aliases = mapOf("call" to mutableMapOf<String, String>(), "tool" to mutableMapOf())
+        fun identifier(kind: String, value: String?, redact: Boolean = true): JsonElement {
+            val original = JsonPrimitive(value)
+            val active = journal
+            if (value == null || !redact || active == null) return original
+            check(!BUILTIN_REDACTION_ALIAS.containsMatchIn(value)) // An original can never impersonate an alias.
+            if (active.content(original) == original) return original
+            val names = aliases.getValue(kind)
+            val alias = names.getOrPut(value) { builtinRedactionAlias(kind, names.size + 1) }
+            check(active.content(JsonPrimitive(alias)) == JsonPrimitive(alias))
+            return JsonPrimitive(alias)
+        }
+
+        /** Tool calls are provider-originated: argument keys/values are content; id and name are aliased identifiers. */
         fun journalCall(call: ModelToolCall, redact: Boolean = true) = buildJsonObject {
-            put("id", content(call.id, redact)); put("name", content(call.name, redact))
+            put("id", identifier("call", call.id, redact)); put("name", identifier("tool", call.name, redact))
             put("arguments", content(canonical(call.arguments), redact))
         }
 
@@ -589,16 +609,16 @@ class BuiltinAgentHarness(
         fun journalContext(definitions: List<ModelToolDefinition>, redact: Boolean = true) = buildJsonObject {
             put("messages", JsonArray(messages.map { message -> buildJsonObject {
                 put("role", message.role.name); put("content", content(message.content, redact))
-                put("toolCallId", content(message.toolCallId, redact))
+                put("toolCallId", identifier("call", message.toolCallId, redact))
                 put("toolCalls", JsonArray(message.toolCalls.map { journalCall(it, redact) }))
             } }))
             put("tools", JsonArray(definitions.sortedBy { it.name }.map { definition -> buildJsonObject {
-                put("name", content(definition.name, redact)); put("description", content(definition.description, redact))
+                put("name", identifier("tool", definition.name, redact)); put("description", content(definition.description, redact))
                 put("parameters", canonical(definition.parameters))
             } }))
         }
 
-        fun usedCallIdsJson(redact: Boolean = true) = JsonArray(usedCallIds.sorted().map { content(it, redact) })
+        fun usedCallIdsJson(redact: Boolean = true) = JsonArray(usedCallIds.sorted().map { identifier("call", it, redact) })
 
         fun contextEntriesJson(redact: Boolean = true) = JsonArray(contextEntries.map { entry -> buildJsonObject {
             put("id", content(entry.id, redact)); put("mediaType", content(entry.mediaType, redact)); put("sha256", entry.sha256)

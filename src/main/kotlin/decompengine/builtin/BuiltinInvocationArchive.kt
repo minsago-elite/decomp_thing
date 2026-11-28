@@ -104,6 +104,7 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
             check(journal.complete == evidence.complete && journal.indeterminate == evidence.indeterminate)
             check(journal.complete) // Suspended checkpoints remain private recovery evidence, not terminal invocation artifacts.
             check(BuiltinJournal.compliantRecords(journal.records, redactor))
+            check(BuiltinJournal.compliantCommittedBytes(configuration, journal, evidence.commitment, redactor))
             val returned = (receipt.outcome as? AgentExecutionOutcome.Returned)?.result
             val candidates = when (provider) {
                 is BuiltinCapturedExecutionEvidence -> provider.candidateChanges
@@ -138,6 +139,8 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
             // Archive envelope and receipt fields are schema-owned too: never rewritten, refused if they match.
             check(redactor.compliant(json))
             val bytes = boundedProviderJson(limits.maximumBytes) { it.writeProviderValue(json) }
+            // The tree check cannot see serialization escapes or record separators; scan the exact bytes.
+            check(BuiltinJournal.compliantBytes(bytes, redactor))
             BuiltinInvocationArchiveDocument(bytes, verifyBuiltinInvocationArchive(bytes, identity, evidence.commitment, limits))
             }
         }

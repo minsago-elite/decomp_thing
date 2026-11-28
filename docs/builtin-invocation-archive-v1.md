@@ -11,7 +11,9 @@ metadata are commitments rather than plaintext.
 Capture requires the active declared secrets. It refuses export when any committed journal record
 does not already satisfy that policy (for example a prefix written under older, weaker rules), and
 applies START's fail-closed identity check to archive-only identifiers (workflow, task ID and prompt
-commitment) before serialization. The runtime journal is never rewritten. The verifier accepts the
+commitment) before serialization. It also scans the exact raw committed journal bytes and the exact
+serialized archive bytes, failing closed on any declared spelling that serialization or record
+separators would create. The runtime journal is never rewritten. The verifier accepts the
 exact `[REDACTED]` string in place of a redacted integer tool argument, and skips only the length
 bound of a string argument that contains the marker; type, enum and correlation checks still apply.
 

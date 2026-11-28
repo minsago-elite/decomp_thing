@@ -61,7 +61,8 @@ class BuiltinJournalTest {
     }
 
     @Test fun `inadmissible secrets are refused and schema-owned literals never change type`() {
-        listOf("true", "false", "null", "12345678", "short-1", "REDACTED", "", "prefix[REDACTED]", "********")
+        listOf("true", "false", "null", "12345678", "short-1", "REDACTED", "", "prefix[REDACTED]", "********",
+            "ACTED-call-12", "x[REDACTED-tool-3]y")
             .forEachIndexed { index, secret ->
                 val refused = configuration("refused-$index")
                 // The sanitized configuration reason survives; it never contains the refused value.
@@ -336,5 +337,28 @@ class BuiltinJournalTest {
         }
         override fun changes(control: BuiltinExecutionControl) = emptyList<AgentFileChange>()
         override fun close() { closed = true }
+    }
+
+    @Test fun `serialized bytes that would spell a declared secret fail closed before persistence`() {
+        // A real tab serializes as backslash-t, so "[REDACTED]<tab>TAIL" is written as bytes containing this secret.
+        val escaped = "ED]\\tTAIL"
+        val configuration = configuration("serialized")
+        val journal = BuiltinJournal.open(configuration, request(), listOf("alpha-secret", escaped))
+        journal.use {
+            val prefix = it.evidence.commitment
+            val text = it.content(JsonPrimitive("alpha-secret\tTAIL"))
+            assertEquals(JsonPrimitive("[REDACTED]\tTAIL"), text)
+            assertFailsWith<BuiltinJournalException> { it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("text", text) }) }
+            assertEquals(prefix.bytes, Files.size(configuration.path))
+        }
+        assertFalse(Files.readString(configuration.path).contains(escaped))
+        // A spelling that exists only where one frame ends and the next begins.
+        val separator = "\"version\":1}\n{\"kind\""
+        val joined = configuration("joined")
+        BuiltinJournal.open(joined, request(), listOf(separator)).use {
+            assertFailsWith<BuiltinJournalException> { it.append(BuiltinJournalKind.STATE) }
+        }
+        assertEquals(1, Files.readAllLines(joined.path).size)
+        assertFalse(Files.readString(joined.path).contains(separator))
     }
 }

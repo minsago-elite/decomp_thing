@@ -74,6 +74,8 @@ internal class BuiltinJournal private constructor(
     private var pending: BuiltinJournalKind? = null
     private var terminal = false
     private var broken = false
+    /** Last committed characters that a following frame could complete into a declared spelling. */
+    private var tail = ""
     val evidence get() = BuiltinJournalEvidence(BuiltinJournalCommitment(count, bytes, head), terminal && !broken, pending != null)
 
     @Synchronized
@@ -92,12 +94,16 @@ internal class BuiltinJournal private constructor(
         val record = JsonObject(body + ("sha256" to JsonPrimitive(checksum)))
         check(redactor.compliant(record))
         val frame = encode(record, configuration.maximumRecordBytes) + byteArrayOf(10)
+        // Serialization escapes (for example a tab written as \t) can spell a secret the tree never
+        // contained, so the exact bytes, joined to the previous frame, are scanned before writing.
+        val text = tail + frame.decodeToString(throwOnInvalidSequence = true)
+        check(!redactor.matches(text))
         check(frame.size <= configuration.maximumBytes - bytes)
         val buffer = ByteBuffer.wrap(frame)
         while (buffer.hasRemaining()) check(channel.write(buffer) > 0)
         channel.force(true)
         verifyFile(configuration.path, fileKey)
-        count++; bytes += frame.size; head = checksum; pending = nextPending
+        count++; bytes += frame.size; head = checksum; pending = nextPending; tail = text.takeLast(redactor.carry)
         terminal = kind == BuiltinJournalKind.TERMINAL
     }
 
@@ -114,6 +120,24 @@ internal class BuiltinJournal private constructor(
     companion object {
         /** A committed prefix written under older or weaker rules is never exported or extended (envelopes included). */
         internal fun compliantRecords(records: List<JsonObject>, redactor: BuiltinRedactor) = records.all(redactor::compliant)
+
+        /** The exact committed bytes, frame separators included, must not spell a declared secret. */
+        internal fun compliantBytes(bytes: ByteArray, redactor: BuiltinRedactor) =
+            !redactor.matches(bytes.decodeToString(throwOnInvalidSequence = true))
+
+        /** Re-read the inspected journal without following links and scan its exact committed bytes. */
+        internal fun compliantCommittedBytes(configuration: BuiltinJournalConfiguration, inspection: BuiltinJournalInspection,
+            expected: BuiltinJournalCommitment, redactor: BuiltinRedactor): Boolean {
+            check(expected.bytes in 1..configuration.maximumBytes)
+            val raw = FileChannel.open(configuration.path, READ, NOFOLLOW_LINKS).use { channel ->
+                check(channel.size() == expected.bytes)
+                val buffer = ByteBuffer.allocate(expected.bytes.toInt())
+                while (buffer.hasRemaining()) check(channel.read(buffer) > 0)
+                buffer.array()
+            }
+            check(hash(raw) == inspection.contentSha256)
+            return compliantBytes(raw, redactor)
+        }
 
         fun open(configuration: BuiltinJournalConfiguration, request: AgentExecutionRequest, secrets: List<String>): BuiltinJournal {
             // Refuse inadmissible secrets before creating any file, keeping the sanitized configuration reason.
@@ -211,18 +235,23 @@ internal class BuiltinJournal private constructor(
                 check(channel.size() == expected.bytes)
                 val digest = MessageDigest.getInstance("SHA-256")
                 val buffer = ByteBuffer.allocate(8192)
+                val committed = java.io.ByteArrayOutputStream(expected.bytes.toInt())
                 var read = 0L
                 while (true) {
                     buffer.clear()
                     val size = channel.read(buffer)
                     if (size < 0) break
                     check(size > 0 && size <= expected.bytes - read)
-                    read += size; digest.update(buffer.array(), 0, size)
+                    read += size; digest.update(buffer.array(), 0, size); committed.write(buffer.array(), 0, size)
                 }
                 check(read == expected.bytes && digest.digest().joinToString("") { "%02x".format(it) } == inspection.contentSha256)
+                // The tree check above cannot see serialization escapes; scan the exact bytes under this lock.
+                val raw = committed.toByteArray()
+                check(compliantBytes(raw, redactor))
                 verifyFile(configuration.path, key)
                 val journal = BuiltinJournal(configuration, channel, lock, key, redactor)
                 journal.count = expected.records; journal.bytes = expected.bytes; journal.head = expected.headSha256
+                journal.tail = raw.decodeToString().takeLast(redactor.carry)
                 return journal to inspection.records.last().getValue("payload").jsonObject
             } catch (_: Exception) {
                 try { channel?.close() } catch (_: Exception) { }

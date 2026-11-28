@@ -305,20 +305,36 @@ class BuiltinCapturedContextToolsTest {
         val secret = "aaaaaaaa"
         val body = "a".repeat(32 * 1024 * 1024)
         val redactor = BuiltinRedactor(listOf(secret))
-        val request = request(listOf(AgentContextInput("trace", body)))
-        val tools = BuiltinCapturedContextTools(request, emptyList(), 16_384, 10, redactor)
-        fun read(offset: Int) = tools.execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace")), offset), control(request))
-        read(0) // Warm up before measuring.
         val threads = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
-        val allocatedBefore = threads.currentThreadAllocatedBytes
-        val started = System.nanoTime()
-        val page = Json.parseToJsonElement(read(16 * 1024 * 1024).content).jsonObject
-        val elapsed = Duration.ofNanos(System.nanoTime() - started)
-        val allocated = threads.currentThreadAllocatedBytes - allocatedBefore
-        assertEquals("*".repeat(4096), page.getValue("text").jsonPrimitive.content)
-        assertEquals(16 * 1024 * 1024 + 4096, page.getValue("nextOffset").jsonPrimitive.int)
-        assertTrue(allocated < 4L * 1024 * 1024, "page read allocated $allocated bytes")
-        assertTrue(elapsed < Duration.ofSeconds(2), "page read took $elapsed")
+        var allocatedBefore = 0L
+        var allocated = -1L
+        var started = 0L
+        var elapsed = Duration.ZERO
+        var page: JsonObject? = null
+        var step = 0
+        // The first and only read of this omitted body in the invocation is cold: no warm-up, no prior page.
+        val provider = ModelProvider { request, _ ->
+            if (step++ == 0) response(listOf(ModelToolCall("cold_1", "read_evidence", buildJsonObject {
+                put("id", "trace"); put("offset", 16 * 1024 * 1024)
+            }))).also { allocatedBefore = threads.currentThreadAllocatedBytes; started = System.nanoTime() }
+            else {
+                allocated = threads.currentThreadAllocatedBytes - allocatedBefore
+                elapsed = Duration.ofNanos(System.nanoTime() - started)
+                page = Json.parseToJsonElement(request.messages.last().content).jsonObject
+                response()
+            }
+        }
+        val files = mapOf("src/a.c" to "a".toByteArray(), "src/b.c" to "b".toByteArray(), "write-only.c" to "private".toByteArray())
+        val execution = CapturedRepairStagingAuthority.executeReceipt(BuiltinCapturedRepairHarness(provider, secrets = listOf(secret)),
+            files, setOf("src/a.c", "write-only.c"), RepairResourceBudget(), { root -> request(listOf(AgentContextInput("trace", body)), root) }) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinCapturedExecutionEvidence>(execution.receipt.providerEvidence).loop.stop)
+        val read = assertNotNull(page)
+        assertEquals("*".repeat(4096), read.getValue("text").jsonPrimitive.content)
+        assertEquals(16 * 1024 * 1024 + 4096, read.getValue("nextOffset").jsonPrimitive.int)
+        assertEquals(decompengine.project.sha256(body.toByteArray()), read.getValue("sha256").jsonPrimitive.content)
+        // A cold whole-body digest alone would allocate the 32 MiB UTF-8 encoding.
+        assertTrue(allocated in 0 until 8L * 1024 * 1024, "cold page read allocated $allocated bytes")
+        assertTrue(elapsed < Duration.ofSeconds(2), "cold page read took $elapsed")
         // Work is bounded by the window: a handful of cancellation checks, not one per body match.
         var checks = 0
         redactor.maskSlice(body, 16 * 1024 * 1024, 16 * 1024 * 1024 + 4096) { checks++ }

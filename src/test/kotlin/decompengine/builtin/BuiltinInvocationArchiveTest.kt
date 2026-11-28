@@ -318,4 +318,75 @@ class BuiltinInvocationArchiveTest {
         assertFailsWith<BuiltinJournalException> { capture(invocation, invocation.secrets + "journalComplete") }
         assertTrue(capture(invocation).verified.candidateEvidenceComplete)
     }
+
+    @Test fun `export scans the raw committed journal bytes and the serialized archive bytes`() {
+        val escaped = "ED]\\tTAIL"
+        // Written without the secret declared: the record holds a real tab, its bytes spell the secret.
+        val weaker = invocation("bytes-weaker", declaredSecrets = emptyList(), echoedProviderState = "[REDACTED]\tTAIL")
+        val before = Files.readAllBytes(weaker.configuration.path)
+        assertTrue(before.decodeToString().contains(escaped))
+        assertFailsWith<BuiltinJournalException> { capture(weaker, listOf(escaped)) }
+        assertContentEquals(before, Files.readAllBytes(weaker.configuration.path))
+        val ordinary = invocation("bytes-ordinary")
+        val journal = Files.readString(ordinary.configuration.path)
+        val archive = capture(ordinary).bytes.decodeToString()
+        // Records are newline-separated in the journal and comma-separated in the archive.
+        val archiveOnly = "\"version\":1},{\"kind\""
+        val journalOnly = "\"version\":1}\n{\"kind\""
+        assertTrue(archive.contains(archiveOnly) && !journal.contains(archiveOnly))
+        assertTrue(journal.contains(journalOnly) && !archive.contains(journalOnly))
+        assertFailsWith<BuiltinJournalException> { capture(ordinary, ordinary.secrets + archiveOnly) }
+        assertFailsWith<BuiltinJournalException> { capture(ordinary, ordinary.secrets + journalOnly) }
+        assertTrue(capture(ordinary).verified.candidateEvidenceComplete)
+    }
+
+    @Test fun `redacted call ids and tool names keep distinct aliases and the archive verifies`() {
+        val secrets = listOf("private-one", "private-two", "toolsecret-a", "toolsecret-b")
+        for (scenario in listOf("equal", "different")) {
+            val journalDirectory = Files.createDirectory(directory.resolve("alias-$scenario"))
+            Files.setPosixFilePermissions(journalDirectory, PosixFilePermissions.fromString("rwx------"))
+            val configuration = BuiltinJournalConfiguration(journalDirectory.resolve("journal.jsonl"),
+                BuiltinJournalIdentity("fixture", "scripted-v1", "a".repeat(64), "b".repeat(64), "c".repeat(64)))
+            val request = AgentExecutionRequest("note evidence", listOf(AgentWorkspaceRoot("project", Path.of("/fixture/project"))),
+                emptyList(), AgentAccessPolicy(emptyList()))
+            fun tool(name: String) = ModelToolDefinition(name, "Record a note", buildJsonObject {
+                put("type", "object"); put("additionalProperties", false)
+                putJsonObject("properties") { putJsonObject("text") { put("type", "string") } }
+                putJsonArray("required") { add("text") }
+            })
+            val session = object : BuiltinToolSession {
+                override val definitions = listOf(tool("toolsecret-a"), tool("toolsecret-b"))
+                override fun authorize(call: ModelToolCall, control: BuiltinExecutionControl) = true
+                override fun execute(call: ModelToolCall, control: BuiltinExecutionControl) = BuiltinToolResult("noted")
+                override fun changes(control: BuiltinExecutionControl) = emptyList<AgentFileChange>()
+                override fun close() = Unit
+            }
+            val second = if (scenario == "equal") ModelToolCall("private-two", "toolsecret-a", buildJsonObject { put("text", "same") })
+                else ModelToolCall("private-two", "toolsecret-b", buildJsonObject { put("text", "other") })
+            var turns = 0
+            val provider = ModelProvider { _, _ ->
+                if (turns++ == 0) response(listOf(ModelToolCall("private-one", "toolsecret-a", buildJsonObject { put("text", "same") }), second))
+                else response()
+            }
+            val receipt = BuiltinAgentHarness(provider, { _, _ -> session }, secrets = secrets, journalConfiguration = configuration)
+                .executeReceipt(request) {}
+            assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(receipt.providerEvidence).stop, scenario)
+            val identity = BuiltinInvocationArchiveIdentity("repair", "alias-$scenario", "d".repeat(64),
+                AgentExecutionRequestBinding.capture(request), configuration.identity)
+            val document = BuiltinInvocationArchiveDocument.capture(identity, request, receipt, configuration, secrets)
+            assertTrue(document.verified.candidateEvidenceComplete, scenario)
+            val serialized = document.bytes.decodeToString()
+            secrets.forEach { assertFalse(serialized.contains(it), scenario) }
+            val records = Json.parseToJsonElement(serialized).jsonObject.getValue("records").jsonArray.map { it.jsonObject }
+            val requests = records.filter { it["kind"] == JsonPrimitive("TOOL_REQUEST") }.map { it.getValue("payload").jsonObject }
+            assertEquals(listOf("[REDACTED-call-1]", "[REDACTED-call-2]"), requests.map { it.getValue("id").jsonPrimitive.content }, scenario)
+            assertEquals(if (scenario == "equal") listOf("[REDACTED-tool-1]", "[REDACTED-tool-1]") else listOf("[REDACTED-tool-1]", "[REDACTED-tool-2]"),
+                requests.map { it.getValue("name").jsonPrimitive.content }, scenario)
+            assertEquals(listOf("[REDACTED-call-1]", "[REDACTED-call-2]"), records.filter { it["kind"] == JsonPrimitive("TOOL_RESULT") }
+                .map { it.getValue("payload").jsonObject.getValue("callId").jsonPrimitive.content }, scenario)
+            val commitment = assertIs<BuiltinLoopEvidence>(receipt.providerEvidence).journal!!.commitment
+            Files.delete(configuration.path)
+            assertTrue(verifyBuiltinInvocationArchive(document.bytes, identity, commitment).candidateEvidenceComplete, scenario)
+        }
+    }
 }
