@@ -282,6 +282,65 @@ class GccBundledCliCommandTest {
     }
 
     @Test
+    fun `an unreadable but searchable working directory is pinned and recorded by the actual CLI`() = fixture { root ->
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it } +
+            listOf("--resume-after-checkpoint", "512")
+        val workingDirectory = privateDirectory(root.resolve("searchable-only"))
+        val classpath = GccKotlinBootClasspathReference.open().use { reference ->
+            parseBootClassPathManifest(reference.invocationManifestBytes(), root, emptySet()).joinToString(File.pathSeparator) { it.path.toString() }
+        }
+        val log = root.resolve("searchable-only.log")
+        // Search (x) without read (r): O_PATH and realpath(3) succeed where a read-only directory open would not.
+        Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("-wx------"))
+        try {
+            // The installed launcher's -XX:-UsePerfData keeps HotSpot from relocating this unreadable directory.
+            val process = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx256m",
+                "-XX:-UsePerfData", "-cp", classpath, "decompengine.MainKt", "gcc-engine-plan") + args)
+                .directory(workingDirectory.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).start()
+            try {
+                assertTrue(process.waitFor(60, TimeUnit.SECONDS))
+            } finally {
+                if (process.isAlive) { process.destroyForcibly(); assertTrue(process.waitFor(5, TimeUnit.SECONDS)) }
+            }
+            val output = Files.readString(log).take(8192)
+            assertTrue(process.exitValue() != 0, output)
+            // Admission got past the working directory and the bound output; only the fixture binary is refused.
+            assertTrue(output.contains("binary differs from selected profile engine"), output)
+        } finally {
+            Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("rwx------"))
+        }
+        val invocation = OracleJson.parseCanonical(Files.readAllBytes(root.resolve("output/invocation.json"))).jsonObject
+        val recorded = invocation.getValue("workingDirectory").jsonObject
+        assertEquals(workingDirectory.toString(), recorded.getValue("path").jsonPrimitive.content)
+        val identity = LinuxFilesystemSyscalls.openRoot(workingDirectory).use { it.identity }
+        assertEquals(identity.key.inode, recorded.getValue("inode").jsonPrimitive.content.toLong())
+        assertEquals(identity.key.device, recorded.getValue("device").jsonPrimitive.content.toLong())
+        assertEquals(identity.mountId, recorded.getValue("mountId").jsonPrimitive.content.toLong())
+        // A working directory HotSpot relocated into its perf-data directory is refused rather than bound.
+        val relocated = assertFails {
+            GccBundledCliWorkingDirectory.requireNotRelocatedByJvm(Path.of("/tmp", "hsperfdata_" + System.getProperty("user.name")))
+        }
+        assertTrue(relocated.message.orEmpty().contains("-XX:-UsePerfData"), relocated.toString())
+        GccBundledCliWorkingDirectory.requireNotRelocatedByJvm(workingDirectory)
+    }
+
+    @Test
+    fun `a failed working-directory capture leaves the output empty and usable for a retry`() = fixture { root ->
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
+        val options = GccBundledCliOptions.parse(args)
+        val failure = assertFails { GccBundledCliCommand.admit(options, args) { error("working directory capture failed") } }
+        assertTrue(failure.message.orEmpty().contains("working directory capture failed"), failure.toString())
+        Files.list(options.output).use { assertEquals(0L, it.count()) }
+        // The retry is admitted against the same still-empty output and fails only on the fixture binary.
+        val retry = assertFails { GccBundledCliCommand.run(options, args) }
+        assertTrue(retry.message.orEmpty().contains("binary differs from selected profile engine"), retry.toString())
+        assertEquals(listOf("inputs", "invocation.json", "journal"),
+            Files.list(options.output).use { it.map { path -> path.fileName.toString() }.sorted().toList() })
+    }
+
+    @Test
     fun `command records selection but refuses a mismatched binary before staging or leasing`() = fixture { root ->
         val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }

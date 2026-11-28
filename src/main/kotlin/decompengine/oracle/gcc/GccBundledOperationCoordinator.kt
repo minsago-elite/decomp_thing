@@ -1492,8 +1492,11 @@ internal object GccBundledOperationCoordinator {
             intent.bundledRuntime.invocationVersion == 3 && intent.bundledRuntime.recoveryMode == "planning") {
             "later-invocation recovery requires an interrupted planning operation"
         }
-        require(recoveryArgv.size in 1..33 && recoveryArgv.sumOf { it.toByteArray().size.toLong() + 1 } <= 65536) {
+        require(recoveryArgv.size <= 33 && recoveryArgv.sumOf { it.toByteArray().size.toLong() + 1 } <= 65536) {
             "later-invocation recovery argv exceeds its bound"
+        }
+        require((intent.cliInvocation == null) == recoveryArgv.isEmpty()) {
+            "a later-invocation recovery argv is recorded exactly when the operation has a CLI invocation"
         }
         var inputs: GccBundledOperationInputs? = null
         var journal: GccBundledOperationJournal? = null
@@ -1521,7 +1524,6 @@ internal object GccBundledOperationCoordinator {
             // A fresh same-process deadline capped by the budget committed with the stopped state, after prefix and
             // state capture. A retained adoption keeps its own recorded allowance, so a crash never refreshes it.
             // Idle time between owners is not charged; whole-operation accounting across invocations remains #982.
-            val retainedAdoption = stopped.retainedAdoptionPayloadBytes?.let { OracleJson.parseCanonical(it) as JsonObject }
             val remainingMillis = stopped.resumeAllowanceMillis
             require(remainingMillis in 2_000L..stopped.recoveryWallCapMillis) {
                 "GCC stopped operation has no remaining wall budget to resume"
@@ -1601,45 +1603,10 @@ internal object GccBundledOperationCoordinator {
             lease = null
             try {
                 prepared.requireInterruptedStateCurrent()
-                val runIdentity = openedLease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
-                    borrowed.withPinnedDescriptor { LinuxFilesystemSyscalls.identity(it.fd) }
-                }
-                val runRootJson = JsonObject(mapOf(
-                    "device" to JsonPrimitive(runIdentity.key.device), "inode" to JsonPrimitive(runIdentity.key.inode),
-                    "mountId" to JsonPrimitive(runIdentity.mountId),
-                ))
-                if (retainedAdoption != null) {
-                    require(retainedAdoption["diskEvidenceSha256"] == JsonPrimitive(stopped.diskEvidence.evidenceSha256) &&
-                        retainedAdoption["leaseRecordSha256"] == JsonPrimitive(stopped.diskEvidence.leaseRecordSha256) &&
-                        retainedAdoption["runRoot"] == runRootJson &&
-                        (retainedAdoption["priorOwnerAbsence"] as? JsonObject)?.get("interruptedUnit") == JsonPrimitive(original.unitName)
-                    ) { "GCC retained adoption names a different lease, run root or interrupted unit" }
-                    openedJournal.completeRetainedRecoveryAdoption()
-                    return prepared
-                }
-                openedJournal.recordRecoveryAdopted(OracleJson.canonicalBytes(JsonObject(mapOf(
-                    "provider" to JsonPrimitive(RECOVERY_PAYLOAD_PROVIDER),
-                    "schemaVersion" to JsonPrimitive(1),
-                    "operationId" to JsonPrimitive(intent.operationId),
-                    "intentSha256" to JsonPrimitive(intent.requestSha256),
-                    "recoveryArgv" to kotlinx.serialization.json.JsonArray(recoveryArgv.map(::JsonPrimitive)),
-                    "stoppedStateRecordSha256" to JsonPrimitive(OracleArtifacts.sha256(stopped.stateRecordBytes)),
-                    "priorOwnerAbsence" to JsonObject(mapOf(
-                        "journalRootLock" to JsonPrimitive("acquired-without-blocking"),
-                        "operationJournalLock" to JsonPrimitive("acquired-without-blocking"),
-                        "scratchMountLock" to JsonPrimitive("acquired-without-blocking"),
-                        "stoppedWorkerAbsenceRecordSha256" to JsonPrimitive(OracleArtifacts.sha256(stopped.interruptedRecordBytes)),
-                        "interruptedUnit" to JsonPrimitive(original.unitName),
-                        "interruptedUnitCgroupAbsent" to JsonPrimitive(true),
-                    )),
-                    "diskEvidenceSha256" to JsonPrimitive(stopped.diskEvidence.evidenceSha256),
-                    "leaseRecordSha256" to JsonPrimitive(stopped.diskEvidence.leaseRecordSha256),
-                    "runRoot" to runRootJson,
-                    "resumeWallBudgetMillis" to JsonPrimitive(remainingMillis),
-                    "idleWallTimeBetweenOwnersCharged" to JsonPrimitive(false),
-                    "complete" to JsonPrimitive(false),
-                    "releaseEligible" to JsonPrimitive(false),
-                ))))
+                // The journal rebuilds the adoption from verified stopped evidence and validates a retained one
+                // with the same full-payload check; the run root it names is the definition's, proven above.
+                if (stopped.retainedAdoptionPayloadBytes != null) openedJournal.completeRetainedRecoveryAdoption()
+                else openedJournal.recordRecoveryAdopted(recoveryArgv, remainingMillis)
                 return prepared
             } catch (failure: Throwable) {
                 runCatching { prepared.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)

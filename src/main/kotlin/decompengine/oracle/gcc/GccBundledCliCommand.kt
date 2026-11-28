@@ -39,9 +39,15 @@ internal object GccBundledCliCommand {
      * Runs every CLI admission check that precedes contained START and returns the coordinator's prepared owner.
      * The caller owns the result; no worker has started, and closing it retains the scratch lease for recovery.
      */
-    fun admit(options: GccBundledCliOptions, arguments: List<String>): GccBundledPreparedOperation {
+    fun admit(
+        options: GccBundledCliOptions,
+        arguments: List<String>,
+        captureWorkingDirectory: () -> GccBundledCliWorkingDirectory = GccBundledCliWorkingDirectory::current,
+    ): GccBundledPreparedOperation {
         require(options.recoverOperationId == null) { "a later-invocation recovery selection is admitted only by recover" }
         requireSelection(options, arguments)
+        // Pinned before any output child exists, so a capture failure leaves --output empty for a retry.
+        val workingDirectory = captureWorkingDirectory()
         val invocation = LinuxFilesystemSyscalls.openRoot(options.output).use { output ->
             require(output.identity.mode.permissions == 448 && LinuxFilesystemSyscalls.directoryEntryNames(output, 1).isEmpty()) {
                 "--output requires an existing empty private directory (mode 0700)"
@@ -56,7 +62,7 @@ internal object GccBundledCliCommand {
                 }
             }
             LinuxFilesystemSyscalls.synchronize(output)
-            GccBundledCliInvocation(options, arguments, identities).also { selected ->
+            GccBundledCliInvocation(options, arguments, identities, workingDirectory).also { selected ->
                 selected.requireCurrent()
                 DescriptorBoundAtomicStateFile.publishNoReplace(output, "invocation.json", selected.canonicalBytes, 256 * 1024)
                 selected.requireCurrent()
@@ -104,6 +110,7 @@ internal object GccBundledCliCommand {
         val originalArguments = arguments.take(selector) + arguments.drop(selector + 2)
         val originalOptions = options.copy(recoverOperationId = null)
         require(GccBundledCliOptions.parse(originalArguments) == originalOptions)
+        val workingDirectory = GccBundledCliWorkingDirectory.current()
         val invocation = LinuxFilesystemSyscalls.openRoot(options.output).use { output ->
             require(output.identity.mode.permissions == 448 &&
                 LinuxFilesystemSyscalls.directoryEntryNames(output, 4).toSet() == setOf("invocation.json", "inputs", "journal")) {
@@ -113,7 +120,7 @@ internal object GccBundledCliCommand {
             for (name in listOf("inputs", "journal")) {
                 identities[options.output.resolve(name)] = LinuxFilesystemSyscalls.openDirectoryAt(output.fd, name).use { it.identity }
             }
-            val rebuilt = GccBundledCliInvocation(originalOptions, originalArguments, identities)
+            val rebuilt = GccBundledCliInvocation(originalOptions, originalArguments, identities, workingDirectory)
             val retained = DescriptorBoundAtomicStateFile.readOrNull(output, "invocation.json", 256 * 1024)
             require(retained != null && MessageDigest.isEqual(retained.bytes, rebuilt.canonicalBytes)) {
                 "later invocation argv, options or output identity differs from the retained invocation"

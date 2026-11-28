@@ -565,6 +565,15 @@ internal object LinuxFilesystemSyscalls {
         if (failure.errno == ENOENT) null else throw failure
     }
 
+    /** Pins this process's own working directory with O_PATH: only search permission is needed, never read. */
+    fun openCurrentWorkingDirectoryPath(): LinuxDescriptor = openDescriptor(
+        AT_FDCWD,
+        ".",
+        O_PATH or O_DIRECTORY or O_CLOEXEC,
+        0,
+        "pin process working directory",
+    )
+
     /** Follows only the kernel-owned `/proc/<pid>/exe` magic link for process attestation. */
     fun openProcessExecutable(pid: Long): LinuxDescriptor {
         require(pid in 1..Int.MAX_VALUE.toLong()) { "process id is invalid" }

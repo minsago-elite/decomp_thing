@@ -64,6 +64,9 @@ kotlin {
 application {
     mainClass.set("decompengine.MainKt")
     applicationName = "llm_bin_patch"
+    // HotSpot perf data would otherwise fchdir into /tmp/hsperfdata_<user> and, from an unreadable working
+    // directory, never return, so the CLI's working-directory binding would record that relocated directory.
+    applicationDefaultJvmArgs = listOf("-XX:-UsePerfData")
 }
 
 val frontendDirectory = layout.projectDirectory.dir("frontend")

@@ -279,7 +279,8 @@ class GccBundledContainedExecutionTest {
             val artifacts = intent.artifacts.associateBy { it.role }
             val journal = privateDirectory(fixture.resolve("journal"))
             val operation = journal.resolve(".gcc-bundled-operation-${intent.operationId}")
-            val laterArgv = listOf("authored-fixture-later-owner")
+            // This authored operation has no CLI invocation, so a later owner records no recovery argv.
+            val laterArgv = emptyList<String>()
             val earlier = GccBundledOperationCoordinator.prepareNew(intent, journal, mount)
             val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(earlier.definitionBytes)
             outputs.add(definition.outputLease.path)
@@ -308,7 +309,7 @@ class GccBundledContainedExecutionTest {
             }
             val firstAdoption = boundedRead(operation.resolve("recovery-adopted.json"), MAXIMUM_METADATA_BYTES)
             assertEquals(12, names(operation).size)
-            GccBundledOperationCoordinator.recoverInterrupted(intent, journal, mount, listOf("authored-fixture-third-owner")).use { later ->
+            GccBundledOperationCoordinator.recoverInterrupted(intent, journal, mount, laterArgv).use { later ->
                 assertEquals(GccBundledExecutionOwnership.LATER_INVOCATION_RECOVERY, later.executionOwnership)
                 assertFailsWith<IllegalStateException> { later.execute() }
                 assertFailsWith<IllegalStateException> { later.plan() }

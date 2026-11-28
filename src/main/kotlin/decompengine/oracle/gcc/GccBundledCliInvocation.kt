@@ -4,7 +4,6 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.fulltree.FullTreeDiskScratchPolicy
-import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -120,11 +119,34 @@ internal data class GccBundledCliWorkingDirectory(val path: Path, val identity: 
     ))
 
     companion object {
-        fun current(): GccBundledCliWorkingDirectory {
+        /**
+         * Pins the kernel's working directory for this process with O_PATH, then requires its canonical path to
+         * name that same directory (device, inode and mount). Neither step needs read permission, so a searchable
+         * but unreadable working directory is admitted.
+         */
+        fun current(): GccBundledCliWorkingDirectory = LinuxFilesystemSyscalls.openCurrentWorkingDirectoryPath().use { cwd ->
             val path = Path.of("").toAbsolutePath().toRealPath()
-            // /proc/self/cwd is the kernel's record of this process's working directory, not a pathname guess.
-            require(Files.isSameFile(path, Path.of("/proc/self/cwd"))) { "CLI working directory differs from the process working directory" }
-            return GccBundledCliWorkingDirectory(path, LinuxFilesystemSyscalls.openRoot(path).use { it.identity })
+            requireNotRelocatedByJvm(path)
+            val named = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
+                ?: throw IllegalArgumentException("CLI working directory path no longer exists")
+            named.use { selected ->
+                require(selected.identity.isDirectory && selected.identity.key == cwd.identity.key &&
+                    selected.identity.mountId == cwd.identity.mountId) {
+                    "CLI working directory path differs from the process working directory"
+                }
+            }
+            GccBundledCliWorkingDirectory(path, cwd.identity)
+        }
+
+        /**
+         * With perf data enabled, HotSpot saves the working directory with a read-only open, changes into its
+         * perf-data directory, and cannot change back from an unreadable directory. Such a relocated working
+         * directory no longer names the launch directory, so it is refused rather than bound.
+         */
+        internal fun requireNotRelocatedByJvm(path: Path) {
+            require(path != Path.of("/tmp", "hsperfdata_" + System.getProperty("user.name"))) {
+                "the JVM moved its working directory into its perf-data directory; launch with -XX:-UsePerfData"
+            }
         }
     }
 }
