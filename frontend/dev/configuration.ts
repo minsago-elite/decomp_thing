@@ -12,12 +12,12 @@ export type DevelopmentSettings = {
   backendOrigin: string | null;
 };
 
-type FixtureDocument = { kind: string; data?: { items?: unknown[]; nextCursor?: unknown } };
+type FixtureDocument = { kind: string; data?: { items?: unknown[]; nextCursor?: unknown; page?: { limit?: unknown } } };
 type FixtureSet = {
   label: string;
   schemaSha256: string;
   routes: Record<string, FixtureDocument>;
-  scenarios: { name: string; description: string; jobPath: string; runPath: string; reportPath: string }[];
+  scenarios: { name: string; description: string; jobId: string; jobPath: string; runPath: string; reportPath: string }[];
   errors: Record<string, unknown>;
   download: { path: string; body: string; sha256: string };
   /** Exact raw-evidence JSON bytes, served as the private artifact-content octet stream. */
@@ -94,7 +94,9 @@ function serveFixture(request: IncomingMessage, response: ServerResponse, url: U
   // A generated route may name one exact query (bounded read-only fixture); other queries stay rejected.
   const exact = url.search ? fixtures.routes[url.pathname + url.search] : undefined;
   const document = exact ?? fixtures.routes[url.pathname];
-  if (url.search && !exact && !(document?.kind === 'events' && url.search === '?transport=poll')) {
+  // The generated job listing is one complete page recorded at the default limit, so only that exact query matches it.
+  const defaultListing = !exact && document?.kind === 'jobs' && url.search === `?limit=${String(document.data?.page?.limit)}`;
+  if (url.search && !exact && !defaultListing && !(document?.kind === 'events' && url.search === '?transport=poll')) {
     json(response, 400, fixtures.errors.VALIDATION_FAILED, head);
   } else if (url.pathname === fixtures.download.path) {
     response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8',
@@ -173,6 +175,7 @@ export function developmentConfiguration(settings: DevelopmentSettings): { plugi
         `<meta name="decomp-base-path" content="${settings.basePath}" />`);
       return { html: replaced, tags: fixtures ? [{ tag: 'aside', attrs: { id: 'decomp-development-notice', role: 'note' },
         children: [{ tag: 'strong', children: 'SIMULATED DEVELOPMENT DATA. ' },
+          { tag: 'span', children: 'Read-only fixture server: upload and sign-out are unavailable. ' },
           { tag: 'a', attrs: { href: cataloguePath }, children: 'Open fixture catalogue' }], injectTo: 'body-prepend' }] : [] };
     },
   };

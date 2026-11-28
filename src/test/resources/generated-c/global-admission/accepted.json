@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 6,
+  "fingerprint": "8e177dc7c20f781eab63ab9b4594b22055483cc633b759f6181b34faac6e71b2",
+  "sourceSha256": "b9ea4f543154cca9860e8ad3460fb41cc867041ba6ad3d9a8c93e91780892bcc",
+  "generator": "recovered-c",
+  "workflowOrigin": "reconstructor-return",
+  "reconstructorIdentity": "custom",
+  "promptSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "promptCharacters": null,
+  "promptBudgetCharacters": null,
+  "executionEvidencePath": null,
+  "executionEvidenceSha256": null,
+  "executionEvidenceSchemaVersion": null,
+  "executionRequestSha256": null,
+  "executionTerminalOutcome": null,
+  "executionReleaseComplete": null,
+  "inputBinarySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "modelSchemaVersion": 2,
+  "profileSha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+  "accepted": true,
+  "compilation": {"sourceSha256":"b9ea4f543154cca9860e8ad3460fb41cc867041ba6ad3d9a8c93e91780892bcc","command":["cc","-std=c11","-g","-Wall","-Wextra","-Werror","-Iinclude","-c","src/modules/entry.c","-o","/dev/null"],"outcome":"passed","returnCode":0,"diagnosticsSha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","diagnosticsBytes":0},
+  "retryable": false,
+  "entityStatuses": [
+    {"id":"fn_main","status":"accepted"},
+    {"id":"global_pointer","status":"accepted"}
+  ],
+  "issues": [
+  ]
+}

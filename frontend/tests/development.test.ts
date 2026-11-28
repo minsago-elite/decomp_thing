@@ -9,6 +9,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from 'vite';
 import type { ViteDevServer } from 'vite';
+import { jobPath } from '../src/app/paths';
 import { allowedDevelopmentRequest, developmentConfiguration, developmentSettings } from '../dev/configuration';
 
 const frontendRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -85,11 +86,18 @@ describe('shared-schema deterministic fixtures', () => {
     const command = () => execFileSync('python3', [generator, '--base-path', '/nested/'], { encoding: 'utf8' });
     const generated = command();
     expect(command()).toBe(generated);
-    const fixture = JSON.parse(generated) as { scenarios: { name: string }[]; routes: Record<string, { data: { items: { sizeBytes: string }[] } }> };
+    const fixture = JSON.parse(generated) as { scenarios: { name: string; jobId: string; jobPath: string }[];
+      routes: Record<string, { data: { items: { jobId: string; sizeBytes: string }[] } }> };
     expect(fixture.scenarios.map((scenario) => scenario.name)).toEqual(['running', 'failed', 'interrupted', 'unsupported', 'partial', 'responsive']);
-    // A fixed past expiry made every fixture session read as expired; the run route needs a 32-hex job id.
-    const bootstrap = fixture.routes['/nested/api/v1/bootstrap'] as unknown as { data: { sessionExpiresAt: string } };
-    expect(Date.parse(bootstrap.data.sessionExpiresAt)).toBeGreaterThan(Date.parse('2090-01-01T00:00:00Z'));
+    const ids = fixture.scenarios.map((scenario) => scenario.jobId);
+    expect(new Set(ids).size).toBe(6);
+    for (const scenario of fixture.scenarios) {
+      expect(scenario.jobId).toMatch(/^[0-9a-f]{32}$/);
+      expect(scenario.jobPath).toBe(`/nested/api/v1/jobs/${scenario.jobId}`);
+      expect(jobPath('/nested/', scenario.jobId)).toBe(`/nested/jobs/${scenario.jobId}`);
+    }
+    expect(() => jobPath('/nested/', 'fixture_job_running')).toThrow();
+    expect(fixture.routes['/nested/api/v1/jobs']?.data.items.map((item) => item.jobId)).toEqual(ids);
     // Named #619 reflow fixtures: long Unicode/RTL name, long hex/text previews, long unbroken source line.
     const job = '/nested/api/v1/jobs/f619f619f619f619f619f619f619f619';
     const run = `${job}/runs/fixture_run_responsive`;
@@ -105,6 +113,10 @@ describe('shared-schema deterministic fixtures', () => {
     expect(Object.keys(fixture.routes).some((path) => path.startsWith(`${revision}/source-search?`))).toBe(true);
     expect(generated.length).toBeLessThan(2 * 1024 * 1024);
     expect(fixture.routes['/nested/api/v1/jobs']?.data.items[0]?.sizeBytes).toBe('9007199254740993');
+    const bootstrap = fixture.routes['/nested/api/v1/bootstrap'] as unknown as { data: { sessionExpiresAt: string; limits: { maxUploadBytes: string } } };
+    expect(Date.parse(bootstrap.data.sessionExpiresAt)).toBeGreaterThan(Date.now());
+    // GET/HEAD-only server: the production zero-limit signal keeps upload submission disabled.
+    expect(bootstrap.data.limits.maxUploadBytes).toBe('0');
     expect(fixture.routes['/nested/api/v1/recovery']).toMatchObject({ kind: 'recovery',
       data: { displayOnly: true, inventoryComplete: true, retainedUploadStages: 0, retainedMetadataFiles: 0 } });
     await mkdir(fileURLToPath(new URL('../../build/', import.meta.url)), { recursive: true });
@@ -135,17 +147,30 @@ describe('shared-schema deterministic fixtures', () => {
     expect(jobs.headers.get('x-decomp-development')).toBe('simulated');
     expect(jobs.headers.get('cache-control')).toBe('no-store');
     expect(jobs.headers.get('x-request-id')).toBe('request_example_1');
-    const polling = await fetch(`${frontend.api}/jobs/fixture_job_interrupted/runs/fixture_run_interrupted/events?transport=poll`);
+    const listing = await fetch(`${frontend.api}/jobs?limit=50`);
+    expect(listing.status).toBe(200);
+    for (const query of ['?limit=10', '?limit=50&status=running', '?cursor=x']) {
+      expect((await fetch(`${frontend.api}/jobs${query}`)).status).toBe(400);
+    }
+    const records = await fetch(`${frontend.origin}/nested/__fixtures/catalogue.json`).then((response) => response.json()) as
+      { scenarios: { name: string; jobId: string }[]; downloadPath: string };
+    const job = (name: string) => records.scenarios.find((scenario) => scenario.name === name)?.jobId ?? 'missing';
+    const polling = await fetch(`${frontend.api}/jobs/${job('interrupted')}/runs/fixture_run_interrupted/events?transport=poll`);
     const page = await polling.json() as { data: { items: { payload: { state: string } }[] } };
     expect(page.data.items[0]?.payload.state).toBe('interrupted');
-    const stream = await fetch(`${frontend.api}/jobs/fixture_job_running/runs/fixture_run_running/events`);
+    const stream = await fetch(`${frontend.api}/jobs/${job('running')}/runs/fixture_run_running/events`);
     expect(stream.headers.get('content-type')).toBe('text/event-stream');
     const reader = stream.body?.getReader();
     expect(reader).toBeDefined();
     const first = await reader?.read();
     expect(new TextDecoder().decode(first?.value)).toContain('fixture_cursor_running');
     await reader?.cancel();
-    const attachment = await fetch(`${frontend.api}/jobs/fixture_job_partial/artifacts/fixture_attachment/content`);
+    expect(records.downloadPath).toBe(`/nested/api/v1/jobs/${job('partial')}/artifacts/fixture_attachment/content`);
+    const artifact = await fetch(`${frontend.api}/jobs/${job('partial')}/artifacts/fixture_attachment`)
+      .then((response) => response.json()) as { data: { binding: { jobId: string }; contentHref: string } };
+    expect(artifact.data.binding.jobId).toBe(job('partial'));
+    expect(artifact.data.contentHref).toBe(records.downloadPath);
+    const attachment = await fetch(`${frontend.origin}${records.downloadPath}`);
     expect(attachment.headers.get('content-disposition')).toBe('attachment; filename="SIMULATED-evidence.txt"');
     expect(await attachment.text()).toContain('not execution evidence');
     const rejected = await fetch(`${frontend.api}/jobs`, { method: 'POST', headers: { Origin: frontend.origin } });
@@ -169,6 +194,10 @@ describe('shared-schema deterministic fixtures', () => {
       expect(createHash('sha256').update(bytes).digest('hex')).toBe(report.data.sourceArtifact.sha256);
       expect((await fetch(`${path}?x=1`)).status).toBe(400);
     }
+    // Sign out (DELETE /session) is refused like every other mutation; no fake success is served.
+    const signOut = await fetch(`${frontend.api}/session`, { method: 'DELETE', headers: { Origin: frontend.origin } });
+    expect(signOut.status).toBe(405);
+    expect(shell).toContain('Read-only fixture server: upload and sign-out are unavailable.');
     const unknown = await fetch(`${frontend.api}/not-present`);
     expect(unknown.status).toBe(404);
     expect(unknown.headers.get('content-type')).toContain('application/json');

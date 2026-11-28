@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference, withValidatedRequestReference } from '../api/client';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import type { Capability, GitRepositories, GitWorkspace, Job, Operation } from '../api/generated';
+import { isDeletedJob } from '../shared/retainMetadata';
 import type { BrowserSession } from '../session/session';
 
 const terminal = new Set<Operation['state']>(['completed', 'failed', 'cancelled', 'interrupted', 'recovery-required']);
@@ -62,8 +63,9 @@ function listingStatus(observed: Observed): string {
  * and one explicit initialization from the latest attempt's recorded candidate. Nothing here
  * commits, fetches or reports validation.
  */
-export function GitRepositoryPanel({ job, capabilities, basePath, session, pollIntervalMs = defaultPollIntervalMs }: {
+export function GitRepositoryPanel({ job, capabilities, basePath, session, onDeleted, pollIntervalMs = defaultPollIntervalMs }: {
   job: Job; capabilities: readonly Capability[]; basePath: string; session: Pick<BrowserSession, 'csrf'>; pollIntervalMs?: number;
+  onDeleted?: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   const capability = capabilities.find(item => item.id === 'git');
@@ -158,6 +160,7 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
           ? copy.operationStates[outcome.state] : outcome && !terminal.has(outcome.state) ? copy.stillRunning : listingStatus(next) }));
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
+      if (onDeleted && isDeletedJob(failure)) { onDeleted(failure); return; }
       if (failure instanceof IdentityMismatch) { update(() => ({ observed: null, stale: false,
         status: withValidatedRequestReference(copy.initializationUnverified, failure.requestId) })); return; }
       if (phase === 'command') {

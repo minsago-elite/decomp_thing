@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
-import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { recordedValidationCopy as copy } from '../copy/attempt';
 import { commonCopy } from '../copy/common';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -38,10 +38,13 @@ function requestedValidation(search: string, preserveRouteContext = false) {
   catch { return { location: null, key: 'invalid:' + search.slice(0, 4097), invalid: true }; }
 }
 
-export function RecordedValidationEvidence({ jobId, runId, basePath, navigation }: {
+export function RecordedValidationEvidence({ jobId, runId, basePath, navigation, onDeleted }: {
   jobId: string; runId: string; basePath: string; navigation?: ValidationNavigation;
+  /** A current read's confirmed RESOURCE_GONE tombstone ends the routed attempt instead of this panel (#512). */
+  onDeleted?: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const binding = useMemo(() => ({ client, jobId, runId, active: null as AbortController | null,
     requestSearch: null as string | null }), [client, jobId, runId]);
   const activeBinding = useRef(binding); activeBinding.current = binding;
@@ -85,6 +88,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
   }
   function failed(controller: AbortController, failure: unknown, restoring = false) {
     if (current(controller)) {
+      if (isDeletedJob(failure) && deletedHandler.current) { binding.active = null; deletedHandler.current(failure); return; }
       setSavedBaseline(null); setComparisonPage(1);
       setStored({ binding, locationKey: requested.key, history: null, selected: null, report: null, loading: false,
         error: failureMessage(failure, restoring) });
@@ -277,7 +281,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
       <ul aria-label={copy.reportLimitations}>{report.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
       {report.state === 'available' && report.binding.revisionId !== null && (cases || failure) &&
         <ValidationSourceSnapshot key={report.reportId} jobId={jobId} runId={runId} validationRevisionId={report.binding.revisionId}
-          sourceSha256={cases?.sourceSha256 ?? failure!.sourceSha256} basePath={basePath} />}
+          sourceSha256={cases?.sourceSha256 ?? failure!.sourceSha256} basePath={basePath} {...(onDeleted && { onDeleted })} />}
       {report.summary && 'result' in report.summary && <dl>
         <dt>{copy.result}</dt><dd>{report.summary.result}</dd><dt>{copy.compared}</dt><dd>{report.summary.casesCompared}</dd>
       </dl>}

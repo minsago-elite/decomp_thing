@@ -2,10 +2,10 @@ import { explorationEvidenceCopy as copy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
 import { PrivateSessionContext, usePrivateTransport } from '../session/PrivateTransport';
 import { useSession } from '../session/useSession';
-import { useContext, useEffect, useMemo, useState } from 'preact/hooks';
+import { useContext, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
-import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { ExplorationCases } from './ExplorationCases';
 import { OutputSignatureBreadth } from './OutputSignatureBreadth';
 
@@ -25,8 +25,12 @@ function failureKind(failure: unknown): Failure {
 type Binding = { client: unknown; basePath: string; jobId: string; runId: string; session: unknown; generation: unknown };
 type Stored = { binding: Binding; intent: number; report: Received<Report> | null; error: string; failure: Failure | null; loading: boolean };
 
-export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
+export function ExplorationEvidence({ jobId, runId, basePath, onDeleted }: { jobId: string; runId: string; basePath: string;
+  /** A confirmed RESOURCE_GONE tombstone ends the routed attempt instead of this panel (#512). */
+  onDeleted?: (failure: unknown) => void;
+}) {
   const { client } = usePrivateTransport(basePath);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const session = useContext(PrivateSessionContext);
   const sessionState = useSession(session);
   const generation = sessionState?.status === 'authenticated' ? sessionState.generation : sessionState?.status ?? null;
@@ -56,6 +60,10 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
       }
       settle(previous => ({ ...previous, report: receive(value), error: '', failure: null, loading: false }));
     }).catch((reason: unknown) => {
+      if (!controller.signal.aborted && isDeletedJob(reason) && deletedHandler.current) {
+        settle(previous => ({ ...previous, report: null, error: '', failure: null, loading: false }));
+        deletedHandler.current(reason); return;
+      }
       // A failed deliberate read never leaves an earlier report standing as if it were current.
       const kind = failureKind(reason);
       settle(previous => ({ ...previous, report: null, error: withApiFailureReference(copy.failures[kind], reason), failure: kind, loading: false }));
@@ -102,11 +110,15 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
       {report.sourceArtifact && <>
         <p>{displayMessage(copy.artifact, { bytes: report.sourceArtifact.sizeBytes, digest: <code>{report.sourceArtifact.sha256}</code> })}</p>
         <p>{copy.theDigestIdentifiesTheObservedBytesItDoesNotValidate}</p>
-        <a href={report.sourceArtifact.contentHref} download="exploration.json">{copy.downloadObservedExplorationJSON}</a>
-        {(report.state === 'available' || report.state === 'partial') && report.adapterVersion === 1 &&
+        {report.sourceArtifact.content?.projection === 'unavailable'
+          ? <p><strong>{copy.explorationDownloadUnavailable}</strong></p>
+          : <>{report.sourceArtifact.content?.projection === 'redacted' && <p>{copy.explorationDownloadRedacted}</p>}
+            <a href={report.sourceArtifact.contentHref} download="exploration.json">{copy.downloadObservedExplorationJSON}</a></>}
+        {report.sourceArtifact.content?.projection !== 'unavailable' &&
+          (report.state === 'available' || report.state === 'partial') && report.adapterVersion === 1 &&
           (report.producerSchemaVersion === null || report.producerSchemaVersion === 2 || (report.producerSchemaVersion === 1 && report.state === 'partial')) &&
           <ExplorationCases key={`${jobId}/${runId}/${report.sourceArtifact.sha256}`} artifact={report.sourceArtifact} jobId={jobId} runId={runId}
-            basePath={basePath} producerSchemaVersion={report.producerSchemaVersion} />}
+            basePath={basePath} producerSchemaVersion={report.producerSchemaVersion} {...(onDeleted && { onDeleted })} />}
       </>}
       <p>{copy.explorationObservationsDoNotEstablishAcceptedReconstruction}</p>
     </>}

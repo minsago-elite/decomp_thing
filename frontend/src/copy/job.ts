@@ -21,7 +21,7 @@ export const jobCopy = {
   "inputSHA256": "Input SHA-256",
   "notReportedByTheJobAPI": "Not reported by the job API",
   "completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision": "Completion is an attempt outcome. Only the recorded accepted revision identifies accepted reconstruction.",
-  "theAttemptPageRetainsItsExactIdentityAsNewerWork": "The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.",
+  "theAttemptPageRetainsItsExactIdentityAsNewerWork": "The attempt page retains its exact identity as newer work is recorded. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.",
   "startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn": "Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.",
   "viewReportedWorkflowAvailability": "View reported workflow availability",
   "workflowAvailabilityForThisJob": "Workflow availability for this job",
@@ -57,7 +57,7 @@ export const jobCopy = {
   "thisJobIsUnavailableItMayHaveBeenRemoved": "This job is unavailable. It may have been removed.",
   "storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts": "Stored job metadata is unavailable or malformed. No binary facts can be shown; inspect job storage or retry after repair.",
   "jobMetadataCouldNotBeLoadedCheckTheLocalSession": "Job metadata could not be loaded. Check the local session and server.",
-  "thisJobWasDeleted": "This job was deleted. Its files were removed and cannot be recovered; only a deletion record is kept for at least 24 hours.",
+  "thisJobWasDeleted": "This job was deleted from the library and cannot be recovered. Its deletion record is kept for at least 24 hours.",
   "label": "Label: {label}",
   "fileName": "File name: {name}"
 } as const;
@@ -89,7 +89,7 @@ export const jobOrganizationCopy = {
 
 export const jobDeletionCopy = {
   "deleteJob": "Delete job",
-  "deletionIsPermanent": "Deletion is permanent. There is no undo and no trash: the uploaded file, every attempt, report, log, source snapshot and archive of this job are removed. Archive the job instead to only hide it.",
+  "deletionIsPermanent": "Deletion is permanent. There is no undo and no trash: the uploaded file, every attempt, report, log, source snapshot and archive of this job will be removed. Archive the job instead to only hide it.",
   "reviewDeletion": "Review what would be deleted",
   "reading": "Reading what this job stores…",
   "previewFailed": "What this job stores could not be read. Nothing was deleted.",
@@ -140,7 +140,10 @@ export const jobDeletionCopy = {
     "GIT_STATE_UNAVAILABLE": "A managed Git repository could not be inspected, so its work is retained. Check Git on the server."
   },
   "protectionFallback": "A retention protection reported by the server prevents deletion. Refresh and review the job again.",
-  "stillRunning": "The job is gone from the library. File cleanup is still running and resumes after a restart if interrupted.",
+  "stillRunning": "File cleanup is still running and resumes after a restart if interrupted. Its files are not yet confirmed removed.",
+  "cleanupFinished": "File cleanup finished: its files were removed.",
+  "cleanupIncomplete": "File cleanup did not finish ({state}). Some files may remain until recovery completes.",
+  "cleanupUnknown": "This page has not observed whether file cleanup finished.",
   "changed": "The job changed since it was reviewed. Review deletion again.",
   "conflict": "The job is protected by its retention policy. The current reasons are listed above.",
   "storage": "Storage is full, read-only or unavailable. The job was not deleted and is unchanged.",
