@@ -665,6 +665,24 @@ export function createColdEvidenceRecorder(browserOrigin, now = () => performanc
   };
 }
 
+/**
+ * Runs the record downloads, then the budget verdict. A verdict failure carries the download result (or its bounded
+ * failure) as `recordDownloads`; with a passing verdict a download failure is thrown as itself.
+ */
+export async function downloadsThenVerdict(downloads, verdict) {
+  let result = null;
+  let failure = null;
+  try { result = await downloads(); } catch (error) { failure = error; }
+  try { verdict(); } catch (error) {
+    if (error !== null && typeof error === 'object') {
+      error.recordDownloads = result ?? { status: 'failed', error: String(failure?.message ?? failure).slice(0, 4096) };
+    }
+    throw error;
+  }
+  if (failure !== null) throw failure;
+  return result;
+}
+
 export function assertStructureQualification(measurements, evidenceFailures = []) {
   const budgetFailures = evaluateStructureBudgets(measurements);
   if (budgetFailures.length || evidenceFailures.length) {
@@ -2339,10 +2357,10 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     requestMethods: tab.requests.map(request => request.method), peakBrowserHeapBytes, browserHeapMemory, jvmMemory,
     moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance,
     ...coldEvidenceSummary, ...inventoryFailureClassification, inventoryConsumption };
-  assertStructureQualification(measurements, evidenceFailures);
-  // Attachment transfer is outside the structure navigation latency and memory measurements.
-  const recordDownloads = await qualifyStructureRecordDownloads({ fixture, makeTarget, cdp, evaluate, ready, waitFor,
-    browserOrigin, profile: profileName });
+  // Attachment transfer is outside the structure navigation latency and memory measurements. It runs before the budget
+  // verdict, so a budget failure keeps the download evidence and a download failure never hides that verdict.
+  const recordDownloads = await downloadsThenVerdict(() => qualifyStructureRecordDownloads({ fixture, makeTarget, cdp, evaluate,
+    ready, waitFor, browserOrigin, profile: profileName }), () => assertStructureQualification(measurements, evidenceFailures));
   pageMs.sort((a, b) => a - b);
   return { ...measurements, recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 51, measuredInteractions: localFeedbackMs.length, maximumMountedRows: 100,

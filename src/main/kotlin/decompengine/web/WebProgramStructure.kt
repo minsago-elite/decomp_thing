@@ -253,12 +253,54 @@ internal class WebProgramStructureIndex(
     fun table(kind: WebStructureKind): WebStructureTable = tables[kind.ordinal]
     val available: Boolean get() = outcome.state == "available"
 
-    /** Relationship adjacency, built on the first neighborhood read of this projection and retained with it. */
-    val callGraph: WebProgramGraph by lazy { WebProgramGraph.calls(this) }
-    val moduleGraph: WebProgramGraph by lazy { WebProgramGraph.modules(this) }
+    /** Relationship adjacency, built on the first neighborhood read and retained only as far as the cache charges it. */
+    val callGraph: WebProgramGraph get() = derived("call-graph", WebProgramGraph::retainedBytes) { WebProgramGraph.calls(this) }
+    val moduleGraph: WebProgramGraph get() = derived("module-graph", WebProgramGraph::retainedBytes) { WebProgramGraph.modules(this) }
 
-    /** The confidence-record scorecard, parsed on first use; the record is committed by this projection's manifest. */
-    @Volatile var scorecard: WebStructureScorecard? = null
+    /** Digest of the recorded population: each kind's identities in sorted order, length-prefixed, so order is irrelevant. */
+    fun populationDigest(): String = derived("population-digest", { 256L }) {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val thread = Thread.currentThread()
+        for (table in tables) {
+            digest.update("${table.kind.route}\n${table.size}\n".toByteArray(Charsets.UTF_8))
+            for (id in table.ids.sortedArray()) {
+                if (thread.isInterrupted) throw CancellationException("Population digest was cancelled.")
+                val bytes = id.toByteArray(Charsets.UTF_8)
+                digest.update("${bytes.size}:".toByteArray(Charsets.UTF_8)); digest.update(bytes)
+            }
+        }
+        java.util.HexFormat.of().formatHex(digest.digest())
+    }
+
+    private val derivedLock = Any()
+    private val derivedValues = HashMap<String, Any>()
+    private var provisionalBytes = 0L
+    private var charge: ((Long) -> Boolean)? = null
+
+    /**
+     * A value derived from this projection after it was built. Before cache admission it stays with the index and
+     * [admitRetention] adds its bytes to the entry charge; afterwards it is kept only when the owning cache charges its
+     * bytes against both ceilings, and is otherwise rebuilt for each read.
+     */
+    internal fun <T : Any> derived(key: String, bytes: (T) -> Long, build: () -> T): T = synchronized(derivedLock) {
+        @Suppress("UNCHECKED_CAST")
+        (derivedValues[key] as T?)?.let { return it }
+        val value = build()
+        val size = bytes(value).also { require(it >= 0) }
+        val charger = charge
+        if (charger == null) { provisionalBytes = Math.addExact(provisionalBytes, size); derivedValues[key] = value }
+        else if (charger(size)) derivedValues[key] = value
+        value
+    }
+
+    /** Hand later derived charges to [charger] and return the bytes already derived before admission. */
+    internal fun admitRetention(charger: (Long) -> Boolean): Long = synchronized(derivedLock) {
+        charge = charger
+        provisionalBytes
+    }
+
+    /** True when a derived value is currently retained; for retention checks. */
+    internal fun retainsDerived(key: String): Boolean = synchronized(derivedLock) { key in derivedValues }
 }
 
 internal class WebStructureRecord(val path: String, val sha256: String, val sizeBytes: Long)
@@ -1028,7 +1070,10 @@ internal class WebProgramStructureCache(private val capacity: Int = 2,
         manifest: decompengine.repair.StableRegularFile, descriptor: decompengine.repair.StableRegularFile) {
         val manifest = manifest.copy(bytes = manifest.bytes.copyOf())
         val descriptor = descriptor.copy(bytes = descriptor.bytes.copyOf())
-        val retainedBytes: Long
+        /** The admitted index, its captures and every derived value the cache has charged since admission. */
+        var retainedBytes: Long
+            private set
+        internal fun charge(bytes: Long) { retainedBytes = Math.addExact(retainedBytes, bytes) }
         init {
             val reference = index.reference
             require(key.jobId == reference.jobId && key.runId == reference.runId &&
@@ -1057,12 +1102,36 @@ internal class WebProgramStructureCache(private val capacity: Int = 2,
         entries.remove(entry.key)
         entries[entry.key] = entry
     }
-    @Synchronized fun put(entry: Entry) {
-        entries.remove(entry.key)
-        if (entry.retainedBytes > maximumEntryBytes || entry.retainedBytes > maximumRetainedBytes) return
-        entries[entry.key] = entry
-        while (entries.size > capacity || entries.values.sumOf { it.retainedBytes } > maximumRetainedBytes) {
-            entries.remove(entries.keys.first())
+    fun put(entry: Entry) {
+        // The building read derived values before admission; they join the entry charge. Later derived values reach
+        // the cache only through [charge]. The index is not shared before admission, so no charge can interleave here.
+        val derived = entry.index.admitRetention { bytes -> charge(entry, bytes) }
+        synchronized(this) {
+            entries.remove(entry.key)
+            entry.charge(derived)
+            if (entry.retainedBytes > maximumEntryBytes || entry.retainedBytes > maximumRetainedBytes) return
+            entries[entry.key] = entry
+            while (entries.size > capacity || entries.values.sumOf { it.retainedBytes } > maximumRetainedBytes) {
+                entries.remove(entries.keys.first())
+            }
         }
     }
+
+    /**
+     * Charge a derived allocation to a retained entry. It is retained only when the entry stays within the entry
+     * ceiling; other entries are evicted, least recently used first, until the retained ceiling holds again.
+     */
+    @Synchronized private fun charge(entry: Entry, bytes: Long): Boolean {
+        if (entries[entry.key] !== entry || bytes < 0) return false
+        val charged = Math.addExact(entry.retainedBytes, bytes)
+        if (charged > maximumEntryBytes || charged > maximumRetainedBytes) return false
+        entry.charge(bytes)
+        while (entries.values.sumOf { it.retainedBytes } > maximumRetainedBytes) {
+            entries.remove(entries.keys.first { it != entry.key })
+        }
+        return true
+    }
+
+    /** Bytes currently charged to retained entries; for ceiling checks. */
+    @Synchronized internal fun retainedBytes(): Long = entries.values.sumOf { it.retainedBytes }
 }

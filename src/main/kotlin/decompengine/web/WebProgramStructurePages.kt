@@ -100,7 +100,7 @@ internal class WebProgramStructurePages(
                     return@apply
                 }
                 val table = index.table(WebStructureKind.FUNCTION)
-                val module = query.fields["module"]?.let { selector -> index.moduleIndex[selector] ?: -100 }
+                val module = query.fields["module"]?.let { selector -> index.moduleIndex[selector]?.takeIf { selectable(selector, policy) } ?: -100 }
                 val orderRows = when (sort) { "name" -> table.byName; "id" -> table.byId; else -> table.byAddress }
                 val addressPrefix = search?.lowercase(Locale.ROOT)?.takeIf { it.matches(Regex("0x[0-9a-f]{1,16}")) }
                 val unfiltered = status == null && evidence == null && ownership == null && module == null && search == null
@@ -136,7 +136,8 @@ internal class WebProgramStructurePages(
         }
     }
 
-    fun modules(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
+    fun modules(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?,
+        policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, emptySet())
         return read(jobId, runId, revisionId) { index, _ ->
             pinned(index, query)
@@ -146,7 +147,7 @@ internal class WebProgramStructurePages(
                 val rows = if (index.available) index.modulesByName else emptyList()
                 if (rows.isEmpty() && query.cursor != null) invalidCursor()
                 val start = if (rows.isEmpty()) 0 else offset(owner, route, index, query, rows.size)
-                val items = rows.subList(start, minOf(rows.size, start + query.limit)).map { moduleItem(index, it) }
+                val items = rows.subList(start, minOf(rows.size, start + query.limit)).map { moduleItem(index, it, policy) }
                 put("totalModules", if (index.available && index.planOutcome.state == "available") JsonPrimitive(rows.size) else JsonNull)
                 put("items", JsonArray(items))
                 put("page", page(owner, route, index, query, (start + items.size).takeIf { it < rows.size }))
@@ -170,16 +171,16 @@ internal class WebProgramStructurePages(
                     put("module", JsonNull); put("owned", JsonNull)
                     return@apply
                 }
-                val moduleRow = index.moduleIndex[selector]?.takeIf { addressable(selector) } ?: throw WebAccessDenied(404,
+                val moduleRow = index.moduleIndex[selector]?.takeIf { selectable(selector, policy) } ?: throw WebAccessDenied(404,
                     "MODULE_NOT_FOUND", "The requested module is not recorded in this revision's module plan.")
                 val module = index.modules[moduleRow]
-                put("module", moduleItem(index, moduleRow).toMutableMap().apply {
+                put("module", moduleItem(index, moduleRow, policy).toMutableMap().apply {
                     put("implementationPath", JsonPrimitive(module.sourcePath))
                     put("implementationFileId", index.sourceFileIds[module.sourcePath]?.let(::JsonPrimitive) ?: JsonNull)
                     put("interfacePath", JsonPrimitive(module.headerPath))
                     put("interfaceFileId", index.sourceFileIds[module.headerPath]?.let(::JsonPrimitive) ?: JsonNull)
                     put("cycle", bounded(module.cycle.filter { it != module.id }, 20) { buildJsonObject {
-                        put("moduleId", it); put("selector", it.takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
+                        put("moduleId", publicModuleId(it, policy)); put("selector", moduleSelector(it, policy))
                     } })
                     put("boundaryEvidence", bounded(module.boundaryEvidence, 20) { text(WebStructureText.of(it, 256, policy)) })
                 }.let(::JsonObject))
@@ -222,7 +223,7 @@ internal class WebProgramStructurePages(
             header(index).apply {
                 if (!index.available) { put("entity", JsonNull); return@apply }
                 val table = index.table(kind)
-                val row = table.index[selector]?.takeIf { addressable(selector) } ?: throw WebAccessDenied(404,
+                val row = table.index[selector]?.takeIf { selectable(selector, policy) } ?: throw WebAccessDenied(404,
                     "ENTITY_NOT_FOUND", "The requested ${kind.wire} is not recorded in this revision's program model.")
                 val fields = records.entity(checkNotNull(index.model), WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES,
                     table.offsets[row], policy)
@@ -267,7 +268,9 @@ internal class WebProgramStructurePages(
                 put("relationships", relationships(index, view, graphOutcome))
                 if (graphOutcome.state != "available") { put("neighborhood", JsonNull); return@apply }
                 val graph = if (view == "calls") index.callGraph else index.moduleGraph
-                val start = if (view == "calls") index.table(WebStructureKind.FUNCTION).index[focus] else index.moduleIndex[focus]
+                // A focus this policy would not publish as its own selector is never offered, so it is not recorded here either.
+                val start = if (!selectable(focus, policy)) null
+                    else if (view == "calls") index.table(WebStructureKind.FUNCTION).index[focus] else index.moduleIndex[focus]
                 if (start == null) throw WebAccessDenied(404, if (view == "calls") "ENTITY_NOT_FOUND" else "MODULE_NOT_FOUND",
                     "The requested focus is not recorded in this revision's ${if (view == "calls") "program model" else "module plan"}.")
                 val result = WebGraphNeighborhood.of(graph, start, depth, direction != "incoming", direction != "outgoing",
@@ -298,7 +301,7 @@ internal class WebProgramStructurePages(
             when {
                 view == "modules" -> {
                     val module = index.modules[node]
-                    put("kind", "module"); put("moduleId", module.id); put("selector", module.id.takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
+                    put("kind", "module"); put("moduleId", publicModuleId(module.id, policy)); put("selector", moduleSelector(module.id, policy))
                     put("functionCount", module.functionIds.size); put("implementationDeclaration", module.implementationDeclaration)
                     put("inDependencyCycle", module.cycle.isNotEmpty()); put("unattributedReferences", graph.unattributed[node])
                     put("implementationPath", module.sourcePath)
@@ -360,11 +363,15 @@ internal class WebProgramStructurePages(
     }
 
     /** The exact committed bytes of one structure record, for download next to the view that cites its digest. */
-    class RecordDownload(val name: String, val sha256: String, val bytes: ByteArray)
+    /**
+     * One committed record to deliver: its attempt, its path below that attempt's report root, the digest its
+     * manifest commits and the reader's byte ceiling. Delivery streams and re-verifies the bytes; none are held here.
+     */
+    class RecordDownload(val name: String, val runId: String, val path: String, val sha256: String, val maximumBytes: Long)
 
     /**
-     * One manifest-committed record of the revision (program model, module plan or confidence report), digest-checked
-     * and pinned to the structure version the browser displayed, so the download is the record that was cited.
+     * One manifest-committed record of the revision (program model, module plan or confidence report), resolved under
+     * the structure version the browser displayed, so the download is the record that was cited.
      */
     fun record(jobId: String, runId: String, revisionId: String, recordId: String, rawQuery: String?): RecordDownload {
         val query = parse(rawQuery, emptySet(), paged = false)
@@ -372,7 +379,7 @@ internal class WebProgramStructurePages(
         if (recordId !in setOf("program-model", "module-plan", "confidence")) throw WebAccessDenied(404, "RECORD_NOT_FOUND",
             "The requested structure record is not one this revision view cites.")
         var download: RecordDownload? = null
-        read(jobId, runId, revisionId) { index, records ->
+        read(jobId, runId, revisionId) { index, _ ->
             pinned(index, query)
             val (record, maximum) = when (recordId) {
                 "program-model" -> index.model to WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES
@@ -380,7 +387,8 @@ internal class WebProgramStructurePages(
                 else -> index.confidenceFile?.let { WebStructureRecord(it.path, it.sha256, -1) } to WebConfidenceRecord.MAXIMUM_BYTES
             }
             if (record == null) throw WebAccessDenied(404, "RECORD_NOT_RECORDED", "This revision's manifest does not commit the requested record.")
-            download = RecordDownload(record.path.substringAfterLast('/'), record.sha256, records.read(record, maximum))
+            download = RecordDownload(record.path.substringAfterLast('/'), index.reference.runId, "source-tree/${record.path}",
+                record.sha256, maximum.toLong())
             JsonObject(emptyMap())
         }
         return checkNotNull(download)
@@ -410,7 +418,7 @@ internal class WebProgramStructurePages(
                 val confidence = checkNotNull(card.confidence)
                 val rows = sortedModules(card, sort, order)
                 val start = if (rows.isEmpty()) { if (query.cursor != null) invalidCursor(); 0 } else offset(owner, route, index, query, rows.size)
-                val items = rows.subList(start, minOf(rows.size, start + query.limit)).map { moduleScore(index, it) }
+                val items = rows.subList(start, minOf(rows.size, start + query.limit)).map { moduleScore(index, it, policy) }
                 put("scorecard", buildJsonObject {
                     put("interpretation", buildJsonObject {
                         put("kind", confidence.interpretationKind); put("schemaVersion", confidence.interpretationSchema)
@@ -436,9 +444,11 @@ internal class WebProgramStructurePages(
 
     /**
      * Two revisions' scorecards side by side. Deltas are exact differences of recorded values and are computed
-     * only when every blocking report, schema and scope identity matches; otherwise they are withheld.
+     * only when every report, schema and scope identity matches, including the entity population and the module
+     * plan; otherwise they are withheld. A comparison whose identities the policy would rewrite is refused.
      */
-    fun comparison(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
+    fun comparison(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?,
+        policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, setOf("baselineRunId", "baselineRevisionId"))
         val baselineRun = query.fields["baselineRunId"]?.takeIf(::addressable) ?: invalidFilter()
         val baselineRevision = query.fields["baselineRevisionId"]?.takeIf(::addressable) ?: invalidFilter()
@@ -451,6 +461,11 @@ internal class WebProgramStructurePages(
             pinned(index, query)
             val card = WebStructureScorecard.of(index, records)
             val checks = compatibility(index, card, baseIndex, baseCard)
+            // The reader verifies each check by its displayed values; a rewritten value could contradict its state.
+            if (checks.any { check -> listOfNotNull(check.current, check.baseline).any { policy.text(it.text) != it.text } }) {
+                throw WebAccessDenied(409, "COMPARISON_IDENTITY_WITHHELD",
+                    "A recorded identity of this comparison is withheld from this listener, so these attempts are not compared here.")
+            }
             val state = when {
                 !card.available || !baseCard.available -> "unavailable"
                 checks.any { it.blocking && it.state != "match" } -> "incompatible"
@@ -471,7 +486,8 @@ internal class WebProgramStructurePages(
                     put("state", state)
                     put("checks", JsonArray(checks.map { check -> buildJsonObject {
                         put("id", check.id); put("state", check.state); put("blocking", check.blocking)
-                        put("current", check.current?.let(::JsonPrimitive) ?: JsonNull); put("baseline", check.baseline?.let(::JsonPrimitive) ?: JsonNull)
+                        put("current", check.current?.let { JsonPrimitive(it.text) } ?: JsonNull)
+                        put("baseline", check.baseline?.let { JsonPrimitive(it.text) } ?: JsonNull)
                     } }))
                 })
                 put("metrics", JsonArray(if (!card.available || !baseCard.available) emptyList() else card.metrics.map { metric ->
@@ -486,7 +502,7 @@ internal class WebProgramStructurePages(
                     put("items", JsonArray(ids.subList(start, minOf(ids.size, start + query.limit)).map { id ->
                         val now = current[id]?.metric; val then = previous[id]?.metric
                         buildJsonObject {
-                            put("moduleId", id); put("selector", id.takeIf { addressable(it) && it in index.moduleIndex }?.let(::JsonPrimitive) ?: JsonNull)
+                            put("moduleId", publicModuleId(id, policy)); put("selector", if (id in index.moduleIndex) moduleSelector(id, policy) else JsonNull)
                             put("presence", when { now != null && then != null -> "both"; now != null -> "current-only"; else -> "baseline-only" })
                             put("current", now?.let(::measure) ?: JsonNull); put("baseline", then?.let(::measure) ?: JsonNull)
                             put("delta", if (now != null && then != null) delta(now, then, withheld)
@@ -500,27 +516,44 @@ internal class WebProgramStructurePages(
         }
     }
 
-    private class Check(val id: String, val blocking: Boolean, val current: String?, val baseline: String?,
-        private val matches: Boolean = current == baseline) {
-        val state: String get() = if (current == null || baseline == null) "not-recorded" else if (matches) "match" else "differs"
+    /** A recorded identity: compared by its typed [value], shown as [text], which renders that value unambiguously. */
+    private class Identity(val value: Any, val text: String)
+
+    private class Check(val id: String, val current: Identity?, val baseline: Identity?) {
+        // Every identity blocks deltas, including the scope: a changed entity population or module membership makes
+        // module and project measures incomparable.
+        val blocking: Boolean get() = true
+        val state: String get() = if (current == null || baseline == null) "not-recorded"
+            else if (current.value == baseline.value) "match" else "differs"
     }
 
     private fun compatibility(index: WebProgramStructureIndex, card: WebStructureScorecard,
         baseIndex: WebProgramStructureIndex, baseCard: WebStructureScorecard): List<Check> {
-        fun interpretation(card: WebStructureScorecard) = card.confidence?.let { "${it.interpretationKind}/v${it.interpretationSchema}/${it.calibrationStatus}" }
-        fun population(index: WebProgramStructureIndex) = if (!index.available) null else index.tables.joinToString("/") { "${it.size} ${it.kind.route}" }
-        fun plan(index: WebProgramStructureIndex) = index.plan?.takeIf { index.planOutcome.state == "available" }?.sha256
+        fun text(value: String) = Identity(value, value)
+        // The reader admits only its closed interpretation vocabulary, so the joined terms cannot be ambiguous.
+        fun interpretation(card: WebStructureScorecard) = card.confidence?.let {
+            Identity(Triple(it.interpretationKind, it.interpretationSchema, it.calibrationStatus),
+                "${it.interpretationKind}/v${it.interpretationSchema}/${it.calibrationStatus}")
+        }
+        // The profile digest has a fixed width, so the text parses back from its right end.
+        fun profile(index: WebProgramStructureIndex) = Identity(index.profileId to index.profileSha256, "${index.profileId}@${index.profileSha256}")
+        // Counts alone do not identify a population; the digest of the recorded identities does.
+        fun population(index: WebProgramStructureIndex) = if (!index.available) null else index.populationDigest().let { digest ->
+            Identity(digest, index.tables.joinToString("/") { "${it.size} ${it.kind.route}" } + " sha256:$digest")
+        }
+        fun plan(index: WebProgramStructureIndex) = index.plan?.takeIf { index.planOutcome.state == "available" }?.sha256?.let(::text)
+        fun confidence(card: WebStructureScorecard) = card.confidence?.let { Identity(2L, "2") }
+        fun formula(card: WebStructureScorecard) = card.confidence?.let { text(decompengine.project.StructuralRecoveryScore.FORMULA) }
+        fun model(index: WebProgramStructureIndex) = index.modelSchemaVersion?.let { Identity(it, it.toString()) }
         return listOf(
-            Check("input-binary", true, index.inputSha256, baseIndex.inputSha256),
-            Check("reconstruction-profile", true, "${index.profileId}@${index.profileSha256}", "${baseIndex.profileId}@${baseIndex.profileSha256}"),
-            Check("confidence-schema", true, card.confidence?.let { "2" }, baseCard.confidence?.let { "2" }),
-            Check("score-interpretation", true, interpretation(card), interpretation(baseCard)),
-            Check("score-formula", true, card.confidence?.let { decompengine.project.StructuralRecoveryScore.FORMULA },
-                baseCard.confidence?.let { decompengine.project.StructuralRecoveryScore.FORMULA }),
-            Check("model-schema", true, index.modelSchemaVersion?.toString(), baseIndex.modelSchemaVersion?.toString()),
-            Check("entity-population", false, population(index), population(baseIndex),
-                index.available && baseIndex.available && index.tables.all { it.samePopulation(baseIndex.table(it.kind)) }),
-            Check("module-plan", false, plan(index), plan(baseIndex)),
+            Check("input-binary", text(index.inputSha256), text(baseIndex.inputSha256)),
+            Check("reconstruction-profile", profile(index), profile(baseIndex)),
+            Check("confidence-schema", confidence(card), confidence(baseCard)),
+            Check("score-interpretation", interpretation(card), interpretation(baseCard)),
+            Check("score-formula", formula(card), formula(baseCard)),
+            Check("model-schema", model(index), model(baseIndex)),
+            Check("entity-population", population(index), population(baseIndex)),
+            Check("module-plan", plan(index), plan(baseIndex)),
         )
     }
 
@@ -601,8 +634,8 @@ internal class WebProgramStructurePages(
         }
     }
 
-    private fun moduleScore(index: WebProgramStructureIndex, module: WebScorecardModule): JsonObject = buildJsonObject {
-        put("moduleId", module.moduleId); put("selector", module.moduleId.takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
+    private fun moduleScore(index: WebProgramStructureIndex, module: WebScorecardModule, policy: WebRedactionPolicy): JsonObject = buildJsonObject {
+        put("moduleId", publicModuleId(module.moduleId, policy)); put("selector", moduleSelector(module.moduleId, policy))
         put("implementationDeclaration", index.modules[module.row].implementationDeclaration)
         put("metric", module.metric.json())
     }
@@ -652,7 +685,7 @@ internal class WebProgramStructurePages(
 
     private fun reference(table: WebStructureTable, row: Int, policy: WebRedactionPolicy): JsonObject = buildJsonObject {
         put("kind", table.kind.wire); put("entityId", publicEntityId(table.kind, table.ids[row], policy))
-        put("selector", table.ids[row].takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
+        put("selector", entitySelector(table.ids[row], policy))
         put("name", publicName(table.names[row], policy)); put("resolution", "recorded")
     }
 
@@ -680,16 +713,37 @@ internal class WebProgramStructurePages(
         put("total", values.size); put("items", JsonArray(values.take(limit).map(render)))
     }
 
+    /**
+     * The public identity of one recorded entity, shared by every view and link. An addressable ID that the listener
+     * policy publishes unchanged in an identity field is its own selector. Any other ID becomes a stable alias with no
+     * selector, so the final redaction pass never rewrites one field of a record while a related field keeps its bytes.
+     */
     private fun publicEntityId(kind: WebStructureKind, id: String, policy: WebRedactionPolicy): String {
-        if (addressable(id)) return id
+        if (addressable(id)) { if (policy.preservesOpaque(id)) return id }
         // Reserve the emitted format so a recorded ID cannot impersonate another row's alias.
-        if (!PUBLIC_ID_ALIAS.matches(id) && !policy.leaks(id)) return id
-        // ':' is outside the selector grammar. Hash the original UTF-16 code units so even
-        // distinct unpaired surrogates accepted by the model reader keep distinct identities.
+        else if (!PUBLIC_ID_ALIAS.matches(id) && !policy.leaks(id)) return id
+        // ':' is outside the selector grammar.
+        return "${kind.wire}:${identityDigest(id)}"
+    }
+
+    private fun entitySelector(id: String, policy: WebRedactionPolicy): JsonElement =
+        id.takeIf { selectable(it, policy) }?.let(::JsonPrimitive) ?: JsonNull
+
+    /** Module IDs follow the same rule. Their alias keeps the module-ID wire grammar and is never a selector. */
+    private fun publicModuleId(id: String, policy: WebRedactionPolicy): String =
+        if (!MODULE_ALIAS.matches(id) && policy.preservesOpaque(id)) id else "_withheld.${identityDigest(id)}"
+
+    private fun moduleSelector(id: String, policy: WebRedactionPolicy): JsonElement =
+        id.takeIf { selectable(it, policy) }?.let(::JsonPrimitive) ?: JsonNull
+
+    /** A request may select only an identity that this policy publishes as its own selector. */
+    private fun selectable(selector: String, policy: WebRedactionPolicy): Boolean = addressable(selector) && policy.preservesOpaque(selector)
+
+    /** Hash the original UTF-16 code units, so even distinct unpaired surrogates keep distinct aliases. */
+    private fun identityDigest(id: String): String {
         val bytes = ByteBuffer.allocate(id.length * Char.SIZE_BYTES)
         for (character in id) bytes.putChar(character)
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes.array())
-        return "${kind.wire}:${HexFormat.of().formatHex(digest)}"
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes.array()))
     }
 
     private fun publicName(value: String?, policy: WebRedactionPolicy): JsonElement {
@@ -704,7 +758,7 @@ internal class WebProgramStructurePages(
     private fun entityItem(index: WebProgramStructureIndex, table: WebStructureTable, row: Int,
         policy: WebRedactionPolicy): JsonObject = buildJsonObject {
         put("kind", table.kind.wire); put("entityId", publicEntityId(table.kind, table.ids[row], policy))
-        put("selector", table.ids[row].takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
+        put("selector", entitySelector(table.ids[row], policy))
         put("recorded", true)
         put("name", publicName(table.names[row], policy))
         put("address", table.address(row)?.let(::JsonPrimitive) ?: JsonNull)
@@ -712,8 +766,8 @@ internal class WebProgramStructurePages(
         put("evidenceState", table.evidence(row).wire)
         put("ownership", table.ownership(row))
         val module = table.owners[row].takeIf { it >= 0 }?.let { index.modules[it].id }
-        put("moduleId", module?.let(::JsonPrimitive) ?: JsonNull)
-        put("moduleSelector", module?.takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
+        put("moduleId", module?.let { JsonPrimitive(publicModuleId(it, policy)) } ?: JsonNull)
+        put("moduleSelector", module?.let { moduleSelector(it, policy) } ?: JsonNull)
         put("implementationUnresolved", table.implementationUnresolved[row])
         put("reportedUnresolved", table.recoveryUnresolved[row])
         put("nameCollision", table.names[row]?.let { it in index.collisions } == true)
@@ -722,13 +776,13 @@ internal class WebProgramStructurePages(
         }
     }
 
-    private fun moduleItem(index: WebProgramStructureIndex, row: Int): JsonObject {
+    private fun moduleItem(index: WebProgramStructureIndex, row: Int, policy: WebRedactionPolicy): JsonObject {
         val module = index.modules[row]
         val functions = index.table(WebStructureKind.FUNCTION)
         val counts = IntArray(WebEvidenceState.entries.size)
         for (id in module.functionIds) functions.index[id]?.let { counts[functions.evidence(it).ordinal]++ }
         return buildJsonObject {
-            put("moduleId", module.id); put("selector", module.id.takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
+            put("moduleId", publicModuleId(module.id, policy)); put("selector", moduleSelector(module.id, policy))
             put("functionCount", module.functionIds.size); put("globalCount", module.globalIds.size); put("typeCount", module.typeIds.size)
             put("implementationDeclaration", module.implementationDeclaration)
             put("inDependencyCycle", module.cycle.isNotEmpty())
@@ -823,6 +877,7 @@ internal class WebProgramStructurePages(
         private const val MAXIMUM_PUBLIC_NAME_CHARACTERS = 4_096
         private const val MAXIMUM_PUBLIC_SEARCH_CHARACTERS = 256
         private val PUBLIC_ID_ALIAS = Regex("(?:function|global|type):[0-9a-f]{64}")
+        private val MODULE_ALIAS = Regex("_withheld\\.[0-9a-f]{64}")
         private val SELECTOR = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
         /** Only identifiers that match the URL selector grammar are addressable; others remain listed without a link. */
         fun addressable(value: String): Boolean = SELECTOR.matches(value)

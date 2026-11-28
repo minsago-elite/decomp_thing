@@ -156,14 +156,14 @@
         {
           "id": "entity-population",
           "state": "match",
-          "blocking": false,
-          "current": "4 functions/0 globals/0 types",
-          "baseline": "4 functions/0 globals/0 types"
+          "blocking": true,
+          "current": "4 functions/0 globals/0 types sha256:ab005cacffe057fe3c520807f7701cb33ad728814d2b961c9e6fde8b67cb4ca0",
+          "baseline": "4 functions/0 globals/0 types sha256:ab005cacffe057fe3c520807f7701cb33ad728814d2b961c9e6fde8b67cb4ca0"
         },
         {
           "id": "module-plan",
           "state": "match",
-          "blocking": false,
+          "blocking": true,
           "current": "b055a06f81aea8ef49b85b1c02f40784ca817d6cb1823b10ee3677f07c2a06c8",
           "baseline": "b055a06f81aea8ef49b85b1c02f40784ca817d6cb1823b10ee3677f07c2a06c8"
         }

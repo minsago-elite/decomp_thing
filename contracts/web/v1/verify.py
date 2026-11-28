@@ -637,8 +637,10 @@ def check_scorecard(data: dict) -> None:
         raise ValueError("scorecard module rows are counted exactly when the plan is available")
 
 
+# Every identity blocks deltas, including the scope: the entity population and the module plan.
 BLOCKING_COMPARISON_CHECKS = frozenset(("input-binary", "reconstruction-profile", "confidence-schema",
-                                        "score-interpretation", "score-formula", "model-schema"))
+                                        "score-interpretation", "score-formula", "model-schema",
+                                        "entity-population", "module-plan"))
 
 
 def exact_difference(current: str, baseline: str) -> str:
@@ -694,7 +696,7 @@ def check_comparison_side(side: dict, values: dict) -> None:
         raise ValueError("the confidence-schema check must state each side's confidence record schema")
     if any((values.get(key) is not None) != available for key in ("score-interpretation", "score-formula")):
         raise ValueError("score identities are recorded exactly when a side's scorecard is available")
-    if "module-plan" in values and values["module-plan"] != (side["plan"]["sha256"] if side["plan"]["state"] == "available" else None):
+    if values.get("module-plan") != (side["plan"]["sha256"] if side["plan"]["state"] == "available" else None):
         raise ValueError("the module-plan check must state each side's available plan record")
 
 
@@ -710,7 +712,8 @@ def check_comparison_identities(data: dict) -> None:
         recorded = check["current"] is not None and check["baseline"] is not None
         if (check["state"] == "not-recorded") == recorded:
             raise ValueError("an identity check is not recorded exactly when a side records no value")
-        if check["id"] != "entity-population" and recorded and (check["state"] == "match") != (check["current"] == check["baseline"]):
+        # Each value renders its identity unambiguously (the population names its digest), so equal text is a match.
+        if recorded and (check["state"] == "match") != (check["current"] == check["baseline"]):
             raise ValueError("an identity check matches exactly when its recorded values are equal")
     for side in ("current", "baseline"):
         check_comparison_side(data[side], {check["id"]: check[side] for check in checks})

@@ -42,6 +42,10 @@ internal class WebConfidenceRecord(
             "semanticPlanningBudgetEvidence", "sourceGenerationBudgetEvidence")
         private val OPTIONAL = setOf("semanticPlanningBudgetEvidence", "sourceGenerationBudgetEvidence")
         private val DECIMAL = Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?")
+        /** The structural-recovery interpretation the producer records (HeuristicScoreInterpretation.STRUCTURAL_RECOVERY). */
+        private val INTERPRETATION_KINDS = setOf("structural-recovery")
+        private val INTERPRETATION_SCHEMAS = setOf(1L)
+        private val CALIBRATION_STATUSES = setOf("uncalibrated")
 
         /** Parse outcome with the structure state vocabulary; only `available` carries a record. */
         fun parse(bytes: ByteArray): WebStructureParse<WebConfidenceRecord> = try {
@@ -121,8 +125,15 @@ internal class WebConfidenceRecord(
             if (scoring.keys != setOf("schemaVersion", "kind", "calibrationStatus", "calibratedProbability",
                     "calibrationArtifactSha256", "empiricalSampleCount")) malformed()
             if (recorded.keys != setOf("schemaVersion", "state", "modelSchemaVersion", "modelSha256") || assessed < 0 || unassessed < 0) malformed()
-            WebConfidenceRecord(checkNotNull(basis), checkNotNull(meaning), scoring["kind"] ?: malformed(),
-                scoring["schemaVersion"]?.toLongOrNull() ?: malformed(), scoring["calibrationStatus"] ?: malformed(),
+            val kind = scoring["kind"] ?: malformed()
+            val interpretationSchema = scoring["schemaVersion"]?.toLongOrNull() ?: malformed()
+            val calibration = scoring["calibrationStatus"] ?: malformed()
+            // Comparisons and the browser key the interpretation by these terms, so only the closed vocabulary this
+            // reader understands is admitted; any other recorded interpretation is unsupported, never shown or compared.
+            if (kind !in INTERPRETATION_KINDS || interpretationSchema !in INTERPRETATION_SCHEMAS || calibration !in CALIBRATION_STATUSES) {
+                throw WebProgramStructureBuilder.WebStructureFailure("unsupported", "CONFIDENCE_INTERPRETATION_UNSUPPORTED")
+            }
+            WebConfidenceRecord(checkNotNull(basis), checkNotNull(meaning), kind, interpretationSchema, calibration,
                 scoring["calibratedProbability"], scoring["empiricalSampleCount"], recorded["state"] ?: malformed(),
                 recorded["modelSchemaVersion"]?.toLongOrNull() ?: malformed(),
                 recorded["modelSha256"]?.takeIf { it.matches(Regex("[a-f0-9]{64}")) } ?: malformed(),
@@ -223,14 +234,29 @@ internal class WebStructureScorecard(
 ) {
     val available: Boolean get() = outcome.state == "available"
 
+    /** Conservative retained size, charged to the structure cache when the scorecard is kept with its projection. */
+    val retainedBytes: Long = run {
+        fun text(value: String?) = if (value == null) 0L else 56L + 2L * value.length
+        fun metric(item: WebScorecardMetric) = 96L + listOf(item.id, item.unit, item.state, item.reason, item.value, item.recomputed,
+            item.numerator, item.record, item.field, item.formula).sumOf(::text)
+        var bytes = 256L + metrics.sumOf(::metric) + modules.sumOf { 48L + text(it.moduleId) + metric(it.metric) }
+        // JSON trees hold a node per value; sixteen bytes per serialized character bounds their fields and maps.
+        bytes += labels.sumOf { 16L * it.toString().length } + 16L * (reconciliation?.toString()?.length ?: 0)
+        confidence?.let { record ->
+            bytes += 256L + listOf(record.basis, record.scoreMeaning, record.interpretationKind, record.calibrationStatus,
+                record.calibratedProbability, record.empiricalSampleCount, record.assessmentState, record.assessmentModelSha256,
+                record.projectScore).sumOf(::text) + record.modules.entries.sumOf { 64L + text(it.key) + text(it.value) }
+        }
+        bytes
+    }
+
     companion object {
         private val STATUS = mapOf(WebExtractionStatus.RECOVERED to RecoveryStatus.RECOVERED, WebExtractionStatus.PARTIAL to RecoveryStatus.PARTIAL,
             WebExtractionStatus.SYNTHETIC to RecoveryStatus.SYNTHETIC, WebExtractionStatus.FAILED to RecoveryStatus.FAILED)
 
-        fun of(index: WebProgramStructureIndex, records: WebStructureRecordReader): WebStructureScorecard {
-            index.scorecard?.let { return it }
-            return build(index, records).also { index.scorecard = it }
-        }
+        /** The projection's scorecard, kept with it only as far as the structure cache charges its bytes. */
+        fun of(index: WebProgramStructureIndex, records: WebStructureRecordReader): WebStructureScorecard =
+            index.derived("scorecard", WebStructureScorecard::retainedBytes) { build(index, records) }
 
         private fun unavailable(outcome: WebStructureOutcome, record: WebStructureRecord? = null) =
             WebStructureScorecard(outcome, record, null, emptyList(), emptyList(), emptyList(), null, 0)

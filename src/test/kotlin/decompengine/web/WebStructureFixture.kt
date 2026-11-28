@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
  * no store, listener, compiler or browser is opened. Each revision commits a program model, a module plan and,
  * unless omitted, a confidence record rendered like the producer's schema-2 record.
  */
-internal class WebStructureFixture {
+internal class WebStructureFixture(val cache: WebProgramStructureCache = WebProgramStructureCache(capacity = 2)) {
     val jobId = "a".repeat(32)
     val profile = GeneratedCMakeReconstructionProfile.descriptor
     private val inputBytes = "input".toByteArray()
@@ -34,7 +34,6 @@ internal class WebStructureFixture {
         if (file.bytes.size > maximum) throw RepairBudgetExceededException("fixture exceeds $maximum")
         file
     }
-    val cache = WebProgramStructureCache(capacity = 2)
     val pages = WebProgramStructurePages { job, run, revision, project ->
         val reference = references[run to revision] ?: throw WebAccessDenied(404, "REVISION_NOT_FOUND", "No such revision.")
         check(job == jobId)

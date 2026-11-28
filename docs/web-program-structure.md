@@ -230,14 +230,38 @@ The browser shows the measures, label components, reconciliation, a page of modu
 scores as a supplementary bar chart followed by the same values in a table, and a
 download of the exact confidence record (`GET R/records/confidence?structureVersion=`).
 
+Record downloads hold the job's delivery lease and the shared download admission (four
+reads in all, two per session) for the whole response. A first pinned pass reproduces the
+manifest-committed digest before any header is sent; the second pass streams through a
+held-back final chunk that is released only after that pass reproduces the digest too, so
+memory stays at one read chunk and a record that changes mid-response is closed short of
+its declared length.
+
+Recorded identities share one public projection under the listener's redaction policy. An
+addressable entity or module ID that the policy publishes unchanged in an identity field
+is its own selector, in inventories, details, neighborhoods (including the echoed
+`focus`), scorecard rows and comparisons. Any other ID becomes a stable alias with no
+selector: `function:`, `global:` or `type:` plus a SHA-256 for entities, and
+`_withheld.` plus a SHA-256 for modules, which keeps the module-ID grammar. A request that
+selects such an ID, as a path selector, a neighborhood focus or a module filter, finds no
+record.
+
 ## Comparing attempts
 
 Issue #542 (tracker #186). `GET R/scorecard-comparison?baselineRunId=&baselineRevisionId=`
 → `scorecardComparison` reads the baseline attempt's scorecard, then the current one,
 each through its own capture. Identity checks: input binary, reconstruction profile,
-confidence schema, score interpretation, formula and model schema block deltas when they
-differ or are not recorded; entity population and module plan digest are reported but
-do not block. A compatible comparison gives exact decimal differences of recorded values
+confidence schema, score interpretation, formula, model schema, entity population and
+module plan. Every check blocks deltas when it differs or is not recorded: a changed
+population or module membership makes module and project measures incomparable, and a
+side without a module plan has no module scope to compare. Checks compare typed values
+and show unambiguous text: the interpretation admits only the vocabulary this reader
+understands (`structural-recovery`, version 1, `uncalibrated`; any other recorded
+interpretation makes the scorecard `unsupported`, `CONFIDENCE_INTERPRETATION_UNSUPPORTED`),
+and the population names the SHA-256 of each kind's sorted, length-prefixed identities as
+well as its counts. A comparison whose displayed identities the listener's redaction
+policy would rewrite is refused (`409 COMPARISON_IDENTITY_WITHHELD`), because a rewritten
+value could contradict its check state. A compatible comparison gives exact decimal differences of recorded values
 (and of numerators and denominators) only where both sides are `measured`; otherwise the
 delta is `not-comparable` with the side's state. An incompatible baseline withholds every
 delta, and an unavailable scorecard on either side compares nothing. Module rows cover

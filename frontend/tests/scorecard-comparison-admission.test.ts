@@ -47,10 +47,17 @@ it('admits the producer comparisons: compatible, incompatible, a different input
   const different = unavailable('baseline');
   Object.assign(check(different, 'input-binary'), { state: 'differs', baseline: other });
   expect(decode(different).data.compatibility.state).toBe('unavailable');
-  // The two advisory checks are not required, so a reader admits a reply that omits them.
-  const advisory = load('scorecard-comparison');
-  advisory.data.compatibility.checks = advisory.data.compatibility.checks.filter(item => item.blocking);
-  expect(decode(advisory).data.compatibility.state).toBe('compatible');
+  // A replanned baseline changes the module scope, so every delta is withheld.
+  const replanned = decode(load('scorecard-comparison-replanned-baseline')).data;
+  expect(replanned.compatibility.state).toBe('incompatible');
+  expect([...replanned.metrics, ...replanned.modules.items].every(row => row.delta.state !== 'computed')).toBe(true);
+});
+
+it('refuses deltas across a changed scope: a replanned baseline claimed compatible, or a different population', () => {
+  expect(() => decode(load('invalid-scorecard-comparison-replanned-baseline-delta'))).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+  const population = load('scorecard-comparison');
+  Object.assign(check(population, 'entity-population'), { state: 'differs', baseline: `4 functions/0 globals/0 types sha256:${other}` });
+  expect(() => decode(population)).toThrow(expect.objectContaining({ code: 'invalid_response' }));
 });
 
 it.each<[string, (document: Envelope) => void]>([
@@ -58,7 +65,8 @@ it.each<[string, (document: Envelope) => void]>([
     document.data.compatibility.checks = document.data.compatibility.checks.filter(item => item.id !== 'input-binary');
     document.data.baseline.scope!.inputSha256 = other;
   }],
-  ...(['input-binary', 'reconstruction-profile', 'confidence-schema', 'score-interpretation', 'score-formula', 'model-schema'] as const)
+  ...(['input-binary', 'reconstruction-profile', 'confidence-schema', 'score-interpretation', 'score-formula', 'model-schema',
+    'entity-population', 'module-plan'] as const)
     .flatMap(id => [
       [`omits the ${id} check`, (document: Envelope) => {
         document.data.compatibility.checks = document.data.compatibility.checks.filter(item => item.id !== id);
@@ -67,8 +75,6 @@ it.each<[string, (document: Envelope) => void]>([
       [`repeats the ${id} check`, (document: Envelope) => { document.data.compatibility.checks.push({ ...check(document, id) }); }] as [string, (document: Envelope) => void],
       [`claims the ${id} check matches different values`, (document: Envelope) => { check(document, id).baseline = 'other'; }] as [string, (document: Envelope) => void],
     ]),
-  ['marks an advisory check blocking', document => { check(document, 'module-plan').blocking = true; }],
-  ['repeats an advisory check', document => { document.data.compatibility.checks.push({ ...check(document, 'entity-population') }); }],
   ['binds the baseline scope to another input', document => { document.data.baseline.scope!.inputSha256 = other; }],
   ['binds the current scope to another input', document => { document.data.current.scope!.inputSha256 = other; }],
   ['changes both scope inputs together', document => {

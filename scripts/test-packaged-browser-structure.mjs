@@ -6,7 +6,7 @@ import { appendStructureFeedbackSample, assertStructureQualification, assertStru
   classifyFailedInventoryRequests, createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets,
   isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordBrowserHeapSample, recordJvmRssSample,
   startBrowserHeapSampler, structureFeedbackInstrumentation, summarizeBrowserHeap, summarizeJvmRss } from './packaged-browser-structure.mjs';
-import { moduleBodyObserver, qualifyStructureBudgets, qualifyStructureColdSample, structureColdSampleFailure, structureFailureEvidence } from './packaged-browser-structure.mjs';
+import { downloadsThenVerdict, moduleBodyObserver, qualifyStructureBudgets, qualifyStructureColdSample, structureColdSampleFailure, structureFailureEvidence } from './packaged-browser-structure.mjs';
 import { publishReport } from './packaged-browser-restart.mjs';
 import { TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
 import { spawn } from 'node:child_process';
@@ -1511,4 +1511,30 @@ test('invalid UTF-8 cannot become a valid oracle body through replacement decodi
   } });
   assert.equal(action.validatedConsumption, false);
   assert.ok(action.reasons.includes('body-utf8'));
+});
+
+test('record downloads run before the budget verdict and survive its failure', async () => {
+  const order = [];
+  const downloads = { confidence: { nativeDownload: 'completed' } };
+  const budget = Object.assign(new Error('Structure qualification failed'), { failedChecks: ['first page 801 ms > 500 ms'] });
+  await assert.rejects(downloadsThenVerdict(async () => { order.push('downloads'); return downloads; },
+    () => { order.push('verdict'); throw budget; }), (error) => {
+    assert.equal(error, budget);
+    assert.deepEqual(error.failedChecks, ['first page 801 ms > 500 ms']);
+    assert.equal(error.recordDownloads, downloads);
+    return true;
+  });
+  assert.deepEqual(order, ['downloads', 'verdict']);
+});
+
+test('a download failure keeps the budget verdict primary and is reported when the budgets pass', async () => {
+  const budget = new Error('budget failed');
+  const broken = new Error('native download of Download the program model record ended canceled');
+  await assert.rejects(downloadsThenVerdict(async () => { throw broken; }, () => { throw budget; }), (error) => {
+    assert.equal(error, budget);
+    assert.deepEqual(error.recordDownloads, { status: 'failed', error: broken.message });
+    return true;
+  });
+  await assert.rejects(downloadsThenVerdict(async () => { throw broken; }, () => {}), (error) => error === broken);
+  assert.deepEqual(await downloadsThenVerdict(async () => ({ ok: true }), () => {}), { ok: true });
 });

@@ -103,9 +103,12 @@ function checkMeasure(measure: Measure, unit: string): void {
 
 type Comparison = Extract<ContractDocument, { kind: 'scorecardComparison' }>['data'];
 
-/** The identities that block deltas. Each is compared by exact recorded value; the other checks are advisory. */
+/**
+ * The identities that block deltas, each compared by its exact displayed value. The scope blocks too: a changed entity
+ * population or module plan makes the module and project measures incomparable.
+ */
 const BLOCKING_CHECKS = new Set(['input-binary', 'reconstruction-profile', 'confidence-schema', 'score-interpretation',
-  'score-formula', 'model-schema']);
+  'score-formula', 'model-schema', 'entity-population', 'module-plan']);
 
 /** A recorded decimal as an integer scaled by its fractional digits; the wire pattern admits only plain decimals. */
 function decimal(text: string): { units: bigint; scale: number } {
@@ -146,8 +149,7 @@ function checkSide(side: Side, value: (id: string) => string | null | undefined)
   requireValue(value('model-schema') === (side.model.schemaVersion === null ? null : String(side.model.schemaVersion)));
   requireValue(value('confidence-schema') === (available ? String(side.confidence.schemaVersion) : null));
   for (const id of ['score-interpretation', 'score-formula']) requireValue((value(id) !== null) === available);
-  const plan = value('module-plan');
-  if (plan !== undefined) requireValue(plan === (side.plan.state === 'available' ? side.plan.sha256 : null));
+  requireValue(value('module-plan') === (side.plan.state === 'available' ? side.plan.sha256 : null));
 }
 
 /**
@@ -162,7 +164,7 @@ function checkIdentityChecks(data: Comparison): void {
     requireValue(check.blocking === BLOCKING_CHECKS.has(check.id));
     const recorded = check.current !== null && check.baseline !== null;
     requireValue((check.state === 'not-recorded') === !recorded);
-    if (check.id !== 'entity-population' && recorded) requireValue((check.state === 'match') === (check.current === check.baseline));
+    if (recorded) requireValue((check.state === 'match') === (check.current === check.baseline));
   }
   const find = (id: string) => checks.find(check => check.id === id);
   checkSide(data.current, id => find(id)?.current);

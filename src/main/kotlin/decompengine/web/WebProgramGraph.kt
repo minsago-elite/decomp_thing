@@ -26,6 +26,15 @@ internal class WebProgramGraph private constructor(
 ) {
     val edges: Int get() = edgeTargets.size
 
+    /** Conservative retained size: every array with its header, and each unrecorded identity as a UTF-16 string. */
+    val retainedBytes: Long = run {
+        fun ints(values: IntArray) = 16L + 4L * values.size
+        var bytes = 96L + ints(outOffsets) + ints(edgeSources) + ints(edgeTargets) + ints(edgeReferences) +
+            16L + edgeRelationships.size + ints(inOffsets) + ints(inEdgeList) + ints(unattributed) + 16L + 8L * unrecordedIds.size
+        for (id in unrecordedIds) bytes += 56L + 2L * id.length
+        bytes
+    }
+
     fun outEdges(node: Int): IntRange = outOffsets[node] until outOffsets[node + 1]
     fun outDegree(node: Int): Int = outOffsets[node + 1] - outOffsets[node]
     fun inDegree(node: Int): Int = inOffsets[node + 1] - inOffsets[node]

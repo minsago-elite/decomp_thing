@@ -1701,6 +1701,22 @@
     {
       "file": "fixtures/invalid-artifact-family-role-projection.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/scorecard-comparison-replanned-baseline.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-replanned-baseline-delta.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-advisory-population-check.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-population-differs-with-equal-text.json",
+      "valid": false
     }
   ]
 }

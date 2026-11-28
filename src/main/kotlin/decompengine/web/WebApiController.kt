@@ -77,6 +77,7 @@ internal class WebApiController(
     private val artifactContent = WebArtifactContent(artifactStore)
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val programStructure = WebProgramStructurePages { job, run, revision, project -> jobs.readProgramStructure(job, run, revision, project) }
+    private val structureRecords = WebStructureRecordDelivery(jobs::streamRunArtifact)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock, deleted = { jobId -> jobs.deletedJob(jobId) != null })
@@ -323,7 +324,7 @@ internal class WebApiController(
                     }
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/records/[^/]+")) -> {
-                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
                     if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Structure record downloads do not support Range or conditional headers.")
                     }
@@ -331,21 +332,14 @@ internal class WebApiController(
                         throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
                     }
                     val parts = resource.split('/')
-                    val record = programStructure.record(parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery)
-                    webApiHeaders(exchange, UUID.randomUUID().toString())
-                    exchange.responseHeaders.set("Content-Type", "application/octet-stream")
-                    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"${record.name}\"")
-                    exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
-                    exchange.responseHeaders.set("Content-Length", record.bytes.size.toString())
-                    exchange.responseHeaders.set("X-Decomp-Content-Verification", "committed-digest")
-                    exchange.responseHeaders.set("X-Decomp-Content-SHA256", record.sha256)
-                    try {
-                        if (exchange.requestMethod == "HEAD" || record.bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
-                        else {
-                            exchange.sendResponseHeaders(200, record.bytes.size.toLong())
-                            exchange.responseBody.use { it.write(record.bytes) }
+                    // The job lease and the shared download admission are held until delivery ends, so deletion
+                    // cannot remove a record mid-response and slow clients cannot hold unbounded deliveries.
+                    jobs.downloadLease(parts[1]).use {
+                        artifactDownloads.admit(session.sessionId) {
+                            val record = programStructure.record(parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery)
+                            structureRecords.send(exchange, parts[1], record)
                         }
-                    } finally { exchange.close() }
+                    }
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:graph|scorecard|scorecard-comparison)")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
@@ -355,7 +349,7 @@ internal class WebApiController(
                     val (kind, value) = when (parts[6]) {
                         "graph" -> "structureNeighborhood" to programStructure.neighborhood(parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
                         "scorecard" -> "structureScorecard" to programStructure.scorecard(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
-                        else -> "scorecardComparison" to programStructure.comparison(session.sessionId, parts[1], parts[3], parts[5], query)
+                        else -> "scorecardComparison" to programStructure.comparison(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
                     }
                     sendWebApiResponse(exchange, 200, kind, value)
                 }
@@ -370,7 +364,7 @@ internal class WebApiController(
                     }
                     val (kind, value) = when {
                         parts.size == 7 && parts[6] == "functions" -> "functionInventory" to programStructure.functions(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
-                        parts.size == 7 -> "moduleInventory" to programStructure.modules(session.sessionId, parts[1], parts[3], parts[5], query)
+                        parts.size == 7 -> "moduleInventory" to programStructure.modules(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
                         parts[6] == "modules" -> "moduleDetail" to programStructure.module(session.sessionId, parts[1], parts[3], parts[5], parts[7], query, WebRedactionPolicy.of(exchange))
                         else -> "entityDetail" to programStructure.entity(WebStructureKind.entries.single { it.route == parts[6] },
                             parts[1], parts[3], parts[5], parts[7], query, WebRedactionPolicy.of(exchange))
@@ -756,19 +750,24 @@ private fun applicationBuildId(): String {
 }
 
 /** Bounded in-memory attachment: inert octet stream, encoded filename, and bodyless HEAD. */
-private fun sendWebAttachment(exchange: HttpExchange, bytes: ByteArray, fileName: String, headers: Map<String, String>) {
+private fun sendWebAttachment(exchange: HttpExchange, bytes: ByteArray, fileName: String, headers: Map<String, String>) =
+    sendWebAttachment(exchange, bytes.size.toLong(), fileName, headers) { it.write(bytes) }
+
+/** The shared inert attachment response; [write] supplies exactly [size] body bytes and is skipped for HEAD. */
+internal fun sendWebAttachment(exchange: HttpExchange, size: Long, fileName: String, headers: Map<String, String>,
+    write: (java.io.OutputStream) -> Unit) {
     val name = java.net.URLEncoder.encode(fileName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
     webApiHeaders(exchange, UUID.randomUUID().toString())
     exchange.responseHeaders.set("Content-Type", "application/octet-stream")
     exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"source.bin\"; filename*=UTF-8''$name")
     exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
-    exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+    exchange.responseHeaders.set("Content-Length", size.toString())
     headers.forEach { (key, value) -> exchange.responseHeaders.set(key, value) }
     try {
-        if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
+        if (exchange.requestMethod == "HEAD" || size == 0L) exchange.sendResponseHeaders(200, -1)
         else {
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
+            exchange.sendResponseHeaders(200, size)
+            exchange.responseBody.use { output -> write(output); output.flush() }
         }
     } finally { exchange.close() }
 }

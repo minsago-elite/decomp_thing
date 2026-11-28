@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedStructure, qualifyStructure, structureFailureEvidence } from './packaged-browser-structure.mjs';
-import { qualifyStructureBudgets, qualifyStructureColdSample, structureColdSampleFailure } from './packaged-browser-structure.mjs';
+import { qualifyStructureBudgets, qualifyStructureColdSample, qualifyStructureRecordDownloads, structureColdSampleFailure } from './packaged-browser-structure.mjs';
 import { structureServerTimingSummary, structureProfile, verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 import { resolveBrowserTempParent, createBrowserTemp } from './packaged-browser-temp-parent.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
@@ -1139,6 +1139,12 @@ try {
       ? await qualifyStructureBudgets({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin,
         applicationPid: application.pid, profile: structureBudgetProfile })
       : await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+    // The ordinary journey downloads the cited records as its own packaged step; budgeted journeys do so before
+    // their verdict, so a budget failure never skips this evidence.
+    if (values.mode === 'structure' && !structureQualification) {
+      report.structureRecordDownloads = await qualifyStructureRecordDownloads({ fixture: structureFixture, makeTarget, cdp, evaluate,
+        ready, waitFor, browserOrigin });
+    }
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobLifecycle = await qualifyLifecycle({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
@@ -1364,6 +1370,8 @@ try {
   report.contentSecurityPolicy = cspEvidence();
   recordPrimaryError(report, safeDiagnostic(error.stack));
   if (Array.isArray(error.failedChecks)) report.failedChecks = error.failedChecks;
+  // A budget failure keeps the record downloads that ran before its verdict.
+  if (error?.recordDownloads) report.structureRecordDownloads = error.recordDownloads;
   // Fixed logs phase labels and bounded counts only, captured in memory before the throw (#1872).
   report.logsFailurePhase = logsFailureEvidence(error);
   // Fixed Structure body-read facts only; observations, not a cause (#1879).

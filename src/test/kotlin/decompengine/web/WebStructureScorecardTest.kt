@@ -127,9 +127,13 @@ class WebStructureScorecardTest {
         fixture.revision("run_1", "revision_1", model, plan(), confidence = confidence)
         val version = card().text("structureVersion")
         val record = fixture.pages.record(fixture.jobId, "run_1", "revision_1", "confidence", "structureVersion=$version")
-        assertContentEquals(confidence, record.bytes); assertEquals("confidence.json", record.name); assertEquals(fixture.sha(confidence), record.sha256)
-        assertContentEquals(model.toJson().toByteArray(),
-            fixture.pages.record(fixture.jobId, "run_1", "revision_1", "program-model", "structureVersion=$version").bytes)
+        assertEquals("confidence.json", record.name); assertEquals(fixture.sha(confidence), record.sha256)
+        assertEquals("run_1", record.runId); assertEquals(WebConfidenceRecord.MAXIMUM_BYTES.toLong(), record.maximumBytes)
+        // Delivery streams the attempt artifact at this path and re-verifies it against the committed digest.
+        assertContentEquals(confidence, fixture.files.getValue("reports/runs/run_1/${record.path}").bytes)
+        val modelRecord = fixture.pages.record(fixture.jobId, "run_1", "revision_1", "program-model", "structureVersion=$version")
+        assertContentEquals(model.toJson().toByteArray(), fixture.files.getValue("reports/runs/run_1/${modelRecord.path}").bytes)
+        assertEquals(fixture.sha(model.toJson().toByteArray()), modelRecord.sha256)
         assertEquals("STRUCTURE_CHANGED", assertFailsWith<WebAccessDenied> {
             fixture.pages.record(fixture.jobId, "run_1", "revision_1", "confidence", "structureVersion=${"0".repeat(64)}")
         }.code)
@@ -161,19 +165,19 @@ class WebStructureScorecardTest {
     private fun JsonObject.populationCheck() = getValue("compatibility").jsonObject.getValue("checks").jsonArray
         .single { it.jsonObject.text("id") == "entity-population" }.jsonObject
 
-    @Test fun `replacing an entity with the same kind and count flags a nonblocking population change`() {
+    @Test fun `replacing an entity with the same kind and count is a blocking population change`() {
         val original = model()
         fixture.revision("run_1", "revision_1", original, plan())
         fixture.revision("run_2", "revision_2", original.copy(functions = original.functions.dropLast(1) + function(9)), plan())
         val comparison = compare("run_1", "revision_1")
         val population = comparison.populationCheck()
         assertEquals("differs", population.text("state"))
-        assertEquals(false, population.getValue("blocking").jsonPrimitive.boolean)
-        assertEquals("6 functions/1 globals/0 types", population.text("current"))
-        assertEquals(population.text("current"), population.text("baseline"))
-        assertEquals("compatible", comparison.getValue("compatibility").jsonObject.text("state"))
-        val score = comparison.getValue("metrics").jsonArray.single { it.jsonObject.text("id") == "structural-recovery-score" }
-        assertEquals("computed", score.jsonObject.getValue("delta").jsonObject.text("state"))
+        assertEquals(true, population.getValue("blocking").jsonPrimitive.boolean)
+        // Equal counts, different identities: the text names each population's digest, so it differs too.
+        for (side in listOf("current", "baseline")) assertTrue(population.text(side)!!.matches(Regex("6 functions/1 globals/0 types sha256:[0-9a-f]{64}")))
+        assertNotEquals(population.text("current"), population.text("baseline"))
+        assertEquals("incompatible", comparison.getValue("compatibility").jsonObject.text("state"))
+        assertTrue(comparison.getValue("metrics").jsonArray.all { it.jsonObject.getValue("delta").jsonObject.text("state") == "withheld" })
     }
 
     @Test fun `reordering committed function records preserves the population match`() {
@@ -199,19 +203,21 @@ class WebStructureScorecardTest {
         for (run in listOf(1, 3)) {
             val check = compare("run_$run", "revision_$run").populationCheck()
             assertEquals("not-recorded", check.text("state"))
-            assertEquals(false, check.getValue("blocking").jsonPrimitive.boolean)
-            assertEquals("6 functions/1 globals/0 types", check.text("current"))
+            assertEquals(true, check.getValue("blocking").jsonPrimitive.boolean)
+            assertTrue(check.text("current")!!.startsWith("6 functions/1 globals/0 types sha256:"))
             assertEquals(JsonNull, check.getValue("baseline"))
         }
     }
 
-    @Test fun `compatible attempts compare with exact deltas and module presence`() {
+    private fun JsonObject.checks() = getValue("compatibility").jsonObject.getValue("checks").jsonArray.map { it.jsonObject }.associateBy { it.text("id") }
+
+    @Test fun `compatible attempts compare with exact deltas over the same scope`() {
         fixture.revision("run_1", "revision_1", model(), plan())
         val improved = model(statuses.map { RecoveryStatus.RECOVERED })
-        val grown = ModulePlan(modules = plan().modules.filter { it.id != "empty" } + fixture.planned("late", listOf(id(5))))
-        fixture.revision("run_2", "revision_2", improved, grown, accepted = setOf("core", "edge"))
+        fixture.revision("run_2", "revision_2", improved, plan(), accepted = setOf("core", "edge"))
         val comparison = compare("run_1", "revision_1")
         assertEquals("compatible", comparison.getValue("compatibility").jsonObject.text("state"))
+        assertTrue(comparison.checks().values.all { it.text("state") == "match" && it.getValue("blocking").jsonPrimitive.boolean })
         val metrics = comparison.getValue("metrics").jsonArray.map { it.jsonObject }.associateBy { it.text("id") }
         val score = metrics.getValue("structural-recovery-score").getValue("delta").jsonObject
         assertEquals("computed", score.text("state"))
@@ -221,15 +227,74 @@ class WebStructureScorecardTest {
         assertEquals("not-comparable", metrics.getValue("calibrated-confidence").getValue("delta").jsonObject.text("state"))
         assertEquals("2", metrics.getValue("implementation-acceptance").getValue("delta").jsonObject.text("numerator"))
         val modules = comparison.getValue("modules").jsonObject.getValue("items").jsonArray.map { it.jsonObject }.associateBy { it.text("moduleId") }
-        assertEquals("baseline-only", modules.getValue("empty").text("presence")); assertEquals("current-only", modules.getValue("late").text("presence"))
-        assertEquals("not-comparable", modules.getValue("late").getValue("delta").jsonObject.text("state"))
+        assertTrue(modules.values.all { it.text("presence") == "both" })
         assertEquals("computed", modules.getValue("core").getValue("delta").jsonObject.text("state"))
-        // The plan change is flagged without blocking the comparison.
-        val checks = comparison.getValue("compatibility").jsonObject.getValue("checks").jsonArray.map { it.jsonObject }.associateBy { it.text("id") }
-        assertEquals("differs", checks.getValue("module-plan").text("state")); assertEquals(false, checks.getValue("module-plan").getValue("blocking").jsonPrimitive.boolean)
         for (side in listOf("current", "baseline")) {
             assertEquals(true, comparison.getValue(side).jsonObject.getValue("reconciliation").jsonObject.getValue("reconciles").jsonPrimitive.boolean)
         }
+    }
+
+    @Test fun `a changed module plan is an incompatible scope that withholds every delta`() {
+        fixture.revision("run_1", "revision_1", model(), plan())
+        // The same population, with entity 2 moved out of core and a new module: membership changes, the input does not.
+        val replanned = ModulePlan(modules = listOf(fixture.planned("core", listOf(id(0), id(1)), listOf("global_0000000000500000")),
+            fixture.planned("edge", listOf(id(2), id(3), id(4))), fixture.planned("late", listOf(id(5)))))
+        fixture.revision("run_2", "revision_2", model(statuses.map { RecoveryStatus.RECOVERED }), replanned)
+        val comparison = compare("run_1", "revision_1")
+        val checks = comparison.checks()
+        assertEquals("match", checks.getValue("entity-population").text("state"))
+        assertEquals("differs", checks.getValue("module-plan").text("state"))
+        assertEquals(true, checks.getValue("module-plan").getValue("blocking").jsonPrimitive.boolean)
+        assertEquals("incompatible", comparison.getValue("compatibility").jsonObject.text("state"))
+        assertTrue(comparison.getValue("metrics").jsonArray.all { it.jsonObject.getValue("delta").jsonObject.text("state") == "withheld" })
+        val modules = comparison.getValue("modules").jsonObject.getValue("items").jsonArray.map { it.jsonObject }.associateBy { it.text("moduleId") }
+        assertEquals("baseline-only", modules.getValue("empty").text("presence")); assertEquals("current-only", modules.getValue("late").text("presence"))
+        assertEquals("withheld", modules.getValue("core").getValue("delta").jsonObject.text("state"))
+        assertTrue(modules.values.all { it.getValue("delta").jsonObject.getValue("value") == JsonNull })
+        // A baseline without a module plan has no module scope to compare either.
+        fixture.revision("run_3", "revision_3", model(), null, confidence = fixture.confidence(model(), plan(), emptySet()))
+        val unplanned = compare("run_3", "revision_3")
+        assertEquals("available", unplanned.getValue("baseline").jsonObject.getValue("confidence").jsonObject.text("state"))
+        assertEquals("not-recorded", unplanned.checks().getValue("module-plan").text("state"))
+        assertEquals("incompatible", unplanned.getValue("compatibility").jsonObject.text("state"))
+    }
+
+    /** Confidence bytes for [model] and [plan] with the recorded interpretation terms replaced. */
+    private fun interpretation(kind: String, schema: Int, calibration: String): ByteArray {
+        val recorded = Json.parseToJsonElement(fixture.confidence(model(), plan(), emptySet()).decodeToString()).jsonObject
+        val terms = recorded.getValue("scoreInterpretation").jsonObject + mapOf("kind" to JsonPrimitive(kind),
+            "schemaVersion" to JsonPrimitive(schema), "calibrationStatus" to JsonPrimitive(calibration))
+        return JsonObject(recorded + ("scoreInterpretation" to JsonObject(terms))).toString().toByteArray()
+    }
+
+    @Test fun `interpretations outside the reader vocabulary are unsupported and never compared by joined text`() {
+        // Joined with '/', these two term tuples render the same text: x/v1/v2/y.
+        fixture.revision("run_1", "revision_1", model(), plan(), confidence = interpretation("x/v1", 2, "y"))
+        fixture.revision("run_2", "revision_2", model(), plan(), confidence = interpretation("x", 1, "v2/y"))
+        for (run in listOf(1, 2)) {
+            val confidence = card("run_$run", "revision_$run").getValue("confidence").jsonObject
+            assertEquals("unsupported", confidence.text("state")); assertEquals("CONFIDENCE_INTERPRETATION_UNSUPPORTED", confidence.text("stateReason"))
+        }
+        val comparison = compare("run_1", "revision_1")
+        assertEquals("unavailable", comparison.getValue("compatibility").jsonObject.text("state"))
+        assertTrue(comparison.getValue("metrics").jsonArray.isEmpty())
+        // A long kind outside the vocabulary is refused before it could exceed the wire bound.
+        fixture.revision("run_3", "revision_3", model(), plan(), confidence = interpretation("structural-recovery".repeat(10), 1, "uncalibrated"))
+        assertEquals("unsupported", card("run_3", "revision_3").getValue("confidence").jsonObject.text("state"))
+    }
+
+    @Test fun `a comparison whose identities the listener would rewrite is refused`() {
+        fixture.revision("run_1", "revision_1", model(), plan())
+        val replanned = ModulePlan(modules = plan().modules + fixture.planned("late", listOf(id(5))))
+        fixture.revision("run_2", "revision_2", model(), replanned)
+        val plans = listOf(plan(), replanned).map { fixture.sha(it.toJson().toByteArray()) }
+        // Both plan digests are configured opaque literals: both would display as [redacted] while their check differs.
+        val policy = WebRedactionPolicy.create(emptyMap(), plans, emptyList())
+        assertEquals("COMPARISON_IDENTITY_WITHHELD", assertFailsWith<WebAccessDenied> {
+            fixture.pages.comparison("owner", fixture.jobId, "run_2", "revision_2", "baselineRunId=run_1&baselineRevisionId=revision_1", policy)
+        }.code)
+        // Without the literals the same comparison is stated, as incompatible.
+        assertEquals("incompatible", compare("run_1", "revision_1").getValue("compatibility").jsonObject.text("state"))
     }
 
     @Test fun `incompatible or unavailable baselines withhold every delta`() {

@@ -119,7 +119,7 @@
       "reconciliation": null
     },
     "compatibility": {
-      "state": "compatible",
+      "state": "incompatible",
       "checks": [
         {
           "id": "input-binary",
@@ -166,14 +166,14 @@
         {
           "id": "entity-population",
           "state": "match",
-          "blocking": false,
-          "current": "4 functions/0 globals/0 types",
-          "baseline": "4 functions/0 globals/0 types"
+          "blocking": true,
+          "current": "4 functions/0 globals/0 types sha256:ab005cacffe057fe3c520807f7701cb33ad728814d2b961c9e6fde8b67cb4ca0",
+          "baseline": "4 functions/0 globals/0 types sha256:ab005cacffe057fe3c520807f7701cb33ad728814d2b961c9e6fde8b67cb4ca0"
         },
         {
           "id": "module-plan",
           "state": "not-recorded",
-          "blocking": false,
+          "blocking": true,
           "current": "b055a06f81aea8ef49b85b1c02f40784ca817d6cb1823b10ee3677f07c2a06c8",
           "baseline": null
         }
@@ -198,11 +198,11 @@
           "denominator": "4"
         },
         "delta": {
-          "state": "computed",
-          "reason": null,
-          "value": "0.3500",
-          "numerator": "1.4",
-          "denominator": "0"
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
+          "value": null,
+          "numerator": null,
+          "denominator": null
         }
       },
       {
@@ -223,8 +223,8 @@
           "denominator": null
         },
         "delta": {
-          "state": "not-comparable",
-          "reason": "CURRENT_UNMEASURED",
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
           "value": null,
           "numerator": null,
           "denominator": null
@@ -248,8 +248,8 @@
           "denominator": "4"
         },
         "delta": {
-          "state": "not-comparable",
-          "reason": "CURRENT_UNMEASURED",
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
           "value": null,
           "numerator": null,
           "denominator": null
@@ -273,8 +273,8 @@
           "denominator": null
         },
         "delta": {
-          "state": "not-comparable",
-          "reason": "BASELINE_UNKNOWN",
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
           "value": null,
           "numerator": null,
           "denominator": null
@@ -298,11 +298,11 @@
           "denominator": "2"
         },
         "delta": {
-          "state": "computed",
-          "reason": null,
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
           "value": null,
-          "numerator": "0",
-          "denominator": "0"
+          "numerator": null,
+          "denominator": null
         }
       },
       {
@@ -323,11 +323,11 @@
           "denominator": "4"
         },
         "delta": {
-          "state": "computed",
-          "reason": null,
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
           "value": null,
-          "numerator": "0",
-          "denominator": "0"
+          "numerator": null,
+          "denominator": null
         }
       },
       {
@@ -348,11 +348,11 @@
           "denominator": "4"
         },
         "delta": {
-          "state": "computed",
-          "reason": null,
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
           "value": null,
-          "numerator": "0",
-          "denominator": "0"
+          "numerator": null,
+          "denominator": null
         }
       },
       {
@@ -373,8 +373,8 @@
           "denominator": null
         },
         "delta": {
-          "state": "not-comparable",
-          "reason": "BASELINE_UNKNOWN",
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
           "value": null,
           "numerator": null,
           "denominator": null
