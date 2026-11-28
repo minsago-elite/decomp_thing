@@ -9,6 +9,12 @@ const slot = (basePath: string) => `decomp.upload.v1:${normalizeBasePath(basePat
 // Tab-local and memory-only, so every panel mounted after an SPA route change still sees the refusal.
 // A full reload forgets it; that is the documented limit.
 const refusedKeys = new Map<string, string>();
+function storedKey(raw: string): unknown {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>).key : undefined;
+  } catch { return undefined; }
+}
 
 /** Test isolation only: forget every remembered refusal. */
 export function resetRefusedUploads() { refusedKeys.clear(); }
@@ -17,17 +23,20 @@ export function resetRefusedUploads() { refusedKeys.clear(); }
 export function createUploadRecovery(basePath: string, storage: () => Storage = () => window.sessionStorage, now = Date.now) {
   const name = slot(basePath);
   function read(): UploadRecovery {
-    const result = readStored();
     const refused = refusedKeys.get(name);
-    if (refused === undefined) return result;
-    if (result.kind === 'pending' && result.ticket.key === refused) return { kind: 'refused' };
-    // The refused ticket is gone from storage, so nothing is left to clear.
-    if (result.kind !== 'blocked' || result.reason !== 'unavailable') refusedKeys.delete(name);
-    return result;
+    let raw: string | null;
+    // Unreadable storage cannot prove the refused ticket is gone, so the refusal stands.
+    try { raw = storage().getItem(name); } catch { return refused === undefined ? { kind: 'blocked', reason: 'unavailable' } : { kind: 'refused' }; }
+    if (refused !== undefined) {
+      // Identity before validation and expiry: the refused ticket stays refused, even once it is stale.
+      if (raw !== null && storedKey(raw) === refused) return { kind: 'refused' };
+      // Readable storage holds no ticket or another one, so nothing refused is left to clear.
+      refusedKeys.delete(name);
+    }
+    return parse(raw);
   }
-  function readStored(): UploadRecovery {
+  function parse(raw: string | null): UploadRecovery {
     try {
-      const raw = storage().getItem(name);
       if (raw === null) return { kind: 'empty' };
       if (raw.length > 2048) return { kind: 'blocked', reason: 'invalid' };
       const value: unknown = JSON.parse(raw);

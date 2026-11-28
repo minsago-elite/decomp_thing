@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { MutationOptions } from '../src/api/client';
 import type { Bootstrap, ResponseOf } from '../src/api/generated';
@@ -261,6 +261,69 @@ it('keeps an uncleared full-library refusal in a fresh panel mounted after leavi
   expect(document.activeElement).toBe(notice);
   expect(notice.textContent).toBe('The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again.');
   expect(picker.disabled).toBe(false);
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
+  expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).not.toBe(refusedKey);
+});
+
+async function refuseAndLeaveUpload() {
+  transport.upload.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'JOB_LIBRARY_FULL', status: 409 }));
+  transport.upload.mockResolvedValueOnce(fixture<ResponseOf<'job'>>('job-lossless'));
+  const removeItem = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('storage unavailable'); });
+  const { session, view } = await mount(); select();
+  fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await screen.findByText(/could not be cleared/);
+  const refusedKey = transport.upload.mock.calls[0]?.[1].idempotencyKey;
+  view.unmount();
+  return { session, removeItem, refusedKey };
+}
+function expectUnclearedLibraryPanel() {
+  const notice = screen.getByRole('alert');
+  expect(notice.id).toBe('upload-feedback');
+  expect(notice.textContent).toBe('The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again. The saved upload record could not be cleared from this tab. Clear it before uploading another file.');
+  expect(screen.queryByText(/Upload was not confirmed|An unconfirmed upload is retained|Retained upload context|Retry keeps the same job identity|Selected: binary.elf/)).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Retry this upload' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Choose another file' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Open the job library' })).toBeNull();
+  expect(screen.getByLabelText<HTMLInputElement>('Binary file').disabled).toBe(true);
+  expect(screen.getByRole('button', { name: 'Clear saved upload record' })).toBeTruthy();
+  return notice;
+}
+
+it('keeps an uncleared full-library refusal in a fresh panel while tab storage cannot be read', async () => {
+  const { session, removeItem, refusedKey } = await refuseAndLeaveUpload();
+  const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage unavailable'); });
+  render(<Home basePath="/nested" session={session} />);
+  const notice = expectUnclearedLibraryPanel();
+  fireEvent.click(screen.getByRole('button', { name: 'Clear saved upload record' }));
+  await waitFor(() => expect(notice.textContent).toContain('still could not be cleared'));
+  getItem.mockRestore();
+  cleanup(); render(<Home basePath="/nested" session={session} />);
+  expectUnclearedLibraryPanel();
+  removeItem.mockRestore();
+  fireEvent.click(screen.getByRole('button', { name: 'Clear saved upload record' }));
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear saved upload record' })).toBeNull());
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
+  expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).not.toBe(refusedKey);
+});
+
+it('keeps an uncleared full-library refusal in a fresh panel after its stored ticket expires', async () => {
+  const slot = 'decomp.upload.v1:/nested';
+  const { session, removeItem, refusedKey } = await refuseAndLeaveUpload();
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 25 * 60 * 60 * 1000 });
+  render(<Home basePath="/nested" session={session} />);
+  expectUnclearedLibraryPanel();
+  expect(JSON.parse(sessionStorage.getItem(slot) ?? 'null')).toMatchObject({ key: refusedKey });
+  // Reading the expired ticket must not forget the refusal while it is still stored.
+  cleanup(); render(<Home basePath="/nested" session={session} />);
+  expectUnclearedLibraryPanel();
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  expect(transport.upload).toHaveBeenCalledOnce();
+  removeItem.mockRestore();
+  fireEvent.click(screen.getByRole('button', { name: 'Clear saved upload record' }));
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear saved upload record' })).toBeNull());
+  expect(sessionStorage.getItem(slot)).toBeNull();
   select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
   await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
   expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).not.toBe(refusedKey);

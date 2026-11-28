@@ -25,6 +25,24 @@ it('retains one bounded ticket across instances and isolates deployment paths wi
   expect(() => recovery.save({ ...ticket, key: 'other'.repeat(8) })).toThrow();
   recovery.clear(); expect(recovery.read()).toEqual({ kind: 'empty' });
 });
+it('keeps a remembered refusal through unreadable storage and ticket expiry, and forgets it only once readable storage lacks the ticket', () => {
+  let readable = true;
+  const storage = () => readable ? sessionStorage : { getItem: () => { throw new Error('unavailable'); } } as unknown as Storage;
+  let clock = 1000;
+  const recovery = createUploadRecovery('/nested', storage, () => clock);
+  const ticket = recovery.ticket(new File(['x'], 'refused.elf'), 'r'.repeat(32)); recovery.save(ticket);
+  readable = false;
+  expect(createUploadRecovery('/nested', storage, () => clock).read()).toEqual({ kind: 'blocked', reason: 'unavailable' });
+  recovery.refuse(ticket.key);
+  expect(createUploadRecovery('/nested', storage, () => clock).read()).toEqual({ kind: 'refused' });
+  readable = true; clock = 1000 + 24 * 60 * 60 * 1000;
+  expect(createUploadRecovery('/nested', storage, () => clock).read()).toEqual({ kind: 'refused' });
+  expect(createUploadRecovery('/nested', storage, () => clock).read()).toEqual({ kind: 'refused' });
+  sessionStorage.setItem('decomp.upload.v1:/nested', JSON.stringify({ ...ticket, key: 'o'.repeat(32), createdAt: clock }));
+  expect(recovery.read()).toMatchObject({ kind: 'pending', ticket: { key: 'o'.repeat(32) } });
+  sessionStorage.setItem('decomp.upload.v1:/nested', JSON.stringify(ticket));
+  expect(recovery.read()).toEqual({ kind: 'blocked', reason: 'expired' });
+});
 it('blocks malformed, oversized, future and expired records without silently minting another intent', () => {
   const recovery = createUploadRecovery('', () => sessionStorage, () => 86400001);
   const ticket = { version: 1, key: 'k'.repeat(32), filename: 'file.elf', size: 64, createdAt: 0 };
