@@ -32,6 +32,7 @@ internal enum class DescriptorBoundCommitFaultPoint {
     BEFORE_REVOCATION,
     BEFORE_REVOCATION_RESTORE,
     BEFORE_REVOCATION_CONFLICT_SYNC,
+    DURING_FINAL_READ,
 }
 
 internal fun interface DescriptorBoundCommitFaultInjector {
@@ -151,8 +152,8 @@ internal object DescriptorBoundAtomicStateFile {
      * of that inode, so no other writer's file can be published by this call. Every caller-side
      * verification precedes the link. After it come only the durability sync of [parent], the
      * caller's [requireBindings], and, last, a check that [authenticatedParentPath] still reaches
-     * [parent] and that its [name] entry is the prepared inode with the exact bytes, read through
-     * the descriptor whose identity was checked. A refused, failed or unconfirmed commit is
+     * [parent] and that its [name] entry is the prepared inode, after the exact bytes are read
+     * through the pinned inode's descriptor. A refused, failed or unconfirmed commit is
      * revoked through [revokeCommitted] before rethrowing. The returned handle keeps the inode's
      * descriptor so that a later revocation can prove what it removes.
      */
@@ -198,7 +199,7 @@ internal object DescriptorBoundAtomicStateFile {
             faultInjector?.hit(DescriptorBoundCommitFaultPoint.AFTER_COMMIT_DIRECTORY_SYNC)
             requireBindings()
             // Last before the caller's acceptance: nothing that can block runs between this check and it.
-            requireCommittedAtPath(parent, authenticatedParentPath, commit, maximumBytes)
+            requireCommittedAtPath(parent, authenticatedParentPath, commit, maximumBytes, faultInjector)
             return commit
         } catch (failure: Throwable) {
             if (commit?.committed == true) {
@@ -256,9 +257,24 @@ internal object DescriptorBoundAtomicStateFile {
         requireUnnamed(commit)
     }
 
-    /** The authenticated pathname must still reach the pinned directory, and its leaf the prepared inode and bytes. */
-    private fun requireCommittedAtPath(parent: LinuxDescriptor, path: Path, commit: DescriptorBoundPreparedCommit, maximumBytes: Int) {
+    /**
+     * Reads the prepared inode's bytes to EOF through its pinned descriptor first, and only then
+     * requires the authenticated pathname to still reach the pinned directory and its leaf to be
+     * that inode with its owner-only mode. A rename or replacement during the read is therefore
+     * seen; the caller accepts the commit immediately afterwards.
+     */
+    private fun requireCommittedAtPath(
+        parent: LinuxDescriptor,
+        path: Path,
+        commit: DescriptorBoundPreparedCommit,
+        maximumBytes: Int,
+        faultInjector: DescriptorBoundCommitFaultInjector?,
+    ) {
         requireParent(parent)
+        val bytes = LinuxFilesystemSyscalls.openReadableFrom(commit.prepared).use { readable ->
+            LinuxFilesystemSyscalls.read(readable, maximumBytes) { faultInjector?.hit(DescriptorBoundCommitFaultPoint.DURING_FINAL_READ) }
+        }
+        requireExactBytes(bytes, commit.snapshot.bytes, "committed immutable state")
         if (path.toRealPath() != path) stateFail("committed state directory no longer resolves at its authenticated path")
         LinuxFilesystemSyscalls.openRoot(path).use { named ->
             if (!sameDirectory(named.identity, parent.identity)) {
@@ -269,9 +285,6 @@ internal object DescriptorBoundAtomicStateFile {
             entry.use { leaf ->
                 if (!sameFile(leaf.identity, commit.identity)) stateFail("committed state entry was replaced")
                 requireManagedFile(leaf.identity, named.identity, OWNER_READ_ONLY_MODE, "committed immutable state")
-                // The bytes are read through this identity-checked descriptor, never by reopening the name.
-                requireExactBytes(LinuxFilesystemSyscalls.readPrefix(leaf, maximumBytes + 1), commit.snapshot.bytes,
-                    "committed immutable state")
             }
         }
     }

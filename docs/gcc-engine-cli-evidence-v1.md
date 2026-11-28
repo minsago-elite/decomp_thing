@@ -116,9 +116,10 @@ attempt, including an `EINTR` retry and the fallback, must still be admitted:
 an abandoned step, or one with less than one second left, starts no further
 attempt. After the link come only the directory sync it needs for durability,
 the CLI's directory-binding recheck, and, last, a check inside the same owned
-step. That check requires the authenticated output pathname to still reach the
-pinned directory, and its `result.json` to be the prepared inode. It reads the
-bytes through the same descriptor whose identity it checked. The commit counts
+step. That check first reads the prepared inode's bytes to EOF through its pinned
+descriptor. Only then does it require the authenticated output pathname to still
+reach the pinned directory, and its `result.json` to be the prepared inode, so a
+rename or replacement during the read is detected. The commit counts
 only if the deadline is still current when the link returns and again after
 these checks.
 If the link, sync or a check completes late, fails or outlasts the owner's wait,
@@ -165,7 +166,7 @@ cover budget refusal before allocation and by measurement, model copying after
 admission, streamed logs, and a blocked owned capture. They also cover expiry or
 a stall at every preparation, commit and post-sync point, a renamed output
 directory, a replaced leaf, and competing writers before the commit and during
-revocation, and a leaf replaced during the binding recheck. A late
+revocation, and a leaf replaced during the binding recheck or the final read. A late
 `AT_EMPTY_PATH` failure after the commit reserve lapses must not start the
 fallback. `LinuxFilesystemSyscallsTest` forces the `/proc` link fallback and
 covers the `ENOENT`/`EPERM`/`EINTR` dispatch.

@@ -163,6 +163,38 @@ class GccBundledDeadlineBoundPublicationTest {
     }
 
     @Test
+    fun `a rename or replacement during the final read is never accepted`() {
+        fixture { root ->
+            val moved = root.resolveSibling(root.fileName.toString() + "-moved")
+            var reads = 0
+            try {
+                val failure = assertFailsWith<java.io.IOException> {
+                    publish(root, Clock().deadline(), fault = { hit ->
+                        if (hit == DescriptorBoundCommitFaultPoint.DURING_FINAL_READ && reads++ == 0) Files.move(root, moved)
+                    })
+                }
+                assertTrue(reads > 0, "the read seam must run")
+                assertTrue(failure is java.nio.file.NoSuchFileException ||
+                    failure.message.orEmpty().contains("no longer resolves at its authenticated path"), failure.toString())
+                assertEquals(emptySet(), entries(moved), "revocation through the pinned descriptor follows the renamed directory")
+            } finally {
+                if (Files.exists(moved)) Files.move(moved, root)
+            }
+        }
+        fixture { root ->
+            var reads = 0
+            val failure = assertFailsWith<java.io.IOException> {
+                publish(root, Clock().deadline(), fault = { hit ->
+                    if (hit == DescriptorBoundCommitFaultPoint.DURING_FINAL_READ && reads++ == 0) replaceWithForeign(root, FOREIGN)
+                })
+            }
+            assertTrue(failure.message.orEmpty().contains("entry was replaced"), failure.toString())
+            assertEquals(setOf(NAME), entries(root))
+            assertContentEquals(FOREIGN, Files.readAllBytes(root.resolve(NAME)))
+        }
+    }
+
+    @Test
     fun `a leaf replaced while the CLI bindings are rechecked is never accepted`() = fixture { root ->
         var checked = false
         val failure = assertFailsWith<java.io.IOException> {
