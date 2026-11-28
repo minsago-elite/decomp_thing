@@ -64,8 +64,9 @@ enum class AcpProviderPrivateDestinations { DENIED, PERMITTED }
 
 /**
  * Whether the deployment translates IPv4 through the well-known NAT64 prefix 64:ff9b::/96. It is
- * explicit operator policy; even when enabled, only a globally reachable embedded IPv4 address is
- * admitted. Network-specific translation prefixes are not recognized and are never inferred.
+ * explicit operator policy; even when enabled, only a public embedded IPv4 address is admitted.
+ * This setting covers only the well-known prefix. An address synthesized from a network-specific
+ * prefix looks like native IPv6, so the resolver contract, not this policy, must handle it.
  */
 enum class AcpProviderAddressTranslation { NONE, WELL_KNOWN_NAT64 }
 
