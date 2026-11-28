@@ -1302,6 +1302,16 @@ try {
   if (values.mode === 'restart' && application && forcedKill.has(application)) {
     report.status = 'failed'; report.forcedShutdown = true; process.exitCode = 1;
   }
+  // A cold sample or profiled journey whose Chrome or JVM needed SIGKILL did not stop cleanly, so its verdict fails;
+  // the cleanup outcome below is still recorded (R4).
+  if ((values.mode === 'structure-cold' || values.mode === 'structure') && structureQualification) {
+    const forcedShutdownProcesses = [['browser', browser], ['application', application]]
+      .filter(([, child]) => child && forcedKill.has(child)).map(([name]) => name);
+    if (forcedShutdownProcesses.length) {
+      report.status = 'failed'; report.forcedShutdown = true; report.forcedShutdownProcesses = forcedShutdownProcesses;
+      process.exitCode = 1;
+    }
+  }
   report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
   if (!report.shutdownConfirmed) {
     report.status = 'failed';

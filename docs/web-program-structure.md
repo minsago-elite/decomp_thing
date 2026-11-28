@@ -174,7 +174,10 @@ ordinary descendant to exit, escalates to a group kill when a surviving child
 ignores cleanup, and refuses to treat forced cleanup as a passing sample. On a
 sample timeout, it sends `SIGTERM`, waits for the bounded grace period, then uses
 `SIGKILL` if the launcher or any descendant remains; that sample is recorded as
-timed out and failed even when cleanup is confirmed.
+timed out and failed even when cleanup is confirmed. A sample, or a profiled journey,
+also fails when the driver itself had to send `SIGKILL` to Chrome or the JVM while
+stopping them; its report keeps `forcedShutdown`, the forced processes and the cleanup
+outcome.
 A process group counts as stopped only when the signal-zero probe finds no members or
 `/proc` shows only zombie or dead members on two polls in a row. A host PID 1 that does
 not reap orphans therefore cannot hold the remaining samples back, and an unreadable or
