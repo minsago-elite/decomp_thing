@@ -26,6 +26,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -35,6 +37,8 @@ import kotlin.test.assertTrue
 class WebSensitiveBoundaryTest {
     private val client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
     private val canary = "CANARYsecret0123456789abcdefXYZ"
+    // Copy of WebAuditRecorder.RUN (src/main/kotlin/decompengine/web/WebAuditRecorder.kt); keep in sync.
+    private val runGrammar = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
     private class Session(val cookie: String, val csrf: String)
 
@@ -217,13 +221,14 @@ class WebSensitiveBoundaryTest {
         try {
             server.start()
             val session = establish(server)
-            val values = listOf(canary, session.cookie.substringAfter('='), session.csrf)
+            // Random base64url tokens may start with '-' or '_'; the fixed values pin both grammar branches.
+            val values = listOf(canary, session.cookie.substringAfter('='), session.csrf, "-leadingDashRunSegment", "_leadingUnderscoreRunSegment")
             for (authenticated in listOf(false, true)) for (value in values) {
                 val denied = request(server, "/workbench/api/v1/jobs/${"a".repeat(32)}/runs/$value/cancel",
                     if (authenticated) session else null, "POST", "{}", mapOf("If-Match" to "\"$value\""))
                 assertTrue(denied.statusCode() >= 400)
             }
-            awaitAudit(server, 7)
+            awaitAudit(server, 1 + 2 * values.size)
             val stored = Files.readString(root.resolve(".web-audit/current.jsonl"))
             val exported = get(server, "/workbench/api/v1/support-export?scope=server", session)
             assertEquals(200, exported.statusCode())
@@ -232,9 +237,14 @@ class WebSensitiveBoundaryTest {
                 assertFalse(exported.body().contains(value), "raw requested versions must not reach exports")
             }
             val entries = server.audit.read().entries.filter { it.action == WebAuditAction.RUN_CANCEL }
-            assertEquals(6, entries.size)
+            assertEquals(2 * values.size, entries.size)
             assertEquals(values.map { WebAuditRecorder.versionCommitment(it) }.toSet(), entries.map { it.target.expectedVersion }.toSet())
-            assertEquals(values.map { WebAuditRecorder.runCommitment(it) }.toSet(), entries.map { it.target.runId }.toSet())
+            // Run segments outside the recorder's run grammar are not attributed, so they record no run ID.
+            val expectedRun = values.associate { WebAuditRecorder.versionCommitment(it) to it.takeIf(runGrammar::matches)?.let(WebAuditRecorder::runCommitment) }
+            entries.forEach { assertEquals(expectedRun.getValue(it.target.expectedVersion!!), it.target.runId) }
+            assertNotNull(expectedRun.getValue(WebAuditRecorder.versionCommitment(canary)))
+            assertNull(expectedRun.getValue(WebAuditRecorder.versionCommitment("-leadingDashRunSegment")))
+            assertNull(expectedRun.getValue(WebAuditRecorder.versionCommitment("_leadingUnderscoreRunSegment")))
         } finally { server.stop(); root.toFile().deleteRecursively() }
     }
 
