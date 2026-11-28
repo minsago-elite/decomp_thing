@@ -468,6 +468,30 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `model commitment requires the imported Program digest to match the verified upload`() = withRoot { root ->
+        val bytes = elfFixture()
+        val job = JobStore(root).createFromUpload("imported-input.elf", bytes)
+        val engines = FakeEngines().apply { modelBytes = "{}".toByteArray() }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        fun execute(name: String): DurableWebWorkflowOutcome.Completed {
+            val fixture = context(root, root.resolve(name), adapter.limits)
+            return assertIs(adapter.execute(fixture.copy(job = job, attempt = fixture.attempt.copy(
+                jobId = job.id, workflow = WorkflowKind.RECONSTRUCT, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY))))
+        }
+
+        val matched = assertNotNull(execute("imported-match").evidenceModel)
+        assertEquals(sha256(bytes), matched.inputSha256)
+        assertEquals(sha256("{}".toByteArray()), matched.modelSha256)
+
+        // Both path reads agree with the upload, but Ghidra reports different imported bytes.
+        engines.importedProgramDigest = sha256("different imported bytes".toByteArray())
+        assertNull(execute("imported-mismatch").evidenceModel)
+
+        engines.importedProgramDigest = null
+        assertNull(execute("imported-missing").evidenceModel)
+    }
+
+    @Test
     fun `production agent reconstruction is unavailable until module compiler containment is qualified`() = withRoot { root ->
         val engines = FakeEngines()
         val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList())
@@ -942,13 +966,14 @@ class WebProductionWorkflowsTest {
         var repairBody: (Path) -> Unit = { project -> acceptRepairGraph(project) }
         var modelBytes: ByteArray? = null
         var modelInputDigest = sha256(elfFixture())
+        var importedProgramDigest: String? = sha256(elfFixture())
         var activity: () -> Unit = {}
         override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) {
             calls.incrementAndGet(); this.activity = activity; exploreBody(reportsDirectory)
         }
         override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
-            published: (String, ByteArray, String) -> Unit) {
-            modelBytes?.let { published(modelInputDigest, it, "f".repeat(64)) }
+            published: (PublishedEvidenceModel) -> Unit) {
+            modelBytes?.let { published(PublishedEvidenceModel(modelInputDigest, importedProgramDigest, it, "f".repeat(64))) }
             calls.incrementAndGet(); reconstructBody(reportsDirectory, mode, progress)
         }
         override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,

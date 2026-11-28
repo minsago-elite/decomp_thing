@@ -182,8 +182,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
         analyzeInternal(binaryPath, workDir, false, null).first
 
-    /** Receives the bytes the exporter validated, only after publication of the model. */
-    internal fun analyzeWithPublishedModel(binaryPath: Path, workDir: Path, published: (String, ByteArray) -> Unit): RecoveredProgramModel =
+    /**
+     * Receives, only after publication of the model, its inputSha256, the isolated worker's report of the digest
+     * Ghidra recorded for the bytes it imported (null when absent or malformed), and the validated model bytes.
+     */
+    internal fun analyzeWithPublishedModel(binaryPath: Path, workDir: Path,
+        published: (String, String?, ByteArray) -> Unit): RecoveredProgramModel =
         analyzeInternal(binaryPath, workDir, false, null, published).first
 
     internal fun analyzeWithDeadline(binaryPath: Path, workDir: Path, deadline: AnalysisDeadline): RecoveredProgramModel =
@@ -199,7 +203,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         workDir: Path,
         includeCallSites: Boolean,
         parentDeadline: AnalysisDeadline?,
-        published: ((String, ByteArray) -> Unit)? = null,
+        published: ((String, String?, ByteArray) -> Unit)? = null,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
         val deadline = AnalysisDeadline.start(
             limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
@@ -218,6 +222,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val exporterSha256 = sha256(scriptBytes)
             val output = reports.resolve("program_model.json")
             val modelCandidate = uniqueExportCandidate(output, "model")
+            val importedProgramReport = modelCandidate.resolveSibling("${modelCandidate.fileName}.program-sha256")
+            require(!Files.exists(importedProgramReport, LinkOption.NOFOLLOW_LINKS)) { "export candidate path already exists" }
             val callOutput = reports.resolve("program_model_calls.json")
             val callScriptBytes = if (includeCallSites) {
                 require(!Files.exists(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site output already exists" }
@@ -243,7 +249,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
             deadline.checkpoint("after constructing export command")
             val exitCode = executeExport(command, workDir, reports, deadline,
-                listOfNotNull(modelCandidate, callCandidate))
+                listOfNotNull(modelCandidate, importedProgramReport, callCandidate))
             deadline.checkpoint("before export result validation")
             require(exitCode == 0) {
                 "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
@@ -251,6 +257,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val modelBytes = readStableProgramModel(modelCandidate, deadline)
             val model = ProgramModelJson.readCanonical(modelBytes, deadline::checkpoint)
             deadline.checkpoint("after canonical model validation")
+            val importedProgramSha256 = readImportedProgramReport(importedProgramReport)
             val calls = callScriptBytes?.let { script ->
                 val callLimits = RecoveredCallSiteLimits()
                 val callCandidatePath = checkNotNull(callCandidate)
@@ -287,7 +294,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 deadline.checkpoint("before publishing validated call-site evidence")
                 moveExportCandidate(callCandidate, callOutput)
             }
-            published?.invoke(model.inputSha256, modelBytes)
+            published?.invoke(model.inputSha256, importedProgramSha256, modelBytes)
             model to calls?.copy(path = callOutput.toAbsolutePath().normalize())
         }
     }
@@ -668,6 +675,18 @@ private fun uniqueExportCandidate(target: Path, kind: String): Path {
     val candidate = target.resolveSibling(".${target.fileName}-$kind-$EXPORT_CANDIDATE_NONCE-${sequence.toString(16)}.candidate")
     require(!Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)) { "export candidate path already exists" }
     return candidate
+}
+
+/** Reads and removes the worker's imported-Program digest report; anything but one exact line is unattested. */
+private fun readImportedProgramReport(path: Path): String? = try {
+    val attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+    if (!attributes.isRegularFile || attributes.size() != 65L) null
+    else Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(66) }.toString(Charsets.US_ASCII)
+        .takeIf { it.matches(Regex("[0-9a-f]{64}\n")) }?.substring(0, 64)
+} catch (_: java.io.IOException) {
+    null
+} finally {
+    try { Files.deleteIfExists(path) } catch (_: java.io.IOException) { }
 }
 
 private fun moveExportCandidate(candidate: Path, target: Path) {

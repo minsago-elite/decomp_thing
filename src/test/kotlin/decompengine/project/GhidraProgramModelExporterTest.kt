@@ -102,13 +102,15 @@ class GhidraProgramModelExporterTest {
         val work = temp.resolve("analysis")
 
         var observations = 0
-        val model = GhidraHeadlessProgramModelAnalyzer(home).analyzeWithPublishedModel(binary, work) { inputDigest, bytes ->
+        val model = GhidraHeadlessProgramModelAnalyzer(home).analyzeWithPublishedModel(binary, work) { inputDigest, imported, bytes ->
             assertEquals("fake-input", inputDigest)
+            assertEquals("ab".repeat(32), imported)
             kotlin.test.assertContentEquals(work.resolve("reports/program_model.json").readBytes(), bytes)
             observations++
         }
 
         assertEquals(1, observations)
+        assertTrue(work.resolve("reports").listDirectoryEntries("*.program-sha256").isEmpty(), "imported-Program report is consumed")
         assertEquals("fake-input", model.inputSha256)
         assertEquals(listOf("fn_0000000000001000"), model.functions.map { it.id })
         val invocation = work.resolve("invocation.txt").readText()
@@ -275,7 +277,9 @@ class GhidraProgramModelExporterTest {
         val work = temp.resolve("analysis")
         val analyzer = GhidraHeadlessProgramModelAnalyzer()
 
-        val first = analyzer.analyze(binary, work)
+        var imported: String? = null
+        val first = analyzer.analyzeWithPublishedModel(binary, work) { _, digest, _ -> imported = digest }
+        assertEquals(sha256(binary.readBytes()), imported, "the worker reports the imported Program digest")
         assertEquals(4, first.schemaVersion)
         assertTrue(first.globals.all { it.byteEvidence?.schemaVersion == 2 })
         val modelPath = work.resolve("reports/program_model.json")
@@ -323,7 +327,9 @@ class GhidraProgramModelExporterTest {
             recoveryMode = GhidraProgramModelRecoveryMode.PLANNING,
         )
 
-        val first = analyzer.analyze(binary, work)
+        var imported: String? = null
+        val first = analyzer.analyzeWithPublishedModel(binary, work) { _, digest, _ -> imported = digest }
+        assertEquals(sha256(binary.readBytes()), imported, "the worker reports the imported Program digest")
         assertEquals(4, first.schemaVersion)
         assertTrue(first.globals.all { it.byteEvidence?.schemaVersion == 2 })
         val modelPath = work.resolve("reports/program_model.json")
@@ -693,6 +699,7 @@ class GhidraProgramModelExporterTest {
                 printf '%s\n' "${'$'}@" > "${'$'}PWD/invocation.txt"
                 for last do :; done
                 cp '${canonicalModel.pathString}' "${'$'}last"
+                printf '%s\n' '${"ab".repeat(32)}' > "${'$'}last.program-sha256"
                 """.trimIndent() + "\n"
             } else {
                 """

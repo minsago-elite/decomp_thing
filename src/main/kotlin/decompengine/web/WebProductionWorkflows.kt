@@ -57,7 +57,7 @@ internal interface WebWorkflowEngines {
     /** [activity] is called after each completed exploration sample. */
     fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
     fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
-        published: (String, ByteArray, String) -> Unit)
+        published: (PublishedEvidenceModel) -> Unit)
     fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,
         owner: RepairPublicationOwner?): WebRepairResult
 
@@ -69,7 +69,7 @@ internal interface WebWorkflowEngines {
             }
 
             override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
-                published: (String, ByteArray, String) -> Unit) {
+                published: (PublishedEvidenceModel) -> Unit) {
                 // The explicit request mode replaces the legacy WEB_RECONSTRUCTION_MODE environment choice.
                 val selected = environment + (WEB_RECONSTRUCTION_MODE_KEY to mode.configurationValue)
                 val strategy = selectWebReconstructionStrategy(selected, progress)
@@ -79,8 +79,8 @@ internal interface WebWorkflowEngines {
                 val analyzer = if (mode == WebReconstructionMode.EVIDENCE_ONLY) {
                     val bounded = bundled.withExportBudgets(strategy.profile.budgets)
                     ProgramModelAnalyzer { input, directory ->
-                        bounded.analyzeWithPublishedModel(input, directory) { digest, bytes ->
-                            published(digest, bytes, strategy.profile.sha256)
+                        bounded.analyzeWithPublishedModel(input, directory) { digest, imported, bytes ->
+                            published(PublishedEvidenceModel(digest, imported, bytes, strategy.profile.sha256))
                         }
                     }
                 } else bundled
@@ -222,11 +222,8 @@ internal class ReconstructWorkflowAdapter(
                 val progress = MeteredWorkflowProgress(journal, meter)
                 val uploadedDigest = if (agent) null else selectedUploadDigest(context.job)
                 try {
-                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress) { digest, bytes, profile ->
-                        if (digest == uploadedDigest && bytes.size in 1..WorkflowEvidenceModel.MAX_BYTES) {
-                            evidenceModel = WorkflowEvidenceModel(context.job.id, context.attempt.runId, digest,
-                                decompengine.project.sha256(bytes), bytes.size, profile)
-                        }
+                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress) { published ->
+                        evidenceModel = evidenceModelCommitment(context.job.id, context.attempt.runId, uploadedDigest, published)
                     }
                 } catch (failure: Exception) {
                     progress.phase(AgentWorkflowPhase.FAILED)
@@ -242,6 +239,34 @@ internal class ReconstructWorkflowAdapter(
             is BoundedWorkflowResult.Threw -> DurableWebWorkflowOutcome.Failed(candidate = candidate, usage = usage, evidenceModel = evidenceModel)
         }
     }
+}
+
+/**
+ * A model the bundled analyzer published. [inputSha256] is the exporter's own read of the executable path;
+ * [importedProgramSha256] is the isolated worker's report of the digest Ghidra recorded for the bytes it
+ * actually imported, or null when the worker reported none.
+ */
+internal class PublishedEvidenceModel(val inputSha256: String, val importedProgramSha256: String?,
+    bytes: ByteArray, val profileSha256: String) {
+    private val content = bytes.copyOf()
+    val size get() = content.size
+    val sha256 = decompengine.project.sha256(content)
+}
+
+/**
+ * Commit a published model only to the bytes Ghidra imported. Two reads of the upload path (the adapter's,
+ * before analysis, and the exporter's, after import) can agree while Ghidra imported different bytes, so the
+ * imported Program's own digest must equal the independently verified upload digest too. No commitment, and
+ * so no resume from this model, results when: the upload could not be verified; the worker reported no
+ * imported-Program digest; that digest or the model's inputSha256 differs from the upload; or the model is
+ * outside 1..[WorkflowEvidenceModel.MAX_BYTES].
+ */
+internal fun evidenceModelCommitment(jobId: String, runId: String, uploadedDigest: String?,
+    published: PublishedEvidenceModel): WorkflowEvidenceModel? {
+    if (uploadedDigest == null) return null
+    if (published.importedProgramSha256 == null || published.importedProgramSha256 != uploadedDigest) return null
+    if (published.inputSha256 != uploadedDigest || published.size !in 1..WorkflowEvidenceModel.MAX_BYTES) return null
+    return WorkflowEvidenceModel(jobId, runId, uploadedDigest, published.sha256, published.size, published.profileSha256)
 }
 
 /** Bind a published model to a separate, bounded observation of this attempt's selected input. */

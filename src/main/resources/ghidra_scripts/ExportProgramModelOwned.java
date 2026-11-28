@@ -2562,6 +2562,22 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
     }
 
+    /**
+     * The owned-candidate protocol also reports the digest Ghidra recorded for the bytes it imported. The
+     * model's inputSha256 is a second read of the executable path, which need not be those bytes. A Program
+     * without a well-formed digest writes no report, and the owner then treats the import as unattested.
+     * EXPORTER_VERSION is unchanged: resumable export state binds this script's SHA-256, so the source
+     * change already invalidates state written by the previous script.
+     */
+    private void attestImportedProgram(Path modelCandidate) throws IOException {
+        String imported = currentProgram.getExecutableSHA256();
+        if (imported == null) return;
+        String normalized = imported.toLowerCase(java.util.Locale.ROOT);
+        if (!normalized.matches("[0-9a-f]{64}")) return;
+        Files.write(modelCandidate.resolveSibling(modelCandidate.getFileName() + ".program-sha256"),
+            (normalized + "\n").getBytes(StandardCharsets.US_ASCII), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+    }
+
     private static boolean isRetryableDecompileTimeout(FunctionExport exported) {
         return exported.status.equals("failed") && exported.failure != null &&
             exported.failure.contains("decompilation failed or timed out:") &&
@@ -3093,6 +3109,7 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
 
         assembleModel(modelAssemblyPath, inputSha256, functionRecords, globalRecords, typeRecords, auxiliaryEvidence);
+        if (!modelAssemblyPath.equals(outputPath)) attestImportedProgram(modelAssemblyPath);
         observedProgress(progressPath, "complete", completed, total, recovered, partial, failed, reused, null);
         println(
             "program-model export complete functions=" + completed + " partial=" + partial +
