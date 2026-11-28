@@ -4,11 +4,12 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join, basename } from 'node:path';
+import { DEVTOOLS_DEADLINE_MS, TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
 
 export const SCREENSHOT_WIDTH = 1280;
 export const SCREENSHOT_HEIGHT = 900;
 export const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
-export const CDP_DEADLINE_MS = 15000;
+export const CDP_DEADLINE_MS = DEVTOOLS_DEADLINE_MS;
 const MAX_EXPIRED = 64;
 const MAX_LATE = 64;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -18,75 +19,41 @@ export const REQUIRED_SESSION_CHECKPOINTS = ['connected', 'signing-out', 'requir
 export const REQUIRED_SESSION_SCREENSHOTS = [...REQUIRED_SESSION_CHECKPOINTS.map((name) => `session-${name}.png`),
   'authenticated-runtime.png'];
 
-/** DevTools client whose deadlines retain late replies as inert, bounded evidence. */
-export class CdpProtocol {
-  constructor(socket, { timeoutMs = CDP_DEADLINE_MS, now = Date.now } = {}) {
-    this.socket = socket;
-    this.timeoutMs = timeoutMs;
+/**
+ * The driver's DevTools connection: master's TargetProtocol (deadline, socket closure and trusted
+ * target-loss handling, #1856) plus labelled deadlines whose late replies are retained as inert,
+ * bounded evidence. A late reply never resolves the caller, writes a file or touches a report.
+ */
+export class CdpProtocol extends TargetProtocol {
+  constructor(socket, { now = Date.now, lifecycle = null, timers } = {}) {
+    super(socket, { lifecycle, ...(timers ? { timers } : {}) });
     this.now = now;
-    this.sequence = 0;
-    this.pending = new Map();
     this.expired = new Map();
     this.lateSettlements = [];
     this.lateSettlementsDropped = 0;
-    this.listeners = new Map();
     socket.addEventListener('message', ({ data }) => {
       let message;
-      try { message = JSON.parse(data); }
-      catch (error) {
-        const failure = new Error('Chrome DevTools returned invalid JSON', { cause: error });
-        for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(failure); }
-        this.pending.clear();
-        socket.close();
-        return;
-      }
-      if (message.id) {
-        const pending = this.pending.get(message.id);
-        if (!pending) {
-          const expired = this.expired.get(message.id);
-          if (expired) {
-            this.expired.delete(message.id);
-            // Inert: never resolves the caller, never writes, never touches a report.
-            if (this.lateSettlements.length < MAX_LATE) {
-              this.lateSettlements.push({ method: expired.method, label: expired.label,
-                lateByMs: Math.max(0, this.now() - expired.deadlineAtMs), error: Boolean(message.error) });
-            } else this.lateSettlementsDropped += 1;
-          }
-          return;
-        }
-        clearTimeout(pending.timer);
-        this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(message.error.message));
-        else pending.resolve(message.result);
-      } else {
-        for (const listener of this.listeners.get(`${message.sessionId ?? ''}:${message.method}`) ?? []) listener(message.params);
-      }
-    });
-    socket.addEventListener('close', () => {
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('DevTools connection closed'));
-      }
-      this.pending.clear();
+      try { message = JSON.parse(data); } catch { return; }
+      const expired = message?.id ? this.expired.get(message.id) : undefined;
+      if (!expired) return;
+      this.expired.delete(message.id);
+      if (this.lateSettlements.length < MAX_LATE) {
+        this.lateSettlements.push({ method: expired.method, label: expired.label,
+          lateByMs: Math.max(0, this.now() - expired.deadlineAtMs), error: Boolean(message.error) });
+      } else this.lateSettlementsDropped += 1;
     });
   }
   call(method, params = {}, sessionId, { label } = {}) {
-    const id = ++this.sequence;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        this.expired.set(id, { method, label: label ?? null, deadlineAtMs: this.now() });
-        while (this.expired.size > MAX_EXPIRED) this.expired.delete(this.expired.keys().next().value);
-        reject(new Error(`DevTools deadline: ${method}${label ? ` [${label}]` : ''}`));
-      }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
-      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+    const promise = super.call(method, params, sessionId);
+    const id = this.sequence;
+    return promise.catch((error) => {
+      if (error?.message !== `DevTools deadline: ${method}`) throw error;
+      this.expired.set(id, { method, label: label ?? null, deadlineAtMs: this.now() });
+      while (this.expired.size > MAX_EXPIRED) this.expired.delete(this.expired.keys().next().value);
+      // Unlabelled deadlines keep TargetProtocol's exact message for setup diagnostics.
+      if (!label) throw error;
+      throw new Error(`DevTools deadline: ${method} [${label}]`, { cause: error });
     });
-  }
-  on(method, listener, sessionId) {
-    const key = `${sessionId ?? ''}:${method}`;
-    if (!this.listeners.has(key)) this.listeners.set(key, []);
-    this.listeners.get(key).push(listener);
   }
   lateEvidence() {
     return { settlements: this.lateSettlements.map((entry) => ({ ...entry })), dropped: this.lateSettlementsDropped };

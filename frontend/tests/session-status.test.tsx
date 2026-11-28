@@ -123,6 +123,29 @@ it('renders connection and explicit logout without displaying or storing credent
   expect(session.csrf()).toBeNull();
 });
 
+it('disables Sign out only in the development fixture mode, without sending a logout', async () => {
+  vi.stubEnv('MODE', 'fixtures');
+  try {
+    const { session, gateway } = setup();
+    await session.initialize({ kind: 'token', token: 'synthetic_non_secret_bootstrap_fixture_1234567890' });
+    const signOut = await screen.findByRole('button', { name: 'Sign out' });
+    expect((signOut as HTMLButtonElement).disabled).toBe(true);
+    expect(signOut.getAttribute('aria-describedby')).toBe('decomp-development-notice');
+    fireEvent.click(signOut);
+    expect(gateway.logout).not.toHaveBeenCalled();
+    expect(session.snapshot().status).toBe('authenticated');
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it('keeps Sign out active outside fixture mode', async () => {
+  expect(import.meta.env.MODE).not.toBe('fixtures');
+  const { session } = setup();
+  await session.initialize({ kind: 'token', token: 'synthetic_non_secret_bootstrap_fixture_1234567890' });
+  const signOut = await screen.findByRole('button', { name: 'Sign out' });
+  expect((signOut as HTMLButtonElement).disabled).toBe(false);
+  expect(signOut.hasAttribute('aria-describedby')).toBe(false);
+});
+
 it('offers a read-only check after expiry without replaying an exchange', async () => {
   const { session, gateway } = setup();
   gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'SESSION_EXPIRED', status: 401 }));

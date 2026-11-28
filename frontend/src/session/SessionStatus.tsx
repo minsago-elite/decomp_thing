@@ -106,10 +106,13 @@ export function SessionStatus({ session, placement = 'any' }: { session: Browser
     <p role="status" data-session-announcement="header" class={ready && headerText ? undefined : 'sr-only'}>
       {ready ? headerText : ''}
     </p>
-    {connected && <button type="button" ref={signOut} onClick={event => {
-      recordActivation(session, event.currentTarget);
-      void session.logout();
-    }}>{copy.signOut}</button>}
+    {/* Dev fixture server is GET/HEAD-only; this branch compiles away from production builds. */}
+    {connected && (import.meta.env.DEV && import.meta.env.MODE === 'fixtures'
+      ? <button type="button" ref={signOut} disabled aria-describedby="decomp-development-notice">{copy.signOut}</button>
+      : <button type="button" ref={signOut} onClick={event => {
+        recordActivation(session, event.currentTarget);
+        void session.logout();
+      }}>{copy.signOut}</button>)}
   </div>;
   if (placement === 'header') return header;
 

@@ -85,7 +85,8 @@ export type PreviewNotice = 'not-viewable' | 'too-large' | 'runtime-disabled' | 
 export function sourceFilePolicy(item: RevisionFile['item'], maximumChunkBytes: string): {
   preview: PreviewNotice; download: boolean; downloadNotice: 'too-large' | 'not-archivable' | null;
 } {
-  const tooLarge = BigInt(item.sizeBytes) > SOURCE_FILE_LIMIT;
+  // A manifest-only entry has no recorded size; the server still enforces the reader ceiling on read.
+  const tooLarge = item.sizeBytes !== null && BigInt(item.sizeBytes) > SOURCE_FILE_LIMIT;
   return {
     preview: !item.declaredViewable ? 'not-viewable' : tooLarge ? 'too-large'
       : BigInt(maximumChunkBytes) < 4n ? 'runtime-disabled' : 'available',
@@ -152,7 +153,8 @@ export function currentSourceRead<T>(value: SourceReadState<T>, key: string): So
 }
 
 /** One callback read with latest-only publication, independent of transport cancellation cooperation. */
-export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>, publish: (state: SourceReadState<T>) => void): () => void {
+export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>, publish: (state: SourceReadState<T>) => void,
+  onDeleted?: (failure: unknown) => void): () => void {
   const controller = new AbortController();
   publish({ key, state: 'loading' });
   void Promise.resolve().then(() => {
@@ -161,7 +163,9 @@ export function beginSourceRead<T>(key: string, read: (signal: AbortSignal) => P
   }).then(value => {
     if (!controller.signal.aborted) publish({ key, state: 'ready', value });
   }).catch((failure: unknown) => {
-    if (!controller.signal.aborted) publish({ key, state: 'failed', failure });
+    if (controller.signal.aborted) return;
+    if (onDeleted && isDeletedJob(failure)) onDeleted(failure);
+    else publish({ key, state: 'failed', failure });
   });
   return () => { controller.abort(); };
 }

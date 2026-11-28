@@ -3,6 +3,7 @@ import { options } from 'preact';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { registerContractExtension } from '../src/api/decode';
 import { lazyContractSchema } from '../src/api/generated-schema-lazy';
+import { forgetPendingDeletionsForTests } from '../src/jobs/deletionAcknowledgement';
 
 // Lazy routes register this extension at load; tests decode every fixture directly.
 registerContractExtension(lazyContractSchema);
@@ -35,3 +36,6 @@ afterEach(() => {
   if (typeof window !== 'undefined') cleanup();
   vi.unstubAllGlobals();
 });
+
+// Pending DELETE observations are module memory; a test that leaves one unsettled must not bind the next.
+afterEach(() => { forgetPendingDeletionsForTests(); });

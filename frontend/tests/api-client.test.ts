@@ -12,6 +12,22 @@ const response = (name = 'session', status = 200, headers: Record<string, string
 afterEach(() => { vi.useRealTimers(); });
 
 describe('bounded v1 fetch client', () => {
+  it('explicitly negotiates manifest inventory while accepting an older server input-only response', async () => {
+    for (const [name, kind] of [['revision-sources', 'revisionSources'], ['revision-directory-root', 'revisionDirectory'],
+      ['revision-file-root', 'revisionFile']] as const) {
+      const text = fixture(`${name}-legacy`);
+      const document = JSON.parse(text) as { requestId: string };
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(text, { headers: {
+        'Content-Type': 'application/json', 'X-Request-ID': document.requestId,
+      } }));
+      await expect(createApiClient({ basePath: '/', fetch: fetcher }).get(kind, '/source-fixture')).resolves.toEqual(JSON.parse(text));
+      expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('X-Decomp-Source-Inventory')).toBe('manifest');
+      expect(fetcher).toHaveBeenCalledOnce(); // No negotiation retry or mutation replay.
+    }
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('session'));
+    await createApiClient({ basePath: '/', fetch: fetcher }).get('session', '/session');
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).has('X-Decomp-Source-Inventory')).toBe(false);
+  });
   it('submits explicit preflight with CSRF and no fabricated resource or replay guards', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('agent-preflight-inspecting', 202,
       { 'X-Request-ID': 'request_preflight_fixture' }));
@@ -36,6 +52,25 @@ describe('bounded v1 fetch client', () => {
     const headers = new Headers(init?.headers);
     expect(headers.get('X-CSRF-Token')).toBe(csrfToken);
     expect(headers.has('If-Match')).toBe(false); expect(headers.has('Idempotency-Key')).toBe(false);
+  });
+  it('submits a digest-bound archive verification with CSRF and a key but never a fabricated version', async () => {
+    const csrf = 'c'.repeat(32); const key = 'k'.repeat(16);
+    const path = `/jobs/${'a'.repeat(32)}/runs/run_1/revisions/revision_1/archive-verifications`;
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(response('operation-archive-verify-failed', 202,
+      { 'X-Request-ID': 'request_archive_5' })));
+    const client = createApiClient({ basePath: '/nested', fetch: fetcher });
+    const body = { archiveSha256: 'a'.repeat(64) };
+    await expect(client.post('operation', path, 'archiveVerificationRequest', body, { csrfToken: csrf, idempotencyKey: key }))
+      .resolves.toHaveProperty('kind', 'operation');
+    const sent = fetcher.mock.calls[0]?.[1]; const headers = new Headers(sent?.headers);
+    expect(headers.get('X-CSRF-Token')).toBe(csrf); expect(headers.get('Idempotency-Key')).toBe(key); expect(headers.has('If-Match')).toBe(false);
+    expect(sent?.body).toBe(JSON.stringify(body));
+    for (const settings of [{ csrfToken: csrf }, { idempotencyKey: key }, { csrfToken: csrf, idempotencyKey: key, ifMatch: '"version_1"' }]) {
+      await expect(client.post('operation', path, 'archiveVerificationRequest', body, settings)).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    await expect(client.post('operation', `${path}/extra`, 'archiveVerificationRequest', body, { csrfToken: csrf, idempotencyKey: key }))
+      .rejects.toMatchObject({ code: 'invalid_request' });
+    expect(fetcher).toHaveBeenCalledOnce();
   });
   it('does not replay an ambiguous explicit preflight POST', async () => {
     const fetcher = vi.fn<typeof fetch>().mockRejectedValue(Error('private transport diagnostic'));
@@ -68,7 +103,7 @@ describe('bounded v1 fetch client', () => {
     const metadata = (JSON.parse(fixture('revision-file-root')) as { data: RevisionFile }).data;
     metadata.binding.jobId = 'a'.repeat(32);
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200, headers: {
-      'Content-Type': 'application/octet-stream', 'Content-Length': metadata.item.sizeBytes, 'X-Content-Type-Options': 'nosniff',
+      'Content-Type': 'application/octet-stream', 'Content-Length': metadata.item.sizeBytes!, 'X-Content-Type-Options': 'nosniff',
       'X-Request-ID': 'request_source_head_1', 'X-Decomp-Content-Verification': 'committed-digest',
       'X-Decomp-File-ID': metadata.item.fileId, 'X-Decomp-Source-SHA256': metadata.sourceSha256,
       'X-Decomp-Metadata-Version': metadata.metadataVersion, 'X-Decomp-Content-SHA256': metadata.item.sha256,
