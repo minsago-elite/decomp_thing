@@ -450,13 +450,14 @@ private class PinnedNinjaRuntimeProfile private constructor(
         deployment.expectedNinjaRuntimeManifestSha256,
     )
 
+    // Re-verification may follow contained execution: one strict attempt, no provisioning restart (#1799).
     fun verifyUnchanged() {
         ninja.requireSingleLink("live Ninja executable")
         ninja.verifyUnchanged("live Ninja executable")
         if (calculateAcpRuntimeManifestSha256(
                 deployment.ninjaExecutableSource,
                 deployment.sandbox.runtimeClosureLimits,
-            ) != ninjaRuntimeManifestSha256
+            ) {} != ninjaRuntimeManifestSha256
         ) throw FullTreeControlException("live Ninja runtime manifest changed")
         files.forEach { (profile, guard) ->
             guard.requireSingleLink("Ninja runtime file ${profile.destination}")
@@ -464,7 +465,7 @@ private class PinnedNinjaRuntimeProfile private constructor(
             if (calculateAcpRuntimeManifestSha256(
                     profile.source,
                     deployment.sandbox.runtimeClosureLimits,
-                ) != profile.expectedRuntimeManifestSha256
+                ) {} != profile.expectedRuntimeManifestSha256
             ) throw FullTreeControlException("Ninja runtime manifest changed: ${profile.destination}")
         }
     }
@@ -685,7 +686,8 @@ internal class PrivateNinjaManifestTree private constructor(
     fun verifyUnchanged() {
         check(!closed) { "Ninja manifest materialization is already closed" }
         requireNamedRootIdentity()
-        if (calculateAcpRuntimeManifestSha256(path, cleanupLimits) != runtimeManifestSha256) {
+        // Re-verification may follow contained execution: one strict attempt (#1799).
+        if (calculateAcpRuntimeManifestSha256(path, cleanupLimits) {} != runtimeManifestSha256) {
             throw FullTreeControlException("Ninja manifest materialization changed")
         }
     }

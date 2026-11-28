@@ -58,7 +58,7 @@ class WebSecurityHeadersTest {
                 contentKind = ProjectContentKind.UTF8_TEXT,
             )
             val report = Json.parseToJsonElement(
-                """{"confidence":{"score":0.625},"candidateCount":0,"expandedOutputSignatures":0,"newOutputSignatures":[],"candidates":[],"observations":[]}""",
+                """{"candidateCount":0,"coverageIncreased":false,"baselineOutputSignatures":0,"expandedOutputSignatures":0,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.625,"inputCount":0,"sourceCount":0,"outputSignatureCount":0,"newOutputSignatureCount":0,"sandboxed":false,"networkIsolated":false},"candidates":[],"observations":[]}""",
             ).jsonObject
             val document = renderJobDocument(
                 job,
