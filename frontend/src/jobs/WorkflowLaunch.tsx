@@ -160,7 +160,8 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const [inputRevisionId, setInputRevisionId] = useState<string>('');
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<{ text: string; refresh: boolean; alert: boolean } | null>(null);
-  const [intent, setIntent] = useState<{ signature: string; key: string } | null>(null);
+  /** The command as first sent: an unchanged resend repeats its key, body and `If-Match` even after a newer observation. */
+  const [intent, setIntent] = useState<{ settings: string; key: string; body: WorkflowStart; version: string } | null>(null);
   const [startedPath, setStartedPath] = useState<string | null>(null);
   const active = useRef<AbortController | null>(null);
   const jobBusy = job.status === 'queued' || job.status === 'running';
@@ -214,25 +215,28 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
     launchSelection: { capabilityId: selected.id, mode: selected.launch.mode },
     limits: selected.launch.limitsAdjustable ? { ...values } : { ...selected.limits },
   } : null;
-  const signature = body ? JSON.stringify([job.jobId, job.version, body]) : null;
+  // The chosen settings alone: a newer job version observed while a command was outstanding is not a new intent.
+  const settings = body ? JSON.stringify([job.jobId, body]) : null;
 
   async function submit(event: Event) {
     event.preventDefault();
-    if (!body || !signature || pending || active.current || jobBusy) return;
+    if (!body || !settings || pending || active.current || jobBusy) return;
     const csrfToken = session.csrf();
     if (!csrfToken) { setNotice({ text: copy.sessionLost, refresh: false, alert: true }); return; }
-    const key = intent?.signature === signature ? intent.key : crypto.randomUUID().replaceAll('-', '');
-    setIntent({ signature, key });
+    const command = intent?.settings === settings ? intent
+      : { settings, key: crypto.randomUUID().replaceAll('-', ''), body, version: job.version };
+    setIntent(command);
+    const { key, body: sent, version } = command;
     const controller = new AbortController(); active.current = controller;
     setPending(true); setNotice({ text: copy.starting, refresh: false, alert: false });
     try {
-      const response = await client.post('run', `/jobs/${job.jobId}/runs`, 'workflowStartRequest', body, {
-        csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: key, signal: controller.signal,
+      const response = await client.post('run', `/jobs/${job.jobId}/runs`, 'workflowStartRequest', sent, {
+        csrfToken, ifMatch: `"${version}"`, idempotencyKey: key, signal: controller.signal,
       });
       if (controller.signal.aborted) return;
       const run: Run = response.data;
       // The key is kept: a resend replays this same answer instead of starting another attempt.
-      if (!recordsRequest(run, job.jobId, body)) { settle('notice'); setNotice({ text: copy.recordedMismatch, refresh: false, alert: true }); return; }
+      if (!recordsRequest(run, job.jobId, sent)) { settle('notice'); setNotice({ text: copy.recordedMismatch, refresh: false, alert: true }); return; }
       const path = runPath(basePath, job.jobId, run.runId);
       setNotice({ text: textMessage(copy.startedOpening, { run: run.runId }), refresh: false, alert: false });
       setStartedPath(path);
