@@ -4,8 +4,8 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
-import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
 import decompengine.oracle.fulltree.KotlinContainedCommandRequest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -20,6 +20,9 @@ internal class GccBundledCapturedPlannerOutput(plan: ByteArray, assessment: Byte
 
 /** Caller must establish worker absence and hold the run lease throughout capture. */
 internal object GccBundledPlannerOutputCapture {
+    /** Assessment allocation admitted per captured model, plan and metadata byte; see docs/gcc-engine-cli-evidence-v1.md. */
+    const val ASSESSMENT_ALLOCATION_PER_INPUT_BYTE = 128L
+
     fun capture(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
         request: GccBundledPlannerRequest, capturedModel: ByteArray,
         maximumStdoutBytes: Int, maximumStderrBytes: Int): GccBundledCapturedPlannerOutput =
@@ -27,8 +30,46 @@ internal object GccBundledPlannerOutputCapture {
 
     internal fun capture(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
         request: GccBundledPlannerRequest, capturedModel: ByteArray,
-        maximumStdoutBytes: Int, maximumStderrBytes: Int, checkpoint: (String) -> Unit): GccBundledCapturedPlannerOutput {
+        maximumStdoutBytes: Int, maximumStderrBytes: Int, checkpoint: (String) -> Unit): GccBundledCapturedPlannerOutput =
+        capture(run, controlName, expectedControl, request, capturedModel, maximumStdoutBytes, maximumStderrBytes,
+            GccBundledHostMemoryBudget(MAXIMUM_HOST_ASSESSMENT_BYTES), checkpoint)
+
+    /**
+     * Production entry: capture and assessment run as one owned host step on [ownedRun], a kernel
+     * duplicate of the pinned run root whose ownership transfers to the step, so a blocked read or
+     * nonpreemptible parse cannot hold the caller past [deadline]. [capturedModel] is copied inside
+     * the step only after its authenticated size and assessment allowance are admitted against
+     * [hostBudgetBytes].
+     */
+    internal fun captureOwned(work: GccBundledHostWorkTracker, ownedRun: LinuxDescriptor, controlName: String,
+        expectedControl: LinuxFileIdentity, request: GccBundledPlannerRequest, capturedModel: () -> ByteArray,
+        maximumStdoutBytes: Int, maximumStderrBytes: Int, hostBudgetBytes: Long,
+        deadline: ContainedCommandOperationDeadline, stageHook: (String) -> Unit = {}): GccBundledCapturedPlannerOutput =
+        work.run("planner output capture", { deadline.remainingMillis(Long.MAX_VALUE) }, ownedRun) { context ->
+            captureMetered(ownedRun, controlName, expectedControl, request, capturedModel, maximumStdoutBytes,
+                maximumStderrBytes, GccBundledHostMemoryBudget(hostBudgetBytes)) { stage ->
+                context.requireCurrent(stage)
+                deadline.requireCurrent()
+                stageHook(stage)
+            }
+        }
+
+    internal fun capture(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
+        request: GccBundledPlannerRequest, capturedModel: ByteArray,
+        maximumStdoutBytes: Int, maximumStderrBytes: Int, budget: GccBundledHostMemoryBudget,
+        unmetered: (String) -> Unit): GccBundledCapturedPlannerOutput =
+        captureMetered(run, controlName, expectedControl, request, { capturedModel }, maximumStdoutBytes, maximumStderrBytes,
+            budget, unmetered)
+
+    private fun captureMetered(run: LinuxDescriptor, controlName: String, expectedControl: LinuxFileIdentity,
+        request: GccBundledPlannerRequest, copyCapturedModel: () -> ByteArray,
+        maximumStdoutBytes: Int, maximumStderrBytes: Int, budget: GccBundledHostMemoryBudget,
+        unmetered: (String) -> Unit): GccBundledCapturedPlannerOutput {
+        val checkpoint: (String) -> Unit = { stage -> budget.requireWithinAdmission(stage); unmetered(stage) }
         checkpoint("before planner output capture")
+        budget.admit("captured model copy and assessment", retainedWithAssessment(request.modelBytes.toLong()))
+        val capturedModel = copyCapturedModel()
+        require(capturedModel.size == request.modelBytes) { "captured model differs from its authenticated size" }
         require(controlName.matches(Regex("control-[a-f0-9]{64}")))
         require(maximumStdoutBytes.toLong() in 0..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES &&
             maximumStderrBytes.toLong() in 0..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES)
@@ -56,13 +97,16 @@ internal object GccBundledPlannerOutputCapture {
                     }
                 }
                 verifyDirectories()
-                val files = GccBoundExportFiles(request.maximumPlanBytes.toLong() + METADATA_BYTES + maximumStdoutBytes + maximumStderrBytes) {
-                    checkpoint("reading planner output file")
-                }
+                // Each retained buffer and its assessment allowance are admitted from the pinned size before allocation.
+                val files = GccBoundExportFiles.admitting(request.maximumPlanBytes.toLong() + METADATA_BYTES + maximumStdoutBytes + maximumStderrBytes,
+                    { bytes, retained ->
+                        if (retained) budget.admit("planner output file read and assessment", retainedWithAssessment(bytes))
+                        else budget.admit("planner log digest buffer", bytes)
+                    }) { checkpoint("reading planner output file") }
                 val plan = files.read(reports, "module_plan.json", request.maximumPlanBytes)
                 val metadata = files.read(reports, "planner-output.json", METADATA_BYTES)
-                val stdout = files.read(reports, "contained-command.stdout", maximumStdoutBytes)
-                val stderr = files.read(reports, "contained-command.stderr", maximumStderrBytes)
+                val (stdoutBytes, stdoutSha256) = files.digest(reports, "contained-command.stdout", maximumStdoutBytes)
+                val (stderrBytes, stderrSha256) = files.digest(reports, "contained-command.stderr", maximumStderrBytes)
                 checkpoint("before planner assessment")
                 val assessed = GccBundledPlannerOutputAssessment.assess(request, capturedModel, plan, metadata, checkpoint)
                 files.verify()
@@ -73,8 +117,8 @@ internal object GccBundledPlannerOutputCapture {
                     "controlName" to JsonPrimitive(controlName),
                     "controlIdentity" to identityJson(control.identity), "reportsIdentity" to identityJson(reports.identity),
                     "capturedBytes" to JsonPrimitive(files.bytes),
-                    "stdoutBytes" to JsonPrimitive(stdout.size), "stdoutSha256" to JsonPrimitive(OracleArtifacts.sha256(stdout)),
-                    "stderrBytes" to JsonPrimitive(stderr.size), "stderrSha256" to JsonPrimitive(OracleArtifacts.sha256(stderr)),
+                    "stdoutBytes" to JsonPrimitive(stdoutBytes), "stdoutSha256" to JsonPrimitive(stdoutSha256),
+                    "stderrBytes" to JsonPrimitive(stderrBytes), "stderrSha256" to JsonPrimitive(stderrSha256),
                 )))
                 val result = GccBundledCapturedPlannerOutput(assessed.planBytes, record)
                 checkpoint("before returning captured planner output")
@@ -82,6 +126,9 @@ internal object GccBundledPlannerOutputCapture {
             }
         }
     }
+
+    private fun retainedWithAssessment(bytes: Long): Long =
+        Math.multiplyExact(bytes, 1 + ASSESSMENT_ALLOCATION_PER_INPUT_BYTE)
 
     private fun requirePrivateDirectory(identity: LinuxFileIdentity, parent: LinuxFileIdentity) {
         require(identity.isDirectory && !identity.isSymbolicLink && identity.mode.permissions == 448 &&
@@ -103,4 +150,5 @@ internal object GccBundledPlannerOutputCapture {
     ))
 
     private const val METADATA_BYTES = 256 * 1024
+    private const val MAXIMUM_HOST_ASSESSMENT_BYTES = 64L * 1024 * 1024 * 1024
 }

@@ -250,7 +250,19 @@ private fun requireInvocation(state: ByteArray, artifacts: List<GccCompilerEngin
     }
 }
 
-internal class GccBoundExportFiles(private val maximumBytes: Long, private val checkpoint: () -> Unit = {}) {
+internal class GccBoundExportFiles private constructor(
+    private val maximumBytes: Long,
+    private val admitRetainedBytes: (Long, Boolean) -> Unit,
+    private val checkpoint: () -> Unit,
+) {
+    constructor(maximumBytes: Long, checkpoint: () -> Unit = {}) : this(maximumBytes, { _, _ -> }, checkpoint)
+
+    companion object {
+        /** [admitRetainedBytes] sees each retained file's pinned size, or one digest read buffer, before allocation. */
+        fun admitting(maximumBytes: Long, admitRetainedBytes: (bytes: Long, retained: Boolean) -> Unit, checkpoint: () -> Unit) =
+            GccBoundExportFiles(maximumBytes, admitRetainedBytes, checkpoint)
+    }
+
     var bytes: Long = 0
         private set
     private val files = mutableListOf<BoundExportFile>()
@@ -342,26 +354,54 @@ internal class GccBoundExportFiles(private val maximumBytes: Long, private val c
     }
 
     fun read(directory: LinuxDescriptor, name: String, maximumFileBytes: Int): ByteArray {
+        var captured = ByteArray(0)
+        consume(directory, name, maximumFileBytes, retain = true) { size, channel ->
+            captured = ByteArray(size.toInt())
+            val buffer = ByteBuffer.wrap(captured)
+            while (buffer.hasRemaining()) {
+                checkpoint()
+                val limit = buffer.limit()
+                buffer.limit(buffer.position() + minOf(buffer.remaining(), READ_REQUEST_BYTES))
+                try { require(channel.read(buffer) > 0) { "GCC export file was truncated: $name" } }
+                finally { buffer.limit(limit) }
+            }
+        }
+        return captured
+    }
+
+    /** Same descriptor binding and byte accounting as [read], retaining only size and SHA-256. */
+    fun digest(directory: LinuxDescriptor, name: String, maximumFileBytes: Int): Pair<Long, String> {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        var consumed = 0L
+        consume(directory, name, maximumFileBytes, retain = false) { size, channel ->
+            val buffer = ByteBuffer.allocate(READ_REQUEST_BYTES)
+            while (consumed < size) {
+                checkpoint()
+                buffer.clear().limit(minOf(READ_REQUEST_BYTES.toLong(), size - consumed).toInt())
+                val read = channel.read(buffer)
+                require(read > 0) { "GCC export file was truncated: $name" }
+                digest.update(buffer.array(), 0, read)
+                consumed += read
+            }
+        }
+        return consumed to digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+    }
+
+    private fun consume(directory: LinuxDescriptor, name: String, maximumFileBytes: Int, retain: Boolean,
+        transfer: (Long, FileChannel) -> Unit) {
         checkpoint()
         val file = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)) { "GCC export file is missing: $name" }
-        return file.use { selected ->
+        file.use { selected ->
             requireCaptureFile(selected.identity, directory.identity)
             val path = LinuxFilesystemSyscalls.stableDescriptorPath(selected.fd)
             val metadata = Files.readAttributes(path, "unix:size,lastModifiedTime,ctime")
             val size = metadata.getValue("size") as Long
             require(size in 0..maximumFileBytes.toLong() && size <= maximumBytes - bytes) { "GCC export capture exceeds its byte bound" }
+            admitRetainedBytes(if (retain) size else READ_REQUEST_BYTES.toLong(), retain)
             bytes = Math.addExact(bytes, size)
-            val captured = ByteArray(size.toInt())
             LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(selected).use { readable ->
                 FileChannel.open(LinuxFilesystemSyscalls.stableDescriptorPath(readable.fd), StandardOpenOption.READ).use { channel ->
-                    val buffer = ByteBuffer.wrap(captured)
-                    while (buffer.hasRemaining()) {
-                        checkpoint()
-                        val limit = buffer.limit()
-                        buffer.limit(buffer.position() + minOf(buffer.remaining(), 64 * 1024))
-                        try { require(channel.read(buffer) > 0) { "GCC export file was truncated: $name" } }
-                        finally { buffer.limit(limit) }
-                    }
+                    transfer(size, channel)
                     checkpoint()
                     require(channel.read(ByteBuffer.allocate(1)) == -1) { "GCC export file grew: $name" }
                 }
@@ -370,7 +410,6 @@ internal class GccBoundExportFiles(private val maximumBytes: Long, private val c
             retained.verify()
             checkpoint()
             files += retained
-            captured
         }
     }
 
@@ -481,6 +520,7 @@ private fun renderAssessment(assessment: GccCompletedRunAssessment, capturedByte
 }
 
 private const val BATCH_FUNCTIONS = 512L
+private const val READ_REQUEST_BYTES = 64 * 1024
 
 /** Length framing covers every byte of every retained fragment, including checkpoint serialization. */
 private fun planningPrefixDigest(batches: List<GccPlanningBatchBytes>): String {

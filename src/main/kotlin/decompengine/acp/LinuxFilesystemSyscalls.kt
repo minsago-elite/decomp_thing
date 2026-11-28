@@ -636,13 +636,26 @@ internal object LinuxFilesystemSyscalls {
     )
 
     /** Creates an unnamed inode, so every failure before [linkTemporaryAt] is residue-free. */
-    fun createTemporaryAt(parentFd: Int): LinuxDescriptor = openDescriptor(
-        parentFd,
-        ".",
-        O_WRONLY or O_TMPFILE or O_CLOEXEC,
-        OWNER_READ_WRITE,
-        "create secure unnamed temporary file",
-    )
+    fun createTemporaryAt(parentFd: Int): LinuxDescriptor = try {
+        openDescriptor(
+            parentFd,
+            ".",
+            O_WRONLY or O_TMPFILE or O_CLOEXEC,
+            OWNER_READ_WRITE,
+            "create secure unnamed temporary file",
+        )
+    } catch (failure: LinuxSyscallException) {
+        throw unnamedTemporaryFailure(failure)
+    }
+
+    /** Without O_TMPFILE support (EOPNOTSUPP, or EISDIR from kernels that predate it) the failure names the requirement. */
+    internal fun unnamedTemporaryFailure(failure: LinuxSyscallException): LinuxSyscallException =
+        if (failure.errno != EOPNOTSUPP && failure.errno != EISDIR) failure
+        else LinuxSyscallException(
+            "create secure unnamed temporary file: the directory's filesystem must support O_TMPFILE " +
+                "(for example ext4, xfs, btrfs or tmpfs; overlayfs needs Linux 6.10 or later)",
+            failure.errno,
+        )
 
     /** Creates one named regular file below an already-pinned private directory. */
     fun createRegularFile(parentFd: Int, name: String, mode: Int): LinuxDescriptor {
@@ -657,9 +670,62 @@ internal object LinuxFilesystemSyscalls {
         return authenticateNamedRegularFile(parentFd, name, opened, "created private regular file")
     }
 
-    fun linkTemporaryAt(temporary: LinuxDescriptor, parentFd: Int, name: String) {
-        call("materialize secure temporary file") {
-            libc.linkat(temporary.fd, "", parentFd, name, AT_EMPTY_PATH)
+    /** Kernel duplicate of one pinned open file description; no path lookup or filesystem I/O. */
+    fun duplicate(descriptor: LinuxDescriptor): LinuxDescriptor = descriptor.whileOpen { fd ->
+        val duplicate = retryOnInterrupted("duplicate pinned descriptor") {
+            libc.fcntl(fd, F_DUPFD_CLOEXEC, 0).toLong()
+        }.toInt()
+        LinuxDescriptor(duplicate, descriptor.identity)
+    }
+
+    fun linkTemporaryAt(temporary: LinuxDescriptor, parentFd: Int, name: String) =
+        linkTemporaryAt(temporary, parentFd, name, attemptEmptyPath = true)
+
+    /**
+     * Names the pinned unnamed inode without replacement. Before Linux 6.10 an unprivileged
+     * AT_EMPTY_PATH link fails with ENOENT (or EPERM) without CAP_DAC_READ_SEARCH, so the link
+     * then follows the descriptor's own /proc/self/fd magic link, which denotes the same open
+     * inode while the descriptor is held. [beforeAttempt] runs before every syscall attempt,
+     * including EINTR retries and the fallback, and throws to stop further attempts.
+     * [attemptEmptyPath] false forces the fallback, and a non-null [emptyPathOverride] errno
+     * replaces one AT_EMPTY_PATH attempt's result; both exist for controls only.
+     */
+    internal fun linkTemporaryAt(
+        temporary: LinuxDescriptor,
+        parentFd: Int,
+        name: String,
+        attemptEmptyPath: Boolean,
+        beforeAttempt: () -> Unit = {},
+        emptyPathOverride: (() -> Int?)? = null,
+    ) {
+        temporary.whileOpen { fd ->
+            var firstFailure: Int? = null
+            if (attemptEmptyPath) {
+                while (true) {
+                    beforeAttempt()
+                    val error = emptyPathOverride?.invoke()
+                        ?: if (libc.linkat(fd, "", parentFd, name, AT_EMPTY_PATH) == 0) 0 else Native.getLastError()
+                    if (error == 0) return@whileOpen
+                    if (error == EINTR) continue
+                    if (error != ENOENT && error != EPERM) throw LinuxSyscallException("materialize secure temporary file", error)
+                    firstFailure = error
+                    break
+                }
+            }
+            while (true) {
+                beforeAttempt()
+                if (libc.linkat(AT_FDCWD, "/proc/self/fd/$fd", parentFd, name, AT_SYMLINK_FOLLOW) == 0) return@whileOpen
+                val error = Native.getLastError()
+                if (error == EINTR) continue
+                throw LinuxSyscallException(
+                    "materialize secure temporary file through its /proc/self/fd magic link " +
+                        "(requires procfs mounted at /proc" +
+                        (firstFailure?.let { "; the AT_EMPTY_PATH link first failed with errno $it" } ?: "") + ")",
+                    error,
+                ).also { failure ->
+                    firstFailure?.let { failure.addSuppressed(LinuxSyscallException("materialize secure temporary file", it)) }
+                }
+            }
         }
     }
 
@@ -1411,6 +1477,7 @@ internal object LinuxFilesystemSyscalls {
         fun syscall(number: NativeLong, directoryFd: NativeLong, path: String, how: Pointer, size: NativeLong): NativeLong
         fun openat(directoryFd: Int, path: String, flags: Int, mode: Int): Int
         fun close(fd: Int): Int
+        fun fcntl(fd: Int, command: Int, argument: Int): Int
         fun read(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
         fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
         fun fsync(fd: Int): Int
@@ -1463,6 +1530,7 @@ internal object LinuxFilesystemSyscalls {
     }
 
     private const val AT_FDCWD = -100
+    private const val AT_SYMLINK_FOLLOW = 0x400
     private const val O_RDONLY = 0
     private const val O_WRONLY = 1
     private const val O_RDWR = 2
@@ -1484,11 +1552,13 @@ internal object LinuxFilesystemSyscalls {
     private const val STATX_IDENTITY_MASK = 0x111f // TYPE | MODE | NLINK | UID | GID | INO | MNT_ID
     private const val AT_REMOVEDIR = 0x200
     private const val RENAME_NOREPLACE = 1
+    private const val F_DUPFD_CLOEXEC = 1030
     private const val RENAME_EXCHANGE = 2
     private const val EINTR = 4
     private const val EPERM = 1
     private const val ENOSYS = 38
     private const val EOPNOTSUPP = 95
+    private const val EISDIR = 21
     private const val EWOULDBLOCK = 11
     private const val LOCK_EX = 2
     private const val LOCK_NB = 4
