@@ -3,6 +3,7 @@ package decompengine.project
 import decompengine.analysis.ANALYSIS_PROCESS_LAUNCH_EXECUTOR
 import decompengine.analysis.AnalysisDeadline
 import decompengine.analysis.BundledGhidraVerificationProcess
+import decompengine.analysis.ExportSupervisorHelper
 import decompengine.analysis.BoundedAnalysisProcessLaunch
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.oracle.core.OracleJson
@@ -341,6 +342,66 @@ class GhidraExportLaunchTest {
             assertTrue(controller.start({}, { next }, { error("admitted process must not use late cleanup") }) === next)
         } finally {
             Thread.interrupted()
+        }
+    }
+
+    @Test
+    fun `retained handle whose PID is reused is never signalled and keeps cleanup unconfirmed`() {
+        val process = FixtureOwnedProcess(fixtureHandle(7101L, initialAlive = true, refusesTermination = false))
+        // Every read follows whichever process holds the PID, as a handle without a start time would.
+        val childStart = AtomicLong(7102L)
+        val childSignals = AtomicInteger()
+        val child = fixtureHandle(7102L, initialAlive = true, refusesTermination = false,
+            startMillis = childStart, signals = childSignals)
+        val clock = AtomicLong()
+        val tree = ExportProcessTree(
+            process, Duration.ZERO,
+            nanoTime = clock::get,
+            sleepNanos = { nanos -> clock.addAndGet(nanos) },
+            descendantObservation = { _, retain -> retain(child) },
+        )
+        tree.residentBytes()
+        childStart.set(9_000L) // The retained child exited and an unrelated process now holds its PID.
+
+        val result = tree.terminate()
+
+        assertEquals("retained-handles", tree.ownership)
+        assertEquals(0, childSignals.get(), "a handle that fails its identity recheck is never signalled")
+        assertFalse(result.confirmedAbsent, "an unsignalled retained handle keeps cleanup unconfirmed")
+        assertEquals(
+            listOf(ExportProcessRefusal(7102L, java.time.Instant.ofEpochMilli(9_000L), "its PID now names 7102@9000, not the retained 7102@7102")),
+            result.refusedHandles,
+        )
+        assertTrue(result.diagnostic.orEmpty().contains("refused to signal retained handles: 7102@9000"), result.diagnostic)
+    }
+
+    @Test
+    fun `supervised cleanup never signals a retained handle, even after a same-tick PID reuse`() {
+        for (killedStatus in listOf(101, 137)) {
+            val supervisor = FixtureSupervisor(fixtureHandle(7401L, initialAlive = true, refusesTermination = false), killedStatus)
+            val childSignals = AtomicInteger()
+            // The retained child exits and a stranger takes its PID within the same clock tick, so the
+            // PID and start instant both still match the retained identity.
+            val child = fixtureHandle(7402L, initialAlive = true, refusesTermination = false, signals = childSignals)
+            val clock = AtomicLong()
+            val tree = ExportProcessTree(
+                SupervisedExportProcess(supervisor), Duration.ofMillis(100),
+                nanoTime = clock::get,
+                sleepNanos = { nanos -> clock.addAndGet(nanos) },
+                descendantObservation = { _, retain -> retain(child) },
+            )
+            tree.residentBytes()
+
+            val result = tree.terminate()
+
+            assertEquals("supervisor", tree.ownership)
+            assertEquals(0, childSignals.get(), "only the supervisor signals, and only its own unreaped children")
+            assertEquals("TK", supervisor.commands(), "T, then K once the grace passes")
+            assertEquals(killedStatus < 128, result.confirmedAbsent, "only a supervisor exit below 128 proves absence")
+            if (killedStatus >= 128) {
+                assertTrue(result.diagnostic.orEmpty().contains("ended with status 137"), result.diagnostic)
+            }
+            assertEquals(TimeUnit.MILLISECONDS.toNanos(100), clock.get(), "K follows the graceful window")
         }
     }
 
@@ -818,6 +879,54 @@ class GhidraExportLaunchTest {
     }
 
     @Test
+    fun `late supervised launch is closed before its permit and starts no worker`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val marker = root.resolve("worker-started")
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val launched = CompletableFuture<Process>()
+            val failure = AtomicReference<Throwable?>()
+            val analyzer = GhidraHeadlessProgramModelAnalyzer(
+                { listOf("/bin/sh", "-c", "touch '$marker'; exec sleep 30") },
+                GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+                processStarter = { command, work ->
+                    entered.countDown()
+                    awaitIgnoringInterrupts(release)
+                    startSupervisedExportProcess(ExportSupervisorHelper.command(command, 0), work).also(launched::complete)
+                },
+            )
+            val caller = Thread {
+                try {
+                    analyzer.analyzeWithDeadline(root.resolve("authored-input"), root.resolve("analysis"),
+                        AnalysisDeadline.start(TimeUnit.MILLISECONDS.toNanos(250), "launch parent"))
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                }
+            }
+            preserveFixtureFailure({
+                caller.start()
+                assertTrue(entered.await(2, TimeUnit.SECONDS), "process launch did not start")
+                caller.join(1_500)
+                assertFalse(caller.isAlive, "caller remained inside processStarter after its admitted deadline")
+                assertIs<GhidraAnalysisException>(failure.get())
+            }, {
+                release.countDown()
+                caller.join(2_000)
+            }, {
+                val process = launched.get(2, TimeUnit.SECONDS)
+                preserveFixtureFailure({
+                    process.onExit().get(2, TimeUnit.SECONDS)
+                    assertEquals(120, process.exitValue(), "the late supervisor exits without a launch permit")
+                    assertFalse(marker.toFile().exists(), "no worker may start without the permit")
+                }, {
+                    if (process.isAlive) process.outputStream.close()
+                })
+            }, {
+                awaitLaunchPoolIdle()
+            })
+        }
+
+    @Test
     fun `shared deadline refuses blocked process launch before it returns and preserves prior evidence`(): Unit =
         inControlTemporaryDirectory { root ->
             val reports = root.resolve("analysis/reports")
@@ -1177,6 +1286,29 @@ class GhidraExportLaunchTest {
         }
     }
 
+    /** A supervisor that ignores T and exits with [killedStatus] on K; it is never destroyed directly. */
+    private class FixtureSupervisor(private val handle: ProcessHandle, private val killedStatus: Int) : Process() {
+        private val received = StringBuilder()
+        @Volatile private var status: Int? = null
+        private val control = object : java.io.OutputStream() {
+            override fun write(b: Int) {
+                synchronized(received) { received.append(b.toChar()) }
+                if (b == 'K'.code) status = killedStatus
+            }
+        }
+        fun commands(): String = synchronized(received) { received.toString() }
+        override fun getOutputStream(): java.io.OutputStream = control
+        override fun getInputStream(): java.io.InputStream = ByteArrayInputStream(byteArrayOf())
+        override fun getErrorStream(): java.io.InputStream = ByteArrayInputStream(byteArrayOf())
+        override fun waitFor(): Int = status ?: throw IllegalThreadStateException()
+        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = status != null
+        override fun exitValue(): Int = status ?: throw IllegalThreadStateException()
+        override fun isAlive(): Boolean = status == null
+        override fun destroy(): Unit = error("a supervised process is never destroyed directly")
+        override fun destroyForcibly(): Process = error("a supervised process is never destroyed directly")
+        override fun toHandle(): ProcessHandle = handle
+    }
+
     private class FixtureOwnedProcess(
         private val handle: ProcessHandle,
         private val waitFailure: Throwable? = null,
@@ -1232,6 +1364,9 @@ class GhidraExportLaunchTest {
         initialAlive: Boolean,
         refusesTermination: Boolean,
         alive: AtomicBoolean = AtomicBoolean(initialAlive),
+        // The start instant of whichever process holds the PID now; change it to simulate PID reuse.
+        startMillis: AtomicLong = AtomicLong(pid),
+        signals: AtomicInteger = AtomicInteger(),
     ): ProcessHandle {
         lateinit var handle: ProcessHandle
         handle = Proxy.newProxyInstance(
@@ -1241,7 +1376,9 @@ class GhidraExportLaunchTest {
             when (method.name) {
                 "pid" -> pid
                 "isAlive" -> alive.get()
+                "info" -> fixtureInfo(startMillis.get().takeIf { alive.get() })
                 "destroy", "destroyForcibly" -> {
+                    signals.incrementAndGet()
                     if (!refusesTermination) alive.set(false)
                     !refusesTermination
                 }
@@ -1260,6 +1397,19 @@ class GhidraExportLaunchTest {
     }
 
     private companion object {
+        fun fixtureInfo(startMillis: Long?): ProcessHandle.Info = Proxy.newProxyInstance(
+            ProcessHandle.Info::class.java.classLoader,
+            arrayOf(ProcessHandle.Info::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "startInstant" -> java.util.Optional.ofNullable(startMillis?.let(java.time.Instant::ofEpochMilli))
+                "toString" -> "FixtureProcessInfo[$startMillis]"
+                "hashCode" -> startMillis.hashCode()
+                "equals" -> false
+                else -> java.util.Optional.empty<Any>()
+            }
+        } as ProcessHandle.Info
+
         // Fixture-only: keep the first failure and attempt every already-owned cleanup action in order.
         private fun preserveFixtureFailure(body: () -> Unit, vararg cleanup: () -> Unit) {
             var failure: Throwable? = null

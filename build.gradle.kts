@@ -451,6 +451,7 @@ val acpGateHelperCompiler = providers.gradleProperty("acpGateHelperCompiler").or
 val exportSupervisorSource = layout.projectDirectory.file("src/main/c/decomp_export_supervisor.c")
 val exportSupervisorBinary = layout.buildDirectory.file("native/export/decomp-export-supervisor")
 val exportSupervisorChecksum = layout.buildDirectory.file("native/export/decomp-export-supervisor.sha256")
+val exportSupervisorReferenceDirectory = layout.buildDirectory.dir("native/export/export-supervisor")
 val exportSupervisorCompiler = providers.gradleProperty("exportSupervisorCompiler").orElse("/usr/bin/cc")
 val llvmBehaviorHelperSource = layout.projectDirectory.file("src/main/c/decomp_llvm_behavior_helper.c")
 val llvmBehaviorHelperBinary = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper")
@@ -1679,6 +1680,33 @@ val generateExportSupervisorChecksum = tasks.register("generateExportSupervisorC
     }
 }
 
+val generateExportSupervisorReference = tasks.register("generateExportSupervisorReference") {
+    group = "build"
+    description = "Writes the reference the application uses to authenticate its packaged export supervisor"
+    dependsOn(verifyExportSupervisor)
+    inputs.files(exportSupervisorBinary, exportSupervisorSource)
+    outputs.dir(exportSupervisorReferenceDirectory)
+
+    doLast {
+        fun sha256(path: Path) = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        val helper = exportSupervisorBinary.get().asFile.toPath()
+        require(System.getProperty("os.arch", "") in setOf("amd64", "x86_64")) {
+            "the export supervisor reference is qualified only for Linux x86-64"
+        }
+        val directory = exportSupervisorReferenceDirectory.get().asFile.toPath()
+        Files.createDirectories(directory)
+        Files.writeString(directory.resolve("decomp-export-supervisor-v1.properties"), listOf(
+            "schemaVersion=1",
+            "binaryName=decomp-export-supervisor",
+            "architecture=linux-x86-64",
+            "helperBytes=${Files.size(helper)}",
+            "helperSha256=${sha256(helper)}",
+            "sourceSha256=${sha256(exportSupervisorSource.asFile.toPath())}",
+        ).joinToString("\n", postfix = "\n"))
+    }
+}
+
 val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHelperChecksum") {
     group = "distribution"
     description = "Writes the digest shipped with the static LLVM behavior helper prerequisite"
@@ -2167,6 +2195,11 @@ dependencies {
 }
 
 tasks.processResources {
+    dependsOn(generateExportSupervisorReference)
+    from(exportSupervisorReferenceDirectory) {
+        into("export-supervisor")
+        duplicatesStrategy = DuplicatesStrategy.FAIL
+    }
     dependsOn(buildAnalysisIoHelper)
     from(analysisIoHelperMetadata) {
         into("analysis-native-io")
@@ -2455,6 +2488,45 @@ val verifyAnalysisIoHelperInstalled = tasks.register<JavaExec>("verifyAnalysisIo
         environment("XDG_CACHE_HOME", fixture.resolve("jvm-cache").toString())
         jvmArgs("-XX:-UsePerfData", "-XX:+ErrorFileToStderr", "-XX:-CreateCoredumpOnCrash",
             "-XX:-DumpReplayDataOnError", "-Djava.io.tmpdir=$scratch", "-Djna.tmpdir=$scratch", "-Duser.home=$home")
+        setArgs(listOf(fixture.toString()))
+    }
+}
+
+val verifyExportSupervisorInstalled = tasks.register<JavaExec>("verifyExportSupervisorInstalled") {
+    group = "verification"
+    description = "Authenticates the installed export supervisor from the installed JAR and supervises one worker"
+    dependsOn("installDist", "testClasses")
+    mainClass.set("decompengine.project.GhidraExportSupervisorTest\$InstalledProbe")
+    // Installed application/dependency JARs precede test classes. Only dependency JARs enter from
+    // the test configuration: neither development main classes nor development resources qualify.
+    classpath = files(layout.buildDirectory.dir("install/llm_bin_patch/lib").map {
+        fileTree(it.asFile) { include("*.jar") }
+    }, sourceSets["test"].output.classesDirs,
+        configurations.testRuntimeClasspath.map { entries -> entries.filter { it.isFile && it.extension == "jar" } })
+    doFirst {
+        val installed = layout.buildDirectory.dir("install/llm_bin_patch/libexec").get().asFile.toPath()
+        val helper = installed.resolve("decomp-export-supervisor")
+        val checksum = installed.resolve("decomp-export-supervisor.sha256")
+        require(Files.isRegularFile(helper, LinkOption.NOFOLLOW_LINKS) && Files.size(helper) in 64L..(4L * 1024 * 1024))
+        val helperSha256 = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(helper))
+            .joinToString("") { "%02x".format(it) }
+        require(Files.isRegularFile(checksum, LinkOption.NOFOLLOW_LINKS) &&
+            Files.readString(checksum) == "$helperSha256  decomp-export-supervisor\n" &&
+            Files.getPosixFilePermissions(checksum) == PosixFilePermissions.fromString("rw-r--r--") &&
+            Files.getPosixFilePermissions(helper) == PosixFilePermissions.fromString("rwxr-xr-x")) {
+            "installDist changed the export supervisor, its checksum or their permissions"
+        }
+        val fixture = layout.buildDirectory.dir("export-supervisor-installed-check").get().asFile.toPath()
+            .toAbsolutePath().normalize()
+        val home = fixture.resolve("jvm-home")
+        val scratch = fixture.resolve("jvm-tmp")
+        listOf(fixture, home, scratch).forEach { Files.createDirectories(it) }
+        systemProperties.remove("decompengine.export.supervisor")
+        listOf("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS").forEach { environment.remove(it) }
+        environment("HOME", home.toString())
+        environment("TMPDIR", scratch.toString())
+        jvmArgs("-XX:-UsePerfData", "-XX:+ErrorFileToStderr", "-XX:-CreateCoredumpOnCrash",
+            "-XX:-DumpReplayDataOnError", "-Djava.io.tmpdir=$scratch", "-Duser.home=$home")
         setArgs(listOf(fixture.toString()))
     }
 }

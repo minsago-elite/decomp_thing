@@ -55,9 +55,11 @@ class ExportSupervisorNativeTest {
             val politeFile = root.resolve("polite")
             val stubbornFile = root.resolve("stubborn")
             val politeExit = root.resolve("polite-exited")
+            // Each leftover installs its trap before the worker exits, so SIGTERM cannot arrive first.
             val supervisor = startWithGrace(400, "/bin/sh", "-c",
-                "(trap 'touch \"$politeExit\"; exit 0' TERM; while :; do sleep 0.05; done) & echo \$! > '$politeFile'; " +
-                    "(trap '' TERM; exec sleep 30) & echo \$! > '$stubbornFile'; exit 0")
+                "(trap 'touch \"$politeExit\"; exit 0' TERM; touch '$root/polite-ready'; while :; do sleep 0.05; done) & " +
+                    "echo \$! > '$politeFile'; (trap '' TERM; touch '$root/stubborn-ready'; exec sleep 30) & " +
+                    "echo \$! > '$stubbornFile'; while [ ! -e '$root/polite-ready' ] || [ ! -e '$root/stubborn-ready' ]; do sleep 0.01; done; exit 0")
             val started = System.nanoTime()
             supervisor.outputStream.write("1\n".toByteArray())
             supervisor.outputStream.flush()

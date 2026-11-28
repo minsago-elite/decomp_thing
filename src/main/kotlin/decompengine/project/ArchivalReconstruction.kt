@@ -3,9 +3,11 @@ package decompengine.project
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.analysis.AnalysisDeadline
+import decompengine.analysis.AnalysisNativeIoHelper
 import decompengine.analysis.BundledGhidra
 import decompengine.analysis.BoundedAnalysisProcessLaunch
 import decompengine.analysis.BoundedProgramModelAcquisitionProcess
+import decompengine.analysis.ExportSupervisorHelper
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
@@ -91,8 +93,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
         analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
-    ) : this({ invocation, _ -> commandFactory(invocation) }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, false,
-        EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
+    ) : this({ invocation, _ -> commandFactory(invocation) }, limits, analysisToolSha256, recoveryMode,
+        exportProcessStarter(limits.terminationGrace), false, EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
 
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
@@ -109,7 +111,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
     ) : this({ invocation, checkpoint ->
         BundledGhidra.locate().analysisCommandForOwnedLaunch(invocation, checkpoint)
-    }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, true, EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
+    }, limits, analysisToolSha256, recoveryMode, exportProcessStarter(limits.terminationGrace), true, EXPORT_PROCESS_LAUNCH,
+        ::ExportProcessTree)
 
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
@@ -325,19 +328,23 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     "\"remainingWallClockNanosAtLaunch\":$remainingNanosAtLaunch," +
                     "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
                     "\"stdoutBytesRetained\":${stdoutBytes.size},\"stderrBytesRetained\":${stderrBytes.size}," +
-                    "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
+                    "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}," +
+                    "\"processOwnership\":\"${processTree.ownership}\"}\n",
             )
             diagnosticsPublished = true
         }
         try {
             deadline.checkpoint("after worker launch")
-            if (requiresLaunchPermit) {
+            val supervised = process is SupervisedExportProcess
+            if (requiresLaunchPermit || supervised) {
                 // A newly started bundled worker stays inert until its handle is owned here.
                 // The two-byte permit fits in the fresh stdin pipe without a child-side read.
+                // A supervisor starts no worker before it, then hands the worker the same permit.
                 process.outputStream.write(byteArrayOf('1'.code.toByte(), '\n'.code.toByte()))
                 process.outputStream.flush()
             }
-            process.outputStream.close()
+            // A supervisor's standard input stays open as its control channel; closing it kills the tree.
+            if (!supervised) process.outputStream.close()
             val memoryMonitorFinished = AtomicBoolean(false)
             taskSettlements += memoryMonitorFinished
             captureSettlements += memoryMonitorFinished
@@ -602,7 +609,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                             "\"remainingWallClockNanosAtLaunch\":$remainingNanosAtLaunch," +
                             "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
                             "\"stdoutBytesRetained\":0,\"stderrBytesRetained\":0," +
-                            "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
+                            "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}," +
+                            "\"processOwnership\":\"${processTree.ownership}\"}\n",
                     )
                 }
             }
@@ -639,7 +647,52 @@ internal data class ExportProcessCleanupResult(
     val confirmedAbsent: Boolean,
     val failure: Throwable?,
     val diagnostic: String? = null,
+    /** Retained handles that were not signalled because their identity could not be rechecked. */
+    val refusedHandles: List<ExportProcessRefusal> = emptyList(),
 )
+
+/** A PID together with the start instant of the process holding it. */
+internal data class ExportProcessIdentity(val pid: Long, val startInstant: java.time.Instant) {
+    override fun toString(): String = "$pid@${startInstant.toEpochMilli()}"
+}
+
+/** A retained handle that was not signalled, with the reason. */
+internal data class ExportProcessRefusal(val pid: Long, val startInstant: java.time.Instant?, val reason: String) {
+    override fun toString(): String = "$pid@${startInstant?.toEpochMilli() ?: "unknown"} ($reason)"
+}
+
+/**
+ * The export supervisor's Process. Its standard input is the supervisor's control channel, so a
+ * destroy request becomes a control command and can never kill the supervisor ahead of its tree.
+ */
+internal class SupervisedExportProcess(private val supervisor: Process) : Process() {
+    /** Sends one control command; false once the channel is closed. */
+    @Synchronized
+    fun send(command: Char): Boolean = try {
+        supervisor.outputStream.write(command.code)
+        supervisor.outputStream.flush()
+        true
+    } catch (_: java.io.IOException) {
+        false
+    }
+
+    override fun getOutputStream(): java.io.OutputStream = supervisor.outputStream
+    override fun getInputStream(): java.io.InputStream = supervisor.inputStream
+    override fun getErrorStream(): java.io.InputStream = supervisor.errorStream
+    override fun waitFor(): Int = supervisor.waitFor()
+    override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = supervisor.waitFor(timeout, unit)
+    override fun exitValue(): Int = supervisor.exitValue()
+    override fun isAlive(): Boolean = supervisor.isAlive
+    override fun destroy() { send('T') }
+    override fun destroyForcibly(): Process = also { send('K') }
+    override fun supportsNormalTermination(): Boolean = true
+    override fun pid(): Long = supervisor.pid()
+    override fun toHandle(): ProcessHandle = supervisor.toHandle()
+    override fun info(): ProcessHandle.Info = supervisor.info()
+    override fun onExit(): CompletableFuture<Process> = supervisor.onExit().thenApply { this }
+    override fun children(): java.util.stream.Stream<ProcessHandle> = supervisor.children()
+    override fun descendants(): java.util.stream.Stream<ProcessHandle> = supervisor.descendants()
+}
 
 /** References retained after unresolved cleanup prevent another launch from assuming capacity. */
 internal data class ExportProcessCleanupOwner(
@@ -672,7 +725,19 @@ private fun moveExportCandidate(candidate: Path, target: Path) {
     }
 }
 
-/** One invocation-wide grace + force/wait window; only the retained observations are covered. */
+/**
+ * One invocation-wide grace + force/wait window.
+ *
+ * Under [SupervisedExportProcess], the production mode on Linux, the supervisor owns the whole tree:
+ * cleanup sends it T, then K after the grace, and absence is proven only by its own exit below 128,
+ * which it reaches only with no children left. Nothing is signalled through a ProcessHandle, and the
+ * retained inventory serves resource monitoring alone.
+ *
+ * Elsewhere only the retained observations are covered, and each retained handle is signalled only
+ * after its PID and start instant are read again. Start instants have clock-tick resolution, so this
+ * fallback cannot tell apart a PID reused within one tick; a handle that fails the recheck is not
+ * signalled and keeps cleanup unconfirmed.
+ */
 internal class ExportProcessTree(
     private val process: Process,
     private val gracefulTermination: Duration,
@@ -682,10 +747,17 @@ internal class ExportProcessTree(
         root.descendants().use { stream -> stream.forEach { retain(it) } }
     },
 ) {
+    private val supervisor = process as? SupervisedExportProcess
+    /** The ownership mode recorded in the export resource report. */
+    val ownership: String = if (supervisor != null) "supervisor" else "retained-handles"
     private var terminationStartedNanos: Long? = null
     private var result: ExportProcessCleanupResult? = null
     private var rootHandle: ProcessHandle? = null
-    private val observedHandles = LinkedHashSet<ProcessHandle>()
+    private var rootIdentity: ExportProcessIdentity? = null
+    // Each retained handle with the identity read when it was retained, or null when unreadable.
+    private val observedHandles = LinkedHashMap<ProcessHandle, ExportProcessIdentity?>()
+    private val refusals = LinkedHashSet<ExportProcessRefusal>()
+    private var refusalsTruncated = false
     private var observationFailure: Throwable? = null
 
     /** Monitoring and cleanup share identities, limits and sticky observation failures. */
@@ -695,7 +767,7 @@ internal class ExportProcessTree(
             // terminate() has already made the final bounded observations in that case.
             if (result == null) observe("while monitoring resident memory")
             observationFailure?.let { throw it }
-            listOfNotNull(rootHandle) + observedHandles.toList()
+            listOfNotNull(rootHandle) + observedHandles.keys.toList()
         }
         return handles.distinctBy { it.pid() }.sumOf { handle ->
             runCatching {
@@ -714,15 +786,18 @@ internal class ExportProcessTree(
     // identity before any later stream error, including observations made before cleanup.
     private fun observe(stage: String) {
         try {
-            val root = rootHandle ?: process.toHandle().also { rootHandle = it }
+            val root = rootHandle ?: process.toHandle().also {
+                rootHandle = it
+                rootIdentity = identityOf(it)
+            }
             descendantObservation(root) { handle ->
-                if (!observedHandles.contains(handle)) {
+                if (!observedHandles.containsKey(handle)) {
                     if (observedHandles.size + 1 >= MAXIMUM_RETAINED_HANDLES) {
                         throw IllegalStateException("Ghidra export process inventory exceeded $MAXIMUM_RETAINED_HANDLES retained handles")
                     }
                     // ProcessHandle equality, not PID alone, distinguishes reused identities.
                     // Only never-observed descendants remain outside this retained inventory.
-                    observedHandles.add(handle)
+                    observedHandles[handle] = identityOf(handle)
                 }
             }
         } catch (failure: Throwable) {
@@ -730,6 +805,29 @@ internal class ExportProcessTree(
                 "Ghidra export process observation failed $stage", failure,
             ) else if (observationFailure !== failure) observationFailure?.addSuppressed(failure)
         }
+    }
+
+    // The identity [handle] denotes now, or null once its process has exited or cannot be read.
+    private fun identityOf(handle: ProcessHandle): ExportProcessIdentity? = runCatching {
+        handle.info().startInstant().orElse(null)?.let { ExportProcessIdentity(handle.pid(), it) }
+    }.getOrNull()
+
+    // Whether [handle] may be signalled: its PID and start instant read now must equal [recorded].
+    private fun rechecked(handle: ProcessHandle, recorded: ExportProcessIdentity?): Boolean {
+        val current = identityOf(handle)
+        if (recorded != null && current == recorded) return true
+        // A process that has exited needs no signal and is not a refusal.
+        if (current == null && !runCatching { handle.isAlive }.getOrDefault(true)) return false
+        val reason = when {
+            recorded == null -> "no start instant was recorded, so its identity cannot be rechecked"
+            current == null -> "its start instant could not be read before signalling"
+            else -> "its PID now names $current, not the retained $recorded"
+        }
+        val refusal = ExportProcessRefusal(handle.pid(), current?.startInstant ?: recorded?.startInstant, reason)
+        if (refusal !in refusals) {
+            if (refusals.size < MAXIMUM_RETAINED_HANDLES) refusals.add(refusal) else refusalsTruncated = true
+        }
+        return false
     }
 
     @Synchronized
@@ -747,9 +845,10 @@ internal class ExportProcessTree(
 
     private fun terminateObserved(onWaitInterrupted: () -> Unit): ExportProcessCleanupResult {
         result?.let { return it }
+        supervisor?.let { return terminateSupervised(it, onWaitInterrupted).also { cleaned -> result = cleaned } }
         val started = terminationStartedNanos ?: nanoTime().also { terminationStartedNanos = it }
         val graceNanos = gracefulTermination.toNanos()
-        fun knownHandles(): List<ProcessHandle> = observedHandles.toList()
+        fun knownHandles(): List<ProcessHandle> = observedHandles.keys.toList()
         fun aliveOrUnknown(): Boolean {
             var alive = false
             try { alive = process.isAlive || alive } catch (failure: Throwable) {
@@ -766,8 +865,11 @@ internal class ExportProcessTree(
         }
         fun signal(force: Boolean) {
             knownHandles().asReversed().forEach { handle ->
-                try { if (handle.isAlive) { if (force) handle.destroyForcibly() else handle.destroy() } }
-                catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
+                try {
+                    if (handle.isAlive && rechecked(handle, observedHandles[handle])) {
+                        if (force) handle.destroyForcibly() else handle.destroy()
+                    }
+                } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
             }
             val root = rootHandle
             var rootAlive: Boolean? = null
@@ -780,7 +882,7 @@ internal class ExportProcessTree(
             if (rootAlive != false) try {
                 if (process.isAlive) { if (force) process.destroyForcibly() else process.destroy() }
             } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
-            if (rootAlive == true && root != null) try {
+            if (rootAlive == true && root != null && rechecked(root, rootIdentity)) try {
                 if (force) root.destroyForcibly() else root.destroy()
             } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
         }
@@ -849,13 +951,63 @@ internal class ExportProcessTree(
             !confirmed || stillObservedAlive -> "process absence was not confirmed within the cleanup allowance"
             else -> null
         }
+        // A refused handle was never signalled, so its process may survive; keep that evidence and fail closed.
+        val refusalDiagnostic = refusals.takeIf { it.isNotEmpty() }?.joinToString(
+            prefix = "refused to signal retained handles: ",
+            postfix = if (refusalsTruncated) ", and further refusals" else "",
+        )
         val result = ExportProcessCleanupResult(
-            confirmedAbsent = confirmed && !stillObservedAlive && cleanupFailure == null,
+            confirmedAbsent = confirmed && !stillObservedAlive && cleanupFailure == null && refusals.isEmpty(),
             failure = cleanupFailure,
-            diagnostic = cleanupDiagnostic,
+            diagnostic = listOfNotNull(cleanupDiagnostic, refusalDiagnostic).joinToString("; ").ifEmpty { null },
+            refusedHandles = refusals.toList(),
         )
         this.result = result
         return result
+    }
+
+    // T, the grace, then K within the same window. The supervisor exits below 128 only when it has no
+    // children left, so that exit alone proves the tree absent; ProcessHandles are never signalled.
+    private fun terminateSupervised(control: SupervisedExportProcess, onWaitInterrupted: () -> Unit): ExportProcessCleanupResult {
+        val started = terminationStartedNanos ?: nanoTime().also { terminationStartedNanos = it }
+        val graceNanos = gracefulTermination.toNanos()
+        fun exitedWithin(allowance: Long): Boolean {
+            while (true) {
+                try {
+                    if (!process.isAlive) return true
+                    val elapsed = nanoTime() - started
+                    val remaining = if (elapsed < 0 || elapsed >= allowance) 0L else allowance - elapsed
+                    if (remaining == 0L) return false
+                    val pollNanos = minOf(remaining, POLL_NANOS)
+                    val waitStarted = nanoTime()
+                    if (process.waitFor(pollNanos, TimeUnit.NANOSECONDS)) return true
+                    val waited = nanoTime() - waitStarted
+                    val waitedNanos = if (waited < 0) 0L else waited
+                    if (waitedNanos < pollNanos) sleepNanos(pollNanos - waitedNanos)
+                } catch (_: InterruptedException) {
+                    onWaitInterrupted()
+                }
+            }
+        }
+        // The retained inventory serves resource monitoring only; keep its last observation current.
+        observe("before supervised termination")
+        var exited = !process.isAlive
+        if (!exited) exited = control.send('T') && exitedWithin(graceNanos)
+        if (!exited) {
+            control.send('K')
+            exited = exitedWithin(saturatingAdd(graceNanos, FORCE_EXIT_WAIT_NANOS))
+        }
+        val status = if (exited) runCatching { process.exitValue() }.getOrNull() else null
+        val proven = status != null && status in 0 until 128
+        return ExportProcessCleanupResult(
+            confirmedAbsent = proven,
+            failure = null,
+            diagnostic = when {
+                !exited -> "export supervisor did not exit within the cleanup allowance"
+                !proven -> "export supervisor ended with status $status, which does not prove its process tree absent"
+                else -> null
+            },
+        )
     }
 
     @Synchronized
@@ -990,8 +1142,35 @@ class ArchivalReconstructionService(
     }
 }
 
-private fun startExportProcess(command: List<String>, workDir: Path): Process =
-    ProcessBuilder(command).directory(workDir.toFile()).start()
+private fun exportProcessStarter(terminationGrace: Duration): (List<String>, Path) -> Process = { command, workDir ->
+    startExportProcess(command, workDir, terminationGrace)
+}
+
+/** On Linux every export runs under the authenticated supervisor; elsewhere it cannot exist. */
+private fun startExportProcess(command: List<String>, workDir: Path, terminationGrace: Duration): Process {
+    if (!ExportSupervisorHelper.required()) return ProcessBuilder(command).directory(workDir.toFile()).start()
+    val leftoverGraceMillis = minOf(terminationGrace.toMillis(), ExportSupervisorHelper.MAXIMUM_LEFTOVER_GRACE_MILLIS)
+    return startSupervisedExportProcess(ExportSupervisorHelper.command(command, leftoverGraceMillis), workDir)
+}
+
+/** Launches a pinned supervisor command; the supervisor starts no worker before its launch permit. */
+internal fun startSupervisedExportProcess(supervisorCommand: List<String>, workDir: Path): Process {
+    AnalysisNativeIoHelper.beforeLaunch(supervisorCommand)
+    val started = try {
+        ProcessBuilder(supervisorCommand).directory(workDir.toFile()).start()
+    } catch (failure: Throwable) {
+        AnalysisNativeIoHelper.launchUnknown(supervisorCommand)
+        throw failure
+    }
+    try {
+        AnalysisNativeIoHelper.launchReturned(supervisorCommand, started)
+    } catch (failure: Throwable) {
+        // Closing the control channel before any permit makes the supervisor exit without a worker.
+        try { started.outputStream.close() } catch (closeFailure: Throwable) { failure.addSuppressed(closeFailure) }
+        throw failure
+    }
+    return SupervisedExportProcess(started)
+}
 
 private fun stopLateExportProcess(
     process: Process,
@@ -1008,6 +1187,8 @@ private fun stopLateExportProcess(
         }
     }
     try {
+        // A late supervisor never received its permit; closing its control channel ends it without a worker.
+        if (process is SupervisedExportProcess) cleanup { process.outputStream.close() }
         val processTree = ExportProcessTree(process, terminationGrace)
         val result = try { processTree.terminate() } catch (caught: Throwable) {
             ExportProcessCleanupResult(false, caught)

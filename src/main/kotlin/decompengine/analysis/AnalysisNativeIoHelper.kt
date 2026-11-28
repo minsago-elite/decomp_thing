@@ -89,6 +89,23 @@ internal object AnalysisNativeIoHelper {
             .toAbsolutePath()
         val reference = readReference(origin)
         val helper = override ?: selectedHelper(origin)
+        return pinExecutable(helper, "analysis native I/O", MAXIMUM_HELPER_BYTES, pins, arguments) { bytes, executable ->
+            verifyArtifact(helper, reference, bytes, executable)
+        }
+    }
+
+    /**
+     * Opens [helper] once, verifies the exact opened bytes with [verify], and returns a command that
+     * executes that descriptor through /proc. The pin follows the launch lifecycle of [beforeLaunch].
+     */
+    internal fun pinExecutable(
+        helper: Path,
+        label: String,
+        maximumBytes: Int,
+        pins: AnalysisNativeIoExecutablePins,
+        arguments: List<String>,
+        verify: (bytes: ByteArray, openedExecutable: Path) -> Unit,
+    ): List<String> {
         val pin = pins.reserve()
         try {
             val before = regularAttributes(helper)
@@ -98,16 +115,16 @@ internal object AnalysisNativeIoHelper {
             val executable = Path.of("/proc", ProcessHandle.current().pid().toString(), "fd", descriptor.toString())
             val opened = Files.readAttributes(executable, BasicFileAttributes::class.java)
             require(sameFile(before, opened) && opened.isRegularFile && channel.size() == before.size()) {
-                "analysis native I/O executable changed while its descriptor was opened"
+                "$label executable changed while its descriptor was opened"
             }
             val bytes = ByteArray(Math.toIntExact(before.size().also {
-                require(it in 64..MAXIMUM_HELPER_BYTES.toLong())
+                require(it in 64..maximumBytes.toLong())
             }))
             val buffer = ByteBuffer.wrap(bytes)
             while (buffer.hasRemaining()) require(channel.read(buffer) > 0)
             require(channel.read(ByteBuffer.allocate(1)) == -1 && channel.size() == before.size() &&
-                sameFile(before, regularAttributes(helper))) { "analysis native I/O executable changed while being pinned" }
-            verifyArtifact(helper, reference, bytes, executable)
+                sameFile(before, regularAttributes(helper))) { "$label executable changed while being pinned" }
+            verify(bytes, executable)
             return PinnedNativeIoCommand(pin, listOf(executable.toString()) + arguments)
         } catch (failure: Throwable) {
             try { pin.notLaunched() } catch (cleanup: Throwable) {
@@ -219,7 +236,7 @@ internal object AnalysisNativeIoHelper {
         return Reference(properties, resources)
     }
 
-    private fun developmentBuildRoot(origin: Path): Path? {
+    internal fun developmentBuildRoot(origin: Path): Path? {
         val suffix = Path.of("build", "classes", "kotlin", "main")
         if (!origin.endsWith(suffix)) return null
         return origin.parent.parent.parent
@@ -238,7 +255,7 @@ internal object AnalysisNativeIoHelper {
             digest(bytes) == reference.properties.getValue("helperSha256")) {
             "analysis native I/O helper does not match the defining application's build tuple"
         }
-        verifyStaticElf(bytes)
+        verifyStaticElf(bytes, "analysis native I/O helper")
         val sidecars = requireNotNull(helper.parent).resolve(RESOURCE_DIRECTORY)
         for ((name, expected) in reference.resources) {
             val installed = readStableFile(sidecars.resolve(name), expected.size)
@@ -248,16 +265,17 @@ internal object AnalysisNativeIoHelper {
         }
     }
 
-    private fun verifyStaticElf(bytes: ByteArray) {
+    /** Requires the qualified static, non-PIE x86-64 ELF64 image with a non-executable stack. */
+    internal fun verifyStaticElf(bytes: ByteArray, label: String) {
         require(bytes.size >= 64 && bytes[0] == 0x7f.toByte() && bytes[1] == 'E'.code.toByte() &&
             bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
             bytes[4] == 2.toByte() && bytes[5] == 1.toByte() && bytes[6] == 1.toByte()) {
-            "analysis native I/O helper is not the qualified ELF64 image"
+            "$label is not the qualified ELF64 image"
         }
         val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         require(elf.getShort(16).toInt() == 2 && elf.getShort(18).toInt() == 62 && elf.getInt(20) == 1 &&
             elf.getShort(52).toInt() == 64 && elf.getShort(54).toInt() == 56) {
-            "analysis native I/O helper has an unsupported ELF ABI"
+            "$label has an unsupported ELF ABI"
         }
         val offset = elf.getLong(32)
         val count = elf.getShort(56).toInt() and 0xffff
@@ -266,7 +284,7 @@ internal object AnalysisNativeIoHelper {
         for (index in 0 until count) {
             val position = Math.toIntExact(offset + index * 56L)
             val kind = elf.getInt(position)
-            require(kind != 2 && kind != 3) { "analysis native I/O helper must have no dynamic loader or dynamic segment" }
+            require(kind != 2 && kind != 3) { "$label must have no dynamic loader or dynamic segment" }
             if (kind == 1) {
                 loads++
                 val fileOffset = elf.getLong(position + 8)
@@ -277,7 +295,7 @@ internal object AnalysisNativeIoHelper {
                     fileOffset <= bytes.size.toLong() - fileSize)
             }
             if (kind == 0x6474e551) require(elf.getInt(position + 4) and 1 == 0) {
-                "analysis native I/O helper has an executable stack"
+                "$label has an executable stack"
             }
         }
         require(loads > 0)
@@ -337,7 +355,7 @@ internal object AnalysisNativeIoHelper {
         }
     }
 
-    private fun parseProperties(bytes: ByteArray): Map<String, String> {
+    internal fun parseProperties(bytes: ByteArray): Map<String, String> {
         require(bytes.isNotEmpty() && bytes.last() == '\n'.code.toByte() &&
             bytes.all { it == '\n'.code.toByte() || it.toInt() in 0x20..0x7e })
         val result = linkedMapOf<String, String>()
@@ -350,7 +368,7 @@ internal object AnalysisNativeIoHelper {
         return result
     }
 
-    private fun readStableFile(path: Path, maximumBytes: Int): ByteArray {
+    internal fun readStableFile(path: Path, maximumBytes: Int): ByteArray {
         val before = regularAttributes(path)
         require(before.size() in 1..maximumBytes.toLong()) { "analysis native I/O artifact exceeds its read bound" }
         val bytes = Files.newInputStream(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { input ->
@@ -362,13 +380,13 @@ internal object AnalysisNativeIoHelper {
         return bytes
     }
 
-    private fun regularAttributes(path: Path): BasicFileAttributes =
+    internal fun regularAttributes(path: Path): BasicFileAttributes =
         Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).also {
             require(it.isRegularFile && it.fileKey() != null) { "analysis native I/O artifact is not a stable regular file" }
         }
-    private fun sameFile(left: BasicFileAttributes, right: BasicFileAttributes): Boolean =
+    internal fun sameFile(left: BasicFileAttributes, right: BasicFileAttributes): Boolean =
         left.fileKey() == right.fileKey() && left.size() == right.size() && left.lastModifiedTime() == right.lastModifiedTime()
-    private fun digest(bytes: ByteArray): String =
+    internal fun digest(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     private fun Map<String, String>.longValue(key: String): Long = getValue(key).let {
         require(it.matches(Regex("0|[1-9][0-9]*"))) { "analysis native I/O provenance number is invalid" }

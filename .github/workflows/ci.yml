@@ -757,6 +757,8 @@ jobs:
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - name: Verify atomic bundle publication and refusal controls
         run: ./gradlew --no-daemon --offline verifyAtomicGhidraBundlePublication
+      - name: Verify the installed export supervisor authenticates and supervises a worker
+        run: ./gradlew --no-daemon --offline verifyExportSupervisorInstalled
       - name: Verify installed Ghidra publication overlap coordinator controls
         run: python3 scripts/qualify-ghidra-install-overlap.py --self-test
       - name: Qualify real installed reconstruction during same-bundle publication
