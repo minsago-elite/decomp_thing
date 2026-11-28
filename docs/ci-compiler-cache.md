@@ -46,6 +46,30 @@ cache ownership is introduced for deliberately cold jobs or private replay homes
 The dependency action excludes `build/ci-compiler-cache`; its shared family never
 changes the single default-branch compiler publisher or the one-GiB limit.
 
+## Archival image Gradle resolution
+
+The `archival-ghidra` job builds its image with BuildKit, whose `/root/.gradle`
+cache mount starts empty on a hosted runner, so the image's single `installDist`
+invocation resolves every plugin and dependency from its repository. The job does
+not restore the runner dependency cache into the image build. GitHub can serve a
+pull request a cache entry saved from that pull request's own merge ref, and the
+copied resolution metadata has no integrity check independent of the cache. A
+restored entry could therefore change which dependencies or plugins resolve. Reusing
+it safely would need repository-wide Gradle dependency verification metadata, which
+the build does not have.
+
+`scripts/archival-gradle-install.sh` is the only place that sets the resolver retry
+properties for that invocation. On a transient repository failure, including HTTP
+429, Gradle sends up to 8 requests per resource. It sleeps the initial backoff, then
+double that, and so on. Each build draws the initial backoff uniformly from 3000 to
+5000 ms, so concurrent builds do not retry in lockstep. The sleeps total 127 times
+the initial backoff, so one throttled resource waits 381 to 635 seconds (6.4 to 10.6
+minutes) before the build fails. The earlier window was 30 seconds: 5 requests from
+a fixed 2000 ms. The 45-minute timeout bounds the whole invocation, and the image
+build capture keeps its 2700-second deadline inside the job's 60-minute timeout.
+`scripts/test-archival-gradle-resolution.py` checks the window, the jitter and the
+original resolver failure cases.
+
 ## Evidence
 
 Ordinary job logs retain the exact source checkout, cache key/restored key, cache
