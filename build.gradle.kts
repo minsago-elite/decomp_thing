@@ -13,17 +13,14 @@ import java.nio.file.attribute.PosixFileAttributes
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.UserPrincipal
 import java.io.File
-import java.io.IOException
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.file.DirectoryStream
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
-import java.nio.file.SecureDirectoryStream
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.attribute.BasicFileAttributeView
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Duration
@@ -1880,99 +1877,40 @@ val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSig
             roots.flatMap { listOf("--class-root", it.absolutePath) })
     }
 }
-// Test fixtures may leave symlinks to system directories (for example /usr/bin) under the
-// temporary root. Each entry is inspected, opened and deleted relative to its already-open parent
-// SecureDirectoryStream with NOFOLLOW_LINKS, so a directory replaced by a link mid-walk cannot
-// redirect traversal or deletes outside the tree: the open fails instead. There is no path-based
-// fallback. [beforeDescent] exists only so the verification task can inject that race.
-fun deleteTreeWithoutFollowingLinks(root: Path, beforeDescent: (Path) -> Unit = {}) {
-    val absolute = root.toAbsolutePath().normalize()
-    val parent = checkNotNull(absolute.parent) { "refusing to delete a filesystem root: $absolute" }
-    if (!Files.exists(absolute, LinkOption.NOFOLLOW_LINKS)) return
-    requireSecureDirectoryStream(Files.newDirectoryStream(parent), parent).use { stream ->
-        deleteEntryWithoutFollowingLinks(stream, absolute.fileName, absolute, beforeDescent)
-    }
-}
-fun requireSecureDirectoryStream(stream: DirectoryStream<Path>, directory: Path): SecureDirectoryStream<Path> {
-    @Suppress("UNCHECKED_CAST")
-    return stream as? SecureDirectoryStream<Path> ?: run {
-        stream.close()
-        throw IOException("refusing path-based deletion: no SecureDirectoryStream is available for $directory")
-    }
-}
-fun deleteEntryWithoutFollowingLinks(
-    parent: SecureDirectoryStream<Path>, name: Path, path: Path, beforeDescent: (Path) -> Unit,
-) {
-    val attributes = parent.getFileAttributeView(name, BasicFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
-        .readAttributes()
-    // A directory swapped in here fails unlinkat without AT_REMOVEDIR; nothing is followed.
-    if (!attributes.isDirectory) return parent.deleteFile(name)
-    beforeDescent(path)
-    // O_NOFOLLOW: a link swapped in after the attribute read fails to open rather than redirecting.
-    requireSecureDirectoryStream(parent.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS), path).use { child ->
-        child.map { it.fileName }.forEach { deleteEntryWithoutFollowingLinks(child, it, path.resolve(it), beforeDescent) }
-    }
-    parent.deleteDirectory(name)
-}
-val verifyTestTemporaryRootCleanup = tasks.register("verifyTestTemporaryRootCleanup") {
-    group = "verification"
-    description = "Proves test temporary-root cleanup deletes symlinks without deleting their targets"
-    val work = layout.buildDirectory.dir("test-tmp-cleanup-check")
-    outputs.upToDateWhen { false }
-    doLast {
-        val base = work.get().asFile.toPath()
-        deleteTreeWithoutFollowingLinks(base)
-        val target = Files.createDirectories(base.resolve("outside/target"))
-        val kept = Files.writeString(target.resolve("kept"), "kept")
-        val root = Files.createDirectories(base.resolve("root/nested"))
-        Files.createSymbolicLink(root.resolve("directory-link"), target)
-        Files.createSymbolicLink(root.resolve("file-link"), kept)
-        Files.createSymbolicLink(base.resolve("root-link"), base.resolve("outside"))
-        // Swap a listed directory for a link to the outside target after its attributes were read
-        // and before descent; cleanup must refuse to follow it and leave the target intact.
-        val swapped = Files.createDirectories(root.resolve("swapped"))
-        Files.writeString(swapped.resolve("inner"), "inner")
-        val race = runCatching {
-            deleteTreeWithoutFollowingLinks(base.resolve("root")) { path ->
-                if (path == swapped) {
-                    Files.delete(swapped.resolve("inner"))
-                    Files.delete(swapped)
-                    Files.createSymbolicLink(swapped, target)
-                }
-            }
+// Each Test task execution gets a fresh, owner-only temporary root build/t/<base36 counter>, created
+// with an exclusive mkdir so an existing root (or a link planted at that name) is skipped, never reused.
+// Nothing here deletes or traverses test temporary roots: JUnit already deletes @TempDir contents after
+// each test, and the per-execution roots left behind accumulate only under the gitignored build/ until
+// `./gradlew clean` removes them. A counter rather than a random name keeps the root to one or two
+// characters, because Unix socket fixtures under it must fit Linux's 108-byte sun_path even in nested
+// worktrees (RepositoryTemporaryRootTest binds the longest fixture socket path).
+fun createTestTemporaryRoot(parent: Path): Path {
+    Files.createDirectories(parent)
+    val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))
+    for (index in 0 until 36 * 36) {
+        try {
+            return Files.createDirectory(parent.resolve(index.toString(36)), ownerOnly)
+        } catch (_: FileAlreadyExistsException) {
+            // Taken by an earlier or concurrent execution; try the next name.
         }
-        check(race.isFailure && Files.isSymbolicLink(swapped)) { "cleanup followed a directory swapped for a link" }
-        check(Files.isRegularFile(kept, LinkOption.NOFOLLOW_LINKS) && Files.readString(kept) == "kept") {
-            "cleanup deleted the target of a directory swapped for a link"
-        }
-        deleteTreeWithoutFollowingLinks(base.resolve("root"))
-        deleteTreeWithoutFollowingLinks(base.resolve("root-link"))
-        check(!Files.exists(base.resolve("root"), LinkOption.NOFOLLOW_LINKS) &&
-            !Files.exists(base.resolve("root-link"), LinkOption.NOFOLLOW_LINKS)) { "cleanup left the root behind" }
-        check(Files.isRegularFile(kept, LinkOption.NOFOLLOW_LINKS) && Files.readString(kept) == "kept") {
-            "cleanup deleted a symlink target outside the root"
-        }
-        deleteTreeWithoutFollowingLinks(base)
     }
+    error("no unused test temporary root under $parent; run ./gradlew clean")
 }
 tasks.withType<Test>().configureEach {
-    dependsOn(verifyCompiledJunitSignatures, verifyTestTemporaryRootCleanup)
+    dependsOn(verifyCompiledJunitSignatures)
     // HotSpot otherwise writes /tmp/hsperfdata_<user>/<pid> for every worker regardless of java.io.tmpdir.
     jvmArgs("-XX:-UsePerfData")
     // Keep @TempDir, Files.createTempDirectory and native temp files inside the repository.
     // Specialized tasks that already choose java.io.tmpdir keep their own roots; whichever
     // doFirst runs first, the explicit override wins. Set at execution time so the absolute
-    // path never becomes a cache-key input. The root stays short because Unix socket fixtures
-    // under it must fit Linux's 108-byte sun_path even in nested worktrees.
-    val repositoryTemporaryRoot = layout.buildDirectory.dir(if (name == "test") "t" else "t-$name")
+    // path never becomes a cache-key input.
+    val repositoryTemporaryParent = layout.buildDirectory.dir("t")
     val testRepositoryRoot = layout.projectDirectory.asFile.absolutePath
     doFirst {
         val testTask = this as Test
         testTask.systemProperty("decompengine.test.repositoryRoot", testRepositoryRoot)
         if (!testTask.systemProperties.containsKey("java.io.tmpdir")) {
-            val root = repositoryTemporaryRoot.get().asFile
-            deleteTreeWithoutFollowingLinks(root.toPath())
-            check(root.mkdirs()) { "test temporary root unavailable: $root" }
+            val root = createTestTemporaryRoot(repositoryTemporaryParent.get().asFile.toPath()).toFile()
             testTask.systemProperty("java.io.tmpdir", root.absolutePath)
             testTask.systemProperty("jna.tmpdir", root.absolutePath)
             testTask.environment("TMPDIR", root.absolutePath)

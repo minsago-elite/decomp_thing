@@ -5,7 +5,9 @@ import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
 import java.nio.channels.ServerSocketChannel
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.Comparator
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -32,6 +34,18 @@ class RepositoryTemporaryRootTest {
         assertUnderBuild(javaTemporary, "java.io.tmpdir")
         assertEquals(javaTemporary.toRealPath(), Path.of(System.getProperty("jna.tmpdir")).toRealPath())
         assertEquals(javaTemporary.toRealPath(), Path.of(assertNotNull(System.getenv("TMPDIR"))).toRealPath())
+    }
+
+    @Test
+    fun `each test execution gets its own owner-only root named by a short base36 counter under build t`() {
+        val javaTemporary = Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().normalize()
+        assertEquals(buildRoot.resolve("t"), javaTemporary.parent.toRealPath(),
+            "java.io.tmpdir must be a per-execution child of build/t")
+        assertTrue(javaTemporary.fileName.toString().matches(Regex("[0-9a-z]{1,2}")),
+            "per-execution root must be a one- or two-character base36 counter: $javaTemporary")
+        assertTrue(Files.isDirectory(javaTemporary, LinkOption.NOFOLLOW_LINKS), "per-execution root must not be a link")
+        assertEquals("rwx------", PosixFilePermissions.toString(
+            Files.getPosixFilePermissions(javaTemporary, LinkOption.NOFOLLOW_LINKS)))
     }
 
     @Test
@@ -69,7 +83,13 @@ class RepositoryTemporaryRootTest {
             assertUnderBuild(root, "ShortSocketDirectory")
             // Every socket path the ShortSocketDirectory fixtures bind, relative to their root. The longest is
             // runtime/docker.sock; keep this list in step with the fixtures when they add or rename sockets.
-            val sockets = listOf("runtime/bus", "runtime/new", "runtime/docker.sock", "src/socket").map(root::resolve)
+            val fixtureSockets = listOf("runtime/bus", "runtime/new", "runtime/docker.sock", "src/socket")
+            val sockets = fixtureSockets.map(root::resolve)
+            // The per-execution root counter grows to two characters before ./gradlew clean resets it;
+            // the longest fixture socket must still fit at that depth.
+            val worstCase = Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().normalize()
+                .resolveSibling("zz").resolve(root.fileName).resolve(fixtureSockets.maxBy { it.length })
+            assertTrue(worstCase.toString().toByteArray().size < 108, "worst-case socket path exceeds sun_path: $worstCase")
             sockets.forEach { socket ->
                 Files.createDirectories(socket.parent)
                 assertTrue(socket.toString().toByteArray().size < 108, "socket path exceeds sun_path: $socket")
