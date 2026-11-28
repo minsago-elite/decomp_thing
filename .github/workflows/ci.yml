@@ -154,9 +154,11 @@ jobs:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+      PACKAGED_WEB_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PACKAGED_WEB_SOURCE_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
     name: Packaged web contracts and browser
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 60
     permissions:
       contents: read
     defaults:
@@ -206,6 +208,9 @@ jobs:
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
           node --test scripts/packaged-browser-temp-parent.test.mjs
+          node --check scripts/packaged-browser-structure-cold.mjs
+          node --check scripts/test-packaged-browser-structure-cold.mjs
+          node --test scripts/test-packaged-browser-structure.mjs scripts/test-packaged-browser-structure-cold.mjs
           node --test scripts/packaged-browser-upload.test.mjs
           node --check scripts/packaged-browser-restart.mjs
           node --test scripts/packaged-browser-restart.test.mjs
@@ -217,6 +222,7 @@ jobs:
           node --test scripts/packaged-browser-capture.test.mjs
           node --test scripts/packaged-browser-native-download.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
+        id: packaged-archives
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
           DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
@@ -330,6 +336,64 @@ jobs:
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode proxy --no-sandbox
           git diff --exit-code -- frontend/ contracts/web/v1/
+      # #536 qualification gates run after the ordinary Structure journey and the Vite proxy, and each
+      # runs once the archives are built even when an earlier step or gate failed, so every profile
+      # still records evidence. The final gate step fails the job if any of them did not pass.
+      - name: Measure twenty fresh-process cold function-inventory loads on loopback
+        id: structure-cold-loopback
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
+        timeout-minutes: 25
+        env:
+          STRUCTURE_COLD_REPORT_DIR: ${{ github.workspace }}/build/packaged-web-ci
+        run: |
+          node scripts/packaged-browser-structure-cold.mjs --run loopback -- \
+            scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --no-sandbox
+      - name: Measure twenty fresh-process cold function-inventory loads on constrained profile
+        id: structure-cold-constrained
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
+        timeout-minutes: 25
+        env:
+          STRUCTURE_COLD_REPORT_DIR: ${{ github.workspace }}/build/packaged-web-ci
+        run: |
+          node scripts/packaged-browser-structure-cold.mjs --run constrained -- \
+            scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --no-sandbox
+      - name: Verify bounded program-structure views with one hundred thousand recorded functions on loopback
+        id: structure-budget-loopback
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --structure-profile loopback --no-sandbox
+      - name: Verify bounded program-structure interactions with one hundred thousand functions on constrained profile
+        id: structure-budget-constrained
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --structure-profile constrained --no-sandbox
+      - name: Require every structure budget gate to pass
+        if: ${{ !cancelled() && steps.packaged-archives.outcome == 'success' }}
+        env:
+          COLD_LOOPBACK: ${{ steps.structure-cold-loopback.outcome }}
+          COLD_CONSTRAINED: ${{ steps.structure-cold-constrained.outcome }}
+          BUDGET_LOOPBACK: ${{ steps.structure-budget-loopback.outcome }}
+          BUDGET_CONSTRAINED: ${{ steps.structure-budget-constrained.outcome }}
+        run: |
+          failed=0
+          for gate in COLD_LOOPBACK COLD_CONSTRAINED BUDGET_LOOPBACK BUDGET_CONSTRAINED; do
+            outcome="${!gate}"
+            echo "$gate=$outcome"
+            if [ "$outcome" != success ]; then failed=1; fi
+          done
+          exit "$failed"
       - name: Retain sanitized packaged web evidence
         uses: actions/upload-artifact@v7
         if: always()
@@ -339,6 +403,7 @@ jobs:
           if-no-files-found: warn
           path: |
             build/packaged-web-ci
+            build/packaged-web-ci/program-structure-cold-*.json
             build/packaged-browser-*/report.json
             build/packaged-browser-*/report.full.part-*
             build/packaged-browser-*/*.png
@@ -588,6 +653,7 @@ jobs:
           path: |
             build/reports/tests/full-suite
             build/test-results/full-suite
+            build/test-results/program-structure-scale.json
             build/reports/tests/test
             build/test-results/test
             build/reports/junit-signatures
