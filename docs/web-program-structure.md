@@ -140,12 +140,15 @@ browser lists these families explicitly rather than omitting them.
 
 ## Scale
 
-Two checks qualify the 100,000-function budget (#536):
+Two checks give partial evidence for the 100,000-function budget (#536); neither
+qualifies it. Neither gates the first-data latency of a fresh process or the packaged
+JVM's memory:
 
 - `WebProgramStructureTest` builds a 100,000-function synthetic revision (4,167
   modules) through the real capture path and requires pages of at most 200 rows and
-  under 1 MiB, a median warm page read under 500 ms and a retained projection inside
-  the 256 MiB incremental JVM budget. The projection cache keeps the entry it charged
+  under 1 MiB, a median warm page read under 500 ms and a post-GC heap increase in the
+  test JVM under 256 MiB. It times one first read in that already-running JVM but does
+  not gate it. The projection cache keeps the entry it charged
   (at most 96 MiB for this fixture), and the 20 warm pages reuse it without reading
   the model again. It prints the measured values.
 - `node scripts/check-packaged-web-browser.mjs --mode structure` seeds a persisted
@@ -154,15 +157,16 @@ Two checks qualify the 100,000-function budget (#536):
   attempt page, pages 20 times by keyboard (focus returns to the results heading),
   reloads a cursor page, searches across all records, follows pinned caller and
   module links to the module source link, checks 390/320 px reflow, refuses any
-  inventory read without the 100-row limit, and asserts a peak JS heap of at most
-  128 MiB and at most 500 mounted table rows. CI runs it in the `web-packaged` job.
+  inventory read without the 100-row limit, and asserts at most 500 mounted table rows
+  and a JS heap of at most 128 MiB at each page where it samples the heap. It records
+  first-page and paging times without gating them. CI runs it in the `web-packaged` job.
   Its seed writes manifests directly, so `WebProgramStructureTest` keeps
   `scripts/packaged-browser-structure-profile.json` equal to the current profile.
   Structure mode starts the packaged JVM with `-Ddecompengine.web.structureTiming=true`
   and the report keeps at most 512 server phase timings. These are stderr diagnostics;
   they do not change any response or check.
 
-A local run on a heavily loaded host (load average about 40) measured: 100 rows per
+An earlier local run on a heavily loaded host (load average about 40) measured: 100 rows per
 page, peak browser heap 12 MB, keypress-to-rendered next page p50 81 ms and p95 84 ms,
 full-population search 161 ms, and 23 bounded inventory reads; on the server, warm
 page reads p50 2 ms, entity detail 22 ms and a retained projection of about 47 MB.
