@@ -344,6 +344,19 @@ class BuiltinCheckpointTest {
         val resumed = harness(teardown, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), latestCheckpoint(teardown), acceptedRevision) {}
         assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
 
+        // The provider throws an Error and teardown throws another: the first failure wins, teardown is suppressed.
+        val doubled = fixture("provider-and-teardown-error")
+        val providerFailure = AssertionError("provider failed")
+        val teardownFailure = AssertionError("session teardown failed after provider failure")
+        val failingTeardown = Session(doubled.source, closeFailure = teardownFailure)
+        val surfaced = assertFailsWith<AssertionError> {
+            harness(doubled, ModelProvider { _, _ -> throw providerFailure }, failingTeardown).executeReceipt(request()) {}
+        }
+        assertSame(providerFailure, surfaced)
+        assertTrue(surfaced.suppressed.any { it === teardownFailure }, "teardown failure must be attached as suppressed")
+        assertTrue(failingTeardown.closed)
+        assertReleased(doubled, "provider and session teardown")
+
         // Both factories throw an Error after taking the lease and the channel lock, before ownership transfers.
         val poisoned = object : AbstractList<String>() {
             override val size = 1

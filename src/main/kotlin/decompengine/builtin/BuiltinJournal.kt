@@ -70,6 +70,21 @@ internal class BuiltinJournalException : RuntimeException("Built-in journal unav
  * its parent) fixed until every holder closes; live relocation is unsupported. Binding the lease to the opened
  * file's identity is future work.
  */
+/**
+ * Runs cleanup without replacing a pending failure. A cleanup Error is attached to [primary] as suppressed, or thrown
+ * when nothing is pending. Ordinary cleanup exceptions stay sanitized: they never replace the outcome or escape.
+ */
+internal inline fun cleanupPreserving(primary: Throwable?, cleanup: () -> Unit) {
+    try {
+        cleanup()
+    } catch (_: Exception) {
+        // The caller decides the outcome; raw journal or session failures are not exposed.
+    } catch (failure: Throwable) {
+        if (primary == null) throw failure
+        if (failure !== primary) primary.addSuppressed(failure)
+    }
+}
+
 internal object BuiltinJournalLeases {
     private val held = java.util.concurrent.ConcurrentHashMap.newKeySet<Path>()
 
@@ -176,6 +191,7 @@ internal class BuiltinJournal private constructor(
             var lease: BuiltinJournalLeases.Lease? = null
             var channel: FileChannel? = null
             var transferred = false
+            var primary: Throwable? = null
             try {
                 verifyParent(configuration.path)
                 lease = BuiltinJournalLeases.acquire(configuration.path)
@@ -202,10 +218,12 @@ internal class BuiltinJournal private constructor(
                 transferred = true
                 return journal
             } catch (_: Exception) {
-                throw BuiltinJournalException()
+                throw BuiltinJournalException().also { primary = it }
+            } catch (failure: Throwable) {
+                primary = failure; throw failure
             } finally {
                 // Until ownership transfers, release on every Throwable: a leaked lease refuses this path until JVM exit.
-                if (!transferred) try { channel?.close() } catch (_: Exception) { } finally { lease?.close() }
+                if (!transferred) cleanupPreserving(primary) { try { channel?.close() } finally { lease?.close() } }
             }
         }
 
@@ -264,6 +282,7 @@ internal class BuiltinJournal private constructor(
             var lease: BuiltinJournalLeases.Lease? = null
             var channel: FileChannel? = null
             var transferred = false
+            var primary: Throwable? = null
             try {
                 val inspection = inspect(configuration, AgentExecutionRequestBinding.capture(request), expected)
                 check(inspection.endsAtCheckpoint)
@@ -294,9 +313,11 @@ internal class BuiltinJournal private constructor(
                 transferred = true
                 return restored
             } catch (_: Exception) {
-                throw BuiltinJournalException()
+                throw BuiltinJournalException().also { primary = it }
+            } catch (failure: Throwable) {
+                primary = failure; throw failure
             } finally {
-                if (!transferred) try { channel?.close() } catch (_: Exception) { } finally { lease?.close() }
+                if (!transferred) cleanupPreserving(primary) { try { channel?.close() } finally { lease?.close() } }
             }
         }
 
