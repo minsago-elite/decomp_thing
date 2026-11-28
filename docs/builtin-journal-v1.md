@@ -33,22 +33,35 @@ The loop records:
   publication authority, then the terminal stop, usage and cleanup outcome.
 
 Declared secrets are admitted fail closed. Configuration is refused, before any journal file,
-provider call or tool effect, when a secret is shorter than eight characters, is a JSON literal
-(`true`, `false`, `null`), contains only digits, is a substring of the `[REDACTED]` marker, or is not
-valid Unicode text. No credential has these shapes, and redacting them would rewrite evidence
-vocabulary such as versions, booleans, counts or the marker itself.
+provider call or tool effect, when a secret has fewer than 8 or more than 4096 characters, is a JSON
+literal (`true`, `false`, `null`), contains only digits, contains or is contained in the
+`[REDACTED]` marker, consists only of the `*` evidence mask, or is not valid Unicode text. These
+shapes would let redaction rewrite evidence vocabulary (versions, booleans, counts) or let the
+marker or mask itself spell a declared secret.
 
-Admitted secrets are redacted in strings and object keys everywhere, including up to three nested
-layers of JSON string escaping. Each layer uses both serializer spellings the harness produces:
-kotlinx (lowercase `\u001b`) and the built-in Jackson writer used for tool pages and provider bodies
-(uppercase `\u001B`). Schema-owned literals (contract version, booleans such as `cleanupComplete`
-and `allowed`, usage counts, offsets) never change type: a declared spelling inside one fails the
-append closed. Only provider-originated tool-call arguments may carry a redacted literal; a numeric
-or boolean argument containing a declared spelling is persisted as exactly the string `[REDACTED]`.
-Fresh, resumed and exported journals use the same policy. Reopening a checkpoint for continuation
-first checks every committed record against the active policy; a prefix written under older or
-weaker rules is refused without rewriting it. Overlapping matches are covered; colliding redacted
-keys fail closed. A full
+This is a compatibility change for every built-in harness configuration, including one with
+journaling disabled: values such as seven-character tokens or numeric PINs that were previously
+accepted (and empty strings, previously ignored) are now refused. Callers must not declare such a
+value; it cannot be protected by this redaction scheme. The refusal is an `IllegalArgumentException`
+with a sanitized reason that never contains the value. It is raised at harness construction, and
+also by direct `BuiltinJournal.open`, `reopenCheckpoint` and archive capture calls, before and
+separately from the generic "Built-in journal unavailable or invalid" failure.
+
+Journal records are schema-owned and the journal never rewrites them. The harness redacts only the
+fields it designates as content: model text, tool-call IDs, names and arguments, tool results,
+message text and call IDs, tool names and descriptions, workspace root and path names, and context
+entry IDs, media types and descriptions. In designated content, keys and strings are redacted and a
+numeric or boolean literal containing a declared spelling becomes exactly the string `[REDACTED]`.
+Matching covers up to three nested layers of JSON string escaping, and each layer uses both
+serializer spellings the harness produces: kotlinx (lowercase `\u001b`) and the built-in Jackson
+writer used for tool pages and provider bodies (uppercase `\u001B`). Every other field, including
+object keys of the harness schema, tool parameter schemas, enum names, hashes, counts, booleans, the
+record kind and the envelope (`version`, `sequence`, `previous`, `sha256`), keeps its exact value.
+Before any byte is written, the complete signed record is checked against the active policy, and a
+declared spelling anywhere fails the append closed. This also catches redaction output that would
+itself spell a declared secret. Reopening a checkpoint, and exporting an archive, first check every
+committed record, envelope included, and refuse a prefix written under older or weaker rules without
+rewriting it. Overlapping matches are covered; colliding redacted keys fail closed. A full
 assembled model response is redacted as one payload, so a secret split across streamed deltas cannot
 leak through separate journal records. An interrupted response leaves a pending request without raw
 partial text. Exceptions, credentials, runtime endpoints and environment maps are never recorded.

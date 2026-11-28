@@ -365,7 +365,7 @@ class BuiltinAgentHarness(
                     }
                 }
                 journal?.append(BuiltinJournalKind.MODEL_RESPONSE, buildJsonObject {
-                    put("text", response.text); put("calls", JsonArray(response.toolCalls.map(::journalCall)))
+                    put("text", content(response.text)); put("calls", JsonArray(response.toolCalls.map(::journalCall)))
                     put("finishReason", response.finishReason.name); put("attempts", response.attempts)
                     put("usage", buildJsonObject {
                         put("inputTokens", response.usage.inputTokens); put("outputTokens", response.usage.outputTokens)
@@ -395,7 +395,7 @@ class BuiltinAgentHarness(
                         journal?.append(BuiltinJournalKind.VALIDATION_RESULT, buildJsonObject {
                             put("validation", validation.name)
                             put("candidateChanges", JsonArray(changes.map { change -> buildJsonObject {
-                                put("root", change.path.rootId); put("path", change.path.relativePath); put("kind", change.kind.name)
+                                put("root", content(change.path.rootId)); put("path", content(change.path.relativePath)); put("kind", change.kind.name)
                                 put("beforeSha256", change.beforeSha256); put("afterSha256", change.afterSha256)
                             } }))
                             put("publicationAuthorized", false)
@@ -441,7 +441,7 @@ class BuiltinAgentHarness(
                     if (result.content.length > limits.maxToolResultBytes || result.content.toByteArray().size > limits.maxToolResultBytes)
                         throw BuiltinAbort(BuiltinStop.EXHAUSTED)
                     journal?.append(BuiltinJournalKind.TOOL_RESULT, buildJsonObject {
-                        put("callId", call.id); put("content", result.content); put("failed", result.failed)
+                        put("callId", content(call.id)); put("content", content(result.content)); put("failed", result.failed)
                     })
                     control.checkpoint()
                     chargeOutput(result.content)
@@ -464,7 +464,7 @@ class BuiltinAgentHarness(
             val value = buildJsonObject {
                 put("version", 2); put("state", "READY_FOR_MODEL")
                 put("loopLimitsSha256", digest(limits.toString().toByteArray()))
-                put("context", journalContext(definitions)); put("contextSha256", digest(context)); put("sourceSha256", snapshot.sha256)
+                put("context", journalContext(definitions, redact = false)); put("contextSha256", digest(context)); put("sourceSha256", snapshot.sha256)
                 val authority = tools.checkpointAuthoritySha256(control)
                 check(authority == null || authority.matches(Regex("[a-f0-9]{64}")))
                 put("toolAuthoritySha256", authority)
@@ -473,18 +473,19 @@ class BuiltinAgentHarness(
                 put("remainingWallClockNanos", remainingNanos)
                 put("deadlineEpochMillis", checkpointConfiguration!!.clock.millis() + remainingNanos / 1_000_000)
                 put("elapsedWallClockNanos", priorWallClockNanos + maxOf(0, System.nanoTime() - started))
-                put("usedCallIds", JsonArray(usedCallIds.sorted().map(::JsonPrimitive)))
+                put("usedCallIds", usedCallIdsJson(redact = false))
                 put("repeated", JsonObject(repeated.toSortedMap().mapValues { JsonPrimitive(it.value) }))
                 put("records", JsonArray(records.map { record -> buildJsonObject {
                     put("sequence", record.sequence); put("state", record.state.name); put("evidenceSha256", record.evidenceSha256)
                 } }))
-                put("contextEntries", JsonArray(contextEntries.map { entry -> buildJsonObject {
-                    put("id", entry.id); put("mediaType", entry.mediaType); put("sha256", entry.sha256)
-                    put("bytes", entry.bytes); put("description", entry.description); put("included", entry.included)
-                } }))
+                put("contextEntries", contextEntriesJson(redact = false))
             }
+            // The digest binds the original state; persisted content fields are redacted afterwards, so any
+            // redaction is detected on restore and redacted text never becomes restored model context.
+            val persisted = JsonObject(value + mapOf("context" to journalContext(definitions),
+                "usedCallIds" to usedCallIdsJson(), "contextEntries" to contextEntriesJson()))
             journal!!.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject {
-                put("resumeState", value)
+                put("resumeState", persisted)
                 put("stateSha256", checkpointStateHash(value, journalConfiguration!!.maximumRecordBytes))
             })
             checkpoint = checkpointStore.publish(journal!!.evidence.commitment)
@@ -570,21 +571,39 @@ class BuiltinAgentHarness(
             check(restoredAuthoritySha256 == null || restoredAuthoritySha256!!.matches(Regex("[a-f0-9]{64}")))
         }
 
-        /** Tool arguments are provider-originated: typed literals carrying a secret become the marker. */
-        fun journalCall(call: ModelToolCall) = buildJsonObject {
-            val arguments = canonical(call.arguments)
-            put("id", call.id); put("name", call.name); put("arguments", journal?.providerContent(arguments) ?: arguments)
+        /**
+         * Journal payloads are schema-owned. Only values named here as provider, tool or caller content
+         * are redacted (keys, strings and literals); every other field reaches the journal unchanged and
+         * fails the append closed if it contains a declared secret.
+         */
+        fun content(value: JsonElement, redact: Boolean = true): JsonElement = if (redact) journal?.content(value) ?: value else value
+        fun content(value: String?, redact: Boolean = true): JsonElement = content(JsonPrimitive(value), redact)
+
+        /** Tool calls are provider-originated: id, name and argument keys/values are content. */
+        fun journalCall(call: ModelToolCall, redact: Boolean = true) = buildJsonObject {
+            put("id", content(call.id, redact)); put("name", content(call.name, redact))
+            put("arguments", content(canonical(call.arguments), redact))
         }
 
-        fun journalContext(definitions: List<ModelToolDefinition>) = buildJsonObject {
+        /** Message text, call IDs and tool names/descriptions are content; tool parameter schemas are schema-owned. */
+        fun journalContext(definitions: List<ModelToolDefinition>, redact: Boolean = true) = buildJsonObject {
             put("messages", JsonArray(messages.map { message -> buildJsonObject {
-                put("role", message.role.name); put("content", message.content)
-                put("toolCallId", message.toolCallId); put("toolCalls", JsonArray(message.toolCalls.map(::journalCall)))
+                put("role", message.role.name); put("content", content(message.content, redact))
+                put("toolCallId", content(message.toolCallId, redact))
+                put("toolCalls", JsonArray(message.toolCalls.map { journalCall(it, redact) }))
             } }))
             put("tools", JsonArray(definitions.sortedBy { it.name }.map { definition -> buildJsonObject {
-                put("name", definition.name); put("description", definition.description); put("parameters", canonical(definition.parameters))
+                put("name", content(definition.name, redact)); put("description", content(definition.description, redact))
+                put("parameters", canonical(definition.parameters))
             } }))
         }
+
+        fun usedCallIdsJson(redact: Boolean = true) = JsonArray(usedCallIds.sorted().map { content(it, redact) })
+
+        fun contextEntriesJson(redact: Boolean = true) = JsonArray(contextEntries.map { entry -> buildJsonObject {
+            put("id", content(entry.id, redact)); put("mediaType", content(entry.mediaType, redact)); put("sha256", entry.sha256)
+            put("bytes", entry.bytes); put("description", content(entry.description, redact)); put("included", entry.included)
+        } })
 
         fun usage() = buildJsonObject {
             put("modelCalls", modelCalls); put("toolCalls", toolCalls); put("inputTokens", inputTokens)

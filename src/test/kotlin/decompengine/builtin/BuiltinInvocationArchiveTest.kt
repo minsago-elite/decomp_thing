@@ -242,7 +242,7 @@ class BuiltinInvocationArchiveTest {
     }
 
     @Test fun `literal collisions archive provider arguments as markers and inadmissible secrets are refused`() {
-        listOf("true", "false", "null", "12345678", "short-1").forEach { refused ->
+        listOf("true", "false", "null", "12345678", "short-1", "prefix[REDACTED]", "********").forEach { refused ->
             assertFailsWith<IllegalArgumentException> {
                 BuiltinCapturedRepairHarness(ModelProvider { _, _ -> error("unused") }, secrets = listOf(refused))
             }
@@ -252,7 +252,7 @@ class BuiltinInvocationArchiveTest {
         }
         val ordinary = invocation("ordinary")
         listOf("true", "12345678").forEach { refused ->
-            assertFailsWith<BuiltinJournalException> { capture(ordinary, listOf(refused)) }
+            assertFailsWith<IllegalArgumentException> { capture(ordinary, listOf(refused)) }
         }
         val secret = "-91827364"
         val journalDirectory = Files.createDirectory(directory.resolve("typed-journal"))
@@ -307,12 +307,15 @@ class BuiltinInvocationArchiveTest {
         assertTrue(capture(invocation, emptyList()).verified.candidateEvidenceComplete)
     }
 
-    @Test fun `archive-only task identifiers carrying a declared secret are refused`() {
+    @Test fun `archive-only identifiers and envelope fields carrying a declared secret are refused`() {
         val invocation = invocation()
         val taskSecret = "task-secret-91ab"
         val leaking = BuiltinInvocationArchiveIdentity("repair", taskSecret, invocation.identity.promptSha256,
             invocation.identity.binding, invocation.identity.journal)
         assertFailsWith<BuiltinJournalException> { capture(invocation, invocation.secrets + taskSecret, leaking) }
+        // "journalComplete" is an archive receipt key only; it is never rewritten, so export fails closed.
+        assertFalse(Files.readString(invocation.configuration.path).contains("journalComplete"))
+        assertFailsWith<BuiltinJournalException> { capture(invocation, invocation.secrets + "journalComplete") }
         assertTrue(capture(invocation).verified.candidateEvidenceComplete)
     }
 }

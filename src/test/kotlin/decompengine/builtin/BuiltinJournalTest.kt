@@ -49,9 +49,9 @@ class BuiltinJournalTest {
         val configuration = configuration()
         val journal = BuiltinJournal.open(configuration, request(), listOf("abcdefgh", "efghijkl", "quo\"ted-1"))
         journal.use {
-            it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject {
+            it.append(BuiltinJournalKind.CHECKPOINT, it.content(buildJsonObject {
                 putJsonObject("abcdefgh") { put("text", "abcdefghijkl and quo\"ted-1"); put("encoded", JsonPrimitive("quo\"ted-1").toString()) }
-            })
+            }).jsonObject)
         }
         val payload = inspect(configuration, journal.evidence.commitment).records.last().getValue("payload").jsonObject
         val child = payload.getValue("[REDACTED]").jsonObject
@@ -61,11 +61,15 @@ class BuiltinJournalTest {
     }
 
     @Test fun `inadmissible secrets are refused and schema-owned literals never change type`() {
-        listOf("true", "false", "null", "12345678", "short-1", "REDACTED", "").forEachIndexed { index, secret ->
-            val refused = configuration("refused-$index")
-            assertFailsWith<BuiltinJournalException> { BuiltinJournal.open(refused, request(), listOf(secret)) }
-            assertFalse(Files.exists(refused.path), "refused configuration must not create a journal")
-        }
+        listOf("true", "false", "null", "12345678", "short-1", "REDACTED", "", "prefix[REDACTED]", "********")
+            .forEachIndexed { index, secret ->
+                val refused = configuration("refused-$index")
+                // The sanitized configuration reason survives; it never contains the refused value.
+                val failure = assertFailsWith<IllegalArgumentException> { BuiltinJournal.open(refused, request(), listOf(secret)) }
+                assertTrue(failure.message!!.startsWith("Declared built-in secrets must"))
+                if (secret.isNotEmpty()) assertFalse(failure.message!!.contains(secret))
+                assertFalse(Files.exists(refused.path), "refused configuration must not create a journal")
+            }
         val numeric = "-91827364"
         val quoted = "q\"t-secret"
         val configuration = configuration()
@@ -73,10 +77,10 @@ class BuiltinJournalTest {
         var nested = quoted
         repeat(3) { nested = JsonPrimitive(nested).toString() }
         journal.use {
-            it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("nested", nested); put("count", 42); put("flag", true) })
+            it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("nested", it.content(JsonPrimitive(nested))); put("count", 42); put("flag", true) })
             val committed = it.evidence.commitment
-            // Provider-originated arguments are the only place a literal becomes the marker string.
-            val arguments = it.providerContent(buildJsonObject {
+            // Designated content is the only place a literal becomes the marker string.
+            val arguments = it.content(buildJsonObject {
                 put("position", -9182736455L); put("safe", 42); put("flag", true); put("absent", JsonNull)
             }).jsonObject
             assertEquals(JsonPrimitive("[REDACTED]"), arguments["position"])
@@ -244,8 +248,51 @@ class BuiltinJournalTest {
         assertFailsWith<BuiltinJournalException> { BuiltinJournal.open(configuration("identity"), request(), listOf("scripted-v1")) }
         val journal = BuiltinJournal.open(configuration("keys"), request(), listOf("private-one", "private-two"))
         journal.use {
-            assertFailsWith<BuiltinJournalException> { it.append(BuiltinJournalKind.CHECKPOINT,
-                buildJsonObject { put("private-one", 1); put("private-two", 2) }) }
+            assertFailsWith<BuiltinJournalException> { it.content(buildJsonObject { put("private-one", 1); put("private-two", 2) }) }
+        }
+    }
+
+    @Test fun `redaction that would spell a declared secret fails closed before persistence`() {
+        // "[REDACTED]alpha-tail" contains the second secret although the original text never did.
+        val secrets = listOf("alpha-secret", "ED]alpha-tail")
+        val created = configuration("created")
+        val journal = BuiltinJournal.open(created, request(), secrets)
+        journal.use {
+            val prefix = it.evidence.commitment
+            assertFailsWith<BuiltinJournalException> { it.content(JsonPrimitive("alpha-secretalpha-tail")) }
+            assertFailsWith<BuiltinJournalException> { it.append(BuiltinJournalKind.STATE) }
+            assertEquals(prefix.bytes, Files.size(created.path))
+        }
+        inspect(created, BuiltinJournalCommitment(1, Files.size(created.path), inspectHead(created)))
+        // The writer independently refuses a record that already spells a secret, even outside content.
+        val defended = configuration("defended")
+        val writer = BuiltinJournal.open(defended, request(), secrets)
+        writer.use {
+            val prefix = it.evidence.commitment
+            assertFailsWith<BuiltinJournalException> {
+                it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("text", "[REDACTED]alpha-tail") })
+            }
+            assertEquals(prefix.bytes, Files.size(defended.path))
+        }
+        assertFalse(Files.readString(defended.path).contains("alpha-tail"))
+    }
+
+    @Test fun `schema keys record kinds and envelopes are never rewritten and fail closed`() {
+        for ((secret, kind, payload) in listOf(
+            Triple("inputTokens", BuiltinJournalKind.STATE, buildJsonObject { putJsonObject("usage") { put("inputTokens", 5) } }),
+            Triple("CHECKPOINT", BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("state", "fixture") }),
+        )) {
+            val configuration = configuration("schema-$secret")
+            val journal = BuiltinJournal.open(configuration, request(), listOf(secret))
+            journal.use {
+                val prefix = it.evidence.commitment
+                assertFailsWith<BuiltinJournalException> { it.append(kind, payload) }
+                assertEquals(prefix.bytes, Files.size(configuration.path))
+            }
+            val raw = Files.readString(configuration.path)
+            assertFalse(raw.contains(secret), "schema-owned field written verbatim")
+            assertFalse(raw.contains("[REDACTED]"), "schema-owned field rewritten")
+            assertEquals(1, inspect(configuration, BuiltinJournalCommitment(1, Files.size(configuration.path), inspectHead(configuration))).records.size)
         }
     }
 

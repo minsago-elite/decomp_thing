@@ -158,9 +158,9 @@ class BuiltinCheckpointTest {
         val fixture = fixture()
         val reference = suspended(fixture)
         val before = Files.readAllBytes(fixture.journal.path)
-        listOf("true", "false", "null", "12345678", "short-1").forEach { refused ->
+        listOf("true", "false", "null", "12345678", "short-1", "prefix[REDACTED]", "********").forEach { refused ->
             assertFailsWith<IllegalArgumentException> { harness(fixture, ModelProvider { _, _ -> error("unused") }, secrets = listOf(refused)) }
-            assertFailsWith<BuiltinJournalException> {
+            assertFailsWith<IllegalArgumentException> {
                 BuiltinJournal.reopenCheckpoint(fixture.journal, request(), commitment(fixture, reference), listOf(refused))
             }
         }
@@ -187,6 +187,29 @@ class BuiltinCheckpointTest {
         val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }, Session(fixture.source, seek = true),
             secrets = listOf(secret)).resumeReceipt(request(), reference) {}
         assertIs<AgentExecutionOutcome.Failed>(rejected.outcome); assertEquals(0, calls)
+    }
+
+    @Test fun `secrets colliding with schema keys or record kinds fail closed and leave the checkpoint resumable`() {
+        val fixture = fixture("schema")
+        val reference = suspended(fixture)
+        val before = Files.readAllBytes(fixture.journal.path)
+        for (secret in listOf("inputTokens", "CHECKPOINT")) {
+            var calls = 0
+            val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }, secrets = listOf(secret))
+                .resumeReceipt(request(), reference) {}
+            assertIs<AgentExecutionOutcome.Failed>(rejected.outcome, secret); assertEquals(0, calls, secret)
+            assertContentEquals(before, Files.readAllBytes(fixture.journal.path))
+        }
+        val resumed = harness(fixture, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), reference) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
+        // A fresh invocation under a colliding secret also fails closed without a rewritten or verbatim record.
+        val fresh = fixture("schema-fresh")
+        val failed = harness(fresh, ModelProvider { _, _ -> answer(listOf(edit())) }, secrets = listOf("inputTokens")).executeReceipt(request()) {}
+        assertIs<AgentExecutionOutcome.Failed>(failed.outcome)
+        val written = Files.readString(fresh.journal.path)
+        assertFalse(written.contains("inputTokens")); assertFalse(written.contains("[REDACTED]"))
+        val committed = assertIs<BuiltinLoopEvidence>(failed.providerEvidence).journal!!.commitment
+        BuiltinJournal.inspect(fresh.journal, AgentExecutionRequestBinding.capture(request()), committed)
     }
 
     @Test fun `continuation refuses a committed prefix written under weaker redaction rules`() {

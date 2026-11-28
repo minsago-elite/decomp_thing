@@ -84,12 +84,14 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
         /** [secrets] is the active redaction policy; export never relies on the rules a prefix was written under. */
         fun capture(identity: BuiltinInvocationArchiveIdentity, request: AgentExecutionRequest, receipt: AgentExecutionReceipt,
             configuration: BuiltinJournalConfiguration, secrets: Collection<String>,
-            limits: BuiltinInvocationArchiveLimits = BuiltinInvocationArchiveLimits()): BuiltinInvocationArchiveDocument = guarded {
+            limits: BuiltinInvocationArchiveLimits = BuiltinInvocationArchiveLimits()): BuiltinInvocationArchiveDocument {
+            // Sanitized configuration refusal stays distinct from journal/archive verification failure.
             val redactor = BuiltinRedactor(secrets)
+            return guarded {
             check(identity.binding == receipt.requestBinding && identity.binding == AgentExecutionRequestBinding.capture(request))
             // Archive-only identifiers (workflow, task, prompt) never pass through START; apply its fail-closed check here.
             val archiveIdentity = identity.json()
-            check(redactor.redact(archiveIdentity) == archiveIdentity)
+            check(redactor.compliant(archiveIdentity))
             check(BuiltinJournal.identity(configuration.identity, identity.binding) == BuiltinJournal.identity(identity.journal, identity.binding))
             val provider = receipt.providerEvidence
             val loop = when (provider) {
@@ -101,7 +103,7 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
             val journal = BuiltinJournal.inspect(configuration, identity.binding, evidence.commitment)
             check(journal.complete == evidence.complete && journal.indeterminate == evidence.indeterminate)
             check(journal.complete) // Suspended checkpoints remain private recovery evidence, not terminal invocation artifacts.
-            check(BuiltinJournal.compliantPayloads(journal.records, redactor))
+            check(BuiltinJournal.compliantRecords(journal.records, redactor))
             val returned = (receipt.outcome as? AgentExecutionOutcome.Returned)?.result
             val candidates = when (provider) {
                 is BuiltinCapturedExecutionEvidence -> provider.candidateChanges
@@ -133,8 +135,11 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
                 }
                 put("records", JsonArray(journal.records))
             }
+            // Archive envelope and receipt fields are schema-owned too: never rewritten, refused if they match.
+            check(redactor.compliant(json))
             val bytes = boundedProviderJson(limits.maximumBytes) { it.writeProviderValue(json) }
             BuiltinInvocationArchiveDocument(bytes, verifyBuiltinInvocationArchive(bytes, identity, evidence.commitment, limits))
+            }
         }
     }
 }

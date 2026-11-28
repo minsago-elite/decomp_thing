@@ -5,28 +5,31 @@ import decompengine.builtin.provider.writeProviderValue
 import kotlinx.serialization.json.*
 
 internal const val BUILTIN_REDACTION_MARKER = "[REDACTED]"
+internal const val BUILTIN_EVIDENCE_MASK = '*'
 internal const val MINIMUM_BUILTIN_SECRET_LENGTH = 8
+internal const val MAXIMUM_BUILTIN_SECRET_LENGTH = 4096
 
 /** Bounded nested JSON-string escaping depth; deeper or transformed spellings are not classified. */
 private const val MAXIMUM_JSON_ESCAPE_DEPTH = 3
-private const val MAXIMUM_SECRET_CHARACTERS = 64 * 1024
 
 /**
- * Declared secrets must be distinguishable from evidence vocabulary. A secret shorter than eight
- * characters, a JSON literal, a digits-only value or a substring of the redaction marker would
- * otherwise rewrite schema-owned metadata (booleans, versions, counts, hashes) or the marker itself.
- * No credential has these shapes, so configuration that declares one is refused rather than guessed.
+ * Declared secrets must be distinguishable from evidence vocabulary and from redaction output.
+ * Refused shapes would otherwise rewrite schema-owned values (versions, booleans, counts), or let the
+ * marker or evidence mask itself spell a declared secret. Refusal messages never contain the value.
  */
 internal fun admitBuiltinSecrets(secrets: Collection<String>): List<String> {
     val admitted = secrets.distinct()
     admitted.forEach { secret ->
-        require(secret.length in MINIMUM_BUILTIN_SECRET_LENGTH..MAXIMUM_SECRET_CHARACTERS) {
-            "Declared built-in secrets must contain $MINIMUM_BUILTIN_SECRET_LENGTH to $MAXIMUM_SECRET_CHARACTERS characters"
+        require(secret.length in MINIMUM_BUILTIN_SECRET_LENGTH..MAXIMUM_BUILTIN_SECRET_LENGTH) {
+            "Declared built-in secrets must contain $MINIMUM_BUILTIN_SECRET_LENGTH to $MAXIMUM_BUILTIN_SECRET_LENGTH characters"
         }
         require(secret !in setOf("true", "false", "null") && !secret.all { it in '0'..'9' }) {
             "Declared built-in secrets must not be a JSON literal or contain only digits"
         }
-        require(!BUILTIN_REDACTION_MARKER.contains(secret)) { "Declared built-in secrets must not overlap the redaction marker" }
+        require(!BUILTIN_REDACTION_MARKER.contains(secret) && !secret.contains(BUILTIN_REDACTION_MARKER)) {
+            "Declared built-in secrets must not contain or be contained in the redaction marker"
+        }
+        require(!secret.all { it == BUILTIN_EVIDENCE_MASK }) { "Declared built-in secrets must not consist only of the evidence mask" }
         require(secret.indices.all { index ->
             val character = secret[index]
             when {
@@ -58,90 +61,90 @@ private fun kotlinxEscaped(value: String) = JsonPrimitive(value).toString().drop
 private fun builtinWriterEscaped(value: String) =
     boundedProviderJson(Int.MAX_VALUE) { it.writeProviderValue(JsonPrimitive(value)) }.decodeToString().drop(1).dropLast(1)
 
+/**
+ * Journal records are schema-owned: keys, record kinds, envelopes, versions, booleans, counts,
+ * enum names and hashes are never rewritten. Only values the harness designates as content
+ * (provider, tool and caller text) pass through [redactContent]; everything else is checked by
+ * [compliant] and fails closed when a declared spelling remains.
+ */
 internal class BuiltinRedactor(secrets: Collection<String>) {
     private val patterns = builtinRedactionPatterns(admitBuiltinSecrets(secrets))
-    val active get() = patterns.isNotEmpty()
-
-    /** Disjoint covering spans of every declared spelling, merged when occurrences overlap. */
-    fun spans(value: String, checkpoint: () -> Unit = {}): List<IntRange> {
-        if (patterns.isEmpty() || value.isEmpty()) return emptyList()
-        val occurrences = mutableListOf<IntRange>()
-        patterns.forEach { pattern ->
-            checkpoint()
-            var index = value.indexOf(pattern)
-            while (index >= 0) {
-                occurrences += index until index + pattern.length
-                index = value.indexOf(pattern, index + 1)
-            }
-        }
-        occurrences.sortWith(compareBy<IntRange> { it.first }.thenByDescending { it.last })
-        val merged = mutableListOf<IntRange>()
-        occurrences.forEach { range ->
-            val last = merged.lastOrNull()
-            if (last != null && range.first <= last.last) merged[merged.lastIndex] = last.first..maxOf(last.last, range.last)
-            else merged += range
-        }
-        return merged
-    }
-
-    fun redactString(value: String): String {
-        val spans = spans(value)
-        if (spans.isEmpty()) return value
-        val result = StringBuilder()
-        var index = 0
-        spans.forEach { span ->
-            result.append(value, index, span.first).append(BUILTIN_REDACTION_MARKER)
-            index = span.last + 1
-        }
-        return result.append(value, index, value.length).toString()
-    }
+    private val longest = patterns.firstOrNull()?.length ?: 0
 
     /**
-     * Strings and keys are redacted everywhere. Schema-owned literals (versions, booleans, counts,
-     * offsets) keep their type: a declared spelling inside one fails closed instead of being rewritten.
+     * Coverage of [start, end) by any declared spelling. Only occurrences that can intersect the
+     * range are searched (a window extended by the longest spelling on each side), and coverage is
+     * merged in a difference array, so cost is bounded by the range and no object is kept per match.
      */
-    fun redact(value: JsonElement): JsonElement = when (value) {
+    fun coverage(value: String, start: Int = 0, end: Int = value.length, checkpoint: () -> Unit = {}): BooleanArray? {
+        if (patterns.isEmpty() || start >= end) return null
+        val windowStart = maxOf(0, start - longest + 1)
+        val windowEnd = minOf(value.length, end + longest - 1)
+        val window = if (windowStart == 0 && windowEnd == value.length) value else value.substring(windowStart, windowEnd)
+        var difference: IntArray? = null
+        var matches = 0
+        patterns.forEach { pattern ->
+            checkpoint()
+            var index = window.indexOf(pattern)
+            while (index >= 0) {
+                val first = maxOf(windowStart + index, start)
+                val last = minOf(windowStart + index + pattern.length, end)
+                if (first < last) {
+                    val counts = difference ?: IntArray(end - start + 1).also { difference = it }
+                    counts[first - start]++; counts[last - start]--
+                }
+                if (++matches and 0x3ff == 0) checkpoint()
+                index = window.indexOf(pattern, index + 1)
+            }
+        }
+        val counts = difference ?: return null
+        var active = 0
+        return BooleanArray(end - start) { offset -> active += counts[offset]; active > 0 }
+    }
+
+    fun matches(value: String) = coverage(value) != null
+
+    fun redactString(value: String): String {
+        val covered = coverage(value) ?: return value
+        val result = StringBuilder(value.length)
+        covered.forEachIndexed { index, masked ->
+            if (!masked) result.append(value[index])
+            else if (index == 0 || !covered[index - 1]) result.append(BUILTIN_REDACTION_MARKER)
+        }
+        return result.toString().also { check(!matches(it)) } // Redaction must never spell a declared secret.
+    }
+
+    /** Harness-designated content only: keys, strings and literals are rewritten; collisions fail closed. */
+    fun redactContent(value: JsonElement): JsonElement = when (value) {
         is JsonObject -> {
-            val pairs = value.entries.map { redactString(it.key) to redact(it.value) }
+            val pairs = value.entries.map { redactString(it.key) to redactContent(it.value) }
             check(pairs.map { it.first }.distinct().size == pairs.size)
             JsonObject(pairs.toMap())
         }
-        is JsonArray -> JsonArray(value.map(::redact))
+        is JsonArray -> JsonArray(value.map(::redactContent))
         is JsonPrimitive -> when {
             value.isString -> JsonPrimitive(redactString(value.content))
             value is JsonNull -> value
-            else -> value.also { check(spans(it.content).isEmpty()) }
+            // A numeric or boolean literal cannot hold a placeholder, so it becomes the marker string.
+            matches(value.content) -> JsonPrimitive(BUILTIN_REDACTION_MARKER)
+            else -> value
         }
+    }
+
+    /** True when no key, value or literal anywhere in the value contains a declared spelling. */
+    fun compliant(value: JsonElement): Boolean = when (value) {
+        is JsonObject -> value.all { (key, child) -> !matches(key) && compliant(child) }
+        is JsonArray -> value.all(::compliant)
+        is JsonPrimitive -> value is JsonNull || !matches(value.content)
     }
 
     /**
-     * Provider-originated values only (tool-call arguments): a numeric or boolean literal containing
-     * a declared spelling cannot hold a placeholder, so it becomes the redaction marker string.
+     * Mask every character of [start, end) that a declared spelling in the original text covers.
+     * Returns null when the masked page would itself spell a declared secret, so the page fails closed.
      */
-    fun redactProviderLiterals(value: JsonElement): JsonElement = when (value) {
-        is JsonObject -> JsonObject(value.mapValues { redactProviderLiterals(it.value) })
-        is JsonArray -> JsonArray(value.map(::redactProviderLiterals))
-        is JsonPrimitive -> if (!value.isString && value !is JsonNull && spans(value.content).isNotEmpty())
-            JsonPrimitive(BUILTIN_REDACTION_MARKER) else value
-    }
-
-    /** True when the value already satisfies this policy, so persisted evidence can be admitted unchanged. */
-    fun compliant(value: JsonElement): Boolean = when (value) {
-        is JsonObject -> value.all { (key, child) -> spans(key).isEmpty() && compliant(child) }
-        is JsonArray -> value.all(::compliant)
-        is JsonPrimitive -> value is JsonNull || spans(value.content).isEmpty()
-    }
-
-    /** Mask every character of a declared spelling that intersects [start, end) of the original text. */
-    fun maskSlice(spans: List<IntRange>, value: String, start: Int, end: Int): String {
-        val slice = value.substring(start, end)
-        if (spans.isEmpty()) return slice
-        val masked = StringBuilder(slice)
-        spans.forEach { span ->
-            val first = maxOf(span.first, start)
-            val last = minOf(span.last, end - 1)
-            for (index in first..last) masked.setCharAt(index - start, '*')
-        }
-        return masked.toString()
+    fun maskSlice(value: String, start: Int, end: Int, checkpoint: () -> Unit = {}): String? {
+        val covered = coverage(value, start, end, checkpoint) ?: return value.substring(start, end)
+        val masked = String(CharArray(end - start) { offset -> if (covered[offset]) BUILTIN_EVIDENCE_MASK else value[start + offset] })
+        return masked.takeIf { coverage(it, checkpoint = checkpoint) == null }
     }
 }

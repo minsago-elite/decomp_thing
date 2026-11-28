@@ -85,8 +85,8 @@ internal class BuiltinCapturedContextTools(
 ) {
     private val paths = paths.sorted()
     private val evidence = request.contextInputs.associateBy { it.id }
-    /** Secret spans over each whole original body, so a page boundary can never split a match into fragments. */
-    private val secretSpans = mutableMapOf<String, List<IntRange>>()
+    /** Whole-body digests are computed once per input, not once per page of a large body. */
+    private val bodyHashes = mutableMapOf<String, String>()
     private val records = mutableListOf<BuiltinContextToolAudit>()
     val definitions = listOf(
         ModelToolDefinition("list_directory", "List readable captured directory entries; empty path means the virtual root", schema(mapOf(
@@ -204,7 +204,7 @@ internal class BuiltinCapturedContextTools(
             return BuiltinToolResult("invalid evidence text offset", failed = true)
         if (item.content.isEmpty()) {
             return try {
-                BuiltinToolResult(evidencePage(item, 0, 0).decodeToString())
+                BuiltinToolResult(checkNotNull(evidencePage(item, 0, 0)).decodeToString())
             } catch (failure: ModelProviderException) {
                 if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
                 BuiltinToolResult("evidence page exceeds the configured result limit", failed = true)
@@ -218,6 +218,7 @@ internal class BuiltinCapturedContextTools(
             if (end < item.content.length && item.content[end - 1].isHighSurrogate()) end--
             try {
                 encoded = evidencePage(item, offset, end, control)
+                    ?: return BuiltinToolResult("evidence page cannot be masked safely", failed = true)
                 break
             } catch (failure: ModelProviderException) {
                 if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
@@ -228,12 +229,14 @@ internal class BuiltinCapturedContextTools(
         return BuiltinToolResult(encoded.decodeToString())
     }
 
-    private fun evidencePage(item: AgentContextInput, offset: Int, end: Int, control: BuiltinExecutionControl? = null): ByteArray {
-        val spans = secretSpans.getOrPut(item.id) { redactor.spans(item.content) { control?.checkpoint() } }
-        // Masking is one character per original UTF-16 unit, so offsets and page bounds are unchanged.
-        val text = redactor.maskSlice(spans, item.content, offset, end)
+    private fun evidencePage(item: AgentContextInput, offset: Int, end: Int, control: BuiltinExecutionControl? = null): ByteArray? {
+        // Secrets are matched against the original body around this page only (bounded by the longest
+        // spelling), so a page boundary cannot split a match. Masking is one character per original
+        // UTF-16 unit, so offsets and page bounds are unchanged.
+        val text = redactor.maskSlice(item.content, offset, end) { control?.checkpoint() } ?: return null
         return boundedProviderJson(maximumResultBytes) { out ->
-            writeEvidencePage(out, item, hash(item.content), offset, text, end.takeIf { it < item.content.length })
+            writeEvidencePage(out, item, bodyHashes.getOrPut(item.id) { hash(item.content) }, offset, text,
+                end.takeIf { it < item.content.length })
         }
     }
 

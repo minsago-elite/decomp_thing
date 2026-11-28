@@ -13,10 +13,10 @@ EXPECTED = {
     "decompengine.agent.AgentExecutionContractTest": 10,
     "decompengine.builtin.BuiltinAgentHarnessTest": 16,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
-    "decompengine.builtin.BuiltinCapturedContextToolsTest": 13,
+    "decompengine.builtin.BuiltinCapturedContextToolsTest": 15,
     "decompengine.builtin.BuiltinContextPackageTest": 8,
-    "decompengine.builtin.BuiltinJournalTest": 12,
-    "decompengine.builtin.BuiltinCheckpointTest": 14,
+    "decompengine.builtin.BuiltinJournalTest": 14,
+    "decompengine.builtin.BuiltinCheckpointTest": 15,
     "decompengine.builtin.BuiltinCapturedResumeTest": 8,
     "decompengine.builtin.BuiltinSourceStoreTest": 9,
     "decompengine.builtin.BuiltinInvocationArchiveTest": 11,
@@ -62,7 +62,7 @@ def main():
     if not source_clean:
         failures.append("Source worktree is not clean")
     verdict = {
-        "schemaVersion": 1, "corpus": "builtin-core-contract-v11",
+        "schemaVersion": 1, "corpus": "builtin-core-contract-v12",
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "requiredHost": True, "sourceClean": source_clean, "forcedTestExecution": True, "gradleExitCode": result.returncode,
         "passed": result.returncode == 0 and not failures,

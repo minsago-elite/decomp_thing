@@ -282,10 +282,48 @@ class BuiltinCapturedContextToolsTest {
         val configuration = BuiltinJournalConfiguration(privateDirectory("unicode-journal").resolve("journal.jsonl"),
             BuiltinJournalIdentity("fixture", "scripted-v1", "a".repeat(64), "b".repeat(64), "c".repeat(64)))
         val journal = BuiltinJournal.open(configuration, request, listOf(secret))
-        journal.use { it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("page", page) }) }
+        // Tool results are designated content, exactly as the harness persists them in TOOL_RESULT.
+        journal.use { it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("page", it.content(JsonPrimitive(page))) }) }
         val persisted = BuiltinJournal.inspect(configuration, AgentExecutionRequestBinding.capture(request), journal.evidence.commitment)
             .records.last().getValue("payload").jsonObject.getValue("page").jsonPrimitive.content
         assertTrue(persisted.contains("[REDACTED]"))
         assertFalse(persisted.contains("secret-77"))
+    }
+
+    @Test fun `an evidence mask that would spell a declared secret fails the page closed`() {
+        assertFailsWith<IllegalArgumentException> { BuiltinRedactor(listOf("********")) }
+        // Masking "zz-secret1" yields "**********zz-tail", which contains the second secret.
+        val secrets = listOf("zz-secret1", "***zz-tail")
+        val request = request(listOf(AgentContextInput("trace", "zz-secret1zz-tail")))
+        val tools = BuiltinCapturedContextTools(request, emptyList(), 8192, 10, BuiltinRedactor(secrets))
+        val page = tools.execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace"))), control(request))
+        assertTrue(page.failed)
+        assertFalse(page.content.contains("zz-tail"))
+    }
+
+    @Test fun `large repetitive evidence reads scan only the page window and stay cancellable`() {
+        val secret = "aaaaaaaa"
+        val body = "a".repeat(32 * 1024 * 1024)
+        val redactor = BuiltinRedactor(listOf(secret))
+        val request = request(listOf(AgentContextInput("trace", body)))
+        val tools = BuiltinCapturedContextTools(request, emptyList(), 16_384, 10, redactor)
+        fun read(offset: Int) = tools.execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace")), offset), control(request))
+        read(0) // Warm up before measuring.
+        val threads = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        val allocatedBefore = threads.currentThreadAllocatedBytes
+        val started = System.nanoTime()
+        val page = Json.parseToJsonElement(read(16 * 1024 * 1024).content).jsonObject
+        val elapsed = Duration.ofNanos(System.nanoTime() - started)
+        val allocated = threads.currentThreadAllocatedBytes - allocatedBefore
+        assertEquals("*".repeat(4096), page.getValue("text").jsonPrimitive.content)
+        assertEquals(16 * 1024 * 1024 + 4096, page.getValue("nextOffset").jsonPrimitive.int)
+        assertTrue(allocated < 4L * 1024 * 1024, "page read allocated $allocated bytes")
+        assertTrue(elapsed < Duration.ofSeconds(2), "page read took $elapsed")
+        // Work is bounded by the window: a handful of cancellation checks, not one per body match.
+        var checks = 0
+        redactor.maskSlice(body, 16 * 1024 * 1024, 16 * 1024 * 1024 + 4096) { checks++ }
+        assertTrue(checks in 1..16, "scan performed $checks cancellation checks")
+        class Cancelled : RuntimeException()
+        assertFailsWith<Cancelled> { redactor.maskSlice(body, 0, 4096) { throw Cancelled() } }
     }
 }
