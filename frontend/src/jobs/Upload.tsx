@@ -54,6 +54,8 @@ export function Upload({ basePath, session, inLibrary = false }: { basePath: str
   const [uncleared, setUncleared] = useState(false);
   const unclearedRef = useRef(false);
   unclearedRef.current = uncleared;
+  // Each failed retry of the clear remounts the uncleared sentence so the alert region announces it again.
+  const [clearFailures, setClearFailures] = useState(0);
   const active = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const live = useRef(true);
@@ -91,7 +93,9 @@ export function Upload({ basePath, session, inLibrary = false }: { basePath: str
     setAttempt(null);
     setProgress(null);
     setPhase(next.kind === 'empty' ? 'idle' : 'retry');
-    setFeedback({ message: copy.theSessionChangedInAnotherTabReconnectBeforeRetryingThis, kind: 'status' });
+    // An uncleared refusal keeps its notice: the user must still clear the record, and the
+    // disconnected-session line below already asks for a reconnect.
+    if (!unclearedRef.current) setFeedback({ message: copy.theSessionChangedInAnotherTabReconnectBeforeRetryingThis, kind: 'status' });
     if (input.current) input.current.value = '';
   }), [recovery, session]);
   useEffect(() => {
@@ -146,7 +150,7 @@ export function Upload({ basePath, session, inLibrary = false }: { basePath: str
         let cleared = true;
         try { recovery.clear(); } catch { cleared = false; }
         // Do not re-read storage: a ticket that survived the failed clear belongs to the refused request.
-        setUncleared(!cleared); setRetained({ kind: 'empty' }); setAttempt(null); setRejectedFileMessage(null); setPhase('idle');
+        setUncleared(!cleared); setClearFailures(0); setRetained({ kind: 'empty' }); setAttempt(null); setRejectedFileMessage(null); setPhase('idle');
         setFeedback({ message, kind: 'refused' });
         if (input.current) input.current.value = '';
         return;
@@ -158,8 +162,9 @@ export function Upload({ basePath, session, inLibrary = false }: { basePath: str
   }
   function clearRefused() {
     if (active.current) return;
-    try { recovery.clear(); } catch { return; }
-    setUncleared(false); setRetained({ kind: 'empty' });
+    // On failure focus stays on this button; the remounted sentence announces that clearing failed again.
+    try { recovery.clear(); } catch { setClearFailures(count => count + 1); return; }
+    setUncleared(false); setClearFailures(0); setRetained({ kind: 'empty' });
     // The clear button disappears, so return focus to the refusal notice.
     notice.current?.focus();
   }
@@ -201,10 +206,11 @@ export function Upload({ basePath, session, inLibrary = false }: { basePath: str
           : progress?.state === 'unconfirmed' ? copy.publicationIsUnconfirmedWaitingForTheUploadResponse
           : copy.transferringTheFileReceivedBytesDoNotConfirmJobPublication}</p></div>}
       {phase === 'pending' && progress && <MetadataReceipt kind="upload" receipt={observation?.receipt} />}
-      <p id="upload-feedback" ref={notice} role={errorFeedback ? 'alert' : 'status'} tabIndex={feedback.kind === 'refused' ? -1 : undefined}
+      <p id="upload-feedback" ref={notice} role={errorFeedback ? 'alert' : 'status'} tabIndex={feedback.kind === 'refused' || uncleared ? -1 : undefined}
         class={errorFeedback ? 'notice notice-error' : undefined}>{feedbackMessage}
-        {feedback.kind === 'refused' && !inLibrary && <> <a href={appPath(basePath, '/')}>{copy.openTheJobLibrary}</a></>}
-        {uncleared && <> {copy.theSavedUploadRecordCouldNotBeClearedClearItBefore}</>}</p>
+        {/* While the refused record is uncleared, a fresh panel elsewhere could show it as pending: clear it first. */}
+        {feedback.kind === 'refused' && !inLibrary && !uncleared && <> <a href={appPath(basePath, '/')}>{copy.openTheJobLibrary}</a></>}
+        {uncleared && <span key={clearFailures}> {clearFailures ? copy.theSavedUploadRecordStillCouldNotBeClearedCheckTab : copy.theSavedUploadRecordCouldNotBeClearedClearItBefore}</span>}</p>
       {phase === 'retry' && <p>{copy.retryKeepsTheSameJobIdentityChoosingAnotherFileDiscards}</p>}
       <div class="job-actions">
         <button type="submit" disabled={!connected || !attempt || phase === 'pending'}>{phase === 'retry' ? copy.retryThisUpload : copy.uploadBinary}</button>

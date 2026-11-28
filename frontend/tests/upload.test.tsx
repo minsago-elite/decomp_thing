@@ -18,11 +18,12 @@ const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cw
 const sessions: ReturnType<typeof createBrowserSession>[] = [];
 beforeEach(() => { sessionStorage.clear(); transport.upload.mockReset(); transport.get.mockReset(); transport.route.mockReset(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); for (const session of sessions.splice(0)) session.dispose(); });
-async function mount(home = false) {
+async function mount(home = false, prepare?: (session: ReturnType<typeof createBrowserSession>) => void) {
   const data = fixture<{ data: Bootstrap }>('bootstrap').data;
   data.basePath = '/nested/'; data.sessionExpiresAt = new Date(Date.now() + 60_000).toISOString(); data.limits.maxUploadBytes = '33554432';
   const session = createBrowserSession({ bootstrap: () => Promise.resolve(data), exchange: vi.fn(), logout: () => Promise.resolve() }, '/nested');
   sessions.push(session); await session.initialize({ kind: 'absent' });
+  prepare?.(session);
   const view = render(home ? <Home basePath="/nested" session={session} /> : <Upload basePath="/nested" session={session} />);
   return { session, view };
 }
@@ -161,25 +162,67 @@ it('keeps a full-library refusal definite when the refused ticket cannot be clea
   expect(screen.queryByText(/Upload was not confirmed|An unconfirmed upload is retained|Retry keeps the same job identity|Selected: binary.elf/)).toBeNull();
   expect(screen.queryByRole('button', { name: 'Retry this upload' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Choose another file' })).toBeNull();
+  // A fresh panel in the library would read the surviving ticket as pending, so no link until it is cleared.
+  expect(screen.queryByRole('link', { name: 'Open the job library' })).toBeNull();
   const picker = screen.getByLabelText<HTMLInputElement>('Binary file');
   expect(picker.disabled).toBe(true);
   select();
   expect(screen.queryByText(/Selected: binary.elf|An unconfirmed upload is retained/)).toBeNull();
   expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Upload binary' }).disabled).toBe(true);
-  fireEvent.click(screen.getByRole('button', { name: 'Clear saved upload record' }));
-  expect(screen.getByRole('button', { name: 'Clear saved upload record' })).toBeTruthy();
+  const clear = screen.getByRole('button', { name: 'Clear saved upload record' });
+  const firstSentence = [...notice.querySelectorAll('span')].at(-1);
+  clear.focus(); fireEvent.click(clear);
+  await waitFor(() => expect(notice.textContent).toContain("The saved upload record still could not be cleared from this tab. Check this tab's storage, then try again."));
+  expect(notice.textContent).not.toContain('could not be cleared from this tab. Clear it before');
+  expect([...notice.querySelectorAll('span')].at(-1)).not.toBe(firstSentence);
+  expect(screen.getByRole('button', { name: 'Clear saved upload record' })).toBe(clear);
+  expect(document.activeElement).toBe(clear);
   expect(sessionStorage.getItem(slot)).not.toBeNull();
+  expect(screen.queryByRole('link', { name: 'Open the job library' })).toBeNull();
   removeItem.mockRestore();
-  fireEvent.click(screen.getByRole('button', { name: 'Clear saved upload record' }));
+  fireEvent.click(clear);
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear saved upload record' })).toBeNull());
   expect(sessionStorage.getItem(slot)).toBeNull();
   expect(document.activeElement).toBe(notice);
   expect(notice.textContent).toContain('The job library is at its 10,000-job capacity.');
   expect(notice.textContent).not.toContain('could not be cleared');
+  const link = screen.getByRole('link', { name: 'Open the job library' });
+  expect(notice.contains(link)).toBe(true);
+  expect(notice.textContent).toBe('The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again. Open the job library');
   expect(picker.disabled).toBe(false);
   select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
   await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
   expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).not.toBe(refusedKey);
+});
+
+it('keeps an uncleared full-library refusal through a session change in another tab', async () => {
+  const slot = 'decomp.upload.v1:/nested';
+  transport.upload.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'JOB_LIBRARY_FULL', status: 409 }));
+  const removeItem = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('storage unavailable'); });
+  let invalidate: ((remote: boolean) => void) | undefined;
+  await mount(false, session => {
+    const subscribe = session.onInvalidated.bind(session);
+    vi.spyOn(session, 'onInvalidated').mockImplementation(listener => { invalidate = listener; return subscribe(listener); });
+  });
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  const notice = await screen.findByRole('alert');
+  expect(document.activeElement).toBe(notice);
+  await act(() => { invalidate?.(true); });
+  expect(invalidate).toBeDefined();
+  expect(screen.getByRole('alert')).toBe(notice);
+  expect(notice.textContent).toBe('The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again. The saved upload record could not be cleared from this tab. Clear it before uploading another file.');
+  expect(notice.textContent).not.toMatch(/Reconnect before retrying|retry/i);
+  expect(notice.getAttribute('tabindex')).toBe('-1');
+  expect(screen.queryByText(/An unconfirmed upload is retained|Retry keeps the same job identity/)).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Open the job library' })).toBeNull();
+  expect(screen.getByLabelText<HTMLInputElement>('Binary file').disabled).toBe(true);
+  removeItem.mockRestore();
+  const clear = screen.getByRole('button', { name: 'Clear saved upload record' });
+  clear.focus(); fireEvent.click(clear);
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear saved upload record' })).toBeNull());
+  expect(sessionStorage.getItem(slot)).toBeNull();
+  expect(document.activeElement).toBe(notice);
+  expect(notice.textContent).not.toContain('could not be cleared');
 });
 
 it('omits the job library link when the refusal is shown on the job library itself', async () => {
