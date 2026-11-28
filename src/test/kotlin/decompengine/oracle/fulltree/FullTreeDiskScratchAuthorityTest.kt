@@ -1161,6 +1161,86 @@ class FullTreeDiskScratchAuthorityTest {
         assertTrue(Files.list(mount).use { it.findAny().isEmpty })
     }
 
+    @Test
+    fun `later owner reacquires a crashed process's active run only while no other holder has the mount`() {
+        val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
+        assumeTrue(
+            !configured.isNullOrBlank(),
+            "set DECOMP_TEST_ORACLE_EXT4_SCRATCH for later-owner lease recovery coverage",
+        )
+        val mount = Path.of(configured).toAbsolutePath().normalize()
+        val policy = FullTreeDiskScratchPolicy(
+            requiredAvailableBytes = 1,
+            maximumFilesystemBytes = EXPECTED_MAXIMUM_FILESYSTEM_BYTES,
+            requiredAvailableInodes = 4,
+            maximumFilesystemInodes = EXPECTED_MAXIMUM_FILESYSTEM_INODES,
+        )
+        listOf(false, true).forEach { activeRun ->
+            val operation = operation(if (activeRun) "3" else "2")
+            val leaseRoot = mount.resolve(".decomp-oracle-lease-${operation.operationId}")
+            val recordPath = leaseRoot.resolve("lease.json")
+            val runPath = leaseRoot.resolve(runDirectoryName(operation.operationId))
+            try {
+                assertTrue(Files.list(mount).use { it.findAny().isEmpty })
+                // The earlier owner is a separate process that exited without releasing its lease.
+                val evidence = leaveCrashedLease(mount, operation, activeRun)
+                val recordBytes = Files.readAllBytes(recordPath).toList()
+                val mountNames = entryNames(mount)
+                val leaseNames = entryNames(leaseRoot)
+                fun requireUnchanged() {
+                    assertEquals(mountNames, entryNames(mount))
+                    assertEquals(leaseNames, entryNames(leaseRoot))
+                    assertEquals(recordBytes, Files.readAllBytes(recordPath).toList())
+                }
+                fun reacquire(expected: FullTreeDiskScratchEvidence = evidence) =
+                    FullTreeDiskScratchAuthority.reacquireActiveRunForRecovery(mount, operation, policy, expected)
+                if (!activeRun) {
+                    // Record-only residue has no run to adopt.
+                    assertFailsWith<FullTreeDiskScratchException> { reacquire() }
+                    requireUnchanged()
+                    FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).close()
+                } else {
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        reacquire(validMutatedEvidence(evidence, "leaseRootInode", JsonPrimitive(differentPositive(evidence.leaseRootInode))))
+                    }
+                    requireUnchanged()
+                    // Any live holder of the mount flock blocks a later owner.
+                    FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).use {
+                        assertFailsWith<FullTreeDiskScratchException> { reacquire() }
+                    }
+                    requireUnchanged()
+                    val (lease, runRoot) = reacquire()
+                    try {
+                        assertEquals(evidence.canonicalBytes().toList(), lease.evidence.canonicalBytes().toList())
+                        lease.requireCurrentOperationRunRoot(runRoot, FullTreeDiskScratchStage.BEFORE_LAUNCH)
+                        lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                        assertEquals(runPath, lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { it.path })
+                        assertFailsWith<FullTreeDiskScratchException> { lease.createEmptyOperationRunRoot() }
+                        // While the later owner is live, no cold inspector, recovery or fresh lease can take the mount.
+                        assertFailsWith<FullTreeDiskScratchException> {
+                            FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy)
+                        }
+                        assertFailsWith<FullTreeDiskScratchException> { reacquire() }
+                        assertFailsWith<FullTreeDiskScratchException> {
+                            FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(mount, operation("6"), policy)
+                        }
+                    } finally {
+                        lease.abandonForRecovery()
+                    }
+                    // Abandoning keeps the exact residue for the next owner.
+                    requireUnchanged()
+                    reacquire().first.abandonForRecovery()
+                    requireUnchanged()
+                }
+            } finally {
+                Files.deleteIfExists(runPath)
+                Files.deleteIfExists(recordPath)
+                Files.deleteIfExists(leaseRoot)
+            }
+        }
+        assertTrue(Files.list(mount).use { it.findAny().isEmpty })
+    }
+
     private fun operation(seed: String = "1") = FullTreeDiskScratchOperation(
         operationId = seed.repeat(64),
         requestSha256 = "2".repeat(64),

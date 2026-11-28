@@ -1,6 +1,7 @@
 package decompengine.oracle.gcc
 
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleJson
 import java.io.File
 import java.nio.file.Files
@@ -8,6 +9,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertFalse
@@ -197,6 +199,63 @@ class GccBundledCliCommandTest {
     }
 
     @Test
+    fun `later-invocation recovery option is bound to an interrupted plan selection`() = fixture { root ->
+        val interrupted = arguments(root) + listOf("--resume-after-checkpoint", "512")
+        val selector = listOf("--recover-operation", RECOVERED_OPERATION)
+        val recovery = GccBundledCliOptions.parse(interrupted + selector)
+        assertEquals(RECOVERED_OPERATION, recovery.recoverOperationId)
+        assertEquals("gcc-engine-plan", recovery.commandName)
+        assertEquals(GccBundledCliOptions.parse(interrupted), recovery.copy(recoverOperationId = null))
+        for (bad in listOf(arguments(root) + selector, interrupted + listOf("--recover-operation", "A".repeat(64)),
+            interrupted + listOf("--recover-operation", "a".repeat(63)), interrupted + selector + selector,
+            interrupted + "--recover-operation")) {
+            assertFails { GccBundledCliOptions.parse(bad) }
+        }
+        assertFails { GccBundledCliOptions.parse(arguments(root) + selector, fullRecoveryExport = true) }
+        assertFails { GccBundledCliOptions.parse(arguments(root) + selector, nativeCallObservations = true) }
+        assertFails { GccBundledCliOptions.parse(arguments(root) + selector, fullRecoveryExport = true, runtimeDiagnostics = true) }
+        val children = listOf(recovery.output, privateDirectory(recovery.output.resolve("inputs")),
+            privateDirectory(recovery.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        // A later-invocation selection is never itself retained as an invocation or admitted as fresh work.
+        assertFails { GccBundledCliInvocation(recovery, interrupted + selector, identities) }
+        assertFails { GccBundledCliCommand.admit(recovery, interrupted + selector) }
+        for (path in children.drop(1) + listOf(recovery.scratch)) Files.list(path).use { assertEquals(0L, it.count()) }
+        assertEquals(listOf("inputs", "journal"), Files.list(recovery.output).use { it.map { p -> p.fileName.toString() }.sorted().toList() })
+    }
+
+    @Test
+    fun `later-invocation recovery refuses changed argv and finished output before any journal or lease`() = fixture { root ->
+        val interrupted = arguments(root) + listOf("--resume-after-checkpoint", "512")
+        val options = GccBundledCliOptions.parse(interrupted)
+        val output = options.output
+        val children = listOf(output, privateDirectory(output.resolve("inputs")), privateDirectory(output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        // The earlier invocation's retained selection, exactly as admission publishes it.
+        LinuxFilesystemSyscalls.openRoot(output).use { selected ->
+            DescriptorBoundAtomicStateFile.publishNoReplace(selected, "invocation.json",
+                GccBundledCliInvocation(options, interrupted, identities).canonicalBytes, 256 * 1024)
+        }
+        val retained = Files.readAllBytes(output.resolve("invocation.json"))
+        fun refused(arguments: List<String>): String = assertFails {
+            GccBundledCliCommand.run(GccBundledCliOptions.parse(arguments), arguments)
+        }.message.orEmpty()
+        val selector = listOf("--recover-operation", RECOVERED_OPERATION)
+        assertTrue(refused(interrupted + listOf("--scratch-min-bytes", "1048576") + selector)
+            .contains("differs from the retained invocation"))
+        val reordered = interrupted.take(2) + interrupted.drop(4).take(2) + interrupted.drop(2).take(2) + interrupted.drop(6)
+        assertEquals(options, GccBundledCliOptions.parse(reordered))
+        assertTrue(refused(reordered + selector).contains("differs from the retained invocation"))
+        // The exact argv authenticates, then the earlier owner's staged controls are required before any journal lock.
+        assertTrue(refused(selector + interrupted).contains("retain exactly its two staged controls"))
+        for (path in children.drop(1) + listOf(options.scratch)) Files.list(path).use { assertEquals(0L, it.count()) }
+        Files.writeString(output.resolve("result.json"), "{}")
+        assertTrue(refused(interrupted + selector).contains("unfinished interrupted invocation"))
+        assertContentEquals(retained, Files.readAllBytes(output.resolve("invocation.json")))
+        for (path in children.drop(1) + listOf(options.scratch)) Files.list(path).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
     fun `command records selection but refuses a mismatched binary before staging or leasing`() = fixture { root ->
         val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
@@ -272,6 +331,10 @@ class GccBundledCliCommandTest {
         assertTrue(nonempty.second.contains("existing empty private directory"), nonempty.second)
         assertEquals("preserve me", Files.readString(prior))
         Files.list(root.resolve("output")).use { assertEquals(1L, it.count()) }
+    }
+
+    private companion object {
+        val RECOVERED_OPERATION = "a".repeat(64)
     }
 
     private fun arguments(root: Path) = listOf("cc1", root.resolve("binary").toString(), "--profile", root.resolve("profile").toString(),

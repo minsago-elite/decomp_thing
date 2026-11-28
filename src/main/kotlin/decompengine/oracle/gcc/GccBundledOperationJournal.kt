@@ -640,9 +640,12 @@ internal class GccBundledOperationJournal private constructor(
         val execution = checkNotNull(linked(INTERRUPTED_FILE, "gcc-bundled-command-interrupted-v1", INTERRUPT_FILE, "execution"))
         val prefix = checkNotNull(linked(PREFIX_FILE, "gcc-bundled-command-prefix-assessed-v1", INTERRUPTED_FILE, "assessment"))
         val manifest = bytes(STATE_MANIFEST_FILE)
-        val manifestDocument = OracleJson.parseCanonical(manifest, GccBundledAnalysisStateCapture.JSON_LIMITS).jsonObject
-        val entryCount = manifestDocument.getValue("entryCount").jsonPrimitive.content.toLong()
-        val totalBytes = manifestDocument.getValue("totalBytes").jsonPrimitive.content.toLong()
+        val manifestDocument = OracleJson.parseCanonical(manifest, GccBundledAnalysisStateCapture.JSON_LIMITS) as? JsonObject
+            ?: journalFail("GCC stopped state manifest is not an object")
+        fun manifestCount(field: String) = (manifestDocument[field] as? JsonPrimitive)?.takeIf { !it.isString }
+            ?.content?.toLongOrNull()?.takeIf { it > 0 } ?: journalFail("GCC stopped state manifest lacks a positive $field")
+        val entryCount = manifestCount("entryCount")
+        val totalBytes = manifestCount("totalBytes")
         val summary = OracleJson.canonicalBytes(JsonObject(mapOf(
             "manifestSha256" to JsonPrimitive(OracleArtifacts.sha256(manifest)),
             "manifestBytes" to JsonPrimitive(manifest.size),

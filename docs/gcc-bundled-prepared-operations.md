@@ -658,11 +658,11 @@ No full hosted compiler-resume qualification is inferred from clock tests.
 
 ## Required hosted authored resume fixture
 
-CI provisions two additional independent 1 GiB ext4 images: one for the authored
-interruption/resume owner and one for its uninterrupted fresh control. Their
-prepare/release selectors are `--bundled-ghidra-resume` and
-`--bundled-ghidra-resume-control`; each has a fixed mount parent and environment
-prefix. The existing required-provisioning flag makes missing hosted prerequisites
+CI provisions three additional independent 1 GiB ext4 images. The first is for the
+authored interruption/resume owner, the second for its uninterrupted fresh control and
+the third for the later-owner recovery fixture. Their prepare/release selectors are
+`--bundled-ghidra-resume`, `--bundled-ghidra-resume-control` and
+`--bundled-ghidra-recovery`. Each has a fixed mount parent and environment prefix. The existing required-provisioning flag makes missing hosted prerequisites
 fail the fixture rather than silently skip. Local unprovisioned runs skip the two
 contained Ghidra fixtures, while a separate local test compiles the generated ELF
 and checks its 4,096 defined functions.
@@ -675,6 +675,13 @@ models. Retained artifacts include the two plans, model/checkpoint evidence,
 receipts and a comparison record linking both evidence directories and receipt
 hashes. Control logs are read from the execution's actual control directory.
 Failures preserve bounded compiler, journal and control-log diagnostics.
+
+The later-owner fixture stops one owner at a checkpoint. It checks that
+`recoverInterrupted` is refused while that owner is live, with no record or run-root change.
+The first owner then closes, leaving residue but no locks. A second owner then recovers,
+resumes, records `recovery-adopted.json` ahead of the resume chain and passes completed-run byte
+validation. A second adoption is refused. The earlier owner closes in-process rather than
+crashing; the separate crashed-process case is covered at the lease layer.
 
 This is an authored integration gate, not cc1/lto1 benchmark acceptance. It has
 been compiled but requires the hosted runtime, user-systemd and dedicated-ext4

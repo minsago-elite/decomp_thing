@@ -19,6 +19,10 @@ oracle_ext4_scratch_profile() {
       scratch_profile_name=bundled-ghidra-resume-control
       environment_prefix=DECOMP_TEST_BUNDLED_GHIDRA_RESUME_CONTROL_EXT4
       image_size=1G; inode_count=16384 ;;
+    --bundled-ghidra-recovery)
+      scratch_profile_name=bundled-ghidra-recovery
+      environment_prefix=DECOMP_TEST_BUNDLED_GHIDRA_RECOVERY_EXT4
+      image_size=1G; inode_count=16384 ;;
     --gcc-engine-cc1-fresh|--gcc-engine-cc1-resume|--gcc-engine-lto1-fresh|--gcc-engine-lto1-resume)
       scratch_profile_name="${1#--}"
       local engine_mode="${1#--gcc-engine-}"

@@ -41,6 +41,7 @@ private val CLI_LINKED_RECORDS = mapOf(
     "interrupted-execution.json" to ("gcc-bundled-command-interrupted-v1" to "execution"),
     "interrupted-prefix-assessment.json" to ("gcc-bundled-command-prefix-assessed-v1" to "assessment"),
     "analysis-state-captured.json" to ("gcc-bundled-interrupted-state-captured-v1" to "analysisState"),
+    "recovery-adopted.json" to ("gcc-bundled-later-invocation-recovery-adopted-v1" to "recovery"),
     "resume-prepared.json" to ("gcc-bundled-resume-prepared-v1" to "resume"),
     "resume-attachment.json" to ("gcc-bundled-resume-attached-v1" to "attachment"),
     "resume-start-authorized.json" to ("gcc-bundled-resume-start-authorized-v1" to null),

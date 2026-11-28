@@ -25,6 +25,51 @@ This is admission evidence only. It does not run an export or the planner, and i
 establish cold recovery (#981), whole-operation resource accounting (#982) or installed-CLI
 execution (#984).
 
+## Later-invocation recovery of an interrupted plan
+
+A later process recovers an interrupted `gcc-engine-plan` by repeating the original argv exactly
+and adding `--recover-operation <operation-id>`. `GccBundledCliCommand.recoveryIntent` rebuilds
+the retained `invocation.json` from that argv and the current output, inputs and journal
+directory identities. The bytes must match. It then re-derives the production intent from the
+current inputs and the two staged controls, which it reuses but never rewrites.
+`GccBundledOperationCoordinator.recoverInterrupted` then takes the journal-root,
+operation-journal and scratch-mount locks without blocking, in `prepareNew`'s order. A lock that
+is still held means the earlier owner is live, and recovery is refused before any record is
+reused.
+
+Only an exactly stopped history is accepted: the journal must end at
+`analysis-state-captured.json`. Every record is rebuilt from its own payload and must match
+byte for byte, and the journal intent must equal the re-derived intent. The interrupted-execution
+record must carry its unit, cgroup and process absence. The definition must be the one derived
+from the reacquired run root, and the fresh control directory must keep its recorded identity.
+The stopped prefix and analysis state must match their durable assessment and manifest, and the
+interrupted unit must have no cgroup. After those checks the coordinator publishes
+`recovery-adopted.json`. That record holds the later argv, the absence basis and the run-root
+identity, and `resume-prepared.json` links to it. Resume, planning and `result.json` stay on the
+original operation ID and intent digest. `result.json` reports `executionOwnership` as
+`fresh-single-owner`, `same-owner-checkpoint-resume` or `later-invocation-recovery`.
+
+The resume wall budget is a fresh deadline. It is capped by the remaining budget the stopped
+execution recorded, and idle time between invocations is not charged (#982). The locks
+coordinate cooperating same-UID processes only. A same-owner `--resume-after-checkpoint` run is
+still not cold recovery.
+
+Evidence and limits:
+
+- Local journal and CLI tests cover the refusals. A live owner is refused, and so is a changed
+  intent, deployment or operation. Tampered or residual records and an unproved worker absence
+  are refused. Prepared, fresh, completed and resume-started histories are refused, and so is a
+  changed or reordered argv or a finished output.
+- The ext4 lease test reacquires a crashed child process's active run, and refuses while any
+  other holder has the mount.
+- The hosted admission test shows two things with genuine cc1 bytes. A later invocation
+  re-derives the identical intent. That invocation is refused while the admitted owner is live,
+  and again once that owner has closed without starting.
+- The ci-live authored-ELF test stops one owner at a checkpoint and refuses recovery while that
+  owner is live. After that owner closes, a new owner resumes the checkpoint and passes
+  completed-run byte validation.
+- No genuine cc1 or lto1 checkpoint has been recovered through the installed CLI (#984).
+
 ## Full-export policy consistency before worker admission
 
 For a normal full-recovery export, the CLI authenticates its fixed structural input set and
@@ -78,7 +123,9 @@ qualification or change native containment and oracle authority.
   `GccBundledOperationCoordinator.prepareNew`.
 - Fresh execution calls `owner.execute()`. The checkpoint option calls
   `executeUntilCheckpoint` and `resume()` on that same retained owner. Both paths
-  then call `owner.plan()` and `owner.publishCliResult()`.
+  then call `owner.plan()` and `owner.publishCliResult()`. A later invocation with
+  `--recover-operation` enters `recoverInterrupted` instead and then calls only
+  `resume()`, `plan()` and `publishCliResult()`.
 - `GccBundledOperationCoordinator.plan()` requires this owner's completed export,
   rechecks the captured model, launches the planner through the contained
   systemd/cgroup boundary, and journals planner preparation, START, execution,

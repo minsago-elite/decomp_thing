@@ -88,7 +88,15 @@ internal object GccBundledCliCommand {
     }
 
     /** Rebuilds the earlier invocation's exact selection and returns the coordinator's recovered live owner. */
-    fun admitRecovery(options: GccBundledCliOptions, arguments: List<String>): GccBundledPreparedOperation {
+    fun admitRecovery(options: GccBundledCliOptions, arguments: List<String>): GccBundledPreparedOperation =
+        GccBundledOperationCoordinator.recoverInterrupted(recoveryIntent(options, arguments), options.output.resolve("journal"),
+            options.scratch, listOf(options.commandName) + arguments)
+
+    /**
+     * Re-derives the earlier invocation's production intent from its retained invocation and the current inputs.
+     * It takes no journal or scratch lock; the coordinator must still prove the earlier owner is gone.
+     */
+    fun recoveryIntent(options: GccBundledCliOptions, arguments: List<String>): GccBundledOperationIntent {
         val operationId = requireNotNull(options.recoverOperationId) { "later-invocation recovery requires --recover-operation" }
         requireSelection(options, arguments)
         val selector = arguments.indexOf("--recover-operation")
@@ -113,12 +121,9 @@ internal object GccBundledCliCommand {
             rebuilt.requireCurrent()
             rebuilt
         }
-        val journal = options.output.resolve("journal")
-        val intent = GccBundledCliIntentBuilder.build(operationId, options.engineId, GccCompilerEngineContainmentRunKind.INTERRUPTED,
-            options.binary, options.profile, options.archive, options.output.resolve("inputs"), journal, options.scratch,
-            options.diskPolicy, invocation, retainedControls = true)
-        return GccBundledOperationCoordinator.recoverInterrupted(intent, journal, options.scratch,
-            listOf(options.commandName) + arguments)
+        return GccBundledCliIntentBuilder.build(operationId, options.engineId, GccCompilerEngineContainmentRunKind.INTERRUPTED,
+            options.binary, options.profile, options.archive, options.output.resolve("inputs"), options.output.resolve("journal"),
+            options.scratch, options.diskPolicy, invocation, retainedControls = true)
     }
 
     private fun requireSelection(options: GccBundledCliOptions, arguments: List<String>) {
