@@ -1514,6 +1514,190 @@ class LinuxBubblewrapBoundaryTest {
         }
     }
 
+    @Test
+    fun `pre-execution scopes restart after unrelated mount churn and refuse churn that reaches the closure`() {
+        withRepositoryTemporaryDirectory("acp-mount-churn-") { base ->
+            val temporary = Files.createDirectory(base.resolve("tmp"))
+            val java = Path.of(System.getProperty("java.home"), "bin", "java")
+            // A private user+mount namespace makes the probe's own mount(2) calls real kernel events
+            // on the JVM's /proc/self/mountinfo without touching the host table.
+            val process = ProcessBuilder(
+                "unshare", "--user", "--map-root-user", "--mount", "--fork", "--",
+                java.toString(), "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary",
+                "-cp", System.getProperty("java.class.path"),
+                LinuxBubblewrapBoundaryTest::class.java.name, "host-mount-churn-restart-probe", base.toString(),
+            ).redirectErrorStream(true).redirectOutput(base.resolve("mount-churn-probe.log").toFile()).start()
+            try {
+                assertTrue(process.waitFor(45, TimeUnit.SECONDS), "host mount churn probe timed out")
+                val output = Files.readString(base.resolve("mount-churn-probe.log"))
+                assertEquals(0, process.exitValue(), output)
+                assertTrue(output.contains("host-mount-churn-restart-probe: all controls passed"), output)
+                output.lineSequence().filter { it.startsWith("host-mount-churn-restart-probe:") }.forEach(::println)
+            } finally {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+                }
+            }
+        }
+    }
+
+    private fun runHostMountChurnRestartProbe(base: Path) {
+        val libc = com.sun.jna.NativeLibrary.getInstance("c")
+        fun mount(source: String?, target: Path, type: String?, flags: Long, data: String?) {
+            val result = libc.getFunction("mount").invokeInt(arrayOf(
+                source, target.toString(), type, com.sun.jna.NativeLong(flags), data,
+            ))
+            assertEquals(0, result, "mount $target failed: errno=${com.sun.jna.Native.getLastError()}")
+        }
+        fun unmount(target: Path) {
+            val result = libc.getFunction("umount2").invokeInt(arrayOf<Any?>(target.toString(), 0))
+            assertEquals(0, result, "umount $target failed: errno=${com.sun.jna.Native.getLastError()}")
+        }
+        mount(null, Path.of("/"), null, 0x4000L or 0x40000L, null) // MS_REC | MS_PRIVATE
+        val runtime = Files.createDirectories(base.resolve("runtime/sub")).parent
+        Files.writeString(runtime.resolve("a"), "alpha-runtime-content")
+        Files.writeString(runtime.resolve("sub/b"), "beta-runtime-content")
+        val unrelated = Files.createDirectory(base.resolve("unrelated"))
+        val limits = AcpRuntimeClosureLimits(64, 1024 * 1024, 8)
+        val refusal = "host mounts changed during runtime manifest"
+        val expected = calculateAcpRuntimeManifestSha256(runtime, limits) {}
+        fun scopeFrames(): List<StackTraceElement> = Thread.currentThread().stackTrace
+            .filter { it.className.startsWith("decompengine.acp.RuntimePrivateControlScope") }
+        // The scope invokes its checkpoint callback immediately before polling its own event latch.
+        fun inCheckpoint(admitted: Boolean): Boolean = scopeFrames().let { frames ->
+            frames.any { it.methodName == "checkpointLocked" } &&
+                frames.none { it.className.endsWith("\$Companion") } == admitted
+        }
+        // Add and remove a mount on a disjoint path within one window: the observed hosted shape.
+        fun churnUnrelated() {
+            mount("tmpfs", unrelated, "tmpfs", 0, "size=64k,mode=700")
+            unmount(unrelated)
+        }
+        fun witnesses(failure: Throwable): List<AcpMountEventWitness> = failure.suppressed.flatMap { suppressed ->
+            if (suppressed is AcpMountEventWitness) listOf(suppressed)
+            else if (suppressed.message == refusal) suppressed.suppressed.filterIsInstance<AcpMountEventWitness>()
+            else emptyList()
+        }
+        fun requireEventWitness(witness: AcpMountEventWitness, stage: String) {
+            assertTrue(witness.diagnosticRecord.startsWith(
+                "mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT "), witness.diagnosticRecord)
+            assertTrue(requireNotNull(witness.admissionRecord).startsWith("mount-admission-v1 stage=$stage "))
+        }
+        val provisioning = AcpSetupRestartPermit { true }
+        fun manifest(restart: AcpSetupRestartPermit?, check: () -> Unit): String =
+            buildRuntimeManifest(runtime, limits, emptySet(), cancellationCheck = check, restart = restart).manifestSha256
+
+        // Unrelated churn while hashing, and while admitting the scope, restarts once and succeeds.
+        for ((admitted, stage) in listOf(true to "ADMITTED", false to "CONSTRUCTING")) {
+            var churns = 0
+            val before = AcpHostMountChurnRestarts.total()
+            assertEquals(expected, manifest(provisioning) {
+                if (churns == 0 && inCheckpoint(admitted)) { churns++; churnUnrelated() }
+            })
+            assertEquals(1, churns)
+            assertEquals(before + 1, AcpHostMountChurnRestarts.total())
+            requireEventWitness(AcpHostMountChurnRestarts.retained().last(), stage)
+        }
+        println("host-mount-churn-restart-probe: unrelatedChurnRestarted=2 recordedWitnesses=2")
+
+        // Without a permit, or after the owner revoked it, the first refusal is final.
+        val recorded = AcpHostMountChurnRestarts.total()
+        var consulted = 0
+        for (restart in listOf(null, AcpSetupRestartPermit { consulted++; false })) {
+            var churns = 0
+            val strict = assertFailsWith<IOException> {
+                manifest(restart) { if (churns == 0 && inCheckpoint(true)) { churns++; churnUnrelated() } }
+            }
+            assertEquals(refusal, strict.message)
+            assertEquals(1, churns)
+            assertEquals(1, witnesses(strict).size)
+            requireEventWitness(witnesses(strict).single(), "ADMITTED")
+        }
+        assertEquals(1, consulted)
+        assertEquals(recorded, AcpHostMountChurnRestarts.total())
+        println("host-mount-churn-restart-probe: strictAndRevokedRefusalsFinal=2 permitConsulted=1")
+
+        // Churn in every attempt exhausts the bound and keeps every discarded witness.
+        var persistentChurns = 0
+        val persistent = assertFailsWith<IOException> {
+            manifest(provisioning) { if (inCheckpoint(true)) { persistentChurns++; churnUnrelated() } }
+        }
+        assertEquals(refusal, persistent.message)
+        assertEquals(3, persistentChurns)
+        assertEquals(2, persistent.suppressed.count { it.message == refusal })
+        assertEquals(3, witnesses(persistent).size)
+        witnesses(persistent).forEach { requireEventWitness(it, "ADMITTED") }
+        assertEquals(recorded, AcpHostMountChurnRestarts.total())
+        println("host-mount-churn-restart-probe: persistentChurnAttempts=3 retainedWitnesses=3")
+
+        // A mount that reaches the closure is refused by the fresh attempt's own strict checks.
+        val covered = runtime.resolve("sub")
+        var coveringMounts = 0
+        try {
+            val reached = assertFailsWith<IOException> {
+                manifest(provisioning) {
+                    if (coveringMounts == 0 && inCheckpoint(true)) {
+                        coveringMounts++
+                        mount("tmpfs", covered, "tmpfs", 0, "size=64k,mode=700")
+                    }
+                }
+            }
+            assertEquals("sandbox runtime closure crosses a mount boundary", reached.message)
+            assertEquals(1, coveringMounts)
+            assertEquals(1, reached.suppressed.count { it.message == refusal })
+            requireEventWitness(witnesses(reached).single(), "ADMITTED")
+            assertEquals(recorded, AcpHostMountChurnRestarts.total())
+        } finally {
+            if (coveringMounts > 0) unmount(covered)
+        }
+        assertEquals(expected, calculateAcpRuntimeManifestSha256(runtime, limits) {})
+        println("host-mount-churn-restart-probe: closureMountRefusedAfterRestart=true")
+
+        // A refused snapshot copy proves its container deletion before the fresh copy begins.
+        val controls = Files.createDirectory(base.resolve("controls"))
+        Files.setPosixFilePermissions(controls, OWNER_ONLY)
+        val type = Class.forName("decompengine.acp.PinnedControlDirectory")
+        val parentType = Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
+        val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val create = companion.javaClass.getDeclaredMethod("create", AcpRuntimeClosureLimits::class.java, parentType)
+        val control = withTemporaryParent(controls.toString()) {
+            val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+            try { requireNotNull(invokePrivate(companion, create, limits, pinned)) }
+            finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+        }
+        val controlPath = invokePrivate(control, type.getDeclaredMethod("getPath")) as Path
+        try {
+            var copyChurns = 0
+            var refusedContainers = -1
+            val before = AcpHostMountChurnRestarts.total()
+            val snapshot = requireNotNull(invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
+                AcpRuntimeClosureLimits::class.java, type, Function0::class.java, RuntimeCopyStatistics::class.java,
+                AcpSetupRestartPermit::class.java), runtime, limits, control, {
+                    if (copyChurns == 0 && inCheckpoint(true) &&
+                        Thread.currentThread().stackTrace.any { it.methodName == "copyRuntimeNode" }) {
+                        copyChurns++
+                        churnUnrelated()
+                    } else if (copyChurns == 1 && refusedContainers < 0 && scopeFrames().isEmpty()) {
+                        refusedContainers = Files.list(controlPath).use { it.count() }.toInt()
+                    }
+                }, null, provisioning))
+            assertEquals(1, copyChurns)
+            assertEquals(0, refusedContainers, "the refused container must be deleted before the restart")
+            assertEquals(before + 1, AcpHostMountChurnRestarts.total())
+            assertEquals(1L, Files.list(controlPath).use { it.count() })
+            val copied = invokePrivate(snapshot, snapshot.javaClass.getDeclaredMethod("getSource")) as Path
+            assertEquals("alpha-runtime-content", Files.readString(copied.resolve("a")))
+            assertEquals("beta-runtime-content", Files.readString(copied.resolve("sub/b")))
+            val container = requireNotNull(invokePrivate(snapshot, snapshot.javaClass.getDeclaredMethod("getContainer")))
+            invokePrivate(container, container.javaClass.getDeclaredMethod("deleteAndProve"))
+        } finally {
+            invokePrivate(control, type.getDeclaredMethod("deleteAndProve"))
+        }
+        println("host-mount-churn-restart-probe: snapshotRestartedFromProvedCleanState=true")
+        println("host-mount-churn-restart-probe: all controls passed")
+    }
+
     private fun runStatxPolicyProbe(base: Path) {
         val (auditArchitecture, statxNumber) = when (System.getProperty("os.arch")) {
             "amd64", "x86_64" -> 0xc000003e.toInt() to 332
@@ -3596,6 +3780,7 @@ class LinuxBubblewrapBoundaryTest {
                 "private-control-poison-probe" -> LinuxBubblewrapBoundaryTest().runPrivateControlPoisonProbe(Path.of(args[1]))
                 "private-control-bind-probe" -> LinuxBubblewrapBoundaryTest().runPrivateControlBindProbe(Path.of(args[1]))
                 "statx-policy-probe" -> LinuxBubblewrapBoundaryTest().runStatxPolicyProbe(Path.of(args[1]))
+                "host-mount-churn-restart-probe" -> LinuxBubblewrapBoundaryTest().runHostMountChurnRestartProbe(Path.of(args[1]))
                 else -> error("unknown native boundary probe")
             }
         }
