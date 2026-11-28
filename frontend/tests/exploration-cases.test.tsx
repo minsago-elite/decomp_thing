@@ -1,5 +1,8 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../src/api/errors';
 import type { Artifact } from '../src/api/generated';
 import { ExplorationCases } from '../src/jobs/ExplorationCases';
 import { bytePreview, MAX_RETAINED_CASES, MAX_RETAINED_CORPUS, parseRetainedCases, textPreview } from '../src/jobs/explorationCases';
@@ -25,6 +28,27 @@ it('joins the exact retained identities and leaves missing observations explicit
   expect(parsed.cases[0]?.observation?.exitCode).toBe(124);
   expect(parsed.cases[1]?.observation).toBeNull(); expect(parsed.observationCount).toBe(1);
   expect(parsed.sources).toEqual(['SEED']);
+});
+
+interface AgreementPatch { readonly path: readonly (string | number)[]; readonly value?: unknown; readonly delete?: boolean }
+interface AgreementCase { readonly name: string; readonly patches: readonly AgreementPatch[]; readonly complete: string }
+it('accepts exactly the version-two reports the server classifies as available', () => {
+  // The corpus also drives WebExplorationReportTest, so the server and the SPA agree on every row type.
+  const corpus = JSON.parse(readFileSync(resolve(process.cwd(), '../src/test/resources/web/exploration-v2-agreement.json'), 'utf8')) as
+    { base: Record<string, unknown>; cases: AgreementCase[] };
+  expect(corpus.cases.length).toBeGreaterThanOrEqual(30);
+  for (const item of corpus.cases) {
+    const root = structuredClone(corpus.base);
+    for (const patch of item.patches) {
+      let target = root as Record<string | number, unknown>;
+      for (const key of patch.path.slice(0, -1)) target = target[key] as Record<string | number, unknown>;
+      const last = patch.path[patch.path.length - 1]!;
+      if (patch.delete) Reflect.deleteProperty(target, last); else target[last] = structuredClone(patch.value);
+    }
+    const read = () => parseRetainedCases(JSON.stringify(root), 2);
+    if (item.complete === 'available') expect(read, item.name).not.toThrow();
+    else expect(read, item.name).toThrow(ApiClientError);
+  }
 });
 
 it('lists versioned retained regression inputs as display-only cases without observations', async () => {

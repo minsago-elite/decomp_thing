@@ -45,10 +45,12 @@ import decompengine.project.sha256
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.net.URI
 import java.nio.ByteBuffer
@@ -137,7 +139,7 @@ class UploadServerTest {
         reports.resolve("runs").createDirectories().resolve("excluded-run.txt").writeText("run")
         val supplied = renderJob(job, artifacts = listOf(WebArtifactSummary("reports/supplied.txt", "supplied.txt", 3L * 1024 * 1024 * 1024)))
         assertTrue(supplied.contains("supplied.txt"))
-        assertTrue(supplied.contains("3072.0 MiB"))
+        assertTrue(supplied.contains("3072.0 MiB (3221225472 bytes)"))
         assertTrue(!supplied.contains("stored.txt"))
         val unsupplied = renderJob(job)
         assertTrue(unsupplied.contains("Artifact listing is unavailable"))
@@ -147,7 +149,8 @@ class UploadServerTest {
         val response = request(server, "GET", "/jobs/$id")
         assertEquals(200, response.status)
         assertTrue(response.body.decodeToString().contains("reports/stored.txt"))
-        assertTrue(response.body.decodeToString().contains("6 B"))
+        assertTrue(response.body.decodeToString().contains("6 bytes"))
+        assertTrue(!response.body.decodeToString().contains("6 B (6 bytes)"))
         assertTrue(!response.body.decodeToString().contains("excluded-source.txt"))
         assertTrue(!response.body.decodeToString().contains("excluded-run.txt"))
         var nested = reports
@@ -200,38 +203,296 @@ class UploadServerTest {
     }
 
     @Test
-    fun `HTML exploration uses supplied data and bounded unavailable report reads`() = withServer { server, root ->
+    fun `HTML exploration uses supplied data and bounded state-classified report reads`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val job = decompengine.jobs.JobStore(root).get(id)
         val reports = root.resolve(id).resolve("reports").createDirectories()
         val report = reports.resolve("exploration.json")
-        val source = """{"confidence":{"score":0.63},"candidateCount":1,"expandedOutputSignatures":1,"newOutputSignatures":[],"candidates":[{"id":"supplied_case","source":"SEED","args":[],"stdinHex":""}],"observations":[]}"""
+        val source = """{"candidateCount":1,"coverageIncreased":false,"baselineOutputSignatures":0,"expandedOutputSignatures":1,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.63,"inputCount":1,"sourceCount":1,"outputSignatureCount":1,"newOutputSignatureCount":0,"sandboxed":true,"networkIsolated":false},"candidates":[{"id":"supplied_case","source":"SEED","args":[],"stdinHex":""}],"observations":[]}"""
         report.writeText(source.replace("supplied_case", "stored_case"))
         val bytes = report.readBytes()
         val rendered = renderJob(job, explorationReport = Json.parseToJsonElement(source).jsonObject)
         assertTrue(rendered.contains("supplied_case"))
         assertTrue(!rendered.contains("stored_case"))
+        // Supplied data passes the same projection, so a valid report is not described as unredactable.
+        assertTrue(!rendered.contains("could not be safely redacted"), rendered)
         val unsupplied = renderJob(job)
-        assertTrue(unsupplied.contains("The exploration report is unavailable"))
+        assertTrue(unsupplied.contains("Evidence state: unknown."))
+        assertTrue(unsupplied.contains("Report bytes are unavailable"))
         assertTrue(!unsupplied.contains("stored_case"))
         val actual = request(server, "GET", "/jobs/$id")
         assertEquals(200, actual.status)
         assertTrue(actual.body.decodeToString().contains("stored_case"))
         assertTrue(actual.body.decodeToString().contains("Exploration heuristic"))
-        assertTrue(actual.body.decodeToString().contains("0.630"))
+        assertTrue(actual.body.decodeToString().contains("Evidence state: available."))
+        assertTrue(actual.body.decodeToString().contains("0.63"))
+        assertTrue(!actual.body.decodeToString().contains("0.630"))
+        assertTrue(actual.body.decodeToString().contains("network isolated no"))
         assertTrue(actual.body.decodeToString().contains("Uncalibrated"))
         assertContentEquals(bytes, report.readBytes())
-        for (invalid in listOf("PRIVATE_REPORT {", "x".repeat(1_048_577), "{\"confidence\":[]}", "{\"confidence\":{},\"confidence\":{}}")) {
-            report.writeText(invalid)
+        // The download link is offered exactly when the redacted projection behind it can be served.
+        for ((invalid, expectedState, downloadable) in listOf(
+            Triple("PRIVATE_REPORT {".toByteArray(), "invalid", false),
+            Triple("x".repeat(1_048_577).toByteArray(), "unknown", false),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":3,"state":"complete"}""".toByteArray(), "unsupported", true),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":2,"candidateCount":1}""".toByteArray(), "partial", true),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":2,"state":7,"candidateCount":1}""".toByteArray(), "invalid", true),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":2,"state":"complete"}""".toByteArray(), "invalid", true),
+            Triple("""{"schema":"decomp-exploration","schemaVersion":"2"}""".toByteArray(), "invalid", true),
+            Triple("{}".toByteArray(), "partial", true),
+            Triple("{\"confidence\":[]}".toByteArray(), "invalid", true),
+            Triple("{\"confidence\":{},\"confidence\":{}}".toByteArray(), "invalid", false),
+            Triple(byteArrayOf(0xff.toByte()), "invalid", false),
+        )) {
+            Files.write(report, invalid)
             val response = request(server, "GET", "/jobs/$id")
             assertEquals(200, response.status)
-            assertTrue(response.body.decodeToString().contains("The exploration report is unavailable"))
-            assertTrue(!response.body.decodeToString().contains("PRIVATE_REPORT"))
-            assertEquals(invalid, report.readBytes().decodeToString())
+            val html = response.body.decodeToString()
+            assertTrue(html.contains("Evidence state: $expectedState."), html)
+            val section = html.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
+            assertTrue(!section.contains("metric-grid") && !section.contains("<tbody>"), html)
+            val href = "/jobs/$id/artifacts/reports/exploration.json"
+            assertEquals(downloadable, html.contains("href=\"$href\">Download JSON"), html)
+            if (expectedState != "unknown") {
+                assertEquals(!downloadable, section.contains("The JSON download is unavailable because this report could not be safely redacted."), section)
+                assertEquals(if (downloadable) 200 else 409, request(server, "GET", href).status)
+            }
+            if (expectedState == "partial") {
+                assertTrue(section.contains("The report is incomplete; summary metrics are withheld."), section)
+                assertTrue(section.contains("Required producer fields are absent; no summary is inferred."), section)
+                assertTrue(!section.contains("producer reported"), section)
+            }
+            assertTrue(!html.contains("PRIVATE_REPORT"))
+            assertContentEquals(invalid, report.readBytes())
         }
+        val failed = """{"schema":"decomp-exploration-failure","schemaVersion":1,"state":"partial","failure":{"phase":"expanded","candidateIndex":0,"kind":"timeout","code":"behavior-deadline-exceeded"},"samples":{"baselineInputs":1,"expandedInputs":1,"baselineObserved":1,"expandedObserved":0},"details":{"baselineInputs":[{"id":"seed","source":"SEED","args":[""],"stdinHex":"00"}],"expandedInputs":[{"id":"generated","source":"MUTATION","args":[],"stdinHex":""}],"baselineObservations":[{"candidateId":"seed","signature":"0::","exitCode":0,"stdoutHex":"","stderrHex":"","networkIsolated":false}],"expandedObservations":[]},"detailsOmitted":null,"coverage":null,"confidence":null}""".toByteArray()
+        Files.write(report, failed)
+        val failedHtml = request(server, "GET", "/jobs/$id").body.decodeToString()
+        assertTrue(failedHtml.contains("Evidence state: partial."))
+        assertTrue(failedHtml.contains("The report is incomplete; summary metrics are withheld."))
+        assertTrue(failedHtml.contains("timeout"))
+        assertTrue(!failedHtml.contains("Required producer fields are absent"))
+        val failedSection = failedHtml.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
+        assertTrue(!failedSection.contains("metric-grid") && !failedSection.contains("<tbody>"))
         Files.delete(report)
-        assertTrue(request(server, "GET", "/jobs/$id").body.decodeToString().contains("The exploration report is unavailable"))
+        val absent = request(server, "GET", "/jobs/$id").body.decodeToString()
+        assertTrue(absent.contains("Evidence state: unknown."))
+        assertTrue(absent.contains("Report bytes are unavailable"))
+        val absentSection = absent.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
+        assertEquals(1, Regex("changed during the bounded read").findAll(absentSection).count(), absentSection)
+        assertTrue(!absentSection.contains("Download JSON") && !absentSection.contains("The JSON download is unavailable"))
         assertTrue(!report.exists())
+    }
+
+    @Test
+    fun `legacy exploration preserves exact available values and withholds ambiguous malformed rows`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val report = reports.resolve("exploration.json")
+        val source = """{"candidateCount":2,"coverageIncreased":true,"baselineOutputSignatures":18446744073709551615,"expandedOutputSignatures":18446744073709551615,"newOutputSignatures":["new"],"angr":null,"confidence":{"score":6.25e-1,"inputCount":18446744073709551615,"sourceCount":1,"outputSignatureCount":18446744073709551615,"newOutputSignatureCount":1,"sandboxed":true,"networkIsolated":false},"candidates":[{"id":"candidate-a","source":"SEED","args":[],"stdinHex":"00"},{"id":"candidate-a","source":"SEED","args":[],"stdinHex":""}],"observations":[{"candidateId":"candidate-a","exitCode":0,"stdoutHex":"414243"},{"candidateId":"candidate-a","exitCode":1,"stdoutHex":"444546"}]}"""
+        report.writeText(source)
+        val before = report.readBytes()
+        val html = request(server, "GET", "/jobs/$id").body.decodeToString()
+        assertTrue(html.contains("Evidence state: available."))
+        assertTrue(html.contains("18446744073709551615"), html)
+        assertTrue(html.contains("6.25e-1"))
+        assertTrue(html.contains("Isolation is producer-reported: sandboxed yes; network isolated no."))
+        assertTrue(html.contains("Not reported (ambiguous candidate id)"))
+        assertTrue(!html.contains("ABC") && !html.contains("DEF"))
+        assertContentEquals(before, report.readBytes())
+    }
+
+    @Test
+    fun `legacy exploration does not pair observations with empty or missing candidate ids`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val report = reports.resolve("exploration.json")
+        val rows = listOf(
+            """{"id":"","source":"SEED","args":[],"stdinHex":""}""" to """{"candidateId":"","exitCode":7,"stdoutHex":"4142"}""",
+            """{"source":"SEED","args":[],"stdinHex":""}""" to """{"exitCode":7,"stdoutHex":"4142"}""",
+            // Two empty identities are absent identities, not an ambiguous shared one.
+            """{"id":"","source":"SEED","args":[],"stdinHex":""},{"id":"","source":"SEED","args":[],"stdinHex":""}""" to
+                """{"candidateId":"","exitCode":7,"stdoutHex":"4142"}""",
+        )
+        for ((candidate, observation) in rows) {
+            val count = Regex("\\{\"(?:id|source)\"").findAll(candidate).count()
+            report.writeText("""{"candidateCount":$count,"coverageIncreased":false,"baselineOutputSignatures":0,"expandedOutputSignatures":0,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.5,"inputCount":1,"sourceCount":1,"outputSignatureCount":1,"newOutputSignatureCount":0,"sandboxed":true,"networkIsolated":true},"candidates":[$candidate],"observations":[$observation]}""")
+            val html = request(server, "GET", "/jobs/$id").body.decodeToString()
+            val section = html.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
+            assertTrue(section.contains("<td>Not reported</td><td><code>Not reported</code></td>"), section)
+            assertTrue(!section.contains(">AB<") && !section.contains("ambiguous"), section)
+        }
+    }
+
+    @Test
+    fun `legacy exploration rows and download withhold configured values in fields and decoded program output`() {
+        val dataDir = createTempDirectory(Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories(), "redaction-")
+        val marker = "configured-exploration-credential-7f3a91" // Opaque: letters and digits, no whitespace.
+        val server = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> }, JobReconstructor { _, _ -> },
+            Executor { it.run() }, sensitiveValues = listOf(marker))
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            val report = dataDir.resolve(id).resolve("reports").createDirectories().resolve("exploration.json")
+            fun hex(text: String) = text.toByteArray().joinToString("") { "%02x".format(it.toInt() and 255) }
+            // The observed program echoes the configured value; the report stores it only as hexadecimal bytes.
+            val stdout = hex("token=$marker\n")
+            val stderr = hex("error $marker")
+            report.writeText("""{"candidateCount":3,"coverageIncreased":false,"baselineOutputSignatures":0,"expandedOutputSignatures":1,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.5,"inputCount":1,"sourceCount":1,"outputSignatureCount":1,"newOutputSignatureCount":0,"sandboxed":true,"networkIsolated":true},"candidates":[{"id":"case_one","source":"SEED","args":["--token","$marker"],"stdinHex":""},{"id":"case_$marker","source":"SEED$marker","args":[],"stdinHex":""},{"id":"case_three","source":"SEED","args":[],"stdinHex":""}],"observations":[{"candidateId":"case_one","exitCode":0,"stdoutHex":"","stderrHex":""},{"candidateId":"case_$marker","exitCode":3,"stdoutHex":"$stdout","stderrHex":"$stderr"},{"candidateId":"case_three","exitCode":4,"stdoutHex":"${hex("ok")}","stderrHex":"$stderr"}]}""")
+            val before = report.readBytes()
+            val html = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue(html.contains("Evidence state: available."), html)
+            assertTrue(html.contains("case_one") && html.contains("--token [redacted]"), html)
+            assertTrue(html.contains("<code>case_[redacted]</code>") && html.contains(">SEED[redacted]<"), html)
+            // The redacted identity still receives its own observation: exit 3 and the redacted decoded output.
+            assertTrue(html.contains("<td>3</td><td><code>token=[redacted]"), html)
+            assertTrue(html.contains("<td>4</td><td><code>ok</code></td>"), html)
+            assertTrue(!html.contains(marker) && !html.contains(marker.take(16)), html)
+            assertTrue(html.contains("<code><span aria-hidden=\"true\">∅</span><span class=\"sr-only\">empty output</span></code>"), html)
+            assertTrue(!html.contains("aria-label=\"empty output\""), html)
+            assertTrue(html.contains("role=\"region\" aria-labelledby=\"exploration-candidates-caption\" tabindex=\"0\""), html)
+            assertTrue(html.contains("<caption id=\"exploration-candidates-caption\">"), html)
+            assertTrue(html.contains("<th scope=\"row\"><code>case_one</code></th>"), html)
+            val css = request(server, "GET", "/assets/app.css").body.decodeToString()
+            assertTrue(css.contains(".sr-only { position: absolute;"), css.take(200))
+            val href = "/jobs/$id/artifacts/reports/exploration.json"
+            assertTrue(html.contains("href=\"$href\">Download JSON"), html)
+            val download = request(server, "GET", href)
+            assertEquals(200, download.status)
+            assertTrue(!download.body.decodeToString().contains(marker))
+            assertTrue(download.body.decodeToString().contains("[redacted]"))
+            assertContentEquals(before, report.readBytes())
+        } finally {
+            server.stop(0)
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy exploration pairs rows by original identities that redact to the same display text`() {
+        val dataDir = createTempDirectory(Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories(), "attribution-")
+        val first = "configured-attribution-credential-1a2b3c"
+        val second = "configured-attribution-credential-4d5e6f"
+        val server = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> }, JobReconstructor { _, _ -> },
+            Executor { it.run() }, sensitiveValues = listOf(first, second))
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            val report = dataDir.resolve(id).resolve("reports").createDirectories().resolve("exploration.json")
+            fun write(candidates: String, count: Int) = report.writeText("""{"candidateCount":$count,"coverageIncreased":false,"baselineOutputSignatures":0,"expandedOutputSignatures":1,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.5,"inputCount":1,"sourceCount":1,"outputSignatureCount":1,"newOutputSignatureCount":0,"sandboxed":true,"networkIsolated":true},"candidates":[$candidates],"observations":[{"candidateId":"case-$second","exitCode":7,"stdoutHex":"77726f6e67"}]}""")
+            fun section(): String = request(server, "GET", "/jobs/$id").body.decodeToString()
+                .substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
+            // One candidate and one unrelated observation whose identity redacts to the same text.
+            write("""{"id":"case-$first","source":"SEED","args":[],"stdinHex":""}""", 1)
+            val unrelated = section()
+            assertTrue(unrelated.contains("<code>case-[redacted]</code>"), unrelated)
+            assertTrue(unrelated.contains("<td>Not reported</td><td><code>Not reported</code></td>"), unrelated)
+            assertTrue(!unrelated.contains("<td>7</td>") && !unrelated.contains("wrong"), unrelated)
+            // Both candidates: the observation belongs to the second row only, and neither row is called ambiguous.
+            write("""{"id":"case-$first","source":"SEED","args":[],"stdinHex":""},{"id":"case-$second","source":"SEED","args":[],"stdinHex":""}""", 2)
+            val both = section()
+            val rows = both.substringAfter("<tbody>").substringBefore("</tbody>").split("</tr>").filter { it.isNotBlank() }
+            assertEquals(2, rows.size, both)
+            assertTrue(rows[0].contains("<td>Not reported</td><td><code>Not reported</code></td>"), rows[0])
+            assertTrue(rows[1].contains("<td>7</td><td><code>wrong</code></td>"), rows[1])
+            assertTrue(!both.contains("ambiguous") && !both.contains(first) && !both.contains(second), both)
+        } finally {
+            server.stop(0)
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy exploration explains withheld rows for an available report without a redacted projection`() {
+        val dataDir = createTempDirectory(Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories(), "withheld-")
+        val first = "configured-collision-credential-1a2b3c"
+        val second = "configured-collision-credential-4d5e6f"
+        val server = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> }, JobReconstructor { _, _ -> },
+            Executor { it.run() }, sensitiveValues = listOf(first, second))
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            val report = dataDir.resolve(id).resolve("reports").createDirectories().resolve("exploration.json")
+            // Two legacy extension keys redact to one public key, so the projection cannot keep the report object.
+            report.writeText("""{"x-$first":1,"x-$second":2,"candidateCount":1,"coverageIncreased":false,"baselineOutputSignatures":18446744073709551615,"expandedOutputSignatures":1,"newOutputSignatures":[],"angr":null,"confidence":{"score":0.5,"inputCount":1,"sourceCount":1,"outputSignatureCount":1,"newOutputSignatureCount":0,"sandboxed":true,"networkIsolated":true},"candidates":[{"id":"case_one","source":"SEED","args":[],"stdinHex":""}],"observations":[]}""")
+            val html = request(server, "GET", "/jobs/$id").body.decodeToString()
+            val section = html.substringAfter("<h2>Exploration report</h2>").substringBefore("</section>")
+            assertTrue(section.contains("Evidence state: available."), section)
+            assertTrue(section.contains("<p>Baseline output signatures</p><strong>18446744073709551615</strong>"), section)
+            assertTrue(section.contains("Candidate rows are withheld because this report could not be safely redacted."), section)
+            assertTrue(!section.contains("<table") && !section.contains("case_one") && !section.contains("Showing"), section)
+            assertTrue(!html.contains(first) && !html.contains(second), section)
+        } finally {
+            server.stop(0)
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy job page shows a high-half entry address as hexadecimal without changing the legacy JSON`() = withServer { server, _ ->
+        val elf = elfFixture()
+        java.nio.ByteBuffer.wrap(elf, 24, 8).order(java.nio.ByteOrder.LITTLE_ENDIAN).putLong(0xffffffff81000000uL.toLong())
+        val uploaded = upload(server, "kernel.elf", elf, acceptJson = true)
+        assertEquals(201, uploaded.status, uploaded.body.decodeToString())
+        val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").jsonPrimitive.content
+        val html = request(server, "GET", "/jobs/$id").body.decodeToString()
+        assertTrue(html.contains("<dt>Entry Point</dt><dd>0xffffffff81000000</dd>"), html)
+        assertTrue(!html.contains("-2130706432"), html)
+        val api = Json.parseToJsonElement(request(server, "GET", "/api/jobs/$id").body.decodeToString()).jsonObject
+        assertEquals("-2130706432", api.getValue("metadata").jsonObject.getValue("entry_point").toString())
+    }
+
+    @Test
+    fun `available exploration classification tolerates malformed rows and keeps the candidate display bounded`() {
+        val root = createTempDirectory("web-exploration-render-")
+        try {
+            val job = decompengine.jobs.JobStore(root).createFromUpload("fixture.elf", elfFixture())
+            val candidates = (0..50).map { index ->
+                if (index == 0) Json.parseToJsonElement("{}").jsonObject
+                else Json.parseToJsonElement("{\"id\":\"candidate-$index\",\"source\":\"SEED\",\"args\":[],\"stdinHex\":\"\"}").jsonObject
+            }
+            val report = buildJsonObject {
+                put("candidateCount", candidates.size)
+                put("coverageIncreased", false)
+                put("baselineOutputSignatures", 0)
+                put("expandedOutputSignatures", 0)
+                put("newOutputSignatures", JsonArray(emptyList()))
+                put("angr", JsonNull)
+                put("confidence", buildJsonObject {
+                    put("score", JsonPrimitive("0.625".toDouble()))
+                    put("inputCount", 0); put("sourceCount", 0); put("outputSignatureCount", 0)
+                    put("newOutputSignatureCount", 0); put("sandboxed", false); put("networkIsolated", false)
+                })
+                put("candidates", JsonArray(candidates))
+                put("observations", JsonArray(listOf(JsonPrimitive("malformed"))))
+            }
+            val html = renderJob(job, explorationReport = report)
+            assertTrue(html.contains("Evidence state: available."))
+            assertTrue(html.contains("Showing 50 of 51 candidates."))
+            assertTrue(html.contains("Not reported"))
+            assertTrue(!html.contains("candidate-50"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy byte sizes and malformed reconstruction counts stay exact and explicit`() {
+        assertEquals("1.5 MiB (1572864 bytes)", formatBytes(1_572_864L))
+        assertEquals("1.5 KiB (1536 bytes)", formatBytes(1536))
+        assertEquals("1 byte", formatBytes(1))
+        assertEquals("1023 bytes", formatBytes(1023))
+        assertEquals("0 bytes", formatBytes(0))
+        val root = createTempDirectory("web-progress-counts-")
+        try {
+            val job = decompengine.jobs.JobStore(root).createFromUpload("fixture.elf", elfFixture())
+            val progress = Json.parseToJsonElement("""{"phase":"modules","completed":"2","total":-1,"module":"core"}""").jsonObject
+            val html = renderJob(job, reconstructionProgress = progress)
+            assertTrue(html.contains("Not reported / Not reported modules"))
+            assertTrue(!html.contains("0 / Not reported modules"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test
@@ -240,9 +501,17 @@ class UploadServerTest {
         val original = decompengine.jobs.JobStore(root).get(id)
         val marker = "\"><img src=x onerror=alert(1)>"
         val exploration = buildJsonObject {
-            put("candidateCount", marker)
-            put("expandedOutputSignatures", marker)
+            put("candidateCount", 1)
+            put("coverageIncreased", false)
+            put("baselineOutputSignatures", 0)
+            put("expandedOutputSignatures", 1)
             put("newOutputSignatures", JsonArray(emptyList()))
+            put("angr", JsonNull)
+            put("confidence", buildJsonObject {
+                put("score", 0.5); put("inputCount", 1); put("sourceCount", 1)
+                put("outputSignatureCount", 1); put("newOutputSignatureCount", 0)
+                put("sandboxed", true); put("networkIsolated", false)
+            })
             put("candidates", JsonArray(listOf(buildJsonObject {
                 put("id", marker); put("source", marker); put("args", JsonArray(listOf(JsonPrimitive(marker))))
                 put("stdinHex", marker)

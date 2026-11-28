@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import org.junit.jupiter.api.extension.ExtendWith
 import com.agentclientprotocol.model.LATEST_PROTOCOL_VERSION
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
@@ -70,6 +71,7 @@ import kotlinx.coroutines.flow.collect
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
+@ExtendWith(AcpHostMountChurnRestartReport::class)
 class AcpAgentHarnessTest {
     private fun assertFixtureManifestAcquisitionBounds() {
         val events = List(3) { java.io.IOException("host mounts changed during runtime manifest") }
@@ -1199,7 +1201,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(103, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(106, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {

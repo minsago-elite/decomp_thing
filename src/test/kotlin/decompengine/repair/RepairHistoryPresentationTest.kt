@@ -129,6 +129,22 @@ class RepairHistoryPresentationTest {
         }
     }
 
+    @Test fun `recorded attempt counts and iteration index render exactly beyond the former display cap`() {
+        val state = run.copy(status = RepairRunStatus.RUNNING, maximumAttempts = 2_000_000_000, attemptedCount = 1_234_567)
+        val iteration = RepairIteration(150_001, "behavior", "", "", emptyList(), emptyList(), runId = state.id)
+        val payload = Json.parseToJsonElement(renderRepairHistoryProjection(listOf(iteration), emptyList(),
+            MAXIMUM_REPAIR_PROJECTION_BYTES, runs = listOf(state))).jsonObject
+        val html = renderRepairHistory(job, payload = payload)
+        assertTrue(html.contains("1234567/2000000000 attempts"), html)
+        assertTrue(html.contains("aria-label=\"Attempt 150001\">150001</div>"), html)
+        assertFalse(html.contains("0/0 attempts"), html)
+        val unindexed = JsonObject(payload + ("iterations" to JsonArray(payload.getValue("iterations").jsonArray.map {
+            JsonObject(it.jsonObject + ("index" to JsonPrimitive(0))) })))
+        val unindexedHtml = renderRepairHistory(job, payload = unindexed)
+        assertTrue(unindexedHtml.contains("aria-label=\"Attempt index not reported\">?</div>"), unindexedHtml)
+        assertFalse(unindexedHtml.contains("aria-label=\"Attempt ?\""), unindexedHtml)
+    }
+
     @Test fun `pending and resolved rollback failures are run level and shared by CLI and web`() {
         for (resolution in listOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)) {
             val failed = run.copy(status = RepairRunStatus.ROLLBACK_FAILED,

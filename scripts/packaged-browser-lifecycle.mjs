@@ -254,60 +254,50 @@ export function assertDeletionAlert(acknowledged, rendered) {
   assert.deepEqual(rendered.split(/\n+/), lines, 'Deleting tab must show the exact state acknowledged by DELETE');
 }
 
-// A first-page collection admits one snapshot at a time; a competing read gets
-// 503 LISTING_BUSY and should retry shortly (WebJobPages, docs/web-job-pagination.md).
-// Only that bound refusal is retried, a few times; every other reply fails at once.
-export const LISTING_BUSY_RETRY_DELAYS_MS = Object.freeze([250, 500, 1000, 2000, 2000]);
-const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-const excerpt = body => typeof body === 'string' ? JSON.stringify(body.slice(0, 300)) : String(body);
-
-function listingFailure(summary, reply, busy) {
-  const prior = busy.length ? '; LISTING_BUSY request ids: ' + busy.map(entry => entry.requestId).join(', ') : '';
-  const error = new Error(`job listing ${summary} (request id ${reply?.requestId ?? 'none'}, body ${excerpt(reply?.body)})${prior}`);
-  error.busy = busy;
-  return error;
-}
-
-/** The refusal is LISTING_BUSY only when the error envelope is bound to its own X-Request-ID. */
-function busyRefusal(reply) {
-  if (reply?.status !== 503 || typeof reply.requestId !== 'string' || reply.requestId === '') return null;
-  let body;
-  try { body = JSON.parse(reply.body); } catch { return null; }
-  if (body?.apiVersion !== 1 || body.kind !== 'error' || body.requestId !== reply.requestId || body.error?.code !== 'LISTING_BUSY') return null;
-  return { requestId: reply.requestId, message: String(body.error.message ?? '') };
-}
-
-function membership(reply, jobId, busy) {
-  let data;
-  try { data = JSON.parse(reply.body).data; } catch { throw listingFailure('200 body is not JSON', reply, busy); }
-  const items = data?.items;
-  if (!Array.isArray(items) || !items.every(item => typeof item?.jobId === 'string')) throw listingFailure('200 body has no identified items', reply, busy);
-  if (data.page?.nextCursor !== null) throw listingFailure('200 body is not one complete page', reply, busy);
-  return items.some(item => item.jobId === jobId);
-}
-
-export async function readListingMembership(read, jobId, { delays = LISTING_BUSY_RETRY_DELAYS_MS, sleep = pause } = {}) {
+// The server collects one job listing at a time and refuses an overlapping one with 503 LISTING_BUSY
+// (WebJobPages, docs/web-job-pagination.md), which the dashboard's own 30 s poll can trigger. Retry only
+// that refusal, a bounded number of times; every other status or error code fails at once (#2035).
+// #1891/#173: a refusal counts as LISTING_BUSY only when its error envelope repeats the response's own
+// X-Request-ID, membership is read only from one complete identified page, and the request ids of the
+// retried refusals are returned as qualification evidence.
+export const listingBusyWaitsMs = [100, 200, 400, 800];
+export const listingProbe = (id, archived) => `(async () => {
+  const url = ${JSON.stringify('/nested/api/v1/jobs?limit=100' + (archived ? '&archived=' + archived : ''))};
+  const waits = ${JSON.stringify(listingBusyWaitsMs)};
   const busy = [];
-  for (let attempt = 0; ; attempt++) {
-    const reply = await read();
-    if (reply?.status === 200) return { listed: membership(reply, jobId, busy), busy };
-    const refusal = busyRefusal(reply);
-    if (!refusal) throw listingFailure(`${reply?.status} is not a bound LISTING_BUSY refusal`, reply, busy);
-    busy.push({ attempt: attempt + 1, ...refusal });
-    if (attempt >= delays.length) {
-      throw listingFailure(`LISTING_BUSY persisted for ${busy.length} reads over ${delays.reduce((total, delay) => total + delay, 0)} ms of backoff`, reply, busy);
+  for (let attempt = 1; ; attempt++) {
+    const response = await fetch(url);
+    const requestId = response.headers.get('X-Request-ID');
+    let body = null;
+    try { body = JSON.parse(await response.text()); } catch {}
+    const fail = reason => {
+      throw new Error('job listing failed after ' + attempt + ' attempt(s): ' + reason
+        + (busy.length ? '; LISTING_BUSY request ids: ' + busy.map(entry => entry.requestId).join(', ') : ''));
+    };
+    if (response.status === 200) {
+      const items = body && body.data && body.data.items;
+      if (!Array.isArray(items) || !items.every(item => item && typeof item.jobId === 'string')) fail('200 body has no identified items');
+      if (!body.data.page || body.data.page.nextCursor !== null) fail('200 body is not one complete page');
+      return { listed: items.some(job => job.jobId === ${JSON.stringify(id)}), busy };
     }
-    await sleep(delays[attempt]);
+    let code = null;
+    if (body && body.kind === 'error' && body.error && typeof body.error.code === 'string') code = body.error.code;
+    if (response.status !== 503 || code !== 'LISTING_BUSY' || attempt > waits.length) fail('status=' + response.status + ' code=' + code);
+    if (body.apiVersion !== 1 || typeof requestId !== 'string' || requestId === '' || body.requestId !== requestId) {
+      fail('status=503 code=LISTING_BUSY is not bound to its own X-Request-ID');
+    }
+    busy.push({ attempt, requestId });
+    let wait = waits[attempt - 1];
+    const retryAfter = response.headers.get('Retry-After');
+    if (retryAfter !== null && /^\\d+$/.test(retryAfter.trim())) wait = Math.min(wait, Number(retryAfter.trim()) * 1000);
+    await new Promise(resolve => setTimeout(resolve, wait));
   }
-}
+})()`;
 
-async function listed(tab, evaluate, id, archived, busy) {
-  const path = '/nested/api/v1/jobs?limit=100' + (archived ? '&archived=' + archived : '');
-  const result = await readListingMembership(() => evaluate(tab, `(async () => {
-    const response = await fetch(${JSON.stringify(path)});
-    return { status: response.status, requestId: response.headers.get('X-Request-ID'), body: await response.text() };
-  })()`), id);
-  busy.push(...result.busy.map(entry => ({ archived: archived || 'exclude', ...entry })));
+/** Whether `id` is listed; retried LISTING_BUSY request ids are appended to `busy` when it is given. */
+export async function listed(tab, evaluate, id, archived, busy) {
+  const result = await evaluate(tab, listingProbe(id, archived));
+  busy?.push(...result.busy.map(entry => ({ archived: archived || 'exclude', ...entry })));
   return result.listed;
 }
 

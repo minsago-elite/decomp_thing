@@ -49,6 +49,23 @@ async function read(value: unknown, observedBody?: string) {
   return { fetcher, mounted, artifact: report.data.sourceArtifact };
 }
 
+it('shows a summary-free partial version-two report without offering retained cases it cannot contain', async () => {
+  // A version-two report that omits its `state` is classified partial with producer schema version 2.
+  const body = JSON.stringify({ schema: 'decomp-exploration', schemaVersion: 2, candidateCount: 1 });
+  const report = structuredClone(frozen);
+  report.data.binding.revisionId = null; report.data.state = 'partial'; report.data.summary = null; report.data.producerSchemaVersion = 2;
+  report.data.sourceArtifact = descriptor(body);
+  const fetcher = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response(JSON.stringify(report), { headers: { 'Content-Type': 'application/json', 'X-Request-ID': report.requestId } }));
+  vi.stubGlobal('fetch', fetcher);
+  render(<ExplorationEvidence jobId={report.data.binding.jobId} runId={report.data.binding.runId!} basePath="/" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+  expect(await screen.findByText('No numeric summary is available from these report bytes. Missing or malformed values are not zero-valued results.')).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Download observed exploration JSON' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Read retained case details' })).toBeNull();
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
 it('preserves repeated IDs at their exact sample positions with independent observations and missing outcomes', () => {
   const value = parse(fixture());
   expect(value.cases.map(v => [v.sample, v.index, v.id, v.outcome])).toEqual([

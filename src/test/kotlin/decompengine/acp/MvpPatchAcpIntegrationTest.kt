@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.selectPatchStrategy
 import decompengine.mvp.BinaryDecompiler
 import decompengine.mvp.BinaryExecutionBoundary
@@ -46,6 +47,7 @@ import kotlinx.serialization.json.putJsonObject
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
+@ExtendWith(AcpHostMountChurnRestartReport::class)
 class MvpPatchAcpIntegrationTest {
     @Test
     fun `default ACP patch turns use captured filesystem callbacks and archive both executions`() {

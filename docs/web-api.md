@@ -700,13 +700,72 @@ state except `available`:
 | Evidence condition | `state` | Exploration adapter | Revision-validation adapter |
 | --- | --- | --- | --- |
 | Unavailable: bytes missing, unreadable or changed during the bounded read | `unknown` | no captured report bytes | no normal receipt, or receipt bytes not captured |
-| Incomplete: fewer observations than the declared scope | `partial` | absent producer fields, versioned failure records | missing required scope, diff or identity evidence |
-| Unsupported producer version | `unsupported` | declared `schema`/`schemaVersion` it does not support | unsupported producer schema |
-| Corrupt or inconsistent bytes | `invalid` | malformed JSON, count/array mismatch, non-decimal counts | malformed or inconsistent receipt evidence |
+| Incomplete: fewer observations than the declared scope | `partial` | absent producer fields, versioned failure records, a version-2 report without `state` | missing required scope, diff or identity evidence |
+| Unsupported producer version | `unsupported` | well-typed `schema`/`schemaVersion` it does not support | unsupported producer schema |
+| Corrupt or inconsistent bytes | `invalid` | malformed JSON, nesting deeper than 32, count/array mismatch, non-decimal counts, any present field of the wrong producer type, a mistyped `schema`/`schemaVersion`, a version-2 `state` other than `"complete"`, `"complete"` with missing fields, unknown version-2 fields | malformed or inconsistent receipt evidence |
 | Structurally checked observations | `available` | exact counts with `authority: observations` | checked normal receipt and result |
 
 `WebExplorationReportTest`, `WebExplorationPreparationReportTest`,
 `RecordedRepairValidationDiagnosticTest` and `RecordedRepairValidationCasesTest` cover each row.
+
+The exploration adapter recognizes success schema `decomp-exploration` version 2 by `schema` and
+`schemaVersion` alone; `state` is a payload value of that version, not part of recognition:
+
+- `state` absent: `partial`, even when every other field is present.
+- `state: "complete"` with every field: `available` when the fields are consistent.
+- `state: "complete"` with a missing field, or any other `state` value (another string, a number): `invalid`.
+- A `schema` that is not a JSON string or a `schemaVersion` that is not a JSON integer: `invalid`,
+  not `unsupported`. Only a well-typed declaration this adapter does not support is `unsupported`.
+- A field outside the version-2 set: `invalid`, in partial and complete reports alike.
+
+Every field a report carries must have the producer's JSON type, whether the report is complete
+or partial, and in the legacy unversioned shape as well as version 2. A present but mistyped field
+is `invalid`, never `partial`. For example: `angr` must be an object or `null`; counts are unsigned
+decimal integers; flags are literal booleans; retained `stdinHex` is lowercase hexadecimal text.
+Presence and cross-field consistency (for example `candidateCount` equal to the candidate list
+length) are checked only when every field is present.
+
+Version-2 rows are checked against the same rules as the SPA's retained-case reader
+(`frontend/src/jobs/explorationCases.ts`), so a report classified `available` can always be opened
+there:
+
+- A candidate has exactly `id`, `source`, `args` and `stdinHex`. `id` and `source` are non-empty
+  strings of at most 128 characters, `args` is an array of at most 256 strings, and `stdinHex` is
+  lowercase hexadecimal. Candidate ids are distinct, and there are at most 1,000 candidates and
+  64 distinct sources.
+- An observation has exactly `candidateId`, `signature`, `exitCode`, `stdoutHex`, `stderrHex` and
+  `networkIsolated`. `exitCode` is a JSON integer in the signed 32-bit range, `networkIsolated` is a
+  literal boolean, both streams are lowercase hexadecimal, and `signature` equals
+  `exitCode:stdoutHex:stderrHex`. Each candidate has at most one observation, and there are at most
+  1,000 observations.
+- These row rules apply to partial and complete reports. Only a complete report must also have
+  every observation name a listed candidate, retained identities distinct from candidate ids, and
+  at most 64 sources including the retained-regression source.
+
+`WebExplorationReportTest` and `frontend/tests/exploration-cases.test.tsx` share one case list,
+`src/test/resources/web/exploration-v2-agreement.json`. The SPA must accept exactly the complete
+reports that the classifier marks `available`. The legacy unversioned shape keeps its tolerant row
+handling: malformed candidate or observation rows there are shown as not reported.
+
+The exploration classifier parses with the same nesting bound as the redacted report projection
+(`WebReportProjection.MAXIMUM_REPORT_DEPTH`, 32 levels). A report nested more deeply is `invalid`
+rather than `available`, so an available report cannot fail its JSON download for depth alone.
+
+The default legacy `GET /jobs/{J}` page uses the same exploration-state classifier on one bounded
+capture of the selected report. It distinguishes unknown, partial, unsupported and invalid data;
+only `available` data shows summary metrics and candidate rows. A legacy page's `available` label
+has the same limited meaning as the adapter state above: structure was checked, not acceptance or
+behavioral equivalence. Summary metrics, including the baseline output-signature count, come from
+the validated captured bytes. Candidate rows come only from the redacted report projection that
+the JSON download serves. Candidates are paired with observations by their original identifiers,
+because distinct identifiers can redact to the same text. Recorded standard output is decoded from
+hexadecimal and the redaction policy is applied to the decoded text before it is clipped and
+escaped. When the projection cannot supply rows, the page shows summary metrics and states that
+candidate rows are withheld instead of showing an empty table. Downloading the report performs a
+fresh bounded artifact read, separate from the capture used for classification. The legacy reconstruction-progress and repair-history
+panels print recorded counts (completed/total units, attempted/maximum attempts, attempt index)
+as their exact canonical decimal values and label an absent or malformed count as not reported,
+never as zero.
 
 `available` means the adapter verified the report's structure and bindings, not that the
 reconstruction was accepted: `acceptance` stays `not-evaluated` unless an acceptance artifact
@@ -714,12 +773,33 @@ supplies it.
 
 Sizes, counts and addresses keep their exact values on the wire and in the SPA. Unsigned
 counts and byte sizes are canonical decimal strings, and the SPA prints them unchanged
-(`formatExactBytes` adds only a unit label, never `Number` rounding). ELF entry addresses are
+(`formatExactBytes` adds only a unit label, never `Number` rounding). The legacy HTML page adds a
+human-readable binary unit and preserves the exact decimal byte count in parentheses (for example,
+`1.5 MiB (1572864 bytes)`; `KiB` uses 1,024 bytes and `MiB` uses 1,048,576 bytes). ELF entry addresses are
 hexadecimal strings shown as sent. Timestamps keep their original fractional digits and
 offset; the SPA only replaces `T` with a space and a trailing `Z` with ` UTC`. The exploration
-confidence `score` is the one JSON number, a producer ratio in `[0, 1]`, shown as received.
+confidence `score` is the one JSON number, a producer ratio in `[0, 1]`, shown as received in both
+the SPA and legacy HTML (the optional legacy gauge uses a numeric value only for its visual scale).
+The output-signature chart compares counters using `BigInt`. It calculates the approximate
+bar width with `Number(added) / Number(total)`. The table, accessible description, report
+summary and exported counts retain the original decimal strings.
+
+The exploration and recorded revision-validation report contracts contain no address fields.
+The job metadata contract carries the ELF entry address, and revision structure APIs describe
+addresses within a selected revision. Validation stream totals use decimal strings. Preview
+prefix and text lengths use bounded JSON integers, with at most 128 retained bytes per stream.
+A validation case page contains at most 20 rows.
+
 Each report carries its provenance: the `binding` (job, run, revision), `sourceArtifact`
 digest descriptor, `producerSchemaVersion`, `adapterVersion` and `limitations`.
+
+For exploration reports, `producerSchemaVersion` names a producer version only after the adapter
+validated the bytes as that version. It is `1` for a valid version-1 failure record (`partial`).
+It is `2` for a version-2 success report, both when the report is `available` and when it is
+`partial` because `state` is absent. It is `null` for the legacy unversioned shape, and for every
+`invalid`, `unsupported` and `unknown` result, including a malformed version-1 failure record or a
+malformed version-2 report. The SPA accepts version 2 as `available` with a summary or `partial`
+without one, and reads retained cases only from an `available` version-2 report.
 
 An exploration confidence score reports observed input/output breadth and active isolation,
 never universal equivalence. A graph root is an initial snapshot, not an accepted repair.
@@ -1057,7 +1137,10 @@ public projection: `id`, `filename`, `status`, `created_at`, `updated_at`, `size
 are removed for privacy: stored diagnostic text can contain host paths, environment values or
 raw exceptions, including records predating redaction. No placeholder diagnostic is invented.
 ELF metadata keeps its existing field names and numeric types, including signed/numeric
-`entry_point`; its five categorical strings must exactly match `ElfMetadataReader` output,
+`entry_point`. Known limitation: `entry_point` is a signed 64-bit JSON integer, so an
+address at or above 2^63 (for example `0xffffffff81000000`) is encoded as its negative
+two's-complement value; the legacy job HTML instead shows `0x` plus lowercase hexadecimal.
+Its five categorical strings must exactly match `ElfMetadataReader` output,
 otherwise the historical job is unavailable with a fixed diagnostic. This legacy shape is not
 a v1 DTO. Execution POSTs still redirect.
 The persistence serializer and stored `job.json` format are unchanged.
