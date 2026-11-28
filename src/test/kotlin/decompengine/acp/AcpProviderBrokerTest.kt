@@ -1,0 +1,445 @@
+package decompengine.acp
+
+import java.io.ByteArrayOutputStream
+import java.net.InetAddress
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneOffset
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.test.AfterTest
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/**
+ * Credential-free integration control for the host provider broker: a synthetic Codex login under build/, a
+ * runtime-generated test CA and leaf under build/, a synthetic #1510 resolver, and a local TLS server reached
+ * through a recording loopback dialer. No real provider or credential is used.
+ */
+class AcpProviderBrokerTest {
+    // The production entry point uses the system clock, so the synthetic token is valid against it as well.
+    private val now = Instant.now()
+    private val clock = Clock.fixed(now, ZoneOffset.UTC)
+    private val policy = approvedProviderPolicy()
+    private val token = syntheticAccessToken(now.plusSeconds(3600))
+    private val codexHome = syntheticCodexHome(syntheticChatGptAuth(token))
+    private val tls = ProviderTestTls("chatgpt.com")
+    private val pinned = numericAddress("104.18.32.47")
+    private val closeables = ArrayList<AutoCloseable>()
+    private val diagnostics = ArrayList<String>()
+    private val capabilities = ArrayList<String>()
+    private val granted = HashMap<AcpProviderBroker, ByteArray>()
+
+    @AfterTest
+    fun cleanup() {
+        closeables.asReversed().forEach { runCatching { it.close() } }
+        // No failure, result or broker rendering may carry the token, the capability or the credential path.
+        diagnostics.forEach { text ->
+            assertFalse(text.contains(token), "diagnostic contains the synthetic token")
+            assertFalse(text.contains(codexHome.toString()), "diagnostic contains the credential source path")
+            capabilities.forEach { assertFalse(text.contains(it, ignoreCase = true), "diagnostic contains the channel capability") }
+        }
+    }
+
+    @Test
+    fun `credential availability is checked before any resolution connection or prompt`() {
+        val server = server()
+        listOf(
+            providerFixtureDirectory("no-login") to AcpProviderCredentialFailure.MISSING,
+            syntheticCodexHome(syntheticChatGptAuth(syntheticAccessToken(now.minusSeconds(5)))) to AcpProviderCredentialFailure.EXPIRED,
+            syntheticCodexHome("""{"OPENAI_API_KEY":"sk-synthetic","tokens":null}""") to AcpProviderCredentialFailure.MECHANISM_UNSUPPORTED,
+        ).forEach { (home, expected) ->
+            val resolver = FixedProviderResolver(listOf(pinned))
+            val dialer = LoopbackProviderDialer(server.port)
+            val failure = assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_UNAVAILABLE) {
+                AcpProviderBroker.open(policy, providerFixtureRequest(), AcpProviderCredentialSource.LocalCodexCachedAuth(home),
+                    resolver, dialer, AcpProviderUpstreamTls.withTrustAnchors(tls.trustAnchors()), clock)
+            }
+            assertEquals(expected, failure.credentialFailure)
+            assertEquals(emptyList(), resolver.hosts, "no resolution before the credential is available")
+            assertEquals(emptyList(), dialer.destinations)
+        }
+        assertRefused(AcpProviderBrokerFailureKind.TRANSPORT_DISABLED) {
+            AcpProviderBroker.open(AcpProviderTransportPolicy.DISABLED, providerFixtureRequest(),
+                AcpProviderCredentialSource.LocalCodexCachedAuth(codexHome))
+        }
+        assertEquals(0, server.accepted.get())
+    }
+
+    @Test
+    fun `the broker pins one validated numeric address and never resolves again`() {
+        val server = server()
+        // Even an answer that carries a host name is reduced to its address bytes.
+        val resolver = FixedProviderResolver(listOf(InetAddress.getByAddress("evil.example", pinned.address), numericAddress("2606:4700::6812:202f")))
+        val dialer = LoopbackProviderDialer(server.port)
+        val broker = broker(resolver = resolver, dialer = dialer)
+        val capability = capability(broker)
+
+        repeat(3) { index -> assertEquals(200, broker.exchange(channelRequest(index + 1L, capability)).status) }
+
+        assertEquals(listOf("chatgpt.com"), resolver.hosts)
+        assertEquals(3, dialer.destinations.size)
+        dialer.destinations.forEach { destination ->
+            assertFalse(destination.isUnresolved)
+            assertEquals(443, destination.port)
+            assertEquals("104.18.32.47", destination.hostString, "the pinned destination carries no host name")
+            assertContentEquals(pinned.address, destination.address.address)
+        }
+        assertEquals(3, server.requests.size)
+    }
+
+    @Test
+    fun `refused destination sets fail before any connection`() {
+        val server = server()
+        listOf(
+            listOf(pinned, numericAddress("127.0.0.1")) to AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED,
+            listOf(numericAddress("169.254.169.254")) to AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED,
+            listOf(numericAddress("::ffff:127.0.0.1")) to AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED,
+            listOf(numericAddress("10.1.2.3")) to AcpProviderRouteRefusal.PRIVATE_DESTINATION_NOT_PERMITTED,
+            emptyList<InetAddress>() to AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED,
+        ).forEach { (addresses, expected) ->
+            val dialer = LoopbackProviderDialer(server.port)
+            val failure = assertRefused(AcpProviderBrokerFailureKind.DESTINATION_REFUSED) {
+                broker(resolver = FixedProviderResolver(addresses), dialer = dialer)
+            }
+            assertEquals(expected, failure.routeRefusal)
+            assertEquals(emptyList(), dialer.destinations)
+        }
+        // Production has no #1510 resolver yet, so the production entry point cannot open a broker.
+        assertRefused(AcpProviderBrokerFailureKind.DESTINATION_REFUSED) {
+            AcpProviderBroker.open(policy, providerFixtureRequest(), AcpProviderCredentialSource.LocalCodexCachedAuth(codexHome))
+        }
+        assertEquals(0, server.accepted.get())
+    }
+
+    @Test
+    fun `TLS keeps the policy host name for SNI and certificate verification`() {
+        val server = server()
+        val broker = broker(dialer = LoopbackProviderDialer(server.port))
+        assertEquals(200, broker.exchange(channelRequest(1, capability(broker))).status)
+        assertEquals(listOf("chatgpt.com"), server.requests.single().serverNames)
+
+        // A trusted certificate for another name, and a certificate for the right name from an untrusted CA.
+        listOf(
+            ProviderTestTls("evil.example", issuer = tls) to tls.trustAnchors(),
+            ProviderTestTls("chatgpt.com") to tls.trustAnchors(),
+        ).forEach { (presented, anchors) ->
+            val wrong = server(presented)
+            val refusing = broker(dialer = LoopbackProviderDialer(wrong.port), upstreamTls = AcpProviderUpstreamTls.withTrustAnchors(anchors))
+            assertRefused(AcpProviderBrokerFailureKind.TLS_REFUSED) { refusing.exchange(channelRequest(1, capability(refusing))) }
+            assertEquals(emptyList(), wrong.requests, "no request byte is sent before verification succeeds")
+        }
+        // Production trust is the platform store, which does not hold the runtime test CA.
+        val platform = broker(dialer = LoopbackProviderDialer(server.port), upstreamTls = AcpProviderUpstreamTls.platform())
+        assertRefused(AcpProviderBrokerFailureKind.TLS_REFUSED) { platform.exchange(channelRequest(1, capability(platform))) }
+        assertEquals(1, server.requests.size)
+    }
+
+    @Test
+    fun `redirects are refused and never followed`() {
+        listOf(301, 302, 303, 307, 308).forEach { status ->
+            val server = server { rawResponse("HTTP/1.1 $status Moved\r\nLocation: https://evil.example/steal\r\nContent-Length: 0\r\n\r\n") }
+            val dialer = LoopbackProviderDialer(server.port)
+            val broker = broker(dialer = dialer)
+            val failure = assertRefused(AcpProviderBrokerFailureKind.REDIRECT_REFUSED) { broker.exchange(channelRequest(1, capability(broker))) }
+            assertEquals(AcpProviderRouteRefusal.REDIRECT_UNDECLARED, failure.routeRefusal)
+            assertEquals(1, dialer.destinations.size, "no second connection for status $status")
+            assertEquals(1, server.accepted.get())
+        }
+    }
+
+    @Test
+    fun `upstream head and framing come only from broker-owned values and the validated body`() {
+        val server = server { sseResponse("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n", framing = "chunked") }
+        val broker = broker(dialer = LoopbackProviderDialer(server.port))
+        val body = """{ "model" : "gpt-6", "input" : [ {"role":"user","content":"hello A"} ], "stream" : true, "store" : false }"""
+        val agentHeaders = listOf(
+            "Host" to "evil.example:8443", "Authorization" to "Bearer agent-chosen", "ChatGPT-Account-ID" to "acct_agent",
+            "Cookie" to "session=agent", "User-Agent" to "agent/9", "Accept-Encoding" to "gzip", "OpenAI-Beta" to "agent",
+            "Content-Type" to "text/plain", "Content-Length" to body.toByteArray().size.toString(), "Connection" to "keep-alive",
+        )
+        val result = broker.exchange(channelRequest(1, capability(broker), body = body, headers = agentHeaders))
+
+        assertEquals(200, result.status)
+        assertEquals("text/event-stream", result.contentType)
+        assertEquals("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n", result.body.toString(StandardCharsets.UTF_8))
+        val observed = server.requests.single()
+        val canonical = """{"model":"gpt-6","input":[{"role":"user","content":"hello A"}],"stream":true,"store":false}"""
+        assertEquals(canonical, observed.body.toString(StandardCharsets.UTF_8))
+        assertEquals(
+            listOf(
+                "POST /backend-api/codex/responses HTTP/1.1",
+                "Host: chatgpt.com",
+                "Authorization: Bearer $token",
+                "ChatGPT-Account-ID: acct_fixture-1",
+                "Content-Type: application/json",
+                "Accept: text/event-stream",
+                "Content-Length: ${canonical.toByteArray().size}",
+                "User-Agent: decomp-acp-provider-broker/1",
+                "Connection: close",
+            ),
+            observed.head,
+        )
+        diagnostics += observed.head.filterNot { it.startsWith("Authorization:") }
+    }
+
+    @Test
+    fun `channel requests are bound to one invocation capability and sequence`() {
+        val server = server()
+        val dialer = LoopbackProviderDialer(server.port)
+        val broker = broker(dialer = dialer)
+        val other = broker(dialer = dialer)
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(1, ByteArray(32))) }
+        val capability = capability(broker)
+        val otherCapability = capability(other)
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.grantChannel() }
+
+        listOf(otherCapability, ByteArray(32), capability.copyOf(31), capability + byteArrayOf(0)).forEach { wrong ->
+            assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(1, wrong)) }
+        }
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(2, capability)) }
+        assertEquals(200, broker.exchange(channelRequest(1, capability)).status)
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(1, capability)) }
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { other.exchange(channelRequest(1, capability)) }
+        // A refused route still consumes its sequence: the frame cannot be replayed with a corrected head.
+        assertRefused(AcpProviderBrokerFailureKind.ROUTE_REFUSED) { broker.exchange(channelRequest(2, capability, target = "/models")) }
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(2, capability)) }
+        assertEquals(200, broker.exchange(channelRequest(3, capability)).status)
+
+        broker.close()
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(4, capability)) }
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(4, ByteArray(32))) }
+        assertEquals(2, dialer.destinations.size)
+        assertEquals(2, server.requests.size)
+        assertFalse(broker.identity.invocationBindingSha256 == other.identity.invocationBindingSha256)
+        assertEquals(broker.identity.requestBindingSha256.length, 64)
+        diagnostics += broker.toString() + broker.identity.toString()
+    }
+
+    @Test
+    fun `route and body refusals send nothing upstream`() {
+        val server = server()
+        val dialer = LoopbackProviderDialer(server.port)
+        val broker = broker(dialer = dialer)
+        val capability = capability(broker)
+        val capabilityHex = capabilityHex(capability)
+        var sequence = 1L
+        fun refused(kind: AcpProviderBrokerFailureKind, request: (Long) -> AcpProviderChannelRequest) =
+            assertRefused(kind) { broker.exchange(request(sequence++)) }
+
+        listOf(
+            AcpProviderRouteRefusal.CONNECT_REFUSED to channelRequestHead("CONNECT", "chatgpt.com:443"),
+            AcpProviderRouteRefusal.PROXY_REQUEST_REFUSED to channelRequestHead("POST", "https://evil.example/responses"),
+            AcpProviderRouteRefusal.OPERATION_UNSUPPORTED to channelRequestHead("POST", "/v1/responses"),
+            AcpProviderRouteRefusal.ROUTING_OVERRIDE_REFUSED to channelRequestHead("POST", "/responses", "X-Forwarded-Host" to "evil.example"),
+        ).forEach { (reason, head) ->
+            val failure = refused(AcpProviderBrokerFailureKind.ROUTE_REFUSED) { AcpProviderChannelRequest(it, capability, head, BODY.toByteArray()) }
+            assertEquals(reason, failure.routeRefusal)
+        }
+        refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, headers = listOf("Host" to "x", "Transfer-Encoding" to "chunked")) }
+        refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, headers = listOf("Host" to "x", "Content-Length" to "3")) }
+        refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, body = "[]") }
+        refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, body = """{"a":1,"a":2}""") }
+        refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, body = "") }
+        refused(AcpProviderBrokerFailureKind.REQUEST_REFUSED) { channelRequest(it, capability, body = "{\"model\":\"" + "x".repeat(policy.bounds.maximumRequestBytes) + "\"}") }
+        // The capability and the credential cannot travel upstream, even behind JSON escapes or in a name.
+        val escaped = capabilityHex.map { "\\u%04x".format(it.code) }.joinToString("")
+        listOf(
+            """{"model":"gpt-6","input":"$capabilityHex"}""",
+            """{"model":"gpt-6","input":"${capabilityHex.uppercase()}"}""",
+            """{"model":"gpt-6","input":"$escaped"}""",
+            """{"model":"gpt-6","$capabilityHex":1}""",
+            """{"model":"gpt-6","input":["$token"]}""",
+        ).forEach { body -> refused(AcpProviderBrokerFailureKind.SECRET_EXPOSURE) { channelRequest(it, capability, body = body) } }
+
+        assertEquals(emptyList(), dialer.destinations)
+        assertEquals(0, server.accepted.get())
+    }
+
+    @Test
+    fun `responses never return credentials error bodies or malformed framing to the channel`() {
+        val responses = listOf(
+            sseResponse("data: {\"echo\":\"$token\"}\n\n") to AcpProviderBrokerFailureKind.SECRET_EXPOSURE,
+            rawResponse("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n") to AcpProviderBrokerFailureKind.MALFORMED_RESPONSE,
+            rawResponse("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}") to AcpProviderBrokerFailureKind.MALFORMED_RESPONSE,
+            rawResponse("HTTP/1.1 200 OK\nContent-Type: text/event-stream\n\n") to AcpProviderBrokerFailureKind.MALFORMED_RESPONSE,
+            rawResponse("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n folded: yes\r\n\r\n") to AcpProviderBrokerFailureKind.MALFORMED_RESPONSE,
+            rawResponse("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n") to
+                AcpProviderBrokerFailureKind.MALFORMED_RESPONSE,
+            rawResponse("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trailer: 1\r\n\r\n") to
+                AcpProviderBrokerFailureKind.MALFORMED_RESPONSE,
+            rawResponse("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 99999999\r\n\r\n") to
+                AcpProviderBrokerFailureKind.RESPONSE_TOO_LARGE,
+            rawResponse("HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") to AcpProviderBrokerFailureKind.MALFORMED_RESPONSE,
+        )
+        responses.forEach { (response, expected) ->
+            val server = server { response }
+            val broker = broker(dialer = LoopbackProviderDialer(server.port))
+            assertRefused(expected) { broker.exchange(channelRequest(1, capability(broker))) }
+        }
+        val failing = server { rawResponse("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 80\r\n\r\n" +
+            """{"error":"bad token $token"}""".padEnd(80)) }
+        val broker = broker(dialer = LoopbackProviderDialer(failing.port))
+        val result = broker.exchange(channelRequest(1, capability(broker)))
+        assertEquals(401, result.status)
+        assertNull(result.contentType)
+        assertEquals(0, result.body.size)
+        diagnostics += result.toString()
+    }
+
+    @Test
+    fun `sandbox launches cannot carry provider authority or expose the credential source`() {
+        val broker = broker(dialer = LoopbackProviderDialer(1))
+        val capabilityHex = capabilityHex(capability(broker))
+        val workspace = providerFixtureDirectory("launch")
+        broker.requireNoProviderAuthority(launch(workspace))
+
+        listOf(
+            launch(workspace, command = listOf("/bin/sh", "-c", "echo $capabilityHex")),
+            launch(workspace, environment = mapOf("PROVIDER" to capabilityHex.uppercase())),
+            launch(workspace, environment = mapOf("OPENAI_ACCESS" to "Bearer $token")),
+            launch(workspace, environment = mapOf(capabilityHex to "1")),
+        ).forEach { assertRefused(AcpProviderBrokerFailureKind.SECRET_EXPOSURE) { broker.requireNoProviderAuthority(it) } }
+        listOf(
+            launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(codexHome))),
+            launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(codexHome.parent, Path.of("/opt/provider")))),
+            launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(codexHome.resolve("auth.json"), Path.of("/opt/auth.json")))),
+            launch(codexHome),
+        ).forEach { assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) { broker.requireNoProviderAuthority(it) } }
+        val linked = Files.createSymbolicLink(providerFixtureDirectory("link").resolve("home"), codexHome)
+        assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) {
+            broker.requireNoProviderAuthority(launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(linked, Path.of("/opt/home")))))
+        }
+        broker.close()
+        // Once closed, the source path stays protected; the dropped credential and capability are no longer held.
+        assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) { broker.requireNoProviderAuthority(launch(codexHome)) }
+        broker.requireNoProviderAuthority(launch(workspace, command = listOf("/bin/sh", "-c", "echo $capabilityHex")))
+    }
+
+    @Test
+    fun `a process started while the channel is live inherits no credential capability or upstream descriptor`() {
+        if (!Files.isDirectory(Path.of("/proc/self/fd"))) return
+        val held = CountDownLatch(1)
+        val server = server().also { it.holdResponse = held }
+        val broker = broker(dialer = LoopbackProviderDialer(server.port))
+        val capabilityHex = capabilityHex(capability(broker))
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val exchange = executor.submit<AcpProviderExchangeResult> { broker.exchange(channelRequest(1, capability(broker, reuse = true))) }
+            assertTrue(server.requestReceived.await(10, TimeUnit.SECONDS), "the upstream request is in flight")
+
+            // The host starts a child with its inherited environment while the upstream TLS connection is open.
+            val child = ProcessBuilder("/bin/sh", "-c", "tr '\\000' '\\n' < /proc/self/environ; for fd in /proc/$$/fd/*; do readlink \"\$fd\" || true; done")
+                .redirectErrorStream(true).start()
+            val output = child.inputStream.readAllBytes().toString(StandardCharsets.UTF_8)
+            assertTrue(child.waitFor(10, TimeUnit.SECONDS))
+            assertEquals(0, child.exitValue())
+            assertFalse(output.contains(token))
+            assertFalse(output.contains(capabilityHex, ignoreCase = true))
+            assertFalse(output.contains(codexHome.toString()))
+            // The listing is real: the shell's own stdout pipe appears, and no socket does.
+            assertTrue(output.lines().any { it.startsWith("pipe:[") }, "descriptor listing is present")
+            assertFalse(output.lines().any { it.startsWith("socket:") }, "no socket descriptor is inherited")
+
+            held.countDown()
+            assertEquals(200, exchange.get(10, TimeUnit.SECONDS).status)
+        } finally {
+            held.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `closing the broker aborts an in-flight upstream exchange`() {
+        val held = CountDownLatch(1)
+        val server = server().also { it.holdResponse = held }
+        val broker = broker(dialer = LoopbackProviderDialer(server.port))
+        val capability = capability(broker)
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val exchange = executor.submit<Result<AcpProviderExchangeResult>> { runCatching { broker.exchange(channelRequest(1, capability)) } }
+            assertTrue(server.requestReceived.await(10, TimeUnit.SECONDS))
+            broker.close()
+            val failure = exchange.get(10, TimeUnit.SECONDS).exceptionOrNull() as AcpProviderBrokerFailure
+            assertEquals(AcpProviderBrokerFailureKind.TRANSPORT, failure.kind)
+            diagnostics += failure.stackTraceToString()
+        } finally {
+            held.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    private fun server(identity: ProviderTestTls = tls, response: ((ObservedProviderRequest) -> ByteArray)? = null): LocalProviderServer =
+        (if (response == null) LocalProviderServer(identity) else LocalProviderServer(identity, response)).also(closeables::add)
+
+    private fun broker(
+        resolver: AcpProviderDestinationResolver = FixedProviderResolver(listOf(pinned)),
+        dialer: AcpProviderDialer,
+        upstreamTls: AcpProviderUpstreamTls = AcpProviderUpstreamTls.withTrustAnchors(tls.trustAnchors()),
+    ): AcpProviderBroker = AcpProviderBroker.open(
+        policy, providerFixtureRequest(), AcpProviderCredentialSource.LocalCodexCachedAuth(codexHome), resolver, dialer, upstreamTls, clock,
+    ).also(closeables::add).also { diagnostics += it.toString() }
+
+    /** The contained relay's side of the private channel setup: read the one-time grant from its stream. */
+    private fun capability(broker: AcpProviderBroker, reuse: Boolean = false): ByteArray {
+        if (reuse) return granted.getValue(broker).copyOf()
+        val grant = broker.grantChannel()
+        diagnostics += grant.toString()
+        val bytes = ByteArrayOutputStream().also(grant::writeTo).toByteArray()
+        assertEquals(32, bytes.size)
+        capabilities += capabilityHex(bytes)
+        granted[broker] = bytes
+        return bytes.copyOf()
+    }
+
+    private fun capabilityHex(capability: ByteArray): String = capability.joinToString("") { "%02x".format(it) }
+
+    private fun channelRequest(
+        sequence: Long,
+        capability: ByteArray,
+        body: String = BODY,
+        target: String = "/responses",
+        headers: List<Pair<String, String>> = listOf("Host" to "127.0.0.1:9", "Content-Type" to "application/json"),
+    ) = AcpProviderChannelRequest(sequence, capability, AcpProviderRelayRequest("POST", target, headers), body.toByteArray())
+
+    private fun channelRequestHead(method: String, target: String, vararg extra: Pair<String, String>) =
+        AcpProviderRelayRequest(method, target, listOf("Host" to "127.0.0.1:9") + extra)
+
+    private fun launch(
+        workingDirectory: Path,
+        command: List<String> = listOf("/usr/bin/true"),
+        environment: Map<String, String> = mapOf("PATH" to "/usr/bin:/bin"),
+        mounts: List<AcpSandboxReadOnlyMount> = emptyList(),
+    ) = AcpSandboxLaunch(
+        command = command,
+        environment = environment,
+        workingDirectory = workingDirectory,
+        resourceLimits = AcpSandboxResourceLimits(),
+        maximumWallDuration = Duration.ofSeconds(5),
+        readOnlyMounts = mounts,
+        stagingRoots = emptyList(),
+        purpose = AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION,
+    )
+
+    private fun assertRefused(kind: AcpProviderBrokerFailureKind, block: () -> Unit): AcpProviderBrokerFailure {
+        val failure = assertFailsWith<AcpProviderBrokerFailure> { block() }
+        assertEquals(kind, failure.kind, failure.message)
+        assertNull(failure.cause)
+        diagnostics += failure.stackTraceToString()
+        return failure
+    }
+
+    private companion object {
+        const val BODY = """{"model":"gpt-6","input":[{"role":"user","content":"hello"}],"stream":true,"store":false}"""
+    }
+}
