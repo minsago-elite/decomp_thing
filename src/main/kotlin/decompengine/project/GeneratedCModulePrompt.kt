@@ -27,7 +27,7 @@ internal object GeneratedCModulePrompt {
         val acceptance = """
             The workflow validates your exact source bytes against the returned change set and owned entity IDs.
             Preserve all required function and global definitions and use only declared shared interfaces.
-            Compiler gate (run by the workflow): ${ReconstructionCompilationPolicies.resolve(request.profile).command(request.profile, target).joinToString(" ")}
+            Compiler gate (run by the workflow): ${ReconstructionCompilationPolicies.resolve(request.profile).commandForCheckpoint(request.profile, target, request.compilationCheckpointVersion).joinToString(" ")}
             Compiler warnings are errors. A completed agent turn is accepted only after policy and compiler validation.
             Full-project build and behavioral validation remain separate release gates.
         """.trimIndent()

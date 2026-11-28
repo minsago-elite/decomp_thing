@@ -15,6 +15,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -67,9 +68,10 @@ internal object KotlinContainedCommandKeeper {
                 root.whileOpen { descriptor -> LinuxFilesystemSyscalls.openDirectoryAt(descriptor, "reports") }.use { reports ->
                     requirePrivateDirectory(reports)
                     root.whileOpen { descriptor -> LinuxFilesystemSyscalls.openDirectoryAt(descriptor, "tmp") }.use(::requirePrivateDirectory)
-                    val stdout = BoundedCommandLog(reports, KotlinContainedCommandProtocol.STDOUT_FILE, request.maximumStdoutBytes)
+                    val strictPipeHashes = request.terminalResourcePolicySha256 != null
+                    val stdout = BoundedCommandLog(reports, KotlinContainedCommandProtocol.STDOUT_FILE, request.maximumStdoutBytes, strictPipeHashes)
                     stdout.use {
-                        val stderr = BoundedCommandLog(reports, KotlinContainedCommandProtocol.STDERR_FILE, request.maximumStderrBytes)
+                        val stderr = BoundedCommandLog(reports, KotlinContainedCommandProtocol.STDERR_FILE, request.maximumStderrBytes, strictPipeHashes)
                         stderr.use {
                             val started = System.nanoTime()
                             val process = ProcessBuilder(request.command)
@@ -134,7 +136,9 @@ internal object KotlinContainedCommandKeeper {
                                     status = "TIMED_OUT"
                                 }
                                 val outcome = KotlinContainedCommandOutcome(keeperPid, process.pid(), process.exitValue(),
-                                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), stdout.bytes.get(), stderr.bytes.get(), status)
+                                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), stdout.bytes.get(), stderr.bytes.get(), status,
+                                    if (strictPipeHashes) stdout.capturedSha256() else null,
+                                    if (strictPipeHashes) stderr.capturedSha256() else null)
                                 ContainedCommandProcessProtection.requireNotDumpable()
                                 publish(root, KotlinContainedCommandProtocol.OUTCOME_FILE,
                                     KotlinContainedCommandProtocol.outcome(bootstrap, request, outcome))
@@ -232,11 +236,18 @@ internal object KotlinContainedCommandKeeper {
     }
 }
 
-private class BoundedCommandLog(root: LinuxDescriptor, name: String, private val maximumBytes: Long) : AutoCloseable {
+private class BoundedCommandLog(
+    root: LinuxDescriptor,
+    name: String,
+    private val maximumBytes: Long,
+    hashPipeBytes: Boolean,
+) : AutoCloseable {
     private val descriptor = root.whileOpen { parent -> LinuxFilesystemSyscalls.createRegularFile(parent, name, 384) }
     val bytes = AtomicLong()
     val exceeded = AtomicBoolean()
     private val failure = AtomicReference<Throwable?>()
+    private val pipeDigest = if (hashPipeBytes) MessageDigest.getInstance("SHA-256") else null
+    private var capturedHash: String? = null
 
     fun capture(input: InputStream) {
         try {
@@ -247,6 +258,9 @@ private class BoundedCommandLog(root: LinuxDescriptor, name: String, private val
                         val count = stream.read(buffer)
                         if (count < 0) break
                         val retained = minOf(count.toLong(), maximumBytes - bytes.get()).toInt()
+                        // The compiler can rewrite its writable report files. Authenticate only
+                        // bytes received on this owned pipe, never a subsequent pathname read.
+                        pipeDigest?.update(buffer, 0, retained)
                         val pending = ByteBuffer.wrap(buffer, 0, retained)
                         while (pending.hasRemaining()) channel.write(pending)
                         bytes.addAndGet(retained.toLong())
@@ -258,6 +272,7 @@ private class BoundedCommandLog(root: LinuxDescriptor, name: String, private val
                     channel.force(true)
                 }
             }
+            capturedHash = pipeDigest?.digest()?.joinToString("") { "%02x".format(it.toInt() and 255) }
         } catch (caught: Throwable) {
             failure.compareAndSet(null, caught)
         }
@@ -265,6 +280,12 @@ private class BoundedCommandLog(root: LinuxDescriptor, name: String, private val
 
     fun requireHealthy() {
         failure.get()?.let { throw IllegalArgumentException("contained command log capture failed", it) }
+    }
+
+    /** Called only after the capture future joins; failed or incomplete capture has no digest. */
+    fun capturedSha256(): String {
+        requireHealthy()
+        return checkNotNull(capturedHash) { "contained command pipe hash was not captured" }
     }
 
     override fun close() = descriptor.close()

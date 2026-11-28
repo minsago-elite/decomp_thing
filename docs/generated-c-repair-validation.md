@@ -145,10 +145,18 @@ also use the same bounded canonical JSON encoding as the retained receipt and ar
 It requires an explicit GitHub Actions run identity and noninteractive operator sudo. The helper
 `ci-prepare-generated-c-validation.py` refuses existing targets, copies a bounded trusted GNU
 compiler/tool closure into root-owned link-free files under
-`/opt/decomp-generated-c-validation-ci`, and provisions distinct finite 64 MiB/4096-inode tmpfs
+`/var/lib/decomp-generated-c-runtime-ci`, and provisions distinct finite 64 MiB/4096-inode tmpfs
 mounts under `/var/lib/decomp-generated-c-validation-ci`. These are independent of the ACP quota
 test fixture. The source mount allows execution because captured ELF file binds inherit mount
 flags; the writable output mount is `noexec`. Both deny device/setuid authority.
+
+The helper validates the existing runtime and mount parents before creating either fixed root.
+It queries only `cc1` and `collect2` through the trusted selected compiler, admits their exact
+canonical executable files, and charges their copies to the existing runtime byte and entry
+limits. The module compiler uses the existing tools directory; repair receives two explicit
+file mounts at its existing compiler tool prefix. No host compiler-internal tree is added to
+the sandbox. A provisioning failure remains the primary error if cleanup also refuses authority;
+the cleanup failure is retained as a diagnostic.
 
 The fixture closure contains the system headers required by its fixed benign stdio program and
 the declared compiler internals, startup objects and dynamic libraries. It does not claim support

@@ -238,18 +238,26 @@ class ReconstructionReportsTest {
     }
 
     @Test
-    fun `public generator publishes supplemental reports when source layout does not create their parent`() = withRoot { root ->
+    fun `public diagnostic generator publishes supplemental reports when source layout does not create their parent`() = withRoot { root ->
+        // This tests report publication, not implementation acceptance. The explicit diagnostic
+        // profile supports relocated evidence without invoking the closed compiler policy.
         // Keep source generation out of reports so the public route genuinely requires the
         // default native stager to create this parent, rather than inheriting a source directory.
         val layout = ProjectLayoutProfile(profile.layout.schemaVersion, profile.layout.declarations.map { declaration ->
             ProjectFileDeclaration(declaration.id, declaration.pathTemplate.replace("reports/", "evidence/"),
                 declaration.roles, declaration.contentKind)
         })
-        val selected = ReconstructionProfile(profile.schemaVersion, profile.id, layout, profile.budgets, profile.adapterConfiguration)
+        val relocated = ReconstructionProfile(profile.schemaVersion, profile.id, layout, profile.budgets, profile.adapterConfiguration)
+        val adapter = ReconstructionAdapters.resolve(relocated)
+        val selected = adapter.evidenceOnlyProfile(relocated)
         val project = root.resolve("public/project")
         assertFalse(project.exists())
 
-        assertEquals(project, RecompilableProjectGenerator.generate(analysis(root), project, selected))
+        assertEquals(project, RecompilableProjectGenerator.generate(analysis(root), project, selected,
+            reconstructor = adapter.evidenceOnlyReconstructor(selected)))
+        assertTrue(adapter.requiresUnresolvedOutput(selected))
+        val sourceManifest = SourceTreeManifestReader.parse(project.resolve("source_tree_manifest.json").readText(), selected)
+        assertFalse(sourceManifest.files.any { it.acceptedImplementation == true })
 
         val reports = project.resolve("reports")
         assertEquals(listOf("analysis.json", "unresolved.json"), reports.listDirectoryEntries().map { it.fileName.toString() }.sorted())

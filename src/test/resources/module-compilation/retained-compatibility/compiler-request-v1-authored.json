@@ -1,0 +1,230 @@
+{
+  "compilerPath": "/var/lib/decomp-generated-c-runtime-ci/tools/cc",
+  "compilerSha256": "1b99826121ae6682a634e5efe09bd3e3df58ce58e0b28f849114ab5b89139c26",
+  "inputs": [
+    {
+      "bytes": 95,
+      "path": "include/decomp_types.h",
+      "sha256": "aa27788da371c7d5cd8215620e33cfeb012f9a4784e5af59807cd05a4a830f1e"
+    },
+    {
+      "bytes": 96,
+      "path": "include/modules/parse.h",
+      "sha256": "ec42459a978e68be355a8869e24e0deea9909bf9b97f5c2883c3614a67cd4c80"
+    },
+    {
+      "bytes": 128,
+      "path": "src/modules/parse.c",
+      "sha256": "5bb9384136aa31271819d6bec47d803e61b1e498016389e261113af22cee1ca1"
+    },
+    {
+      "bytes": 183,
+      "path": "src/modules/parse_internal.h",
+      "sha256": "757f8dff2afa9e0844767928eafdd6e002895578044927628ef195310c41c7b5"
+    }
+  ],
+  "maximumOutputBytes": 2097152,
+  "maximumWallMillis": 30000,
+  "nonce": "c70590978103e4b750c4d77b5b03deacb8a9a3cb921e159c97cda50646a2dda1",
+  "outputDirectory": "/var/lib/decomp-module-compile-ci/scratch/.decomp-oracle-lease-c70590978103e4b750c4d77b5b03deacb8a9a3cb921e159c97cda50646a2dda1/.function-observation-run-c70590978103e4b750c4d77b5b03deacb8a9a3cb921e159c97cda50646a2dda1/reports",
+  "profile": {
+    "adapterConfiguration": {
+      "build-executable": [
+        "make"
+      ],
+      "build-system": [
+        "gnu-make"
+      ],
+      "compiler-driver": [
+        "cc"
+      ],
+      "compiler-flags": [
+        "-std=c11",
+        "-g",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Iinclude"
+      ],
+      "entry-symbol-candidates": [
+        "main",
+        "decomp_engine_main",
+        "entry",
+        "recovered__start"
+      ],
+      "source-language": [
+        "c11"
+      ]
+    },
+    "budgets": {
+      "archiveMaximumEntries": 100000,
+      "archiveMaximumFileBytes": 134217728,
+      "archiveMaximumTotalBytes": 1073741824,
+      "buildMaximumOutputBytes": 33554432,
+      "buildWallClockMillis": 600000,
+      "exportMaximumResidentBytes": 4294967296,
+      "exportWallClockMillis": 600000,
+      "maximumFunctionsPerModule": 24,
+      "plannerMaximumDependencyEdges": 2000000,
+      "plannerMaximumEntities": 250000,
+      "plannerMaximumWorkUnits": 50000000,
+      "reconstructionMaximumContextCharacters": 120000
+    },
+    "id": "generated-c-make-v1",
+    "layout": {
+      "files": [
+        {
+          "contentKind": "utf8-text",
+          "id": "build-definition",
+          "pathTemplate": "Makefile",
+          "roles": [
+            "archive-payload",
+            "build-definition",
+            "build-input",
+            "editable",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "confidence-evidence",
+          "pathTemplate": "reports/confidence.json",
+          "roles": [
+            "archive-payload",
+            "evidence",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "entrypoint-implementation",
+          "pathTemplate": "src/main.c",
+          "roles": [
+            "archive-payload",
+            "build-input",
+            "editable",
+            "entrypoint-implementation",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "module-agent-execution-evidence",
+          "pathTemplate": "reports/agent-executions/{module}.json",
+          "roles": [
+            "archive-payload",
+            "evidence",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "module-evidence",
+          "pathTemplate": "reports/modules/{module}.json",
+          "roles": [
+            "archive-payload",
+            "evidence",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "module-implementation",
+          "pathTemplate": "src/modules/{module}.c",
+          "roles": [
+            "archive-payload",
+            "build-input",
+            "editable",
+            "module-implementation",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "module-interface",
+          "pathTemplate": "include/modules/{module}.h",
+          "roles": [
+            "archive-payload",
+            "build-input",
+            "editable",
+            "public-interface",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "module-plan-evidence",
+          "pathTemplate": "reports/module_plan.json",
+          "roles": [
+            "archive-payload",
+            "evidence",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "module-private-interface",
+          "pathTemplate": "src/modules/{module}_internal.h",
+          "roles": [
+            "archive-payload",
+            "build-input",
+            "editable",
+            "private-interface",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "program-model-evidence",
+          "pathTemplate": "reports/program_model.json",
+          "roles": [
+            "archive-payload",
+            "evidence",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "shared-interface",
+          "pathTemplate": "include/decomp_types.h",
+          "roles": [
+            "archive-payload",
+            "build-input",
+            "editable",
+            "public-interface",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "toolchain-evidence",
+          "pathTemplate": "reports/toolchain.json",
+          "roles": [
+            "archive-payload",
+            "evidence",
+            "viewable"
+          ]
+        },
+        {
+          "contentKind": "utf8-text",
+          "id": "unresolved-evidence",
+          "pathTemplate": "UNRESOLVED.md",
+          "roles": [
+            "archive-payload",
+            "evidence",
+            "viewable"
+          ]
+        }
+      ],
+      "schemaVersion": 1
+    },
+    "schemaVersion": 1
+  },
+  "profileId": "generated-c-make-v1",
+  "profileSha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+  "provider": "contained-module-compiler-request-v1",
+  "schemaVersion": 1,
+  "snapshotRoot": "/var/lib/decomp-module-compile-ci/scratch/.decomp-oracle-lease-c70590978103e4b750c4d77b5b03deacb8a9a3cb921e159c97cda50646a2dda1/.function-observation-run-c70590978103e4b750c4d77b5b03deacb8a9a3cb921e159c97cda50646a2dda1/state/snapshot",
+  "snapshotSha256": "1f7281a1cd0974e3f351555dfbcb6348516cdf1a927d3d8456382b70eea58233",
+  "sourcePath": "src/modules/parse.c"
+}

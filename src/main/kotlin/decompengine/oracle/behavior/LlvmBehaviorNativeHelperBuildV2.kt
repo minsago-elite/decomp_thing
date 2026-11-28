@@ -112,8 +112,8 @@ object LlvmBehaviorNativeHelperBuildV2 {
                                 "bytes" to JsonPrimitive(compilerGuard.size), "sha256" to JsonPrimitive(compilerGuard.authenticatedSha256),
                                 "version" to JsonPrimitive(firstLine), "versionCommand" to helperStrings(listOf(compiler.toString(), "--version")),
                                 "result" to helperProcessRecord(version))),
-                            "compilation" to JsonObject(linkedMapOf("arguments" to helperStrings(arguments),
-                                "environment" to JsonObject(environment.mapValues { JsonPrimitive(it.value) }),
+                            "compilation" to JsonObject(linkedMapOf("arguments" to helperStrings(nativeHelperRecordedArguments(compiler.toString())),
+                                "environment" to JsonObject(nativeHelperRecordedEnvironment(environment).mapValues { JsonPrimitive(it.value) }),
                                 "workingDirectory" to JsonPrimitive("/"), "result" to helperProcessRecord(compilation))),
                             "claims" to nativeHelperFalseClaims(),
                         ))
@@ -139,6 +139,28 @@ object LlvmBehaviorNativeHelperBuildV2 {
         }
     }
 }
+
+/**
+ * The deployment reference records the private, randomly named compilation directory by this fixed
+ * token, so shipped bytes carry no build-host path and stay identical across rebuilds. The token
+ * stands for the directory holding the staged source, the output and the `home`/`tmp` scratch.
+ */
+internal const val NATIVE_HELPER_RECORDED_BUILD_ROOT = "\${BUILD_ROOT}"
+
+internal fun nativeHelperRecordedArguments(compiler: String): List<String> =
+    listOf(compiler) + NATIVE_HELPER_ARGUMENT_TEMPLATE.map {
+        when (it) {
+            "\${SOURCE}" -> "$NATIVE_HELPER_RECORDED_BUILD_ROOT/$NATIVE_HELPER_SOURCE_NAME"
+            "\${OUTPUT}" -> "$NATIVE_HELPER_RECORDED_BUILD_ROOT/$NATIVE_HELPER_NAME"
+            else -> it
+        }
+    }
+
+internal fun nativeHelperRecordedEnvironment(environment: Map<String, String>): Map<String, String> =
+    LinkedHashMap(environment).apply {
+        replace("HOME", "$NATIVE_HELPER_RECORDED_BUILD_ROOT/home")
+        replace("TMPDIR", "$NATIVE_HELPER_RECORDED_BUILD_ROOT/tmp")
+    }
 
 object LlvmBehaviorNativeHelperBuildV2Cli {
     @JvmStatic fun main(arguments: Array<String>) {

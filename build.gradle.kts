@@ -458,6 +458,27 @@ val analysisIoHelperBinary = analysisIoHelperDirectory.map { it.file("decomp-ana
 val analysisIoHelperChecksum = analysisIoHelperDirectory.map { it.file("decomp-analysis-io-helper.sha256") }
 val analysisIoHelperMetadata = analysisIoHelperDirectory.map { it.dir("analysis-native-io") }
 val analysisIoHelperCompiler = providers.gradleProperty("analysisIoHelperCompiler").orElse("/usr/bin/cc")
+val moduleCompilerExecHelperSource = layout.projectDirectory.file("src/main/c/decomp_module_compiler_exec.c")
+val moduleCompilerExecHelperBinary = layout.buildDirectory.file("native/module-compiler/decomp-module-compiler-exec")
+val moduleCompilerExecHelperCompiler = providers.gradleProperty("moduleCompilerExecHelperCompiler").orElse("/usr/bin/cc")
+val buildModuleCompilerExecHelper = tasks.register<Exec>("buildModuleCompilerExecHelper") {
+    group = "build"
+    description = "Builds the native Landlock trampoline used for authenticated module compiler execution"
+    inputs.file(moduleCompilerExecHelperSource)
+    inputs.property("compiler", moduleCompilerExecHelperCompiler)
+    outputs.file(moduleCompilerExecHelperBinary)
+    doFirst {
+        val output = moduleCompilerExecHelperBinary.get().asFile.toPath()
+        Files.createDirectories(output.parent)
+        commandLine(moduleCompilerExecHelperCompiler.get(), "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+            "-D_FORTIFY_SOURCE=2", "-fstack-protector-strong", "-Wl,-z,relro,-z,now",
+            moduleCompilerExecHelperSource.asFile.absolutePath, "-o", output.toString())
+    }
+    doLast {
+        Files.setPosixFilePermissions(moduleCompilerExecHelperBinary.get().asFile.toPath(),
+            PosixFilePermissions.fromString("rwxr-xr-x"))
+    }
+}
 val llvmBehaviorHelperDirectory = layout.buildDirectory.dir("native/behavior")
 val llvmBehaviorHelperSourceCopy = llvmBehaviorHelperDirectory.map { it.file("decomp_llvm_behavior_helper.c") }
 val llvmBehaviorHelperBuildRecord = llvmBehaviorHelperDirectory.map { it.file("decomp-llvm-behavior-helper-build-v2.json") }
@@ -1646,6 +1667,10 @@ distributions {
                 into("libexec")
                 filePermissions { unix("rwxr-xr-x") }
             }
+            from(moduleCompilerExecHelperBinary) {
+                into("libexec")
+                filePermissions { unix("rwxr-xr-x") }
+            }
             from(analysisIoHelperChecksum) {
                 into("libexec")
                 filePermissions { unix("rw-r--r--") }
@@ -1729,6 +1754,7 @@ private fun configureOracleTestRuntime(testTask: Test) {
     testTask.dependsOn(generateAcpGateHelperChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
     testTask.dependsOn(buildAnalysisIoHelper)
+    testTask.dependsOn(buildModuleCompilerExecHelper)
     testTask.inputs.files(analysisIoHelperBinary, analysisIoHelperChecksum)
     testTask.inputs.dir(analysisIoHelperMetadata)
     testTask.dependsOn(generateKotlinBootClasspathReference)
@@ -1747,6 +1773,7 @@ private fun configureOracleTestRuntime(testTask: Test) {
         testTask.systemProperty("decompengine.analysis.io.testHelper", analysisIoHelperBinary.get().asFile.absolutePath)
         testTask.systemProperty("decompengine.analysis.io.helper", analysisIoHelperBinary.get().asFile.absolutePath)
         testTask.systemProperty("decompengine.analysis.io.testCompiler", file(analysisIoHelperCompiler.get()).canonicalPath)
+        testTask.systemProperty("decompengine.module.compiler.execHelper", moduleCompilerExecHelperBinary.get().asFile.absolutePath)
         testTask.systemProperty("decompengine.oracle.nativeLibraryDirectory", oracleNativeLibraryDirectory.get().asFile.absolutePath)
         val ghidraBundle = if (testInstalledGhidra) layout.buildDirectory.dir("install/llm_bin_patch/libexec/ghidra")
             else project(":ghidra-bridge").layout.buildDirectory.dir("bundle")
@@ -2061,6 +2088,7 @@ tasks.processResources {
 
 listOf("installDist", "distZip", "distTar").forEach { taskName ->
     tasks.named(taskName) { dependsOn(buildAnalysisIoHelper) }
+    tasks.named(taskName) { dependsOn(buildModuleCompilerExecHelper) }
     tasks.named(taskName) {
         dependsOn(":ghidra-bridge:stageBundle")
         dependsOn(stageOracleNativeLibraries)
