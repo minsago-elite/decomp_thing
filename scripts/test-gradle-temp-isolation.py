@@ -17,6 +17,10 @@ HOOK_LINE = '. "$APP_HOME/gradle/repository-temp.sh"'
 PROBE_MARKER = "DECOMP_TEMP_PROBE "
 
 FAKE_JAVA = """#!/bin/sh
+if [ "$*" = "-XX:-UsePerfData -version" ]; then
+    printf 'openjdk version "%s" 2026-10-20\\n' "$DECOMP_FAKE_JAVA_VERSION" >&2
+    exit 0
+fi
 { printf '%s\\n' "$@"; printf 'TMPDIR=%s\\n' "$TMPDIR"; } > "$DECOMP_FAKE_JAVA_RECORD"
 """
 
@@ -96,7 +100,8 @@ class GradleWrapperHookTest(unittest.TestCase):
         self.assertEqual(1, lines.count(HOOK_LINE))
         self.assertTrue(lines[lines.index(HOOK_LINE) - 1].startswith("DEFAULT_JVM_OPTS="))
 
-    def test_wrapper_client_disables_perf_data_and_uses_repository_temporary_directory(self):
+    def wrapper(self, release_version=None, probe_version="21.0.9"):
+        """A copy of gradlew and its hook with a fake JAVA_HOME; returns (root, record, result)."""
         root = scratch(self, "gradle-temp-wrapper-")
         shutil.copy2(REPOSITORY / "gradlew", root / "gradlew")
         (root / "gradle").mkdir()
@@ -105,13 +110,37 @@ class GradleWrapperHookTest(unittest.TestCase):
         java.parent.mkdir(parents=True)
         java.write_text(FAKE_JAVA)
         java.chmod(0o755)
+        if release_version:
+            (root / "java-home/release").write_text(f'IMPLEMENTOR="fake"\nJAVA_VERSION="{release_version}"\n')
         record = root / "java-arguments.txt"
-        subprocess.run(["sh", str(root / "gradlew"), "help"], cwd=root, check=True, timeout=60, env={
+        result = subprocess.run(["sh", str(root / "gradlew"), "help"], cwd=root, timeout=60, env={
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root),
             "JAVA_HOME": str(java.parent.parent), "DECOMP_FAKE_JAVA_RECORD": str(record),
+            "DECOMP_FAKE_JAVA_VERSION": probe_version,
             # A caller's own settings must not move build-tool temporary files out of the repository.
             "TMPDIR": "/elsewhere", "GRADLE_OPTS": "-Djava.io.tmpdir=/elsewhere -XX:+UsePerfData",
-        })
+        }, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return root, record, result
+
+    def test_wrapper_refuses_a_java_other_than_21_before_starting_gradle(self):
+        # Gradle on Java 25 with Java 21 as an explicit toolchain still probes that toolchain
+        # without -XX:-UsePerfData, so the hook rejects it instead of documenting a workaround.
+        for release, probe in (("25.0.1", "21.0.9"), (None, "25.0.1")):
+            root, record, result = self.wrapper(release, probe)
+            self.assertNotEqual(0, result.returncode, result.stdout)
+            self.assertIn("requires Java 21", result.stdout)
+            self.assertIn("Java 25.0.1", result.stdout)
+            self.assertFalse(record.exists(), "gradlew must not start Gradle on another Java version")
+
+    def test_wrapper_reads_the_java_version_from_release_or_a_perf_data_free_probe(self):
+        for release, probe in (("21.0.9", "25.0.1"), (None, "21.0.9")):
+            _root, record, result = self.wrapper(release, probe)
+            self.assertEqual(0, result.returncode, result.stdout)
+            self.assertTrue(record.is_file())
+
+    def test_wrapper_client_disables_perf_data_and_uses_repository_temporary_directory(self):
+        root, record, result = self.wrapper("21.0.9")
+        self.assertEqual(0, result.returncode, result.stdout)
         lines = record.read_text().splitlines()
         expected = root / ".gradle/tmp"
         self.assertTrue(expected.is_dir(), "gradlew must create the temporary directory before java starts")
@@ -130,7 +159,7 @@ class WrapperRegenerationTest(unittest.TestCase):
         probe.write_text(WRAPPER_PROBE)
         subprocess.run(["./gradlew", "--no-daemon", "--quiet", "--init-script", str(probe), "wrapper"],
                        cwd=REPOSITORY, check=True, timeout=900, env={**os.environ, "DECOMP_TEST_WRAPPER_ROOT": str(root)})
-        self.assertEqual((REPOSITORY / "gradlew").read_text(), (root / "gradlew").read_text(),
+        self.assertEqual((REPOSITORY / "gradlew").read_bytes(), (root / "gradlew").read_bytes(),
                          "the wrapper task must reproduce the checked-in gradlew, hook line included")
 
 

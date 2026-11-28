@@ -206,9 +206,12 @@ Gradle build tools keep their temporary files under the repository (#2008):
 - `org.gradle.java.installations.auto-detect=false`: every toolchain is Java 21, the
   JVM that runs Gradle in CI and in the Dockerfile. Auto-detection would start every
   other local JDK once per `--no-daemon` build to read its version, and each of those
-  JVMs writes an hsperfdata file. **Developer-visible change:** run Gradle on Java 21
-  (`JAVA_HOME`), or list a Java 21 installation in `org.gradle.java.installations.paths`
-  in `~/.gradle/gradle.properties`.
+  JVMs writes an hsperfdata file. An explicitly listed installation
+  (`org.gradle.java.installations.paths`) is probed the same way, so it is not a
+  workaround. **Developer-visible change:** `./gradlew` refuses to start unless the
+  Java that runs Gradle is Java 21. Set `JAVA_HOME` to a Java 21 installation. The hook
+  reads the version from the installation's `release` file. Only when that file is
+  missing does it run `java -XX:-UsePerfData -version`.
 - `buildAcpGateHelper` sets the compiler's `TMPDIR` to its Gradle task temporary
   directory when the task runs, after any `clean` in the same build. The JVM helper
   builders already use their own scratch `tmp` directories.
@@ -247,8 +250,8 @@ Limits:
 
 In the Kotlin CI job, the first Gradle builds run through the check: the oracle runtime
 and bundled Ghidra preparation. So do the core-main and core-oracle `scripts/ci.sh` runs,
-which together form `-PciTestShard=core`. Each job uploads `build/system-temp-isolation`
-as the `system-temp-isolation-<shard>` artifact. Scripts that run inside the check pass
+which together form `-PciTestShard=core`. Each job uploads the reports (`summary.json` and the
+`.txt` listings, not `observed-tmp`) as the `system-temp-isolation-<shard>` artifact. Scripts that run inside the check pass
 `-XX:-UsePerfData` (`-J-XX:-UsePerfData` for `javac`) to every JDK tool they start
 directly. The check deliberately sets no `JDK_JAVA_OPTIONS` or `JAVA_TOOL_OPTIONS`: either
 would hide the leak the check exists to report, add a "Picked up" line to the stderr of

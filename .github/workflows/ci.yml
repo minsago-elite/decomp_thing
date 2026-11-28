@@ -557,7 +557,10 @@ jobs:
           name: system-temp-isolation-${{ matrix.shard }}
           retention-days: 14
           if-no-files-found: ignore
-          path: build/system-temp-isolation
+          # Reports only; observed-tmp holds whatever a failing build leaked.
+          path: |
+            build/system-temp-isolation/*/summary.json
+            build/system-temp-isolation/*/*.txt
       - name: Require every source-declared recovery scenario in core reports
         if: always() && matrix.shard == 'core'
         run: >-
