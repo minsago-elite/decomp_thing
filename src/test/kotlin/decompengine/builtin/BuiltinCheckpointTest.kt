@@ -267,6 +267,61 @@ class BuiltinCheckpointTest {
         assertIs<AgentExecutionOutcome.Failed>(initial.outcome); assertEquals(0, calls)
     }
 
+    @Test fun `refused same-JVM resume contender leaves the cross-process journal lock held`() {
+        val fixture = fixture("contender")
+        val reference = suspended(fixture)
+        val commitment = BuiltinCheckpointStore(fixture.checkpoint, fixture.journal, request()).read(reference)
+        assertEquals("FREE", BuiltinJournalLockProbe.observe(fixture.journal.path))
+        // The first resume holds append authority while it is still validating the stage, before RESUME.
+        val (first, _) = BuiltinJournal.reopenCheckpoint(fixture.journal, request(), commitment, emptyList())
+        first.use {
+            assertEquals("LOCKED", BuiltinJournalLockProbe.observe(fixture.journal.path))
+            var calls = 0
+            val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }).resumeReceipt(request(), reference, acceptedRevision) {}
+            assertIs<AgentExecutionOutcome.Failed>(rejected.outcome); assertEquals(0, calls)
+            assertFailsWith<BuiltinJournalException> {
+                BuiltinJournal.inspect(fixture.journal, AgentExecutionRequestBinding.capture(request()), commitment)
+            }
+            assertEquals("LOCKED", BuiltinJournalLockProbe.observe(fixture.journal.path),
+                "a refused same-JVM contender must not release the first holder's operating-system lock")
+        }
+        assertEquals("FREE", BuiltinJournalLockProbe.observe(fixture.journal.path))
+        val resumed = harness(fixture, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), reference, acceptedRevision) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
+    }
+
+    @Test fun `legacy checkpoint schemas with a valid journal and commitment are refused`() {
+        val identityKeys = setOf("provider", "model", "stageSha256", "acceptedRevisionSha256")
+        for (legacy in listOf("schema-1", "schema-2", "version-2-with-identity")) {
+            val fixture = fixture(legacy)
+            val reference = suspended(fixture)
+            val store = BuiltinCheckpointStore(fixture.checkpoint, fixture.journal, request())
+            val (journal, payload) = BuiltinJournal.reopenCheckpoint(fixture.journal, request(), store.read(reference), emptyList())
+            val current = payload.getValue("resumeState").jsonObject
+            assertEquals(JsonPrimitive(3), current["version"])
+            val state = when (legacy) {
+                "schema-1" -> JsonObject(current.filterKeys { it !in identityKeys + "toolAuthoritySha256" } + ("version" to JsonPrimitive(1)))
+                "schema-2" -> JsonObject(current.filterKeys { it !in identityKeys } + ("version" to JsonPrimitive(2)))
+                else -> JsonObject(current + ("version" to JsonPrimitive(2)))
+            }
+            val commitment = journal.use {
+                it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject {
+                    put("resumeState", state); put("stateSha256", checkpointStateHash(state, fixture.journal.maximumRecordBytes))
+                })
+                it.evidence.commitment
+            }
+            val legacyReference = store.publish(commitment)
+            val inspection = BuiltinJournal.inspect(fixture.journal, AgentExecutionRequestBinding.capture(request()), commitment)
+            assertTrue(inspection.endsAtCheckpoint, "the legacy journal and commitment must be valid: $legacy")
+            assertFalse(inspection.indeterminate)
+            val before = Files.readAllBytes(fixture.journal.path)
+            var calls = 0
+            val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }).resumeReceipt(request(), legacyReference, acceptedRevision) {}
+            assertIs<AgentExecutionOutcome.Failed>(rejected.outcome, legacy); assertEquals(0, calls, legacy)
+            assertContentEquals(before, Files.readAllBytes(fixture.journal.path), "rejected legacy schema must not modify journal: $legacy")
+        }
+    }
+
     private inner class Session(val source: Path, val description: String = "edit fixture") : BuiltinToolSession {
         var executions = 0
         var closed = false
