@@ -2780,9 +2780,9 @@
       "sha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
     },
     "policySource": {
-      "bytes": 49105,
+      "bytes": 50327,
       "path": "scripts/capture-gcc-preprocessing-reference.py",
-      "sha256": "7d5778d7ac5718b237ea4633954237bd3eee86099cf9f93565850292bdef5d4e"
+      "sha256": "3ed1583551f1b543836551552ce22e624cc6b1ced96bfbe3907029b2a2825a87"
     },
     "reference": {
       "bytes": 734432,
