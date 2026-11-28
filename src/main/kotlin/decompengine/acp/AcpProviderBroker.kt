@@ -19,8 +19,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.InetAddress
 import java.net.Socket
-import java.nio.channels.SelectableChannel
-import java.nio.channels.WritableByteChannel
+import java.nio.channels.Pipe
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
@@ -152,13 +151,16 @@ internal class AcpProviderBroker private constructor(
     private val destination: InetAddress,
     private val connector: AcpProviderUpstreamConnector,
     requestBinding: AgentExecutionRequestBinding,
+    private val relayChannels: AcpProviderRelayChannelFactory,
+    private val deliveryNanoTime: () -> Long,
 ) : AutoCloseable {
     private val lock = Any()
     private val capability = ByteArray(PROVIDER_CHANNEL_CAPABILITY_BYTES).also(SecureRandom()::nextBytes)
     private var credential: AcpProviderCredential? = credential
     // Not secret: where the credential came from, which no sandbox launch may make visible. Kept after close.
     private val credentialSourceIdentity: AcpProviderCredentialSourceIdentity = credential.source
-    private var privateChannel: SelectableChannel? = null
+    private var privateChannel: Pipe.SinkChannel? = null
+    private var deliveryStarted = false
     private var delivered = false
     private var closed = false
     private var nextSequence = 1L
@@ -178,38 +180,62 @@ internal class AcpProviderBroker private constructor(
 
     /**
      * The only provider authority a contained agent receives: the broker's fresh random capability, bound to this
-     * broker and so to one admitted invocation, one policy and one channel. It is written once to [channel], the
-     * host-owned private relay channel: an unbuffered selectable byte channel such as a pipe sink or a socket. The
-     * broker takes ownership of it and closes it on [close]. The capability is never an environment variable,
-     * argument or file, and a second delivery, or one after close, is refused.
+     * broker and so to one admitted invocation, one policy and one channel. It is written once into the private
+     * relay channel, a pipe the broker creates and owns exclusively, and the pipe's read end is returned for the
+     * boundary to hand to the contained relay. The capability is never an environment variable, argument or file,
+     * and a second delivery, or one after close, is refused.
      *
-     * The channel is reserved under the broker lock and written outside it, in non-blocking mode, until the bytes are
-     * written, the idle bound passes or the broker closes. So the writer never blocks inside the channel, nothing
-     * depends on the channel's own close releasing it, and a channel that never drains cannot stop [close]. Abort is
-     * a plain channel close: there is no buffered wrapper to flush and no watchdog thread. The write gets a temporary
-     * copy, never the broker's own array, and the copy is zeroed afterwards. Delivery is committed only if every
-     * byte was written while the broker was still open.
+     * The broker keeps the write end. It is configured non-blocking when it is created, before any capability byte
+     * is copied, and it is never registered with a selector, so no other thread holds its blocking lock or defers its
+     * close. The capability is copied under the broker lock straight into a broker-owned direct buffer (no heap copy
+     * that the JDK could stage through an unwiped temporary buffer), written outside the lock until every byte is
+     * written, the idle bound passes, the broker closes or the writer is interrupted, and wiped in full afterwards.
+     * The deadline is checked before every write and again before completion is accepted. Abort is a plain close of
+     * the write end; there is nothing to flush and no watchdog thread.
      */
-    fun <C> deliverChannelCapability(channel: C) where C : SelectableChannel, C : WritableByteChannel {
-        val copy = synchronized(lock) {
-            if (closed || privateChannel != null) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
-            // Reserved before the write: a failed delivery cannot be retried on another channel.
-            privateChannel = channel
-            capability.copyOf()
-        }
-        val written = try {
-            writeWithinDeadline(channel, copy, policy.bounds.idleTimeout) { synchronized(lock) { closed } }
-        } finally {
-            copy.fill(0)
-        }
+    fun deliverChannelCapability(): Pipe.SourceChannel {
         synchronized(lock) {
-            if (written && !closed) {
-                delivered = true
-                return
+            if (closed || deliveryStarted) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+            // Reserved first: a failed delivery can never be retried.
+            deliveryStarted = true
+        }
+        val endpoints = try {
+            relayChannels.open()
+        } catch (_: Exception) {
+            refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+        }
+        val buffer = ByteBuffer.allocateDirect(PROVIDER_CHANNEL_CAPABILITY_BYTES)
+        var committed = false
+        try {
+            // Exclusive and non-blocking before any capability byte is copied; a registered end is refused.
+            if (endpoints.sink.isRegistered) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+            endpoints.sink.configureBlocking(false)
+            val installed = synchronized(lock) {
+                if (closed) false else {
+                    privateChannel = endpoints.sink
+                    buffer.put(capability).flip()
+                    true
+                }
+            }
+            if (installed) {
+                val written = writeWithinDeadline(endpoints.sink, buffer, policy.bounds.idleTimeout, deliveryNanoTime) {
+                    synchronized(lock) { closed }
+                }
+                committed = synchronized(lock) { (written && !closed).also { if (it) delivered = true } }
+            }
+        } catch (failure: AcpProviderBrokerFailure) {
+            throw failure
+        } catch (_: Exception) {
+            committed = false
+        } finally {
+            wipe(buffer)
+            if (!committed) {
+                runCatching { endpoints.sink.close() }
+                runCatching { endpoints.source.close() }
             }
         }
-        runCatching { channel.close() }
-        refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+        if (!committed) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+        return endpoints.source
     }
 
     /** Forwards one channel request. Nothing is sent upstream unless every check before it passes. */
@@ -538,6 +564,18 @@ internal class AcpProviderBroker private constructor(
             resolver: AcpProviderDestinationResolver = AcpProviderDestinationResolver.UNAVAILABLE,
         ): AcpProviderBroker = open(policy, request, credentialSource, resolver, null, Clock.systemUTC())
 
+        /** Credential-free controls only: substitute relay channel ends and a delivery clock. */
+        internal fun open(
+            policy: AcpProviderTransportPolicy,
+            request: AgentExecutionRequest,
+            credentialSource: AcpProviderCredentialSource,
+            resolver: AcpProviderDestinationResolver,
+            connector: AcpProviderUpstreamConnector?,
+            clock: Clock,
+            relayChannels: AcpProviderRelayChannelFactory,
+            deliveryNanoTime: () -> Long,
+        ): AcpProviderBroker = openWith(policy, request, credentialSource, resolver, connector, clock, relayChannels, deliveryNanoTime)
+
         /**
          * Credential-free controls only: a connector that reaches a local server through the module TLS client
          * with test trust anchors, and a fixed clock. A null connector is production platform trust.
@@ -549,6 +587,19 @@ internal class AcpProviderBroker private constructor(
             resolver: AcpProviderDestinationResolver,
             connector: AcpProviderUpstreamConnector?,
             clock: Clock,
+        ): AcpProviderBroker = openWith(
+            policy, request, credentialSource, resolver, connector, clock, AcpProviderRelayChannelFactory.PIPE, System::nanoTime,
+        )
+
+        private fun openWith(
+            policy: AcpProviderTransportPolicy,
+            request: AgentExecutionRequest,
+            credentialSource: AcpProviderCredentialSource,
+            resolver: AcpProviderDestinationResolver,
+            connector: AcpProviderUpstreamConnector?,
+            clock: Clock,
+            relayChannels: AcpProviderRelayChannelFactory,
+            deliveryNanoTime: () -> Long,
         ): AcpProviderBroker {
             val approved = policy as? AcpProviderTransportPolicy.Approved
                 ?: refuse(AcpProviderBrokerFailureKind.TRANSPORT_DISABLED)
@@ -571,6 +622,7 @@ internal class AcpProviderBroker private constructor(
             }
             return AcpProviderBroker(
                 approved, credentialSource, credential, destination, upstream, AgentExecutionRequestBinding.capture(request),
+                relayChannels, deliveryNanoTime,
             )
         }
 
@@ -925,27 +977,54 @@ private fun sourceEntryKey(path: Path): LinuxFileKey? = try {
 }
 
 /**
- * Writes [bytes] to [channel] in non-blocking mode on the caller's thread, polling until every byte is written,
- * [bound] passes, [stopped] reports true or the channel fails or closes. True only if every byte was written. The
- * writer never blocks inside the channel, so a channel that never drains, or one closed by another thread, only
- * ends the loop.
+ * Writes [buffer] to the broker's non-blocking [channel] on the caller's thread, polling until every byte is
+ * written, [bound] passes, [stopped] reports true, the writer is interrupted, or the channel fails or closes. True
+ * only if every byte was written before the deadline while not stopped. The deadline is checked before every write
+ * and again before completion is accepted, so a channel that becomes writable only after expiry never commits. An
+ * interrupted writer is refused at once, with its interrupt flag kept, instead of polling with a park that returns
+ * immediately.
  */
-private fun writeWithinDeadline(channel: SelectableChannel, bytes: ByteArray, bound: Duration, stopped: () -> Boolean): Boolean {
-    val deadline = System.nanoTime() + bound.toNanos()
-    val buffer = ByteBuffer.wrap(bytes)
+private fun writeWithinDeadline(
+    channel: Pipe.SinkChannel,
+    buffer: ByteBuffer,
+    bound: Duration,
+    nanoTime: () -> Long,
+    stopped: () -> Boolean,
+): Boolean {
+    val deadline = nanoTime() + bound.toNanos()
     return try {
-        channel.configureBlocking(false)
-        val writable = channel as WritableByteChannel
         while (buffer.hasRemaining()) {
-            if (stopped() || !channel.isOpen) return false
-            if (writable.write(buffer) > 0) continue
-            val remaining = deadline - System.nanoTime()
+            if (stopped() || !channel.isOpen || Thread.currentThread().isInterrupted) return false
+            if (nanoTime() - deadline >= 0) return false
+            if (channel.write(buffer) > 0) continue
+            val remaining = deadline - nanoTime()
             if (remaining <= 0) return false
             LockSupport.parkNanos(minOf(remaining, DELIVERY_POLL_NANOS))
         }
-        !stopped()
+        nanoTime() - deadline < 0 && !stopped()
     } catch (_: Exception) {
         false
+    }
+}
+
+/** Overwrites the whole capacity of a broker-owned buffer, whatever its position and limit. */
+private fun wipe(buffer: ByteBuffer) {
+    for (index in 0 until buffer.capacity()) buffer.put(index, 0)
+    buffer.clear()
+}
+
+/** One private relay channel. The broker owns [sink] exclusively; [source] is the end handed to the contained relay. */
+internal class AcpProviderRelayEndpoints(val sink: Pipe.SinkChannel, val source: Pipe.SourceChannel)
+
+/**
+ * Creates the private relay channel for one broker. Production creates a fresh OS pipe, which only the broker ever
+ * holds. Credential-free controls substitute ends that stall, fail or record what they were handed.
+ */
+internal fun interface AcpProviderRelayChannelFactory {
+    fun open(): AcpProviderRelayEndpoints
+
+    companion object {
+        val PIPE = AcpProviderRelayChannelFactory { Pipe.open().let { AcpProviderRelayEndpoints(it.sink(), it.source()) } }
     }
 }
 

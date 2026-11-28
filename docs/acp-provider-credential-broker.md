@@ -76,21 +76,29 @@ cache owned by someone else is refused; production always uses the process's own
 
 ## Invocation-bound channel
 
-The broker creates a fresh 32-byte random channel capability. `deliverChannelCapability` writes it once to the
-host-owned private relay channel. That channel must be an unbuffered selectable byte channel, such as a pipe
-sink or a socket channel, never an `OutputStream` wrapper. The broker takes ownership of it and closes it on
-`close`.
+The broker creates a fresh 32-byte random channel capability. `deliverChannelCapability` creates the private
+relay channel itself, writes the capability into it once, and returns the channel's read end for the boundary to
+hand to the contained relay. The relay channel is an OS pipe made by a broker-side factory. No caller-supplied
+stream or channel is accepted, and sockets are not supported, so socket linger never applies.
 
-- The channel is reserved under the broker lock, so a failed delivery cannot be retried on another channel. A
+- Delivery is reserved under the broker lock before anything else, so a failed delivery can never be retried. A
   second delivery, or one after close, is refused with `CHANNEL_REFUSED`.
-- The write happens outside the lock that `close` needs, in non-blocking mode. The writer polls until every byte
-  is written, the policy idle bound passes, the broker closes, or the channel fails. It never blocks inside the
-  channel, so a channel that never drains cannot stop `close`, and nothing depends on the channel's own close
-  releasing the writer.
-- Abort is a plain channel close, with no buffered wrapper to flush and no watchdog thread to get stuck.
-- The channel is handed a temporary copy, never the broker's own array, and the copy is zeroed after the write.
-- Delivery is committed only if every byte was written while the broker was still open. Otherwise the channel is
-  closed and delivery is refused for good.
+- The broker owns the pipe's write end exclusively. The end is configured non-blocking when it is created, before
+  any capability byte is copied, and an end already registered with a selector is refused. So no other thread can
+  hold its blocking lock, and no outside selector can defer its close.
+- The capability is copied under the broker lock straight into a broker-owned direct buffer. There is no heap
+  copy, so the JDK never stages it through a temporary direct buffer that might return to a thread-local cache
+  unwiped. The buffer's whole capacity is wiped after the write, whether delivery succeeds, times out or is
+  closed.
+- The write runs outside the lock that `close` needs. The writer polls until every byte is written, the policy
+  idle bound passes, the broker closes, the writer is interrupted, or the channel fails. It never blocks inside the
+  pipe, so a pipe that never drains cannot stop `close`.
+- The deadline is checked before every write and again before completion is accepted, so an end that first
+  becomes writable after expiry never commits.
+- An interrupted writer is refused at once, with its interrupt flag kept, instead of spinning until the deadline.
+- Abort is a plain close of the write end, with nothing to flush and no watchdog thread.
+- Delivery commits only if every byte was written before the deadline while the broker was still open.
+  Otherwise both ends are closed and delivery is refused for good.
 
 The capability is never an environment variable, argument or file. Analyzed programs, candidate build and
 validation processes and ACP terminal children therefore cannot inherit it through process ancestry or find it
@@ -244,7 +252,13 @@ Two further entry points bind the check to the exact objects a boundary mounts:
 - call `requirePinnedSourcesExcludeCredential` with the descriptors it pinned, held until the mount;
 - merge `credentialForbiddenRuntimeFiles` into the forbidden set it passes to `PinnedReadOnlyMount.pin`.
 
-Descriptor isolation and host `/proc` isolation through the real boundary are qualified then too.
+That wiring must also check what the boundary adds itself, not only the launch it was given:
+
+- the `launcherMounts` it merges into every launch's bind set (`LinuxBubblewrapBoundary` argv assembly);
+- the files it copies into staging.
+
+Both can carry credentials independently of the working directory. Descriptor isolation and host `/proc`
+isolation through the real boundary are qualified then too.
 
 The credential and capability live only in host JVM memory, and upstream sockets are host-owned descriptors
 that child processes do not inherit. The integration control starts a child process while an upstream TLS
@@ -289,8 +303,11 @@ The tests use no real credentials and make no external connection. Hosted CI sta
   - the upstream head is exactly the policy-owned headers and the credential headers, and the body is the
     validated body;
   - the capability is delivered once to a broker-owned stream, never again, and is erased on close;
-  - a delivery to a full pipe that is never drained, or to a channel whose own close releases nothing, cannot
-    stop `close`: the writer exits, its copy is zeroed, and the idle bound ends it when nobody closes;
+  - a delivery to a full pipe that is never drained, or to an end whose own close releases nothing, cannot stop
+    `close`: the writer exits, the direct buffer is wiped after success, timeout and close, and the idle bound
+    ends it when nobody closes;
+  - an end that becomes writable only after expiry is never written or committed, and an interrupted writer is
+    refused at once with its flag kept;
   - a sandbox working directory of `/tmp` is allowed when the credential home is below a host directory with
     that path, while an overlapping host mount source is still refused;
   - capability and sequence binding hold;

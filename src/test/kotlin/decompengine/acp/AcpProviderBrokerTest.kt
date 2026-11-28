@@ -45,6 +45,7 @@ class AcpProviderBrokerTest {
     @Test fun `event stream framing and content coding are strict`() = run("eventStreamFramingAndEncodingAreStrict")
     @Test fun `nested JSON arguments and per-item deltas are scanned`() = run("nestedArgumentsAndPerItemDeltasAreScanned")
     @Test fun `delivery never holds the lock close needs and is bounded`() = run("deliveryNeverHoldsTheCloseLock")
+    @Test fun `delivery never commits after its deadline`() = run("deliveryNeverCommitsAfterTheDeadline")
     @Test fun `the source walk fails closed and checks identities below the root`() = run("sourceWalkFailsClosedAndChecksBelowTheRoot")
 
     @Test
@@ -74,13 +75,33 @@ class AcpProviderBrokerTest {
             // No ambient operator variables reach the scenario; its own child shell needs only a fixed PATH.
             .also { it.environment().clear(); it.environment()["PATH"] = "/usr/bin:/bin" }
             .start()
-        if (!process.waitFor(120, TimeUnit.SECONDS)) {
-            // Never leave a stuck scenario JVM behind: a hung control must fail, not outlive the test.
-            process.destroyForcibly().waitFor(10, TimeUnit.SECONDS)
-            throw AssertionError("scenario JVM did not finish: $scenario\n" + Files.readAllLines(log).joinToString("\n"))
+        try {
+            if (!process.waitFor(120, TimeUnit.SECONDS)) {
+                throw AssertionError("scenario JVM did not finish: $scenario\n" + Files.readAllLines(log).joinToString("\n"))
+            }
+            val output = Files.readAllLines(log)
+            assertEquals(0, process.exitValue(), output.joinToString("\n"))
+            assertEquals("SCENARIO_OK $scenario", output.last(), output.joinToString("\n"))
+        } finally {
+            // Whatever ended the wait (a timeout, an interrupt or a failed assertion), never leave a scenario JVM or
+            // its children behind, and fail when their termination cannot be confirmed.
+            requireTerminated(process.toHandle(), scenario)
         }
-        val output = Files.readAllLines(log)
-        assertEquals(0, process.exitValue(), output.joinToString("\n"))
-        assertEquals("SCENARIO_OK $scenario", output.last(), output.joinToString("\n"))
+    }
+
+    private fun requireTerminated(root: ProcessHandle, scenario: String) {
+        val tree = root.descendants().toList() + root
+        tree.forEach { it.destroyForcibly() }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        val interrupted = Thread.interrupted()
+        try {
+            while (tree.any(ProcessHandle::isAlive) && System.nanoTime() < deadline) {
+                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20))
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+        val survivors = tree.filter(ProcessHandle::isAlive).map(ProcessHandle::pid)
+        if (survivors.isNotEmpty()) throw AssertionError("scenario $scenario left processes that could not be terminated: $survivors")
     }
 }
