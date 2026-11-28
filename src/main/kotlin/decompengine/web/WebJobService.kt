@@ -714,6 +714,9 @@ class WebJobService(
         return seed
     }
 
+    /** Test hook run after job enumeration and stamping, before the final root metadata check. */
+    @Volatile internal var dashboardStampBeforeRootRecheck: (() -> Unit)? = null
+
     /**
      * Revalidate the persisted inputs used by the dashboard image, including writes performed
      * through another JobStore instance or by a cooperating external process. This is metadata
@@ -723,8 +726,10 @@ class WebJobService(
      * The storage root contributes only its identity and its job-id entry names. Service-owned
      * siblings such as the lazily created `.web-audit` directory or `.web-owner.lock` change the
      * root's timestamps and link count without changing any job, so they must not invalidate the
-     * image. Job additions and removals still change the hashed job-id names, and replacements or
-     * edits still change the per-job directory and file stamps.
+     * image. The root's full metadata is still compared before and after stamping, so a root
+     * change during stamping marks the stamp uncacheable. Job additions and removals still change
+     * the hashed job-id names, and replacements or edits still change the per-job directory and
+     * file stamps.
      */
     internal fun dashboardStorageStamp(freshSinceMillis: Long, checkpoint: () -> Unit): WebJobCollectionStamp {
         val digest = MessageDigest.getInstance("SHA-256")
@@ -826,7 +831,8 @@ class WebJobService(
             if (!current.complete || current.mode and 0xf000 != expectedKind) cacheable = false
             if (!identityOnly && (atOrAfter(current.modifiedSeconds, current.modifiedNanoseconds, freshSinceMillis - 2_000L) ||
                 atOrAfter(current.changedSeconds, current.changedNanoseconds, freshSinceMillis - 2_000L))) cacheable = false
-            return current
+            // Callers compare full metadata; identity-only entries limit only what enters the digest.
+            return observed
         }
 
         try {
@@ -881,6 +887,9 @@ class WebJobService(
                 addRecord(7, 1)
             }
         }
+        dashboardStampBeforeRootRecheck?.invoke()
+        // Any root change while stamping (a job published after enumeration, or a service-owned
+        // sibling appearing) makes this stamp unusable; the caller rescans instead of reusing it.
         val rootAfter = stampFile(root, 8, 0x4000, missingAllowed = false, identityOnly = true)
         if (rootAfter == null || rootBefore != rootAfter) { cacheable = false; inventoryComplete = false }
         if (knownOrganizations == null && inventoryComplete) dashboardOrganizationIds = observedOrganizations.toSet()

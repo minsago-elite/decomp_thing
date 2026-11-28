@@ -101,6 +101,33 @@ class WebJobServiceTest {
         } finally { service.close() }
     }
 
+    @Test fun `a job published while the dashboard stamp is taken is listed by that page`() = withStore { store, root ->
+        val existing = store.createFromUpload("fixture.elf", elfFixture())
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage()
+            val scans = AtomicInteger()
+            val pages = WebJobPages({ scans.incrementAndGet(); service.collectionRecords() },
+                checkpointedSource = { checkpoint -> scans.incrementAndGet(); service.collectionRecordsWithProgress(checkpoint) },
+                collectionVersion = service::dashboardCollectionVersion,
+                collectionStamp = { _, checkpoint -> service.dashboardStorageStamp(Long.MAX_VALUE, checkpoint) })
+            fun ids() = pages.page("owner", WebJobQuery(), null).getValue("items").jsonArray
+                .map { it.jsonObject.getValue("jobId").jsonPrimitive.content }.toSet()
+            assertEquals(setOf(existing.id), ids())
+            assertEquals(setOf(existing.id), ids())
+            assertEquals(1, scans.get(), "The second page reuses the cached image")
+
+            var published: String? = null
+            service.dashboardStampBeforeRootRecheck = {
+                if (published == null) published = JobStore(root).createFromUpload("raced.elf", elfFixture()).id
+            }
+            val listed = ids()
+            assertEquals(setOf(existing.id, checkNotNull(published)), listed)
+            assertEquals(2, scans.get(), "A root change after enumeration must force a rescan")
+        } finally { service.dashboardStampBeforeRootRecheck = null; service.close() }
+    }
+
     @Test fun `startup seed preserves the workflow and organization presentation`() = withStore { store, root ->
         val job = store.createFromUpload("fixture.elf", elfFixture())
         val completed = WorkflowAttemptStore.open(root).use { attempts ->
