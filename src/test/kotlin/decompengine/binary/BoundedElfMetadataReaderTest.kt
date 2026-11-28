@@ -191,8 +191,9 @@ class BoundedElfMetadataReaderTest {
             val inputDirectory = java.nio.file.Files.createDirectory(root.resolve("input-tree"))
             val input = writeElf(inputDirectory.resolve("relative-jna.elf"), dynamicFixture(variants.first()))
             // Relative to the test JVM's working directory (the project directory), never to the worker's.
-            val relative = "build/elf-worker-relative-jna-${System.nanoTime()}"
-            val expected = java.nio.file.Path.of("").toAbsolutePath().resolve(relative).normalize()
+            // The "./" component is configuration and must reach the worker unchanged, only prefixed.
+            val relative = "build/./elf-worker-relative-jna-${System.nanoTime()}"
+            val expected = "${java.nio.file.Path.of("").toAbsolutePath()}/$relative"
             val previous = System.getProperty("jna.tmpdir")
             var launched: List<String>? = null
             System.setProperty("jna.tmpdir", relative)
@@ -208,7 +209,7 @@ class BoundedElfMetadataReaderTest {
             assertEquals(listOf("relative-jna.elf"), java.nio.file.Files.list(inputDirectory).use { paths ->
                 paths.map { it.fileName.toString() }.toList()
             }, "the worker resolved jna.tmpdir under its own working directory")
-            java.nio.file.Files.deleteIfExists(expected)
+            java.nio.file.Files.deleteIfExists(java.nio.file.Path.of(expected))
         }
 
     @Test

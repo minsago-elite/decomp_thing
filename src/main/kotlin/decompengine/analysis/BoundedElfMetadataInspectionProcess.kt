@@ -546,13 +546,15 @@ private fun metadataWorkerCommand(path: Path, limits: BoundedElfMetadataLimits):
  * The worker starts with a cleared environment, so it would otherwise fall back to JVM and JNA defaults
  * (`/tmp`, and `~/.cache/JNA/temp` for the extracted JNA dispatch library). Forward the temporary directories this
  * process is already configured with; never choose new ones. The worker runs in the input's directory, so a
- * relative setting is resolved against this process's working directory first, as [bundledGhidraDirectoryOptions]
- * does.
+ * relative setting is prefixed with this process's working directory, keeping its configured components (no
+ * lexical normalization); an absolute setting is forwarded unchanged.
  */
 private fun metadataWorkerTemporaryOptions(): List<String> {
-    val workingDirectory = Path.of("").toAbsolutePath().normalize()
+    val workingDirectory = Path.of("").toAbsolutePath()
     return listOf("java.io.tmpdir", "jna.tmpdir").mapNotNull { name ->
-        System.getProperty(name)?.takeIf(String::isNotEmpty)?.let { "-D$name=${workingDirectory.resolve(it).normalize()}" }
+        System.getProperty(name)?.takeIf(String::isNotEmpty)?.let { configured ->
+            "-D$name=" + if (Path.of(configured).isAbsolute) configured else "$workingDirectory${File.separator}$configured"
+        }
     }
 }
 
