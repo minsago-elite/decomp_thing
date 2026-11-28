@@ -239,6 +239,15 @@ class WebGitControllerTest {
             assertTrue(entries.all {
                 it.getValue("target").jsonObject.getValue("jobId").jsonPrimitive.content == f.job.id
             })
+            // The source run and revision are kept only once admission confirmed them (admission and replay);
+            // refused requests store domain-separated commitments to the requested body values.
+            val sources = entries.map {
+                val target = it.getValue("target").jsonObject
+                "${it.getValue("outcome").jsonPrimitive.content}:${target.getValue("runId").jsonPrimitive.content}:" +
+                    target.getValue("revisionId").jsonPrimitive.content
+            }.sorted()
+            val committed = "rejected:${WebAuditRecorder.runCommitment(f.run.runId)}:${WebAuditRecorder.revisionCommitment("revision_one")}"
+            assertEquals(listOf("accepted:${f.run.runId}:revision_one", committed, committed, "replayed:${f.run.runId}:revision_one").sorted(), sources)
         }
     }
 

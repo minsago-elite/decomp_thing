@@ -71,7 +71,13 @@ class WebSourceArchiveRoutesTest {
             assertEquals(200, session.statusCode())
             val csrf = Json.parseToJsonElement(session.body()).jsonObject.getValue("data").jsonObject.getValue("csrfToken").jsonPrimitive.content
             block(Fixture(server, root, job.id, created.runId, tree, session.headers().firstValue("Set-Cookie").orElseThrow().substringBefore(';'), csrf, origin))
-        } finally { server.stop(); root.toFile().deleteRecursively() }
+        } finally {
+            // Audited responses are followed by an fsync'd append on the request thread; let admitted handlers
+            // finish before the server's bounded one-second request drain so slow storage cannot fail the stop.
+            val idle = System.nanoTime() + 30_000_000_000
+            while (server.activeRequestCount() != 0 && System.nanoTime() < idle) Thread.sleep(10)
+            server.stop(); root.toFile().deleteRecursively()
+        }
     }
 
     private fun get(fixture: Fixture, path: String, accept: String = "application/json") = client.send(
@@ -305,6 +311,70 @@ class WebSourceArchiveRoutesTest {
         override fun setAttribute(name: String, value: Any?) = Unit
         override fun setStreams(input: java.io.InputStream?, output: java.io.OutputStream?) = Unit
         override fun getPrincipal(): com.sun.net.httpserver.HttpPrincipal? = null
+    }
+
+    @Test fun `archive verification is audited with actor attempt revision and outcome without request secrets`() = withFixture { fixture ->
+        val digest = sha256(Files.readAllBytes(fixture.archive))
+        fun archiveEntries() = fixture.server.audit.read(fixture.jobId).entries
+            .filter { it.action == WebAuditAction.ARCHIVE_VERIFY }.sortedBy { it.sequence }
+        fun await(count: Int): List<WebAuditEntry> {
+            val deadline = System.nanoTime() + 10_000_000_000
+            while (archiveEntries().size < count && System.nanoTime() < deadline) Thread.sleep(10)
+            return archiveEntries().also { assertEquals(count, it.size) }
+        }
+        val key = "archive-audit-key-CANARY01"
+        val unknownRevision = "revision_CANARYsecret0123456789"
+        // Refusals: no session, no CSRF token, a stale displayed digest and an unknown revision.
+        val anonymous = client.send(HttpRequest.newBuilder(URI("${fixture.origin}${fixture.revision}/archive-verifications"))
+            .timeout(Duration.ofSeconds(30)).header("Accept", "application/json").header("Content-Type", "application/json")
+            .header("Origin", fixture.origin).header("Idempotency-Key", key)
+            .POST(HttpRequest.BodyPublishers.ofString("{\"archiveSha256\":\"$digest\"}")).build(), HttpResponse.BodyHandlers.ofByteArray())
+        // Entries are appended after each response is sent; wait for each so sequence order is request order.
+        assertEquals(401, anonymous.statusCode()); await(1)
+        assertEquals(403, verify(fixture, digest, key, csrf = null).statusCode()); await(2)
+        assertEquals(409, verify(fixture, "0".repeat(64), key).statusCode()); await(3)
+        val unknown = client.send(HttpRequest.newBuilder(URI("${fixture.origin}/w/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/$unknownRevision/archive-verifications"))
+            .timeout(Duration.ofSeconds(30)).header("Accept", "application/json").header("Content-Type", "application/json")
+            .header("Origin", fixture.origin).header("Cookie", fixture.cookie).header("X-CSRF-Token", fixture.csrf).header("Idempotency-Key", key)
+            .POST(HttpRequest.BodyPublishers.ofString("{\"archiveSha256\":\"$digest\"}")).build(), HttpResponse.BodyHandlers.ofByteArray())
+        assertTrue(unknown.statusCode() in 400..499, String(unknown.body())); await(4)
+        // Admission and an idempotent replay of the same key.
+        val operation = data(verify(fixture, digest, key), "operation", 202); await(5)
+        assertEquals(202, verify(fixture, digest, key).statusCode())
+        finish(fixture, operation)
+
+        val entries = await(6)
+        val expectedRun = if (Regex("run_[a-f0-9]{32}").matches(fixture.runId)) fixture.runId else WebAuditRecorder.runCommitment(fixture.runId)
+        assertTrue(entries.all { it.target.jobId == fixture.jobId && it.target.runId == expectedRun }, "every entry names the attempt")
+        assertTrue(entries.all { it.target.expectedVersion == null && it.target.resultVersion == null })
+        assertEquals(listOf(WebAuditOutcome.REJECTED, WebAuditOutcome.REJECTED, WebAuditOutcome.REJECTED, WebAuditOutcome.REJECTED,
+            WebAuditOutcome.ACCEPTED, WebAuditOutcome.REPLAYED), entries.map { it.outcome })
+        assertEquals(listOf(401, 403, 409, unknown.statusCode(), 202, 202), entries.map { it.status })
+        assertEquals("ARCHIVE_CHANGED", entries[2].reasonCode)
+        assertTrue(entries.all { it.requestId != null })
+        // Actor: the unauthenticated request is unattributed; every other entry is the one browser session's digest.
+        assertEquals(WebAuditActor.UNAUTHENTICATED, entries[0].actor)
+        val actors = entries.drop(1).map { it.actor }.toSet()
+        assertEquals(1, actors.size)
+        assertEquals("browser_session", actors.single().kind)
+        // Revision: the server-confirmed ID once admitted; refusals keep only a commitment to the requested route value.
+        assertEquals(listOf("revision_archive", "revision_archive"), entries.takeLast(2).map { it.target.revisionId })
+        assertEquals(List(3) { WebAuditRecorder.revisionCommitment("revision_archive") }, entries.take(3).map { it.target.revisionId })
+        assertEquals(WebAuditRecorder.revisionCommitment(unknownRevision), entries[3].target.revisionId)
+        // Stored and exported bytes contain neither credentials, the idempotency key nor the unconfirmed revision.
+        val stored = Files.readString(fixture.root.resolve(".web-audit/current.jsonl"))
+        val exported = String(get(fixture, "/w/api/v1/support-export?scope=job&jobId=${fixture.jobId}").body())
+        for (secret in listOf(key, unknownRevision, fixture.cookie.substringAfter('='), fixture.csrf)) {
+            assertFalse(stored.contains(secret), "audit storage must not contain $secret")
+            assertFalse(exported.contains(secret), "support export must not contain $secret")
+        }
+        assertTrue(exported.contains("revision.archive-verify"))
+        // Entries for other actions keep their original target shape.
+        val other = fixture.server.audit.read().entries.first { it.action != WebAuditAction.ARCHIVE_VERIFY }.toJson()
+        assertFalse("revisionId" in other.getValue("target").jsonObject)
+        assertEquals(WebAuditAction.ARCHIVE_VERIFY to WebAuditTarget(fixture.jobId, fixture.runId, revisionId = "revision_archive"),
+            WebAuditRecorder.versionedAction("POST", "jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/revision_archive/archive-verifications"))
+        assertNull(WebAuditRecorder.versionedAction("GET", "jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/revision_archive/archive-verifications/x"))
     }
 
     @Test fun `operation location and key replay survive missing source metadata`() = withFixture { fixture ->
