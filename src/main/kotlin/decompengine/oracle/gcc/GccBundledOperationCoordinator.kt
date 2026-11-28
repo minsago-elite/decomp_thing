@@ -436,7 +436,8 @@ internal class GccBundledPreparedOperation internal constructor(
             }
             inputs.verify("after stopped GCC analysis-state capture")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-            val stateReceipt = journal.recordInterruptedAnalysisState(state)
+            // The deadline snapshot is taken inside the stopped commit: an expired operation never commits.
+            val stateReceipt = journal.recordInterruptedAnalysisState(state) { checkNotNull(operationDeadline).snapshot() }
             GccBundledInterruptedOperation(receipt, prefixReceipt, prefix, state, stateReceipt)
         }.also {
             retainedInterruption = it
@@ -1464,6 +1465,9 @@ internal object GccBundledOperationCoordinator {
      * the stopped prefix, in-flight bytes and analysis state must match their durable assessment.
      * The exact interrupted unit must have no cgroup. Only then is `recovery-adopted.json`
      * published, and the returned owner can only resume, plan and publish this checkpoint.
+     * If an earlier later owner crashed after adopting but before any resume record, its single
+     * adoption is revalidated and reused (or its complete atomic temporary is renamed into place)
+     * under all three locks, and its recorded allowance stays the cap.
      */
     fun recoverInterrupted(
         intent: GccBundledOperationIntent,
@@ -1514,13 +1518,15 @@ internal object GccBundledOperationCoordinator {
             val trigger = GccBundledCheckpointTrigger.restoreFromDurableAuthorization(
                 stopped.interruptAuthorizationBytes, intent.cliInvocation?.options?.resumeAfterCheckpoint,
             )
-            // A fresh same-process deadline: the stopped execution's remaining budget caps it. Idle time between
-            // owners is not charged here; whole-operation accounting across invocations remains #982.
-            val remainingNanos = ((executed["operationWallTime"] as? JsonObject)?.get("remainingNanos") as? JsonPrimitive)
-                ?.takeIf { !it.isString }?.content?.toLong()
-                ?: throw IllegalArgumentException("GCC stopped execution has no durable operation wall time")
-            val remainingMillis = minOf(intent.budgets.wallClockMillis, remainingNanos / 1_000_000_000L * 1_000L)
-            require(remainingMillis >= 2_000L) { "GCC stopped operation has no remaining wall budget to resume" }
+            // A fresh same-process deadline capped by the budget committed with the stopped state, after prefix and
+            // state capture. A retained adoption keeps its own recorded allowance, so a crash never refreshes it.
+            // Idle time between owners is not charged; whole-operation accounting across invocations remains #982.
+            val retainedAdoption = stopped.retainedAdoptionPayloadBytes?.let { OracleJson.parseCanonical(it) as JsonObject }
+            val remainingMillis = retainedAdoption?.let { (it.getValue("resumeWallBudgetMillis") as JsonPrimitive).content.toLong() }
+                ?: stopped.recoveryWallCapMillis
+            require(remainingMillis in 2_000L..stopped.recoveryWallCapMillis) {
+                "GCC stopped operation has no remaining wall budget to resume"
+            }
             val deadline = ContainedCommandOperationDeadline(remainingMillis)
             val limits = GccAnalysisStateCaptureLimits(
                 maximumEntries = minOf(intent.diskPolicy.maximumFilesystemInodes, 32768L).toInt(),
@@ -1599,6 +1605,19 @@ internal object GccBundledOperationCoordinator {
                 val runIdentity = openedLease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
                     borrowed.withPinnedDescriptor { LinuxFilesystemSyscalls.identity(it.fd) }
                 }
+                val runRootJson = JsonObject(mapOf(
+                    "device" to JsonPrimitive(runIdentity.key.device), "inode" to JsonPrimitive(runIdentity.key.inode),
+                    "mountId" to JsonPrimitive(runIdentity.mountId),
+                ))
+                if (retainedAdoption != null) {
+                    require(retainedAdoption["diskEvidenceSha256"] == JsonPrimitive(stopped.diskEvidence.evidenceSha256) &&
+                        retainedAdoption["leaseRecordSha256"] == JsonPrimitive(stopped.diskEvidence.leaseRecordSha256) &&
+                        retainedAdoption["runRoot"] == runRootJson &&
+                        (retainedAdoption["priorOwnerAbsence"] as? JsonObject)?.get("interruptedUnit") == JsonPrimitive(original.unitName)
+                    ) { "GCC retained adoption names a different lease, run root or interrupted unit" }
+                    openedJournal.completeRetainedRecoveryAdoption()
+                    return prepared
+                }
                 openedJournal.recordRecoveryAdopted(OracleJson.canonicalBytes(JsonObject(mapOf(
                     "provider" to JsonPrimitive(RECOVERY_PAYLOAD_PROVIDER),
                     "schemaVersion" to JsonPrimitive(1),
@@ -1616,10 +1635,7 @@ internal object GccBundledOperationCoordinator {
                     )),
                     "diskEvidenceSha256" to JsonPrimitive(stopped.diskEvidence.evidenceSha256),
                     "leaseRecordSha256" to JsonPrimitive(stopped.diskEvidence.leaseRecordSha256),
-                    "runRoot" to JsonObject(mapOf(
-                        "device" to JsonPrimitive(runIdentity.key.device), "inode" to JsonPrimitive(runIdentity.key.inode),
-                        "mountId" to JsonPrimitive(runIdentity.mountId),
-                    )),
+                    "runRoot" to runRootJson,
                     "resumeWallBudgetMillis" to JsonPrimitive(remainingMillis),
                     "idleWallTimeBetweenOwnersCharged" to JsonPrimitive(false),
                     "complete" to JsonPrimitive(false),

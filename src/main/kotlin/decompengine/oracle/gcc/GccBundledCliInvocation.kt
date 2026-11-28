@@ -4,6 +4,7 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.fulltree.FullTreeDiskScratchPolicy
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -106,13 +107,37 @@ internal data class GccBundledCliOptions(
     }
 }
 
-/** Immutable CLI selection and directory identity, committed as part of the operation request. */
+/** The launcher's process working directory: its canonical path and the identity of the directory it names. */
+internal data class GccBundledCliWorkingDirectory(val path: Path, val identity: LinuxFileIdentity) {
+    init {
+        require(path.isAbsolute && path.normalize() == path) { "CLI working directory must be canonical" }
+    }
+
+    fun toJson(): JsonObject = JsonObject(mapOf(
+        "path" to JsonPrimitive(path.toString()), "device" to JsonPrimitive(identity.key.device),
+        "inode" to JsonPrimitive(identity.key.inode), "mountId" to JsonPrimitive(identity.mountId),
+        "uid" to JsonPrimitive(identity.uid), "gid" to JsonPrimitive(identity.gid), "mode" to JsonPrimitive(identity.mode),
+    ))
+
+    companion object {
+        fun current(): GccBundledCliWorkingDirectory {
+            val path = Path.of("").toAbsolutePath().toRealPath()
+            // /proc/self/cwd is the kernel's record of this process's working directory, not a pathname guess.
+            require(Files.isSameFile(path, Path.of("/proc/self/cwd"))) { "CLI working directory differs from the process working directory" }
+            return GccBundledCliWorkingDirectory(path, LinuxFilesystemSyscalls.openRoot(path).use { it.identity })
+        }
+    }
+}
+
+/** Immutable CLI selection, working directory and directory identity, committed as part of the operation request. */
 internal class GccBundledCliInvocation(val options: GccBundledCliOptions, arguments: List<String>,
-    identities: Map<Path, LinuxFileIdentity>) {
+    identities: Map<Path, LinuxFileIdentity>,
+    val workingDirectory: GccBundledCliWorkingDirectory = GccBundledCliWorkingDirectory.current()) {
     private val directories = java.util.Map.copyOf(identities)
     val path: Path = options.output.resolve("invocation.json")
     private val encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
-        "provider" to JsonPrimitive("gcc-bundled-cli-invocation-v1"), "schemaVersion" to JsonPrimitive(1),
+        "provider" to JsonPrimitive("gcc-bundled-cli-invocation-v2"), "schemaVersion" to JsonPrimitive(2),
+        "workingDirectory" to workingDirectory.toJson(),
         "argv" to JsonArray((listOf(options.commandName) + arguments)
             .map(::JsonPrimitive)),
         "engineId" to JsonPrimitive(options.engineId), "binary" to JsonPrimitive(options.binary.toString()),

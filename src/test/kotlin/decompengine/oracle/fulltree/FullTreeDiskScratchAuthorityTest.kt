@@ -1164,6 +1164,9 @@ class FullTreeDiskScratchAuthorityTest {
     @Test
     fun `later owner reacquires a crashed process's active run only while no other holder has the mount`() {
         val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
+        if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+            assertTrue(!configured.isNullOrBlank(), "required CI ext4 scratch slot was not provisioned")
+        }
         assumeTrue(
             !configured.isNullOrBlank(),
             "set DECOMP_TEST_ORACLE_EXT4_SCRATCH for later-owner lease recovery coverage",

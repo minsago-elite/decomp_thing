@@ -25,6 +25,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -150,7 +152,7 @@ class GccBundledOperationJournalTest {
             journal.recordInterruptionAuthorization(payload)
             journal.recordInterruptedExecution(payload)
             journal.recordInterruptedPrefixAssessment(payload)
-            journal.recordInterruptedAnalysisState(snapshot)
+            journal.recordInterruptedAnalysisState(snapshot) { wallSnapshot(elapsedNanos = STOPPED_ELAPSED_NANOS) }
             action(journal, resumed)
         }
     }
@@ -178,30 +180,100 @@ class GccBundledOperationJournalTest {
             assertEquals(1L, stopped.stateEntryCount)
             assertEquals(3L, stopped.stateTotalBytes)
             assertEquals(OPERATION_ID, stopped.diskEvidence.operationId)
+            assertEquals(null, stopped.retainedAdoptionPayloadBytes)
+            // The allowance is the stopped commit's remaining budget, not the earlier execution receipt's.
+            assertEquals(STOPPED_REMAINING_NANOS, stopped.stoppedRemainingNanos)
+            assertEquals(RECOVERY_CAP_MILLIS, stopped.recoveryWallCapMillis)
             // While this later owner holds the journal, a third invocation is refused in turn.
             val third = assertFails { GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256) }
             assertTrue(third.message.orEmpty().contains("held by a live owner"), third.toString())
             val stateRecord = Files.readAllBytes(path.resolve("analysis-state-captured.json"))
-            val adopted = later.recordRecoveryAdopted(recoveryPayload(stateRecord))
+            val adopted = later.recordRecoveryAdopted(recoveryPayload(intent, stateRecord))
             val record = OracleJson.parseCanonical(adopted).jsonObject
             assertEquals(JsonPrimitive("gcc-bundled-later-invocation-recovery-adopted-v1"), record["provider"])
             assertEquals(JsonPrimitive(OracleArtifacts.sha256(stateRecord)), record["previousSha256"])
             assertEquals(JsonPrimitive(OracleArtifacts.sha256(intent)), record["intentSha256"])
             assertContentEquals(adopted, later.recoveryRecordBytes)
-            val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true))))
-            later.recordResumePrepared(recoverableResumeDefinition())
-            later.recordResumeAttachment(payload)
-            later.recordResumeStartAuthorization()
-            later.recordResumeExecution(payload)
-            later.recordResumeExportAssessment(payload)
+            continueRecoveredResume(later)
             val resumed = OracleJson.parseCanonical(Files.readAllBytes(path.resolve("resume-prepared.json"))).jsonObject
             assertEquals(JsonPrimitive(OracleArtifacts.sha256(adopted)), resumed["previousSha256"])
             assertEquals(stoppedNames + "recovery-adopted.json" + RESUME_NAMES, names(path))
             stoppedBytes.forEach { (name, bytes) -> assertEquals(bytes, Files.readAllBytes(path.resolve(name)).toList(), name) }
             later.verify("after the recovered resume chain")
         }
-        // Adoption is single use: the history is no longer exactly stopped.
+        // A history that reached resume START is never adopted again.
         assertFails { GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256) }
+    }
+
+    @Test
+    fun `a later owner that crashed after adopting resumes from the same single adoption and allowance`() = withJournalRoot { root ->
+        val intent = intent()
+        recoverableStoppedJournal(root, intent).close()
+        val path = root.resolve(operationName())
+        val stateRecord = Files.readAllBytes(path.resolve("analysis-state-captured.json"))
+        val payload = recoveryPayload(intent, stateRecord, budget = 40_000)
+        val adopted = GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { first ->
+            first.recordRecoveryAdopted(payload)
+        }
+        // The first later owner is gone before any resume definition was written.
+        val names = names(path)
+        GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { second ->
+            assertContentEquals(adopted, second.recoveryRecordBytes)
+            assertContentEquals(payload, second.recoveredStoppedEvidence.retainedAdoptionPayloadBytes)
+            // A second, possibly larger, allowance can never be published over the retained one.
+            assertFails { second.recordRecoveryAdopted(recoveryPayload(intent, stateRecord)) }
+        }
+        assertEquals(names, names(path))
+        GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { second ->
+            assertContentEquals(adopted, second.completeRetainedRecoveryAdoption())
+            continueRecoveredResume(second)
+        }
+        assertEquals(names + RESUME_NAMES, names(path))
+    }
+
+    @Test
+    fun `a crash between linking and renaming the adoption is completed without new bytes`() = withJournalRoot { root ->
+        val intent = intent()
+        recoverableStoppedJournal(root, intent).close()
+        val path = root.resolve(operationName())
+        val stateRecord = Files.readAllBytes(path.resolve("analysis-state-captured.json"))
+        val adopted = GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { first ->
+            first.recordRecoveryAdopted(recoveryPayload(intent, stateRecord))
+        }
+        // Model the atomic publisher's crash window: the complete named temporary exists, the final name does not.
+        Files.move(path.resolve("recovery-adopted.json"), path.resolve(".recovery-adopted.json.atomic"))
+        val temporaryInode = Files.getAttribute(path.resolve(".recovery-adopted.json.atomic"), "unix:ino")
+        // Resume is still refused until the retained adoption is completed.
+        GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { second ->
+            assertEquals(null, second.recoveryRecordBytes)
+            assertFails { second.recordResumePrepared(recoverableResumeDefinition()) }
+        }
+        assertTrue(Files.exists(path.resolve(".recovery-adopted.json.atomic")))
+        GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { second ->
+            assertFails { second.recordRecoveryAdopted(recoveryPayload(intent, stateRecord)) }
+        }
+        GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { second ->
+            assertContentEquals(adopted, second.completeRetainedRecoveryAdoption())
+            assertFalse(Files.exists(path.resolve(".recovery-adopted.json.atomic")))
+            assertEquals(temporaryInode, Files.getAttribute(path.resolve("recovery-adopted.json"), "unix:ino"))
+            continueRecoveredResume(second)
+        }
+        // Both names at once, or an invalid temporary, stay fail-closed.
+        for (case in listOf("both", "invalid")) withJournalRoot { other ->
+            recoverableStoppedJournal(other, intent).close()
+            val operation = other.resolve(operationName())
+            GccBundledOperationJournal.openStoppedForRecovery(other, OPERATION_ID, intent, DEPLOYMENT_SHA256).use {
+                it.recordRecoveryAdopted(recoveryPayload(intent, Files.readAllBytes(operation.resolve("analysis-state-captured.json"))))
+            }
+            if (case == "both") Files.copy(operation.resolve("recovery-adopted.json"), operation.resolve(".recovery-adopted.json.atomic"))
+            else {
+                Files.delete(operation.resolve("recovery-adopted.json"))
+                immutableFile(operation.resolve(".recovery-adopted.json.atomic"), "{}".encodeToByteArray())
+            }
+            val before = names(operation)
+            assertFails(case) { GccBundledOperationJournal.openStoppedForRecovery(other, OPERATION_ID, intent, DEPLOYMENT_SHA256) }
+            assertEquals(before, names(operation), case)
+        }
     }
 
     @Test
@@ -210,7 +282,7 @@ class GccBundledOperationJournalTest {
             "residue", "absence", "authorization")) withJournalRoot { root ->
             val intent = intent()
             recoverableStoppedJournal(root, intent, unitAbsent = case != "absence",
-                authorizationOverride = case == "authorization").close()
+                foreign = if (case == "authorization") "authorization-digest" else null).close()
             val path = root.resolve(operationName())
             when (case) {
                 "rewritten-attachment" -> replaceImmutable(path.resolve("attachment.json")) { bytes ->
@@ -232,41 +304,93 @@ class GccBundledOperationJournalTest {
                 }
                 "residue" -> Files.writeString(path.resolve("unexpected.json"), "{}")
             }
-            val before = names(path).associateWith { Files.readAllBytes(path.resolve(it)).toList() }
-            assertFails(case) {
-                GccBundledOperationJournal.openStoppedForRecovery(root,
-                    if (case == "operation") SECOND_OPERATION_ID else OPERATION_ID,
-                    if (case == "intent") intent("changed later intent") else intent,
-                    if (case == "deployment") "b".repeat(64) else DEPLOYMENT_SHA256)
+            requireRefusedUnchanged(root, path, intent, case,
+                operationId = if (case == "operation") SECOND_OPERATION_ID else OPERATION_ID,
+                expectedIntent = if (case == "intent") intent("changed later intent") else intent,
+                deployment = if (case == "deployment") "b".repeat(64) else DEPLOYMENT_SHA256)
+        }
+    }
+
+    @Test
+    fun `later invocation refuses an otherwise consistent chain whose absence receipt names another command`() {
+        for (foreign in listOf("attachment-unit", "attachment-cgroup", "attachment-nonce", "attachment-deployment", "keeper",
+            "authorization-request", "execution-attachment", "execution-request", "outcome-status", "outcome-keeper",
+            "outcome-nonce")) withJournalRoot { root ->
+            val intent = intent()
+            // Every record is published through the journal writer, so the linked chain itself is consistent.
+            recoverableStoppedJournal(root, intent, foreign = foreign).close()
+            val failure = requireRefusedUnchanged(root, root.resolve(operationName()), intent, foreign)
+            assertTrue(failure.message.orEmpty().contains("not bound to this operation's interrupted command"), "$foreign: $failure")
+        }
+    }
+
+    @Test
+    fun `the resume allowance is the budget committed with the stopped state and never outlives it`() {
+        // A deadline that expired before the stopped commit leaves no recoverable stopped state.
+        withJournalRoot { root ->
+            val intent = intent()
+            assertFails { recoverableStoppedJournal(root, intent, stoppedWall = { error("operation wall deadline expired") }) }
+            val path = root.resolve(operationName())
+            assertFalse(Files.exists(path.resolve("analysis-state-captured.json")))
+            requireRefusedUnchanged(root, path, intent, "expired-before-commit")
+        }
+        // A commit snapshot that is not this operation's own later snapshot is refused.
+        for ((case, wall) in listOf(
+            "foreign-deadline" to wallSnapshot(started = 2_000, elapsedNanos = STOPPED_ELAPSED_NANOS),
+            "before-execution" to wallSnapshot(elapsedNanos = EXECUTION_ELAPSED_NANOS - 1),
+            "other-budget" to wallSnapshot(maximumMillis = 61_000, elapsedNanos = STOPPED_ELAPSED_NANOS),
+        )) withJournalRoot { root ->
+            val intent = intent()
+            recoverableStoppedJournal(root, intent, stoppedWall = { wall }).close()
+            requireRefusedUnchanged(root, root.resolve(operationName()), intent, case)
+        }
+        // An adoption cannot credit back the time spent after the worker exited.
+        withJournalRoot { root ->
+            val intent = intent()
+            recoverableStoppedJournal(root, intent).close()
+            val path = root.resolve(operationName())
+            val stateRecord = Files.readAllBytes(path.resolve("analysis-state-captured.json"))
+            val executionAllowance = (60_000L * 1_000_000L - EXECUTION_ELAPSED_NANOS) / 1_000_000_000L * 1_000L
+            assertTrue(executionAllowance > RECOVERY_CAP_MILLIS)
+            for (budget in listOf(executionAllowance, RECOVERY_CAP_MILLIS + 1_000, 1_000L, RECOVERY_CAP_MILLIS - 1)) {
+                GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->
+                    assertFails("$budget") { later.recordRecoveryAdopted(recoveryPayload(intent, stateRecord, budget)) }
+                }
             }
-            assertEquals(before, names(path).associateWith { Files.readAllBytes(path.resolve(it)).toList() }, case)
-            // A refused recovery releases both locks it took.
-            LinuxFilesystemSyscalls.openRoot(root).use { assertTrue(LinuxFilesystemSyscalls.tryExclusiveLock(it), case); LinuxFilesystemSyscalls.unlock(it) }
-            LinuxFilesystemSyscalls.openRoot(path).use { assertTrue(LinuxFilesystemSyscalls.tryExclusiveLock(it), case); LinuxFilesystemSyscalls.unlock(it) }
+            assertFalse(Files.exists(path.resolve("recovery-adopted.json")))
+            GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->
+                later.recordRecoveryAdopted(recoveryPayload(intent, stateRecord, RECOVERY_CAP_MILLIS))
+            }
         }
     }
 
     @Test
     fun `later invocation refuses admitted fresh completed and resume-started histories`() {
         val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true))))
-        for (history in listOf("prepared", "fresh-exported", "resume-started")) withJournalRoot { root ->
+        for (history in listOf("prepared", "fresh-exported", "resume-started", "adopted-resume-started")) withJournalRoot { root ->
             val intent = intent()
-            if (history == "resume-started") {
-                recoverableStoppedJournal(root, intent).use { it.recordResumePrepared(recoverableResumeDefinition()) }
-            } else GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
-                journal.recordLease(evidence(intent))
-                journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
-                if (history == "fresh-exported") {
-                    journal.recordAttachment(payload)
-                    journal.recordStartAuthorization()
-                    journal.recordExecution(payload)
-                    journal.recordExportAssessment(payload)
+            when (history) {
+                "resume-started" -> recoverableStoppedJournal(root, intent).use { it.recordResumePrepared(recoverableResumeDefinition()) }
+                "adopted-resume-started" -> {
+                    recoverableStoppedJournal(root, intent).close()
+                    GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->
+                        later.recordRecoveryAdopted(recoveryPayload(intent,
+                            Files.readAllBytes(root.resolve(operationName()).resolve("analysis-state-captured.json"))))
+                        later.recordResumePrepared(recoverableResumeDefinition())
+                    }
+                }
+                else -> GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+                    journal.recordLease(evidence(intent))
+                    journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+                    if (history == "fresh-exported") {
+                        journal.recordAttachment(payload)
+                        journal.recordStartAuthorization()
+                        journal.recordExecution(payload)
+                        journal.recordExportAssessment(payload)
+                    }
                 }
             }
-            val path = root.resolve(operationName())
-            val before = names(path)
-            assertFails(history) { GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256) }
-            assertEquals(before, names(path))
+            requireRefusedUnchanged(root, root.resolve(operationName()), intent, history)
         }
     }
 
@@ -275,7 +399,8 @@ class GccBundledOperationJournalTest {
         // A same-owner stopped journal never contains a recovery record, so it cannot record one.
         withStoppedJournal { journal, _ ->
             val before = names(journal.path)
-            assertFails { journal.recordRecoveryAdopted(recoveryPayload(Files.readAllBytes(journal.path.resolve("analysis-state-captured.json")))) }
+            assertFails { journal.recordRecoveryAdopted(recoveryPayload(intent(),
+                Files.readAllBytes(journal.path.resolve("analysis-state-captured.json")))) }
             assertEquals(before, names(journal.path))
         }
         withJournalRoot { root ->
@@ -289,16 +414,44 @@ class GccBundledOperationJournalTest {
             }
             assertEquals(before, names(path))
             GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->
-                assertFails { later.recordRecoveryAdopted(recoveryPayload("forged".encodeToByteArray())) }
+                assertFails { later.recordRecoveryAdopted(recoveryPayload(intent, "forged".encodeToByteArray())) }
+            }
+            assertEquals(before, names(path))
+            GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->
+                assertFails { later.completeRetainedRecoveryAdoption() }
             }
             assertEquals(before, names(path))
         }
     }
 
-    private fun recoveryPayload(stateRecord: ByteArray) = OracleJson.canonicalBytes(JsonObject(mapOf(
-        "provider" to JsonPrimitive(RECOVERY_PAYLOAD_PROVIDER), "operationId" to JsonPrimitive(OPERATION_ID),
-        "stoppedStateRecordSha256" to JsonPrimitive(OracleArtifacts.sha256(stateRecord)), "fixtureOnly" to JsonPrimitive(true),
-    )))
+    private fun requireRefusedUnchanged(root: Path, path: Path, intent: ByteArray, case: String,
+        operationId: String = OPERATION_ID, expectedIntent: ByteArray = intent, deployment: String = DEPLOYMENT_SHA256): Throwable {
+        val before = names(path).associateWith { Files.readAllBytes(path.resolve(it)).toList() }
+        val failure = assertFails(case) { GccBundledOperationJournal.openStoppedForRecovery(root, operationId, expectedIntent, deployment) }
+        assertEquals(before, names(path).associateWith { Files.readAllBytes(path.resolve(it)).toList() }, case)
+        // A refused recovery releases both locks it took.
+        LinuxFilesystemSyscalls.openRoot(root).use { assertTrue(LinuxFilesystemSyscalls.tryExclusiveLock(it), case); LinuxFilesystemSyscalls.unlock(it) }
+        LinuxFilesystemSyscalls.openRoot(path).use { assertTrue(LinuxFilesystemSyscalls.tryExclusiveLock(it), case); LinuxFilesystemSyscalls.unlock(it) }
+        return failure
+    }
+
+    private fun continueRecoveredResume(journal: GccBundledOperationJournal) {
+        val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true))))
+        journal.recordResumePrepared(recoverableResumeDefinition())
+        journal.recordResumeAttachment(payload)
+        journal.recordResumeStartAuthorization()
+        journal.recordResumeExecution(payload)
+        journal.recordResumeExportAssessment(payload)
+    }
+
+    private fun recoveryPayload(intent: ByteArray, stateRecord: ByteArray, budget: Long = RECOVERY_CAP_MILLIS) =
+        OracleJson.canonicalBytes(JsonObject(mapOf(
+            "provider" to JsonPrimitive(RECOVERY_PAYLOAD_PROVIDER), "schemaVersion" to JsonPrimitive(1),
+            "operationId" to JsonPrimitive(OPERATION_ID), "intentSha256" to JsonPrimitive(OracleArtifacts.sha256(intent)),
+            "stoppedStateRecordSha256" to JsonPrimitive(OracleArtifacts.sha256(stateRecord)),
+            "resumeWallBudgetMillis" to JsonPrimitive(budget), "complete" to JsonPrimitive(false),
+            "releaseEligible" to JsonPrimitive(false), "fixtureOnly" to JsonPrimitive(true),
+        )))
 
     private fun recoverableManifest(totalBytes: Long = 3) = OracleJson.canonicalBytes(JsonObject(mapOf(
         "entryCount" to JsonPrimitive(1), "totalBytes" to JsonPrimitive(totalBytes), "fixtureOnly" to JsonPrimitive(true),
@@ -314,31 +467,77 @@ class GccBundledOperationJournalTest {
         return GccCompilerEngineContainmentContract.assessDefinition(GccCompilerEngineContainmentRequest(
             original.engineId, GccCompilerEngineContainmentRunKind.RESUMED, original.artifacts, state,
             runtime.command(original.artifacts, state, original.outputLease), original.environment, original.outputLease,
-            original.budgets, runtime,
+            original.budgets.copy(wallClockMillis = RECOVERY_CAP_MILLIS), runtime,
         )).canonicalBytes
     }
 
-    /** The earlier owner's exact stopped chain, returned while that owner still holds both journal locks. */
-    private fun recoverableStoppedJournal(root: Path, intent: ByteArray, unitAbsent: Boolean = true,
-        authorizationOverride: Boolean = false): GccBundledOperationJournal {
+    private fun wallSnapshot(maximumMillis: Long = 60_000, started: Long = 1_000, elapsedNanos: Long) = JsonObject(mapOf(
+        "provider" to JsonPrimitive("kotlin-contained-operation-wall-deadline-v1"),
+        "maximumWallMillis" to JsonPrimitive(maximumMillis), "startedMonotonicNanos" to JsonPrimitive(started),
+        "elapsedNanos" to JsonPrimitive(elapsedNanos), "remainingNanos" to JsonPrimitive(maximumMillis * 1_000_000L - elapsedNanos),
+    ))
+
+    private fun selfHashed(fields: Map<String, JsonElement>, field: String): JsonObject =
+        JsonObject(fields + (field to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(fields))))))
+
+    /**
+     * The earlier owner's exact stopped chain with receipts bound to its definition, returned while that owner
+     * still holds both journal locks. [foreign] substitutes one receipt field while keeping every record linked.
+     */
+    private fun recoverableStoppedJournal(root: Path, intent: ByteArray, unitAbsent: Boolean = true, foreign: String? = null,
+        stoppedWall: () -> JsonObject = { wallSnapshot(elapsedNanos = STOPPED_ELAPSED_NANOS) }): GccBundledOperationJournal {
         val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true))))
-        val authorization = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureAuthorization" to JsonPrimitive(true))))
-        val execution = OracleJson.canonicalBytes(JsonObject(mapOf(
+        val definitionBytes = definition(runKind = GccCompilerEngineContainmentRunKind.INTERRUPTED)
+        val selected = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definitionBytes)
+        val request = "5".repeat(64)
+        val other = "6".repeat(64)
+        fun pick(case: String, value: String, substitute: String) = JsonPrimitive(if (foreign == case) substitute else value)
+        val attachment = selfHashed(mapOf(
+            "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v1"),
+            "unitName" to pick("attachment-unit", selected.unitName, "decomp-gcc-cc1-${"7".repeat(32)}.scope"),
+            "controlGroup" to pick("attachment-cgroup", selected.expectedControlGroup, "/foreign.slice/unit.scope"),
+            "nonce" to pick("attachment-nonce", selected.bindingSha256, other),
+            "requestSha256" to JsonPrimitive(request),
+            "deploymentClosureSha256" to pick("attachment-deployment", DEPLOYMENT_SHA256, other),
+            "processes" to JsonArray(listOf(JsonObject(mapOf(
+                "role" to JsonPrimitive("supervisor-jvm"),
+                "namespacePids" to JsonArray(listOf(JsonPrimitive(1), JsonPrimitive(if (foreign == "keeper") 43 else KEEPER_PID)))),
+            ))),
+        ), "attachmentSha256")
+        val authorization = selfHashed(mapOf(
+            "provider" to JsonPrimitive("kotlin-contained-command-interrupt-authorization-v1"),
+            "requestSha256" to JsonPrimitive(if (foreign == "authorization-request") other else request),
+            "keeperPid" to JsonPrimitive(KEEPER_PID), "fixtureOnly" to JsonPrimitive(true),
+        ), "authorizationSha256")
+        val outcome = JsonObject(mapOf(
+            "event" to JsonPrimitive("OUTCOME"), "status" to JsonPrimitive(if (foreign == "outcome-status") "EXITED" else "INTERRUPTED"),
+            "keeperPid" to JsonPrimitive(if (foreign == "outcome-keeper") 44 else KEEPER_PID), "requestSha256" to JsonPrimitive(request),
+            "nonce" to JsonPrimitive(if (foreign == "outcome-nonce") other else selected.bindingSha256),
+        ))
+        val attachmentBytes = OracleJson.canonicalBytes(attachment)
+        val authorizationBytes = OracleJson.canonicalBytes(authorization)
+        val execution = OracleJson.canonicalBytes(selfHashed(mapOf(
             "provider" to JsonPrimitive("kotlin-lease-contained-command-interrupted-v1"),
+            "attachmentSha256" to JsonPrimitive(if (foreign == "execution-attachment") other else OracleArtifacts.sha256(attachmentBytes)),
+            "requestSha256" to JsonPrimitive(if (foreign == "execution-request") other else request),
+            "deploymentClosureSha256" to JsonPrimitive(DEPLOYMENT_SHA256),
+            "outcome" to outcome, "outcomeSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(outcome))),
             "unitAbsent" to JsonPrimitive(unitAbsent), "cgroupAbsent" to JsonPrimitive(true), "processesAbsent" to JsonPrimitive(true),
-            "interruptionAuthorizationSha256" to JsonPrimitive(OracleArtifacts.sha256(
-                if (authorizationOverride) payload else authorization)),
-        )))
+            "interruptionAuthorization" to authorization,
+            "interruptionAuthorizationSha256" to JsonPrimitive(
+                if (foreign == "authorization-digest") other else OracleArtifacts.sha256(authorizationBytes)),
+            "operationWallTime" to wallSnapshot(elapsedNanos = EXECUTION_ELAPSED_NANOS),
+        ), "executionSha256"))
         val journal = GccBundledOperationJournal.create(root, OPERATION_ID, intent)
         try {
             journal.recordLease(evidence(intent))
-            journal.recordPrepared(definition(runKind = GccCompilerEngineContainmentRunKind.INTERRUPTED), DEPLOYMENT_SHA256)
-            journal.recordAttachment(payload)
+            journal.recordPrepared(definitionBytes, DEPLOYMENT_SHA256)
+            journal.recordAttachment(attachmentBytes)
             journal.recordStartAuthorization()
-            journal.recordInterruptionAuthorization(authorization)
+            journal.recordInterruptionAuthorization(authorizationBytes)
             journal.recordInterruptedExecution(execution)
             journal.recordInterruptedPrefixAssessment(payload)
-            journal.recordInterruptedAnalysisState(GccBundledAnalysisStateSnapshot(1, 3, recoverableManifest()))
+            journal.recordInterruptedAnalysisState(GccBundledAnalysisStateSnapshot(1, 3, recoverableManifest()), stoppedWall)
             return journal
         } catch (failure: Throwable) {
             journal.close()
@@ -365,7 +564,7 @@ class GccBundledOperationJournalTest {
             journal.recordInterruptedExecution(payload)
             val prefix = journal.recordInterruptedPrefixAssessment(payload)
             val snapshot = GccBundledAnalysisStateSnapshot(1, 3, payload)
-            val receipt = journal.recordInterruptedAnalysisState(snapshot)
+            val receipt = journal.recordInterruptedAnalysisState(snapshot) { wallSnapshot(elapsedNanos = STOPPED_ELAPSED_NANOS) }
             val document = OracleJson.parseCanonical(receipt).jsonObject
             assertEquals(JsonPrimitive(OracleArtifacts.sha256(prefix)), document["previousSha256"])
             assertEquals(JsonPrimitive(snapshot.sha256), document.getValue("analysisState").jsonObject["manifestSha256"])
@@ -387,7 +586,7 @@ class GccBundledOperationJournalTest {
         GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
             journal.recordLease(evidence(intent))
             journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
-            assertFails { journal.recordInterruptedAnalysisState(GccBundledAnalysisStateSnapshot(1, 3, payload)) }
+            assertFails { journal.recordInterruptedAnalysisState(GccBundledAnalysisStateSnapshot(1, 3, payload)) { wallSnapshot(elapsedNanos = STOPPED_ELAPSED_NANOS) } }
             assertFalse(Files.exists(journal.path.resolve("analysis-state-manifest.json")))
         }
     }
@@ -1088,6 +1287,11 @@ class GccBundledOperationJournalTest {
     private companion object {
         val OPERATION_ID = "1".repeat(64)
         val SECOND_OPERATION_ID = "2".repeat(64)
+        const val KEEPER_PID = 42L
+        const val EXECUTION_ELAPSED_NANOS = 5_000_000_000L
+        const val STOPPED_ELAPSED_NANOS = 8_000_000_000L
+        const val STOPPED_REMAINING_NANOS = 52_000_000_000L
+        const val RECOVERY_CAP_MILLIS = 52_000L
         val RESUME_NAMES = setOf("resume-definition.json", "resume-prepared.json", "resume-attachment.json",
             "resume-start-authorized.json", "resume-execution.json", "resume-export-assessment.json")
         val DEPLOYMENT_SHA256 = "a".repeat(64)

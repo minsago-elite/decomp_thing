@@ -256,6 +256,32 @@ class GccBundledCliCommandTest {
     }
 
     @Test
+    fun `later-invocation recovery from another working directory is refused against the retained invocation`() = fixture { root ->
+        val interrupted = arguments(root) + listOf("--resume-after-checkpoint", "512")
+        val options = GccBundledCliOptions.parse(interrupted)
+        val children = listOf(options.output, privateDirectory(options.output.resolve("inputs")),
+            privateDirectory(options.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val current = GccBundledCliWorkingDirectory.current()
+        assertEquals(current, GccBundledCliInvocation(options, interrupted, identities).workingDirectory)
+        val elsewhere = GccBundledCliWorkingDirectory(root, LinuxFilesystemSyscalls.openRoot(root).use { it.identity })
+        assertFalse(current == elsewhere)
+        val retained = GccBundledCliInvocation(options, interrupted, identities, elsewhere)
+        val document = OracleJson.parseCanonical(retained.canonicalBytes).jsonObject
+        assertEquals("gcc-bundled-cli-invocation-v2", document.getValue("provider").jsonPrimitive.content)
+        assertEquals(root.toString(), document.getValue("workingDirectory").jsonObject.getValue("path").jsonPrimitive.content)
+        assertEquals(LinuxFilesystemSyscalls.openRoot(root).use { it.identity.key.inode },
+            document.getValue("workingDirectory").jsonObject.getValue("inode").jsonPrimitive.content.toLong())
+        LinuxFilesystemSyscalls.openRoot(options.output).use { selected ->
+            DescriptorBoundAtomicStateFile.publishNoReplace(selected, "invocation.json", retained.canonicalBytes, 256 * 1024)
+        }
+        val recovery = interrupted + listOf("--recover-operation", RECOVERED_OPERATION)
+        val failure = assertFails { GccBundledCliCommand.run(GccBundledCliOptions.parse(recovery), recovery) }
+        assertTrue(failure.message.orEmpty().contains("differs from the retained invocation"), failure.toString())
+        for (path in children.drop(1) + listOf(options.scratch)) Files.list(path).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
     fun `command records selection but refuses a mismatched binary before staging or leasing`() = fixture { root ->
         val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
