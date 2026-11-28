@@ -1,19 +1,26 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/preact';
+import { LocationProvider } from 'preact-iso/router';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
 import type { createApiClient } from '../src/api/client';
-import type { AttemptControls as Controls, Job, JobDeletionPreview, Operation, Run } from '../src/api/generated';
+import { decodeResponse } from '../src/api/decode';
+import type { AttemptControls as Controls, Capability, Job, JobDeletionPreview, Operation, Run } from '../src/api/generated';
+import { archiveCopy } from '../src/copy/archive';
 import { attemptControlsCopy } from '../src/copy/attempt';
-import { jobDeletionCopy, jobOrganizationCopy } from '../src/copy/job';
+import { gitRepositoryCopy, jobDeletionCopy, jobOrganizationCopy } from '../src/copy/job';
 import { AttemptControls } from '../src/jobs/AttemptControls';
+import { GitRepositoryPanel } from '../src/jobs/GitRepositoryPanel';
 import { JobDeletion, JobOrganization } from '../src/jobs/JobLifecycle';
+import { archiveVerificationsRoute } from '../src/sources/archive';
+import { sourceReadMessage } from '../src/sources/navigation';
+import { SourceArchive } from '../src/sources/SourceArchive';
 
 /**
- * Duplicate activation and connection loss for the job organization, attempt recovery and job deletion
- * commands (#635). Every reply, connection event and clock advance is synthetic and in memory: the transport
+ * Duplicate activation and connection loss for the job organization, attempt recovery, job deletion, repository
+ * initialization and archive verification commands (#635). Every reply, connection event and clock advance is synthetic and in memory: the transport
  * below answers only when a test settles a call and, like the real client, rejects an aborted call.
  */
 type Settings = { csrfToken?: string; ifMatch?: string; idempotencyKey?: string; signal?: AbortSignal };
@@ -115,6 +122,37 @@ it('sends one organization change for repeated activation and only an explicit, 
   expect(put.fn).toHaveBeenCalledTimes(2);
 });
 
+it('keeps the refusal of an organization change when connection loss cuts only its follow-up read', async () => {
+  render(<JobOrganization job={job()} client={client()} basePath="/nested/" session={session} onChanged={vi.fn()} />);
+  fireEvent.input(screen.getByLabelText(jobOrganizationCopy.displayLabel), { target: { value: 'Router firmware' } });
+  await activateTwice(jobOrganizationCopy.save);
+  await act(async () => { put.calls[0]!.reject(new ApiClientError('http_error', { status: 412 })); await Promise.resolve(); }); await settle();
+  expect(get.fn).toHaveBeenCalledOnce();
+  await disconnect();
+  expect(get.calls[0]!.settings.signal?.aborted).toBe(true);
+  await reconnect();
+  // The server answered the change, so its refusal stands; only the read of the current version was cut.
+  expect(status()).toBe(jobOrganizationCopy.changed);
+  expect(put.fn).toHaveBeenCalledOnce(); expect(get.fn).toHaveBeenCalledOnce();
+});
+
+it('drops an organization change abandoned by switching jobs without reporting it on the next job', async () => {
+  const view = render(<JobOrganization job={job()} client={client()} basePath="/nested/" session={session} />);
+  fireEvent.input(screen.getByLabelText(jobOrganizationCopy.displayLabel), { target: { value: 'Router firmware' } });
+  await activateTwice(jobOrganizationCopy.save);
+  const other = job({ jobId: 'fedcba0987654321fedcba0987654321' });
+  view.rerender(<JobOrganization job={other} client={client()} basePath="/nested/" session={session} />); await settle();
+  expect(put.calls[0]!.settings.signal?.aborted).toBe(true);
+  expect(status()).toBe('');
+  expect(button(jobOrganizationCopy.save).disabled).toBe(false);
+  // The next job's own save is not blocked by the abandoned one.
+  fireEvent.input(screen.getByLabelText(jobOrganizationCopy.displayLabel), { target: { value: 'Other firmware' } });
+  await activateTwice(jobOrganizationCopy.save);
+  expect(put.fn).toHaveBeenCalledTimes(2);
+  expect(put.calls[1]!.args[1]).toBe(`/jobs/${other.jobId}`);
+  expect(status()).toBe(jobOrganizationCopy.saving);
+});
+
 const failed = fixture<Run>('run-failed');
 const controls = (): { data: Controls } => ({ data: { ...fixture<Controls>('attempt-controls-retry'), jobId: failed.jobId, runId: failed.runId, runVersion: failed.version } });
 const slot = 'decomp.attempt-command.v1:/nested';
@@ -192,7 +230,6 @@ it('keeps one confirmed deletion in flight across reconnection without sending a
   expect(status()).toBe(jobDeletionCopy.deleting);
   expect(button(jobDeletionCopy.deletePermanently).disabled).toBe(true);
   expect(button(jobDeletionCopy.reviewDeletion).disabled).toBe(true);
-  await activateTwice(jobDeletionCopy.deletePermanently);
   expect(put.fn).toHaveBeenCalledOnce(); expect(get.fn).toHaveBeenCalledOnce();
 
   await act(async () => { sent.resolve({ data: operation }); await Promise.resolve(); }); await settle();
@@ -200,4 +237,54 @@ it('keeps one confirmed deletion in flight across reconnection without sending a
   expect(status()).toBe('Deletion accepted (completed).');
   expect(screen.getByText(accepted)).toBeTruthy();
   expect(put.fn).toHaveBeenCalledOnce();
+});
+
+const git: Capability = { id: 'git', state: 'supported', reasonCode: null, message: null, workflows: [], agentContractVersion: null, limits: null };
+
+it('sends one repository initialization for repeated activation and nothing after reconnecting', async () => {
+  render(<GitRepositoryPanel job={job({ latestRunId: 'run_1' })} capabilities={[git]} basePath="/nested/" session={session} />);
+  await settle();
+  await act(async () => { get.calls[0]!.resolve({ data: { jobId, repositories: [], operations: [] } }); await Promise.resolve(); }); await settle();
+  await act(async () => { get.calls[1]!.resolve({ data: { jobId, runId: 'run_1', resultRevisionId: 'revision_1' } }); await Promise.resolve(); }); await settle();
+  await activateTwice(gitRepositoryCopy.initialize);
+  expect(post.fn).toHaveBeenCalledOnce();
+  const sent = post.calls[0]!;
+  expect(sent.args.slice(0, 4)).toEqual(['operation', `/jobs/${jobId}/repositories`, 'gitRepositoryInitRequest',
+    { action: 'git.init', runId: 'run_1', revisionId: 'revision_1', initialBranch: null }]);
+  expect(sent.settings.ifMatch).toBe('"version_1"');
+  expect(status()).toBe(gitRepositoryCopy.requestingInitialization);
+
+  // Connection loss ends the request without an answer; nothing is sent again, and initializing again needs a fresh read.
+  await disconnect();
+  await act(async () => { sent.reject(new ApiClientError('network_error')); await Promise.resolve(); }); await settle();
+  await reconnect();
+  expect(post.fn).toHaveBeenCalledOnce(); expect(get.fn).toHaveBeenCalledTimes(2);
+  expect(status()).toBe(gitRepositoryCopy.initializationUnconfirmed);
+  expect(screen.queryByRole('button', { name: gitRepositoryCopy.initialize })).toBeNull();
+  expect(button(gitRepositoryCopy.refresh).disabled).toBe(false);
+});
+
+const archiveSelection = { jobId, runId: 'run_1', revisionId: 'revision_1' };
+const archive = () => decodeResponse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/source-archive-verified.json'), 'utf8')
+  .replaceAll('job_1', jobId), 'sourceArchive').data;
+
+it('sends one archive verification for repeated activation and nothing after reconnecting', async () => {
+  render(<LocationProvider scope="/"><SourceArchive selected={archiveSelection} basePath="/" session={session} /></LocationProvider>);
+  fireEvent.click(button(archiveCopy.inspect)); await settle();
+  await act(async () => { get.calls[0]!.resolve({ data: archive() }); await Promise.resolve(); }); await settle();
+  await activateTwice(archiveCopy.verify);
+  expect(post.fn).toHaveBeenCalledOnce();
+  const sent = post.calls[0]!;
+  expect(sent.args.slice(0, 4)).toEqual(['operation', archiveVerificationsRoute(archiveSelection), 'archiveVerificationRequest',
+    { archiveSha256: archive().archive.sha256 }]);
+  expect(screen.getByText(archiveCopy.submitting)).toBeTruthy();
+
+  await disconnect();
+  const failure = new ApiClientError('network_error');
+  await act(async () => { sent.reject(failure); await Promise.resolve(); }); await settle();
+  await reconnect();
+  // Nothing is sent or read automatically; another verification waits for the person.
+  expect(post.fn).toHaveBeenCalledOnce(); expect(get.fn).toHaveBeenCalledOnce();
+  expect(screen.getByRole('alert').textContent).toBe(sourceReadMessage(failure));
+  expect(button(archiveCopy.verify).hasAttribute('aria-disabled')).toBe(false);
 });

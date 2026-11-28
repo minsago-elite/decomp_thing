@@ -28,6 +28,8 @@ aborted call the way the real client does:
   saves again. The status reports the abandoned change as unconfirmed instead
   of still saving. The explicit save uses a fresh intent with the same version
   guard, so an earlier write that did land is refused rather than applied twice.
+  If the server already answered and only the follow-up read is cut, its answer
+  stays reported.
 - Attempt retry (POST): repeated activation sends one command. A connection
   failure keeps it retained. Reconnecting sends neither the command nor a read.
   An explicit replay, even if activated twice, sends it once with the same
@@ -35,6 +37,10 @@ aborted call the way the real client does:
 - Job deletion (DELETE): repeated activation sends one request. Connection loss
   neither aborts nor repeats the accepted request. The controls stay inert until
   its single outcome is reported.
+- Repository initialization (POST) and archive verification (POST): repeated
+  activation sends one command. After a connection failure and reconnection,
+  nothing is sent or read until the person acts again; initialization first
+  needs a fresh repository read.
 
 All responses, session callbacks, connection events and clock advances are
 controlled in memory. Ten-second advances are virtual; no service, actual
