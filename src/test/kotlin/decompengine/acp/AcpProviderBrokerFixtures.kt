@@ -24,7 +24,10 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.math.BigInteger
 import java.net.InetAddress
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
 import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -109,32 +112,31 @@ internal class ProviderTestTls(serverName: String, issuer: ProviderTestTls? = nu
         authority = false, dnsName = serverName)
     val directory: Path = providerFixtureDirectory("tls")
 
+    /** The server's key and chain, for [LocalProviderServer]. */
+    val serverStore: Path = directory.resolve("server.p12")
+
     init {
         Files.write(directory.resolve("authority.der"), authority.encoded)
         Files.write(directory.resolve("leaf.der"), leaf.encoded)
-        Files.newOutputStream(directory.resolve("server.p12")).use { identityStore().store(it, STORE_PASSWORD) }
-    }
-
-    fun trustAnchors(): KeyStore = KeyStore.getInstance("PKCS12").apply {
-        load(null, null)
-        setCertificateEntry("authority", authority)
-    }
-
-    fun serverContext(): SSLContext {
         val identity = KeyStore.getInstance("PKCS12").apply {
-            Files.newInputStream(directory.resolve("server.p12")).use { load(it, STORE_PASSWORD) }
+            load(null, null)
+            setKeyEntry("server", leafKeys.private, PROVIDER_FIXTURE_STORE_PASSWORD.toCharArray(), arrayOf(leaf, authority))
         }
-        val keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(identity, STORE_PASSWORD) }
-        return SSLContext.getInstance("TLS").apply { init(keys.keyManagers, null, SecureRandom()) }
+        Files.newOutputStream(serverStore).use { identity.store(it, PROVIDER_FIXTURE_STORE_PASSWORD.toCharArray()) }
     }
 
-    private fun identityStore(): KeyStore = KeyStore.getInstance("PKCS12").apply {
-        load(null, null)
-        setKeyEntry("server", leafKeys.private, STORE_PASSWORD, arrayOf(leaf, authority))
+    /** A trust store holding only this CA, for a scenario JVM's `javax.net.ssl.trustStore` properties. */
+    fun writeTrustStore(): Path {
+        val path = directory.resolve("roots.p12")
+        val roots = KeyStore.getInstance("PKCS12").apply {
+            load(null, null)
+            setCertificateEntry("authority", authority)
+        }
+        Files.newOutputStream(path).use { roots.store(it, PROVIDER_FIXTURE_STORE_PASSWORD.toCharArray()) }
+        return path
     }
 
     private companion object {
-        val STORE_PASSWORD = "fixture".toCharArray()
 
         fun ecKeyPair(): KeyPair = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
 
@@ -176,6 +178,15 @@ internal class ProviderTestTls(serverName: String, issuer: ProviderTestTls? = nu
     }
 }
 
+internal const val PROVIDER_FIXTURE_STORE_PASSWORD = "fixture"
+
+internal fun providerServerContext(store: Path): SSLContext {
+    val password = PROVIDER_FIXTURE_STORE_PASSWORD.toCharArray()
+    val identity = KeyStore.getInstance("PKCS12").apply { Files.newInputStream(store).use { load(it, password) } }
+    val keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(identity, password) }
+    return SSLContext.getInstance("TLS").apply { init(keys.keyManagers, null, SecureRandom()) }
+}
+
 /** What the local provider server observed on one accepted connection. */
 internal class ObservedProviderRequest(val serverNames: List<String>, val head: List<String>, val body: ByteArray)
 
@@ -184,10 +195,10 @@ internal class ObservedProviderRequest(val serverNames: List<String>, val head: 
  * and body, then writes the scripted raw response. It is never reachable through production resolution.
  */
 internal class LocalProviderServer(
-    tls: ProviderTestTls,
+    serverStore: Path,
     private val response: (ObservedProviderRequest) -> ByteArray = { sseResponse("data: {\"type\":\"response.completed\"}\n\n") },
 ) : AutoCloseable {
-    private val server = tls.serverContext().serverSocketFactory
+    private val server = providerServerContext(serverStore).serverSocketFactory
         .createServerSocket(0, 8, InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))) as SSLServerSocket
     val port: Int get() = server.localPort
     val accepted = AtomicInteger()
@@ -260,8 +271,10 @@ internal fun sseResponse(events: String, framing: String = "length"): ByteArray 
 internal fun rawResponse(text: String): ByteArray = text.toByteArray(StandardCharsets.ISO_8859_1)
 
 /**
- * Records each pinned address the broker asks for, connects to the local server instead, and layers the module
- * TLS client over that socket. Only the destination socket differs from production; TLS verification does not.
+ * Records each pinned address the broker asks for and connects to the local server instead. The loopback server
+ * is not an admissible `connect` destination, so this reaches the module client's private layered handshake by
+ * reflection, as the #958 TLS probe does. Only the destination socket differs from production; trust, SNI and
+ * host name verification are the production code.
  */
 internal class LoopbackProviderConnector(private val serverPort: Int, private val tls: AcpProviderUpstreamTls) :
     AcpProviderUpstreamConnector {
@@ -269,9 +282,19 @@ internal class LoopbackProviderConnector(private val serverPort: Int, private va
 
     override fun open(address: InetAddress, timeout: Duration): SSLSocket {
         addresses += address
-        val socket = Socket()
+        val socket = Socket(Proxy.NO_PROXY)
         socket.connect(InetSocketAddress(InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1)), serverPort), timeout.toMillis().toInt())
-        return tls.handshake(socket, timeout)
+        return try {
+            HANDSHAKE.invoke(tls, socket, timeout) as SSLSocket
+        } catch (invocation: InvocationTargetException) {
+            throw invocation.targetException
+        }
+    }
+
+    private companion object {
+        val HANDSHAKE: Method = AcpProviderUpstreamTls::class.java
+            .getDeclaredMethod("handshake", Socket::class.java, Duration::class.java)
+            .apply { isAccessible = true }
     }
 }
 
