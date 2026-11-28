@@ -382,6 +382,8 @@ class UploadServer(
     @Volatile internal var requestDrainObserver: () -> Unit = {}
     /** Test seam run, under lifecycleLock and without blocking, when stop's drain extends to the audit deadline. */
     @Volatile internal var auditExtensionObserver: () -> Unit = {}
+    /** Test seam run, under lifecycleLock and without blocking, when stop's drain first waits for admitted requests. */
+    @Volatile internal var requestDrainWaitObserver: () -> Unit = {}
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
 
@@ -709,11 +711,15 @@ class UploadServer(
             requestDrain.begin(TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs),
                 TimeUnit.MILLISECONDS.toNanos(auditShutdownTimeoutMs))
             var extensionReported = false
+            var waitReported = false
             while (true) {
-                requestDrain.decide()?.let { return it }
+                // Report the extension even when the first observation is already past the audit deadline.
+                val decision = requestDrain.decide()
                 if (!extensionReported && requestDrain.auditExtended) { extensionReported = true; auditExtensionObserver() }
+                if (decision != null) return decision
                 val remaining = requestDrain.waitNanos()
                 if (remaining <= 0) continue
+                if (!waitReported) { waitReported = true; requestDrainWaitObserver() }
                 try { TimeUnit.NANOSECONDS.timedWait(lifecycleLock, remaining) } catch (_: InterruptedException) { onInterrupt() }
             }
         }

@@ -7,7 +7,6 @@ import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 import kotlin.test.*
 
 /** Controlled request-admission and archive-worker fixtures only; no workflow or external target executes. */
@@ -15,9 +14,9 @@ import kotlin.test.*
 class UploadServerShutdownTest {
     @Test fun `stop drains an actual request-worker audit append without setting durable loss`() {
         val root = createTempDirectory("web-request-audit-drain-")
-        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 3000)
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 5000)
         val caller = Executors.newSingleThreadExecutor()
-        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val entered = CountDownLatch(1); val release = CountDownLatch(1); val draining = CountDownLatch(1)
         fun record() = server.audit.record(WebAuditActor.OPERATOR, WebAuditAction.SUPPORT_EXPORT,
             WebAuditTarget(), WebAuditOutcome.ACCEPTED, 200, null, null)
         server.start()
@@ -34,8 +33,11 @@ class UploadServerShutdownTest {
                 as java.util.concurrent.ExecutorService
             val request = worker.submit<Boolean> { server.withActiveRequest { assertEquals(2L, record()?.sequence) } }
             assertTrue(entered.await(3, TimeUnit.SECONDS))
+            server.requestDrainWaitObserver = { draining.countDown() }
             val stop = caller.submit { server.stop() }
-            assertFailsWith<TimeoutException> { stop.get(150, TimeUnit.MILLISECONDS) }
+            // Positive point: stop is waiting in its request drain while the append is held.
+            assertTrue(draining.await(10, TimeUnit.SECONDS), "stop reached its request drain")
+            assertFalse(stop.isDone, "stop finished while the admitted append was held")
             assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }
             release.countDown()
             assertTrue(request.get(3, TimeUnit.SECONDS))
@@ -69,6 +71,15 @@ class UploadServerShutdownTest {
             .timeout(java.time.Duration.ofSeconds(10)).header("Content-Type", "application/json")
             .POST(java.net.http.HttpRequest.BodyPublishers.ofString("{}")).build(),
         java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode()
+
+    /** Waits for a positive state transition; never used to infer that something did not happen. */
+    private fun awaitState(label: String, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (!condition()) {
+            assertTrue(System.nanoTime() - deadline < 0, label)
+            Thread.sleep(1)
+        }
+    }
 
     private fun assertWholeAuditEntry(root: java.nio.file.Path, action: WebAuditAction = WebAuditAction.SESSION_START) {
         val reopened = WebAuditLog(root).read()
@@ -110,7 +121,8 @@ class UploadServerShutdownTest {
 
     @Test fun `stop returns audit-pending past the audit bound and retains ownership until the append finishes`() {
         val root = createTempDirectory("web-post-response-audit-bound-")
-        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 50, auditShutdownTimeoutMs = 400)
+        // Zero bounds: stop's first observation is already past the audit deadline, the late reporting path.
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 0, auditShutdownTimeoutMs = 0)
         val caller = Executors.newSingleThreadExecutor()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
         val finished = java.util.concurrent.atomic.AtomicBoolean()
@@ -250,9 +262,11 @@ class UploadServerShutdownTest {
 
     private fun checkDrain(interrupted: Boolean) {
         val root = createTempDirectory("web-request-drain-")
-        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 3000)
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 5000)
         val executor = Executors.newFixedThreadPool(2)
         val entered = CountDownLatch(1); val release = CountDownLatch(1); val stopping = CountDownLatch(1)
+        val draining = CountDownLatch(1)
+        server.requestDrainWaitObserver = { draining.countDown() }
         server.start()
         try {
             val request = executor.submit<Boolean> {
@@ -266,7 +280,9 @@ class UploadServerShutdownTest {
                 finally { Thread.interrupted() }
             }
             assertTrue(stopping.await(3, TimeUnit.SECONDS))
-            assertFailsWith<TimeoutException> { stop.get(150, TimeUnit.MILLISECONDS) }
+            // Positive point: stop is waiting in its request drain while the handler is held.
+            assertTrue(draining.await(10, TimeUnit.SECONDS), "stop reached its request drain")
+            assertFalse(stop.isDone, "stop finished while an admitted handler was held")
             assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }
             release.countDown()
             assertTrue(request.get(3, TimeUnit.SECONDS))
@@ -309,9 +325,15 @@ class UploadServerShutdownTest {
                     finally { Thread.interrupted() }
                 }
                 assertTrue(stopping.await(3, TimeUnit.SECONDS))
-                assertFailsWith<TimeoutException> { stop.get(150, TimeUnit.MILLISECONDS) }
-                if (!interruptBeforeStop) stoppingThread.get().interrupt()
-                assertFailsWith<TimeoutException> { stop.get(150, TimeUnit.MILLISECONDS) }
+                // Positive point: stop has shut the archive executor down and now waits for the held verifier.
+                awaitState("stop reached archive shutdown") { worker.isShutdown }
+                assertFalse(stop.isDone, "stop finished while the archive verifier was held")
+                if (!interruptBeforeStop) {
+                    stoppingThread.get().interrupt()
+                    // Positive point: archive shutdown consumed the interrupt and keeps waiting.
+                    awaitState("archive shutdown consumed the interrupt") { !stoppingThread.get().isInterrupted }
+                    assertFalse(stop.isDone, "an interrupt ended stop while the archive verifier was held")
+                }
                 assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }
                 release.countDown()
                 assertTrue(stop.get(5, TimeUnit.SECONDS), "stop must restore interruption after cleanup")
