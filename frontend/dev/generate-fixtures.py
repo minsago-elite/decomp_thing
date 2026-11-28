@@ -101,6 +101,8 @@ def responsive_exploration(job_path: str, job_id: str, base_run: dict, kind: str
                                             sizeBytes=str(len(data)), sha256=hashlib.sha256(data).hexdigest(),
                                             contentHref=content)
     report["data"]["sourceArtifact"]["binding"].update(jobId=job_id, runId=run_id, revisionId=None)
+    # The fulfilled content is these exact bytes, so the report must not inherit the contract example's redacted projection.
+    report["data"]["sourceArtifact"]["content"] = {"projection": "verbatim"}
     record(run_path + "/reports/exploration", report)
     artifacts[content] = {"body": body, "sha256": report["data"]["sourceArtifact"]["sha256"]}
     return {"kind": kind, "runPath": run_path, "contentPath": content}
