@@ -9,29 +9,60 @@ import org.junit.jupiter.api.extension.ExtensionContext
 
 /**
  * Writes one bounded JSON record per test JVM with its count of pre-execution scope restarts after
- * host mount churn, including zero, so CI evidence distinguishes quiet runs from recovered ones.
- * Display data only: it never admits, retries or waives anything.
+ * host mount churn, including zero, so CI evidence distinguishes quiet runs from recovered ones. An
+ * `.expected` marker without its JSON, or an `.incomplete` marker, is incomplete telemetry; report
+ * failures never fail a test. Display data only: it never admits, retries or waives anything.
  */
 internal class AcpHostMountChurnRestartReport : BeforeAllCallback {
     override fun beforeAll(context: ExtensionContext) {
-        context.root.getStore(ExtensionContext.Namespace.GLOBAL)
-            .getOrComputeIfAbsent(AcpHostMountChurnRestartReport::class.java.name, { Report() }, Report::class.java)
+        try {
+            context.root.getStore(ExtensionContext.Namespace.GLOBAL)
+                .getOrComputeIfAbsent(AcpHostMountChurnRestartReport::class.java.name, { Report() }, Report::class.java)
+        } catch (_: Throwable) { /* Telemetry never changes a test outcome; the absent marker stays visible. */ }
     }
 
+    /** Announces an expected report at registration, then completes it or marks it incomplete at teardown. */
     private class Report : ExtensionContext.Store.CloseableResource {
+        private val pid = ProcessHandle.current().pid()
+        private val directory: Path? = try {
+            reportDirectory(System.getenv()).also { Files.createDirectories(it) }
+        } catch (_: Throwable) { null }
+
+        init {
+            directory?.let { writeQuietly(it.resolve("test-jvm-$pid.expected"), "expected\n") }
+        }
+
         override fun close() {
-            val directory = repositoryRoot().resolve("build").resolve(DIRECTORY)
-            Files.createDirectories(directory)
-            val pid = ProcessHandle.current().pid()
-            val target = directory.resolve("test-jvm-$pid.json")
-            val staged = directory.resolve(".test-jvm-$pid.json.partial")
-            Files.writeString(staged, render(AcpHostMountChurnRestarts.total(), AcpHostMountChurnRestarts.retained()))
-            Files.move(staged, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            val target = directory ?: return
+            try {
+                val staged = target.resolve(".test-jvm-$pid.json.partial")
+                Files.writeString(staged, render(AcpHostMountChurnRestarts.total(), AcpHostMountChurnRestarts.retained()))
+                Files.move(staged, target.resolve("test-jvm-$pid.json"),
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: Throwable) {
+                writeQuietly(target.resolve("test-jvm-$pid.incomplete"), "write-failed\n")
+            }
         }
     }
 
     internal companion object {
         const val DIRECTORY = "acp-host-mount-churn-restarts"
+        private val DIGITS = Regex("[0-9]{1,20}")
+
+        /** One fresh directory per CI run attempt, so a rerun never mixes with an earlier attempt's reports. */
+        fun reportDirectory(environment: Map<String, String>): Path {
+            val run = environment["GITHUB_RUN_ID"]
+            val attempt = environment["GITHUB_RUN_ATTEMPT"]
+            val name = if (run != null && attempt != null && DIGITS.matches(run) && DIGITS.matches(attempt)) {
+                "github-$run-$attempt"
+            } else "local"
+            return repositoryRoot().resolve("build").resolve(DIRECTORY).resolve(name)
+        }
+
+        private fun writeQuietly(path: Path, text: String) {
+            try { Files.writeString(path, text) } catch (_: Throwable) { /* The missing JSON still marks it incomplete. */ }
+        }
+
         private val WITNESS = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
             "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=EVENT " +
             "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")

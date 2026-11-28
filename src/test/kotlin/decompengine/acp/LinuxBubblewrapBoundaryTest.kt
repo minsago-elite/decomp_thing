@@ -3169,7 +3169,7 @@ class LinuxBubblewrapBoundaryTest {
                     LinuxBubblewrapBoundaryTest::class.java.name, "setup-restart-barrier-probe", base.toString()),
             ).redirectErrorStream(true).redirectOutput(base.resolve("barrier-probe.log").toFile()).start()
             try {
-                assertTrue(process.waitFor(90, TimeUnit.SECONDS), "setup restart barrier probe timed out")
+                assertTrue(process.waitFor(150, TimeUnit.SECONDS), "setup restart barrier probe timed out")
                 val output = Files.readString(base.resolve("barrier-probe.log"))
                 assertEquals(0, process.exitValue(), output)
                 assertTrue(output.contains("setup-restart-barrier-probe: all controls passed"), output)
@@ -3282,7 +3282,105 @@ class LinuxBubblewrapBoundaryTest {
         } finally {
             boundary.close()
         }
+        runStuckSetupRestartDrainProbe(runtime, limits, expected, scopes, phase)
         println("setup-restart-barrier-probe: all controls passed")
+    }
+
+    /** A restarted attempt stuck in I/O cannot hold authorization past its own bound, even with a no-op checkpoint. */
+    private fun runStuckSetupRestartDrainProbe(
+        runtime: Path,
+        limits: AcpRuntimeClosureLimits,
+        expected: String,
+        scopes: Set<*>,
+        phase: Any,
+    ) {
+        val before = controlDirectories()
+        val units = mutableListOf<String>()
+        val scopeIdentities = mutableListOf<AcpSandboxScopeIdentity>()
+        val boundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            observer = unitObserver(units),
+            scopeObserver = AcpSandboxScopeObserver { identity -> scopeIdentities.add(identity) },
+        )
+        try {
+            val permit = setupRestartPermit(boundary)
+            val launch = probeLaunch(listOf("netns"))
+            val bound = minOf(Duration.ofSeconds(10), launch.maximumWallDuration)
+            val stuck = java.util.concurrent.CountDownLatch(1)
+            val unstick = java.util.concurrent.CountDownLatch(1)
+            var injected = false
+            var restarted: Result<String>? = null
+            val setup = Thread {
+                restarted = runCatching {
+                    buildRuntimeManifest(runtime, limits, emptySet(), cancellationCheck = {
+                        val frames = Thread.currentThread().stackTrace
+                        val inScope = frames.any { it.className.startsWith("decompengine.acp.RuntimePrivateControlScope") }
+                        if (!injected && frames.any { it.methodName == "checkpointLocked" } &&
+                            frames.none { it.className == "decompengine.acp.RuntimePrivateControlScope\$Companion" }) {
+                            injected = true
+                            val scope = scopes.single { candidate ->
+                                val root = candidate!!.javaClass.getDeclaredField("root").apply { isAccessible = true }.get(candidate)
+                                root.javaClass.getDeclaredMethod("getNamespacePath").invoke(root) == runtime
+                            }!!
+                            val check = scope.javaClass.getDeclaredField("mountEventCheck").apply { isAccessible = true }.get(scope)
+                            runCatching {
+                                invokePrivate(check, check.javaClass.getDeclaredMethod("requireObservation",
+                                    java.lang.Long.TYPE, phase.javaClass), (1L shl 32) or 10L, phase)
+                            }
+                        } else if (injected && stuck.count > 0 && !inScope &&
+                            frames.any { it.className.startsWith("java.util.stream.") }) {
+                            // The restarted attempt now holds its grant and blocks inside its walk.
+                            stuck.countDown()
+                            unstick.await(60, TimeUnit.SECONDS)
+                        }
+                    }, restart = permit).manifestSha256
+                }
+            }
+            var authorized = false
+            var outcome: Result<AcpSandboxedProcess>? = null
+            var drainObserved = 0L
+            var finishedAt = 0L
+            try {
+                setup.start()
+                assertTrue(stuck.await(30, TimeUnit.SECONDS), "the restarted attempt never reached its walk")
+                val launching = Thread {
+                    // A no-op checkpoint: only the drain's own bound may end the wait.
+                    outcome = runCatching { boundary.launch(launch, true, {}) { authorized = true } }
+                    finishedAt = System.nanoTime()
+                }
+                launching.start()
+                // Admission closes when draining begins; the stuck grant is still held.
+                val pollDeadline = System.nanoTime() + Duration.ofSeconds(40).toNanos()
+                while (drainObserved == 0L && System.nanoTime() < pollDeadline && launching.isAlive) {
+                    val grant = permit.holdBeforeUntrustedExecution()
+                    if (grant == null) drainObserved = System.nanoTime() else { grant.close(); Thread.sleep(2) }
+                }
+                assertTrue(drainObserved != 0L, "restart admission must close as soon as authorization drains")
+                launching.join(bound.plusSeconds(20).toMillis())
+                assertFalse(launching.isAlive, "authorization must stop waiting at its own bound")
+                assertEquals(1L, unstick.count, "the restarted attempt stayed stuck for the whole wait")
+            } finally {
+                unstick.countDown()
+                setup.join(30_000)
+            }
+            val drained = Duration.ofNanos(finishedAt - drainObserved)
+            val failure = requireNotNull(outcome).exceptionOrNull()
+            assertEquals("restarted sandbox setup did not finish before authorization", failure?.message, failure.toString())
+            assertFalse(authorized, "a launch must never authorize while a restarted attempt may run")
+            assertTrue(drained >= bound.minusMillis(250), "drain ended early after $drained")
+            assertTrue(drained <= bound.plusSeconds(8), "drain and cleanup exceeded the bound: $drained")
+            assertTrue(boundary.evidence(null).launches.isEmpty())
+            units.forEach(::assertUnitAbsent)
+            scopeIdentities.forEach { assertFalse(Files.exists(it.cgroupPath, LinkOption.NOFOLLOW_LINKS)) }
+            assertEquals(null, permit.holdBeforeUntrustedExecution(), "a timed-out drain never reopens restarts")
+            // The grant that was already running finishes normally; nothing it computed is authorized.
+            assertEquals(expected, requireNotNull(restarted).getOrThrow())
+            println("setup-restart-barrier-probe: stuckRestartDrainBoundMillis=${bound.toMillis()} " +
+                "drainAndCleanupMillis=${drained.toMillis()} admissionClosed=true neverAuthorized=true")
+        } finally {
+            boundary.close()
+        }
+        assertBoundaryResidueAbsent(before, units, scopeIdentities)
     }
 
     @Test

@@ -72,7 +72,8 @@ Each new attempt opens a new mountinfo descriptor, baseline, table snapshot and 
 identities. It reuses nothing that the refused attempt computed.
 
 A scope's final poll and its detachment from other threads' control admission happen in one registry
-transaction. Another thread's admission polls every published scope. If it latches an event before
+transaction. The final poll runs after the last control and root revalidation, immediately before
+detachment. Another thread's admission polls every published scope. If it latches an event before
 that transaction, the attempt fails at its final poll. After the transaction, no thread can latch the
 scope, so an accepted result never coexists with an event latched on its own scope.
 
@@ -84,12 +85,22 @@ scope, so an accepted result never coexists with an event latched on its own sco
 | Later launches on that boundary, including terminal launches | No |
 | Internal `calculateAcpRuntimeManifestSha256(source, limits, check)`, Full-tree Ninja re-verification, sealed snapshot checks | No |
 
-Each boundary orders its restarts against its first authorization with a read-write barrier. A
-restarted attempt holds the shared side from its restart decision until it finishes. The first
-authorization takes the exclusive side after it reserves launch evidence. It waits, while honoring
-cancellation, for restarted attempts already in flight, then revokes the permit before the broker's
-write-ahead authorization callback and the start byte. A restart decision after revocation is refused.
-The permit never returns, even after cleanup is proven.
+Each boundary orders its restarts against its first authorization. A restarted attempt holds a
+grant from its restart decision until it finishes. The first authorization starts after the launch
+reserves its evidence and before the broker's write-ahead authorization callback and the start byte:
+
+1. It closes restart admission permanently. From then on, every restart decision on that boundary is
+   refused, so the refusal is final.
+2. It waits only for grants issued before admission closed. The wait has its own bound: 10 seconds,
+   or the launch's wall-duration ceiling if that is shorter, because the launch's systemd scope
+   already enforces that ceiling. The caller's cancellation checkpoint is still checked every 50 ms,
+   but the bound holds even when that checkpoint does nothing.
+3. If grants remain at the bound, the launch fails with
+   `restarted sandbox setup did not finish before authorization`. It goes through the same
+   pre-authorization cleanup as any other launch failure and never authorizes. Admission stays
+   closed, and a later launch waits again under its own bound.
+
+Admission never reopens, even after cleanup is proven.
 
 Each discarded refusal keeps its closed witness. If the unit still fails, those witnesses are
 attached as suppressed throwables to the final failure. If a restart succeeds, the 16 most recent
@@ -138,18 +149,34 @@ namespaces and cannot propagate into the JVM's namespace.
   the permit on a live boundary. The permit survives a launch that is refused before start. It is
   revoked inside the authorization callback, and it stays revoked after cleanup.
 - `restarted setup attempts complete before a concurrent first authorization` runs in a separate JVM
-  on a live boundary. A restarted attempt pauses after its restart decision while another launch
-  reaches authorization. The launch waits at the barrier, and authorization follows the restarted
-  attempt. A refusal after authorization is final.
+  on live boundaries:
+  - A restarted attempt pauses after its restart decision while another launch reaches
+    authorization. The launch waits, and authorization follows the restarted attempt. A refusal after
+    authorization is final.
+  - A restarted attempt blocks inside its walk while a launch with a no-op checkpoint reaches
+    authorization. Restart admission closes as soon as draining begins. The launch fails at its
+    bound, its sandbox scope and control directory are cleaned up, and it never authorizes.
 
 ## Restart evidence in CI
 
-Each test JVM writes `build/acp-host-mount-churn-restarts/test-jvm-<pid>.json` when its ACP test
-classes finish. The file records the number of successful restarts after natural host churn, which
-can be zero, and up to 16 closed witnesses. The required ACP contract job uploads the directory as
-`required-acp-host-mount-churn-restarts`. A run with a zero count was quiet. A run with a positive
-count recovered from churn. A missing file is incomplete evidence. Tests that inject restarts
-deliberately run in child JVMs, so their restarts are not counted.
+Reports go to `build/acp-host-mount-churn-restarts/github-<run id>-<run attempt>/`, so each run
+attempt starts with a fresh directory. Outside Actions the directory is named `local`.
+
+- When the first annotated ACP test class starts, its JVM writes `test-jvm-<pid>.expected`.
+- When the JVM's tests finish, it writes `test-jvm-<pid>.json`. The file records the number of
+  successful restarts after natural host churn, which can be zero, and up to 16 closed witnesses.
+- If that write fails, the JVM writes `test-jvm-<pid>.incomplete` instead. Report failures never
+  fail a test.
+
+`scripts/ci-summarize-host-mount-churn-restarts.sh` prints one summary line, adds it to the job
+summary and stores it as `summary.txt`:
+- `COMPLETE`: every expected report is present.
+- `INCOMPLETE`: an expected report is missing or marked incomplete.
+- `ABSENT`: no ACP test JVM registered.
+
+The required ACP contract job and every `kotlin-<shard>` job upload the directory, named with the
+run attempt. A quiet run reports zero; a recovered run reports a positive count. Tests that inject
+restarts deliberately run in child JVMs, so their restarts are not counted.
 
 ## Remaining work
 

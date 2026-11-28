@@ -31,4 +31,16 @@ class AcpHostMountChurnRestartReportTest {
             AcpHostMountChurnRestartReport.render(2, listOf(witness(admitted), witness("forged \"admission\" /PRIVATE"))),
         )
     }
+
+    @Test
+    fun `restart reports use one directory per run attempt and never trust malformed identifiers`() {
+        fun leaf(environment: Map<String, String>) =
+            AcpHostMountChurnRestartReport.reportDirectory(environment).fileName.toString()
+        assertEquals("github-46102066453-2", leaf(mapOf("GITHUB_RUN_ID" to "46102066453", "GITHUB_RUN_ATTEMPT" to "2")))
+        assertEquals("local", leaf(emptyMap()))
+        assertEquals("local", leaf(mapOf("GITHUB_RUN_ID" to "46102066453")))
+        assertEquals("local", leaf(mapOf("GITHUB_RUN_ID" to "../escape", "GITHUB_RUN_ATTEMPT" to "1")))
+        assertEquals(AcpHostMountChurnRestartReport.DIRECTORY,
+            AcpHostMountChurnRestartReport.reportDirectory(emptyMap()).parent.fileName.toString())
+    }
 }

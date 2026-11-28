@@ -23,7 +23,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.locks.ReentrantReadWriteLock
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** Failure-only display data from a closed producer; never execution, identity or cleanup authority. */
 internal sealed interface AcpMountEventWitness {
@@ -526,35 +527,67 @@ internal class LinuxBubblewrapBoundary private constructor(
     private val closed = AtomicBoolean(false)
     private val closeFailure = AtomicReference<AcpCleanupProofFailure?>()
     /**
-     * Set, never cleared, before this boundary's first authorization commit. Until then no target of
-     * this boundary can run, so its setup scopes may restart after their own host mount EVENT refusal
-     * (#1799); from then on every refusal is final for every launch, including terminal launches.
-     * Restarted attempts hold the barrier's shared side for their whole duration; revocation takes
-     * its exclusive side, so every restarted attempt completes before the first authorization.
+     * Until this boundary first starts to authorize a target, none of its targets can run, so its
+     * setup scopes may restart after their own host mount EVENT refusal (#1799). Each restarted
+     * attempt holds a grant for its whole duration. Authorization first closes admission for good,
+     * then waits, within its own bound, until no grant remains; only then may it authorize.
      */
     private val authorizationMayHaveCommitted = AtomicBoolean(false)
-    private val setupRestartBarrier = ReentrantReadWriteLock()
+    private val setupRestartLock = ReentrantLock()
+    private val setupRestartsReleased = setupRestartLock.newCondition()
+    /** Guarded by [setupRestartLock]; set when authorization starts draining and never cleared. */
+    private var setupRestartsClosed = false
+    /** Guarded by [setupRestartLock]: live grants per holding thread. */
+    private val setupRestartHolders = HashMap<Thread, Int>()
     private val setupRestart = AcpSetupRestartPermit {
-        val shared = setupRestartBarrier.readLock()
-        shared.lock()
-        if (authorizationMayHaveCommitted.get()) {
-            shared.unlock()
-            null
-        } else AutoCloseable { shared.unlock() }
+        setupRestartLock.withLock {
+            if (setupRestartsClosed) null else {
+                val holder = Thread.currentThread()
+                setupRestartHolders[holder] = (setupRestartHolders[holder] ?: 0) + 1
+                SetupRestartGrant(holder)
+            }
+        }
     }
 
-    /** Waits, cancellably, for in-flight restarted attempts, then revokes restarts permanently. */
-    private fun revokeSetupRestarts(cancellationCheck: () -> Unit) {
-        if (authorizationMayHaveCommitted.get()) return
-        if (setupRestartBarrier.readHoldCount > 0) {
-            throw IOException("sandbox authorization cannot begin inside a restarted setup attempt")
+    private inner class SetupRestartGrant(private val holder: Thread) : AutoCloseable {
+        private var released = false
+
+        override fun close() = setupRestartLock.withLock {
+            if (released) return@withLock
+            released = true
+            val remaining = (setupRestartHolders[holder] ?: 1) - 1
+            if (remaining == 0) setupRestartHolders.remove(holder) else setupRestartHolders[holder] = remaining
+            if (setupRestartHolders.isEmpty()) setupRestartsReleased.signalAll()
         }
-        val exclusive = setupRestartBarrier.writeLock()
-        while (!exclusive.tryLock(SETUP_RESTART_BARRIER_WAIT_MILLISECONDS, TimeUnit.MILLISECONDS)) cancellationCheck()
-        try {
-            authorizationMayHaveCommitted.set(true)
-        } finally {
-            exclusive.unlock()
+    }
+
+    /**
+     * Closes restart admission permanently, then waits only for grants already issued. The wait has
+     * its own bound, [SETUP_RESTART_DRAIN_TIMEOUT] capped by the launch's wall-duration ceiling that
+     * its systemd scope already enforces, so a stuck attempt or a no-op checkpoint cannot hold the
+     * launch. On expiry the launch fails closed through its pre-authorization cleanup.
+     */
+    private fun revokeSetupRestarts(maximumWallDuration: Duration, cancellationCheck: () -> Unit) {
+        if (authorizationMayHaveCommitted.get()) return
+        val bound = minOf(SETUP_RESTART_DRAIN_TIMEOUT, maximumWallDuration)
+        val deadline = System.nanoTime() + bound.toNanos()
+        while (true) {
+            setupRestartLock.withLock {
+                if (Thread.currentThread() in setupRestartHolders) {
+                    throw IOException("sandbox authorization cannot begin inside a restarted setup attempt")
+                }
+                setupRestartsClosed = true
+                if (setupRestartHolders.isEmpty()) {
+                    authorizationMayHaveCommitted.set(true)
+                    return
+                }
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0L) {
+                    throw IOException("restarted sandbox setup did not finish before authorization")
+                }
+                setupRestartsReleased.awaitNanos(minOf(remaining, SETUP_RESTART_DRAIN_POLL_NANOS))
+            }
+            cancellationCheck()
         }
     }
 
@@ -1016,7 +1049,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             val reservation = reserveSuccessfulLaunchEvidence(launchEvidence)
             launchEvidenceReservation = reservation
             // From here a target may be authorized; no later setup in this boundary may restart.
-            revokeSetupRestarts(cancellationCheck)
+            revokeSetupRestarts(launch.maximumWallDuration, cancellationCheck)
             cancellationCheck()
             beforeAuthorizationCommit()
             // No fallible operation or cancellation/policy check follows the broker's
@@ -2195,8 +2228,15 @@ private val BEFORE_ANY_UNTRUSTED_EXECUTION = AcpSetupRestartPermit { NOTHING_TO_
 /** The original attempt plus two complete restarts. */
 private const val MAXIMUM_HOST_MOUNT_CHURN_ATTEMPTS = 3
 
-/** Revocation polls the caller's cancellation checkpoint while restarted attempts drain. */
-private const val SETUP_RESTART_BARRIER_WAIT_MILLISECONDS = 50L
+/**
+ * Upper bound for authorization to wait on restarted setup attempts that were already running when
+ * it closed restart admission. One restarted attempt is a single runtime manifest or snapshot copy,
+ * which also runs within the caller's prelaunch budget; expiry fails the launch closed.
+ */
+private val SETUP_RESTART_DRAIN_TIMEOUT: Duration = Duration.ofSeconds(10)
+
+/** The drain re-checks the caller's cancellation checkpoint at least this often. */
+private val SETUP_RESTART_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(50)
 
 /** Identity-only record of the refusals built by the latches of scopes opened for one attempt. */
 private class ManifestScopeAttempt {
@@ -2619,6 +2659,9 @@ private class RuntimePrivateControlScope private constructor(
         // an event any thread latched before it fails this attempt, and none can latch it afterwards.
         synchronized(ACTIVE_PRIVATE_CONTROLS) {
             checkpointLocked()
+            // checkpointLocked revalidates controls and the root after its poll; poll once more so the
+            // latch covers every event through detachment.
+            requireMountsUnchanged(MountEventPhase.CHECKPOINT)
             finished = true
         }
         observePrivateControlTransaction(PrivateControlTransactionStage.AFTER_MANIFEST_DETACH)
