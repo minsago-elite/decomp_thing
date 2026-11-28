@@ -1022,8 +1022,9 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
       };
     },
     /**
-     * Identify the single captured response whose recorded identity the rendered page shows. Superseded requests
-     * cancelled before any body was captured are accounted for; every other candidate must be the consumed one.
+     * Identify the captured response whose recorded identity the rendered page shows. Superseded requests
+     * cancelled before any body was captured and byte-identical continued refetches are accounted for; every other
+     * candidate must be the consumed one.
      */
     consumedResponse(path, matchesRendered) {
       const captures = order.filter((value) => value.path === path);
@@ -1046,24 +1047,29 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
         try { matched = matchesRendered(snapshot) === true; } catch { matched = false; }
         if (matched) matches.push({ value, snapshot });
       }
-      if (matches.length > 1) {
-        for (const { value } of matches) value.role = 'duplicate-match';
-        fail('Unaccounted duplicate module responses');
-      }
       if (matches.length === 0) fail('No captured module response matches the rendered identity');
-      const [{ value: consumed, snapshot }] = matches;
+      // As on master (#1879), matching captures with byte-identical bodies are one response fetched again: a
+      // benign refetch. Matching captures whose bytes differ conflict, and nothing else excuses them.
+      if (matches.some(({ value }) => value.body !== matches[0].value.body)) {
+        for (const { value } of matches) value.role = 'conflicting-match';
+        fail('Conflicting module responses match the rendered identity');
+      }
+      const delivered = (value) => value.pausedStatus === 200 && value.networkStatus === 200 && !value.fromDiskCache
+        && !value.fromServiceWorker && value.continuation === 'continued' && value.terminal !== 'failed';
+      const { value: consumed, snapshot } = matches.find(({ value }) => delivered(value)) ?? matches[0];
       consumed.role = 'consumed';
-      const valid = consumed.pausedStatus === 200 && consumed.networkStatus === 200 && !consumed.fromDiskCache
-        && !consumed.fromServiceWorker && consumed.continuation === 'continued' && consumed.terminal !== 'failed';
+      // A refetch, like master's other captures, must itself have been continued unchanged.
+      for (const { value } of matches) if (value !== consumed && value.continuation === 'continued') value.role = 'identical-refetch';
       for (const value of captures) {
         if (value === consumed) continue;
         if (value.terminal === 'canceled' && value.capture === 'pending') value.role = 'superseded-canceled';
       }
-      if (!valid) fail('Consumed module response violates delivery constraints');
+      if (!delivered(consumed)) fail('Consumed module response violates delivery constraints');
       if (captures.some((value) => value.role === undefined)) fail('Unaccounted module response');
       return { snapshot, evidence: { networkId: consumed.networkId, xRequestId: consumed.responseRequestId,
         terminal: consumed.terminal, candidates: captures.length,
-        supersededCanceled: captures.filter((value) => value.role === 'superseded-canceled').length } };
+        supersededCanceled: captures.filter((value) => value.role === 'superseded-canceled').length,
+        identicalRefetches: captures.filter((value) => value.role === 'identical-refetch').length } };
     },
   };
 }

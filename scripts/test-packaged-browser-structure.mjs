@@ -165,7 +165,8 @@ test('consumed module response is matched by rendered identity and carries X-Req
   deliver(recorder, 'net-1');
   const { snapshot, evidence } = recorder.consumedResponse(modulePath, rendered('module_0041'));
   assert.equal(snapshot.module.moduleId, 'module_0041');
-  assert.deepEqual(evidence, { networkId: 'net-1', xRequestId: 'req-1', terminal: 'finished', candidates: 1, supersededCanceled: 0 });
+  assert.deepEqual(evidence, { networkId: 'net-1', xRequestId: 'req-1', terminal: 'finished', candidates: 1, supersededCanceled: 0,
+    identicalRefetches: 0 });
 });
 
 test('cancellation after body capture keeps the captured evidence', async () => {
@@ -207,15 +208,55 @@ test('unmatched or foreign identity fails', async () => {
   assert.throws(() => createStructureResponseRecorder().consumedResponse(modulePath, () => true), /Missing module response/);
 });
 
-test('unexplained duplicates fail: two matching bodies or an extra completed response', async () => {
+test('a byte-identical continued refetch is benign, as on master (R3)', async () => {
   const both = createStructureResponseRecorder();
   const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041'), 'interception-2': moduleBody('module_0041') });
   const intercept = createModuleResponseInterceptor({ call: cdp.call, recorder: both, browserOrigin });
   await intercept(paused());
   await intercept(paused({ requestId: 'interception-2', networkId: 'net-2' }));
   deliver(both, 'net-1');
-  deliver(both, 'net-2');
-  assert.throws(() => both.consumedResponse(modulePath, rendered('module_0041')), /Unaccounted duplicate module responses/);
+  deliver(both, 'net-2', { terminal: 'failed' });
+  const { snapshot, evidence } = both.consumedResponse(modulePath, rendered('module_0041'));
+  assert.equal(snapshot.module.moduleId, 'module_0041');
+  assert.deepEqual(evidence, { networkId: 'net-1', xRequestId: 'req-1', terminal: 'finished', candidates: 2, supersededCanceled: 0,
+    identicalRefetches: 1 });
+  assert.deepEqual(cdp.calls.filter(([method]) => method === 'Fetch.getResponseBody').map(([, id]) => id), ['interception-1', 'interception-2'],
+    'one response-stage read per paused response; no retry or replacement read');
+
+  // The delivered capture is the consumed one even when it arrived second.
+  const later = createStructureResponseRecorder();
+  const cdpLater = fakeCdp({ 'interception-1': moduleBody('module_0041'), 'interception-2': moduleBody('module_0041') });
+  const interceptLater = createModuleResponseInterceptor({ call: cdpLater.call, recorder: later, browserOrigin });
+  await interceptLater(paused());
+  await interceptLater(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  later.loadingFailed('net-1', { errorText: 'net::ERR_ABORTED', canceled: true });
+  deliver(later, 'net-2');
+  assert.equal(later.consumedResponse(modulePath, rendered('module_0041')).evidence.networkId, 'net-2');
+});
+
+test('conflicting or undelivered matching captures still fail (R3)', async () => {
+  // Both bodies show the rendered identity but their bytes differ: nothing proves which one the page consumed.
+  const conflicting = createStructureResponseRecorder();
+  const variant = JSON.stringify({ data: { module: { moduleId: 'module_0041' }, sourceSha256: 'a'.repeat(64), metadataVersion: 'b'.repeat(64) } });
+  const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041'), 'interception-2': variant });
+  const intercept = createModuleResponseInterceptor({ call: cdp.call, recorder: conflicting, browserOrigin });
+  await intercept(paused());
+  await intercept(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  deliver(conflicting, 'net-1');
+  deliver(conflicting, 'net-2');
+  assert.throws(() => conflicting.consumedResponse(modulePath, rendered('module_0041')),
+    /Conflicting module responses match the rendered identity.*id=net-1.*role=conflicting-match.*id=net-2.*role=conflicting-match/);
+
+  // A byte-identical refetch that was not continued unchanged is not explained.
+  const stalled = createStructureResponseRecorder();
+  const bodies = { 'interception-1': moduleBody('module_0041'), 'interception-2': moduleBody('module_0041') };
+  await createModuleResponseInterceptor({ call: fakeCdp(bodies).call, recorder: stalled, browserOrigin })(paused());
+  await createModuleResponseInterceptor({ call: fakeCdp(bodies, { failContinue: true }).call, recorder: stalled, browserOrigin })(
+    paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  deliver(stalled, 'net-1');
+  deliver(stalled, 'net-2');
+  assert.throws(() => stalled.consumedResponse(modulePath, rendered('module_0041')),
+    /Unaccounted module response.*id=net-2.*continuation=continue-failed.*role=unaccounted/);
 
   const extra = createStructureResponseRecorder();
   const cdp2 = fakeCdp({ 'interception-1': moduleBody('module_0041'), 'interception-2': moduleBody('module_0041', 'b') });
