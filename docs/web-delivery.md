@@ -224,8 +224,8 @@ median/p95 values.
 The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
 chunks and worker are real packaged responses. That isolates browser-side navigation and
 rendering work. The default `--profile reference` preserves browser defaults and applies the
-documented navigation budgets. An opt-in `--profile constrained` applies 4× CPU throttling and
-symmetric 10 Mbit/s throughput to each audit page target. It records and validates the same timing
+documented navigation budgets. An opt-in `--profile constrained` applies the constrained measurement profile above (4× CPU,
+10 Mbit/s download, 2 Mbit/s upload, 100 ms latency) to each audit page target. It records and validates the same timing
 evidence (navigation, filter and source-open) but does not apply the reference timing thresholds; it creates no new interaction budget
 or CI gate. The profile does not create a fresh browser process per cold load, measure server
 latency or establish a cross-engine result. A local reference-profile run on a development host

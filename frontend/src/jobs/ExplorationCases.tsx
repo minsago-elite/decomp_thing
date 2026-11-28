@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Artifact } from '../api/generated';
 import { withApiFailureReference } from '../api/errors';
+import { isDeletedJob } from '../shared/retainMetadata';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { explorationCasesCopy as copy } from '../copy/attempt';
 import { message, textMessage } from '../shared/messages';
@@ -76,7 +77,8 @@ function CaseDetail({ value, artifact, jobId, runId, partial }: { value: Retaine
 }
 
 /** Explicit read only; navigation and filters never submit a workflow or persist report bytes. */
-type CasesProps = { artifact: Artifact; jobId: string; runId: string; basePath: string; producerSchemaVersion?: 1 | 2 | null };
+type CasesProps = { artifact: Artifact; jobId: string; runId: string; basePath: string; producerSchemaVersion?: 1 | 2 | null;
+  onDeleted?: (failure: unknown) => void };
 
 export function ExplorationCases(props: CasesProps) {
   const scope = JSON.stringify([props.jobId, props.runId, props.basePath, props.artifact, props.producerSchemaVersion ?? null]);
@@ -85,8 +87,9 @@ export function ExplorationCases(props: CasesProps) {
   return <CaseReader key={scope} {...props} artifact={artifact} />;
 }
 
-function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = null }: CasesProps) {
+function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = null, onDeleted }: CasesProps) {
   const { client } = usePrivateTransport(basePath);
+  const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const [intent, setIntent] = useState<{ client: typeof client } | null>(null);
   const [observation, setData] = useState<Received<RetainedCases | FailureRetainedCases | PreparationCases> | null>(null);
   const data = observation?.value;
@@ -104,7 +107,9 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
       if (!controller.signal.aborted) setData(receive(producerSchemaVersion === 1 ? parsePartialCases(text)
         : parseRetainedCases(text, producerSchemaVersion === 2 ? 2 : null)));
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(withApiFailureReference(copy.unavailable, failure));
+      if (controller.signal.aborted) return;
+      if (isDeletedJob(failure) && deletedHandler.current) { deletedHandler.current(failure); return; }
+      setError(withApiFailureReference(copy.unavailable, failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [artifact, jobId, runId, client, intent, producerSchemaVersion]);

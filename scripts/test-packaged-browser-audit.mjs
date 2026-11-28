@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, compactJobFilterAuditEvidence, compactTimedAuditEvidence, fileOpenChunkQuery, fileOpenContract, fileOpenEvidenceContract, fileOpenFailures, fileOpenMetadataPhase, fileOpenPin, fileOpenPreviewPhase, renderedPreviewDigest, sourceResponseIdentity, timedPhaseScript, filterElementVisible, focusFilterSubmitForTiming, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, applyAuditProfile, auditProfileEvidence, chromiumSupplementalInteractionContexts, engineSupplementalInteractionContexts,
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, compactJobFilterAuditEvidence, compactTimedAuditEvidence, focusTrajectoryFrames, focusTrajectoryMs, fileOpenChunkQuery, fileOpenContract, fileOpenEvidenceContract, fileOpenFailures, fileOpenMetadataPhase, fileOpenPin, fileOpenPreviewPhase, renderedPreviewDigest, sourceResponseIdentity, timedPhaseScript, filterElementVisible, focusFilterSubmitForTiming, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, applyAuditProfile, auditProfileEvidence, chromiumSupplementalInteractionContexts, engineSupplementalInteractionContexts, preparedFocusInteractionContexts,
   captureOutputSignatureChart, chartCaptureFailures, chartCaptureSets, measureChartCaptureTile, measureOutputSignatureChart, pngDimensions, prepareChartCaptureTile } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
@@ -171,7 +171,7 @@ const verdict = (audit, served = responses) => assertAudit(audit, manifest, serv
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
-  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length, audit.chart.length], [120, 48, 24, 10]);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length, audit.chart.length], [130, 52, 26, 10]);
   assert.deepEqual(verdict(audit), []);
 });
 
@@ -488,8 +488,9 @@ test('interaction records match each fixture action and are summarized without a
   slow.timing.interactions = { samples: slow.interactions.length, median: 10_000, p95: 10_000 };
   assert.deepEqual(verdict(slow), [], 'interaction timings are summarized but have no unapproved threshold');
 
+  const engineContexts = engineSupplementalInteractionContexts(interactionPages);
   const crossEngine = clean();
-  for (const { page: pageName, context } of engineSupplementalInteractionContexts) {
+  for (const { page: pageName, context } of engineContexts) {
     const page = interactionPages.find(entry => entry.name === pageName);
     for (const [stepIndex, step] of page.preparation.entries()) {
       crossEngine.interactions.push({ page: page.name, action: step.action, stepIndex,
@@ -500,12 +501,85 @@ test('interaction records match each fixture action and are summarized without a
   crossEngine.timing.interactions.samples = crossEngine.interactions.length;
   assert.deepEqual(assertAudit(crossEngine, manifest, responses, origin, undefined, {
     interactionPages,
-    extraInteractionContexts: engineSupplementalInteractionContexts,
+    extraInteractionContexts: engineContexts,
   }).failures, []);
   assert.match(verdict(crossEngine).join('\n'), /unexpected action/);
 });
 
-test('the constrained profile is explicit, applies 4x CPU and 10 Mbit/s, and does not apply reference budgets', async () => {
+test('Firefox/WebKit focus contexts derive from every prepared fixture page (#1805 hosted 91 vs 89)', () => {
+  const engineVerdict = (audit, extra) => assertAudit(audit, manifest, responses, origin, undefined, {
+    connectionNotice: false, jobFilter: false, fileOpen: false, interactionPages, extraInteractionContexts: extra }).failures;
+  const preparedNames = interactionPages.filter(page => (page.preparation ?? []).length > 0).map(page => page.name);
+  assert.ok(preparedNames.includes('structure functions'), 'structure functions declares a Refresh preparation step');
+  const focusContexts = preparedFocusInteractionContexts(interactionPages);
+  assert.deepEqual(focusContexts, preparedNames.flatMap(page => ['focus light', 'focus dark'].map(context => ({ page, context }))));
+  assert.deepEqual(chromiumSupplementalInteractionContexts(interactionPages).filter(entry => entry.context.startsWith('focus ')), focusContexts,
+    'Chromium and engine runners share one focus derivation');
+  const engineContexts = engineSupplementalInteractionContexts(interactionPages);
+  assert.deepEqual(engineContexts.filter(entry => !entry.context.startsWith('focus ')), [
+    { page: 'attempt overview', context: 'keyboard commands' },
+    { page: 'source file', context: 'keyboard download' },
+    { page: 'source file', context: 'worker/CSP qualification' }]);
+
+  // Replay the hosted shape: the Playwright runner prepares every page in each focus scheme.
+  const hosted = clean();
+  const push = (audit, pageName, context) => {
+    const page = interactionPages.find(entry => entry.name === pageName);
+    for (const [stepIndex, step] of page.preparation.entries()) {
+      audit.interactions.push({ page: page.name, action: step.action, stepIndex, elapsedMs: 5, reads: [...step.reads], context });
+      audit.timing.raw.interactions.push(5);
+    }
+  };
+  // Summary values are unchanged by these rows (clean() timings already bracket them); only the count moves.
+  const seal = audit => { audit.timing.interactions.samples = audit.interactions.length; return audit; };
+  for (const { page, context } of engineContexts) push(hosted, page, context);
+  seal(hosted);
+  assert.equal(hosted.interactions.filter(entry => entry.page === 'structure functions' && entry.context.startsWith('focus ')).length, 2);
+  assert.deepEqual(engineVerdict(hosted, engineContexts), [], 'hosted Firefox/WebKit interaction set is accepted');
+
+  // Regression control: the old hand-kept engine list omitted structure functions.
+  const legacy = [...['attempt overview', 'attempt activity', 'attempt evidence', 'source file'].flatMap(page =>
+    ['focus light', 'focus dark'].map(context => ({ page, context }))),
+  { page: 'attempt overview', context: 'keyboard commands' }, { page: 'source file', context: 'keyboard download' },
+  { page: 'source file', context: 'worker/CSP qualification' }];
+  const legacyFailures = engineVerdict(hosted, legacy).join('\n');
+  assert.match(legacyFailures, /unexpected action \["structure functions",0,"Refresh from the first page","focus light"\]/);
+  assert.match(legacyFailures, /requires 89 finite/);
+
+  // Missing focus record for structure functions fails closed.
+  const missing = structuredClone(hosted);
+  const drop = missing.interactions.findIndex(entry => entry.page === 'structure functions' && entry.context === 'focus dark');
+  missing.interactions.splice(drop, 1); missing.timing.raw.interactions.splice(drop, 1); seal(missing);
+  assert.match(engineVerdict(missing, engineContexts).join('\n'), /missing action \["structure functions",0,"Refresh from the first page","focus dark"\]/);
+
+  // Duplicate and unexpected rows still fail.
+  const duplicated = structuredClone(hosted);
+  duplicated.interactions.push(structuredClone(duplicated.interactions.at(-1))); duplicated.timing.raw.interactions.push(5); seal(duplicated);
+  assert.match(engineVerdict(duplicated, engineContexts).join('\n'), /duplicate action/);
+  const wrongRead = structuredClone(hosted);
+  wrongRead.interactions.find(entry => entry.page === 'structure functions' && entry.context === 'focus light').reads = [];
+  assert.match(engineVerdict(wrongRead, engineContexts).join('\n'), /structure functions \/ Refresh from the first page \(focus light\) reads do not match fixture/);
+  const wrongStep = structuredClone(hosted);
+  wrongStep.interactions.find(entry => entry.page === 'structure functions' && entry.context === 'focus light').stepIndex = 1;
+  assert.match(engineVerdict(wrongStep, engineContexts).join('\n'), /unexpected action \["structure functions",1,/);
+
+  // Forged or unprepared pages and undeclared contexts are rejected by the derivation and the verdict.
+  assert.throws(() => preparedFocusInteractionContexts([...interactionPages, { name: 'forged', preparation: [{ action: 'x', reads: [] }] }]), /undeclared fixture page/);
+  assert.throws(() => preparedFocusInteractionContexts([{ name: 'structure functions', preparation: 'Refresh' }]), /invalid preparation/);
+  assert.throws(() => preparedFocusInteractionContexts(undefined), /fixture page contract/);
+  assert.ok(!preparedFocusInteractionContexts(interactionPages).some(entry => entry.page === 'workspace'), 'unprepared pages get no focus context');
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'workspace', context: 'focus light' }]).join('\n'), /extra context for unprepared page \["workspace","focus light"\]/);
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'forged', context: 'focus light' }]).join('\n'), /invalid extra context contract/);
+  assert.match(engineVerdict(hosted, [...engineContexts, { page: 'source file', context: 'focus sepia' }]).join('\n'), /undeclared extra context \["source file","focus sepia"\]/);
+  assert.match(engineVerdict(hosted, [...engineContexts, engineContexts[0]]).join('\n'), /duplicate extra context/);
+  assert.match(engineVerdict(hosted, 'focus light').join('\n'), /invalid extra context contract/);
+  const forgedRow = structuredClone(hosted);
+  forgedRow.interactions.push({ page: 'workspace', action: 'Refresh from the first page', stepIndex: 0, elapsedMs: 5, reads: [], context: 'focus light' });
+  forgedRow.timing.raw.interactions.push(5); seal(forgedRow);
+  assert.match(engineVerdict(forgedRow, engineContexts).join('\n'), /unexpected action \["workspace",0/);
+});
+
+test('the constrained profile is explicit, matches the documented 4x CPU, 10/2 Mbit/s, 100 ms contract, and does not apply reference budgets', async () => {
   const calls = [];
   const cdp = { call: async (...args) => { calls.push(args); return {}; } };
   assert.deepEqual(await applyAuditProfile(cdp, 'target-session', 'reference'), auditProfileEvidence('reference'));
@@ -514,8 +588,8 @@ test('the constrained profile is explicit, applies 4x CPU and 10 Mbit/s, and doe
   assert.deepEqual(profile, auditProfileEvidence('constrained'));
   assert.deepEqual(calls, [
     ['Emulation.setCPUThrottlingRate', { rate: 4 }, 'target-session'],
-    ['Network.emulateNetworkConditions', { offline: false, latency: 0,
-      downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 }, 'target-session'],
+    ['Network.emulateNetworkConditions', { offline: false, latency: 100,
+      downloadThroughput: 1_250_000, uploadThroughput: 250_000 }, 'target-session'],
   ]);
   await assert.rejects(applyAuditProfile(cdp, 'target-session', 'unknown'), /Unknown packaged audit profile/);
 
@@ -533,6 +607,11 @@ test('the constrained profile is explicit, applies 4x CPU and 10 Mbit/s, and doe
     interactionPages, profile: 'constrained',
   });
   assert.deepEqual(verdictForConstrained.failures, []);
+  const symmetric = structuredClone(constrained);
+  Object.assign(symmetric.profile.network, { latency: 0, uploadThroughput: 1_250_000 });
+  assert.match(assertAudit(symmetric, manifest, responses, origin, undefined, { interactionPages, profile: 'constrained' })
+    .failures.join('\n'), /audit profile: report does not match requested constrained profile/,
+  'evidence from the superseded symmetric zero-latency profile must not qualify as constrained');
   assert.equal(verdictForConstrained.profile, 'constrained');
   assert.equal(verdictForConstrained.timingBudgetsEnforced, false);
 });
@@ -1070,11 +1149,11 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, chart: 10, navigations: 84, chartCaptureEvaluations: 4 });
+  assert.deepEqual(counts, { layout: 130, contrast: 52, focus: 52, chart: 10, navigations: 91, chartCaptureEvaluations: 4 });
   assert.deepEqual(calls.filter(([method]) => ['Emulation.setCPUThrottlingRate', 'Network.emulateNetworkConditions'].includes(method)), [
     ['Emulation.setCPUThrottlingRate', { rate: 4 }],
-    ['Network.emulateNetworkConditions', { offline: false, latency: 0,
-      downloadThroughput: 1_250_000, uploadThroughput: 1_250_000 }],
+    ['Network.emulateNetworkConditions', { offline: false, latency: 100,
+      downloadThroughput: 1_250_000, uploadThroughput: 250_000 }],
   ], 'the active audit path applies the constrained profile before navigation');
 });
 
@@ -1085,6 +1164,21 @@ test('content checks require visible, distinctive rows rather than an empty or h
     const document = { querySelectorAll: () => [{ textContent, getClientRects: () => visible ? [{}] : [] }] };
     assert.equal(runInNewContext(auditContentReady(checks), { document }), expected);
   }
+});
+
+test('structure fixture is the bound function-inventory contract fixture behind the lazy Structure route', () => {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const page = fixtures.pages.find(page => page.name === 'structure functions');
+  assert.ok(page && page.path.endsWith('/functions'));
+  const [step] = page.preparation;
+  assert.deepEqual(step.reads, [page.path.slice('/nested'.length)]);
+  const document = fixtures.respond('GET', step.reads[0], 'application/json').document;
+  assert.equal(document.kind, 'functionInventory');
+  const [, jobId, runId, revisionId] = /^\/jobs\/([^/]+)\/runs\/([^/]+)\/revisions\/([^/]+)\/functions$/.exec(step.reads[0]);
+  assert.deepEqual(document.data.binding, { jobId, runId, revisionId });
+  assert.equal(runId, fixtures.runId);
+  assert.ok(step.content.some(check => check.text === page.rendered));
+  assert.ok(step.content.some(check => document.data.items.some(item => item.address === check.text)));
 });
 
 test('evidence fixtures preserve attempt identity, validation owner commitments and deployment path', () => {
@@ -1253,6 +1347,64 @@ test('measures visible input values and placeholders and rejects low contrast fo
 test('covers the documented desktop, narrow, 320px and 200%/400% zoom profiles', () => {
   assert.deepEqual(auditViewports.map(({ width, height, deviceScaleFactor }) => [width, height, deviceScaleFactor]),
     [[1440, 900, 1], [390, 844, 1], [320, 640, 1], [640, 400, 2], [320, 200, 4]]);
+});
+
+// Runs the real focus probe against a scripted page. `tops` gives the box top per frame; frames
+// past the end keep the last value. `ticks` caps how many frames the page renders.
+async function runFocusProbe({ tops, ticks = Infinity, blur = null, text = 'secret-token https://example.invalid/x' }) {
+  let frame = 0; let now = 0; let rendered = 0;
+  const element = { tagName: 'INPUT', id: '', textContent: text, getAttribute: () => null, parentElement: null,
+    matches: selector => selector === ':focus-visible', contains: other => other === element,
+    getBoundingClientRect: () => { const top = tops[Math.min(frame, tops.length - 1)]; return { left: 311, right: 328.6, top, bottom: top + 17.6, width: 17.6, height: 17.6 }; } };
+  const document = { activeElement: element, body: {}, elementFromPoint: () => element };
+  const context = { document, innerWidth: 1440, innerHeight: 900, scrollX: 0, get scrollY() { return 794 - (tops[Math.min(frame, tops.length - 1)] - tops[0]); },
+    performance: { now: () => now },
+    // A timer fires only after a frame would have rendered, and jumps the clock to the bound.
+    setTimeout: (fn) => { const t = { cleared: false }; setImmediate(() => { if (!t.cleared) { now += 1000; fn(); } }); return t; },
+    clearTimeout: t => { t.cleared = true; },
+    requestAnimationFrame: fn => { if (rendered >= ticks) return; rendered += 1; queueMicrotask(() => { frame += 1; now += 16; if (frame === blur) document.activeElement = {}; fn(); }); },
+    getComputedStyle: () => ({ backgroundColor: 'rgb(255, 255, 255)', outlineColor: 'rgb(163, 92, 0)', outlineStyle: 'solid', outlineWidth: '3px' }),
+    WeakMap, Number, Math, JSON, Promise };
+  context.window = context;
+  return runInNewContext(measureFocus, context);
+}
+
+test('focus trajectory is failure-only, bounded, numeric and does not change the verdict', async () => {
+  // Visible stop: original sample only, no trajectory or extra frames.
+  const visible = await runFocusProbe({ tops: [400, 400, 400] });
+  assert.equal(visible.inViewport, true); assert.equal('trajectory' in visible, false);
+  // Persistent: off-screen in every later frame; bounded by the frame cap.
+  const persistent = await runFocusProbe({ tops: [900, 900, 900] });
+  assert.equal(persistent.inViewport, false);
+  assert.equal(persistent.geometry.top, 900, 'original sample is preserved');
+  assert.ok(persistent.trajectory.length > 0 && persistent.trajectory.length <= focusTrajectoryFrames);
+  assert.ok(persistent.trajectory.every(entry => entry.top >= entry.viewportHeight && entry.sameTarget === true));
+  assert.ok(persistent.trajectory.at(-1).ms <= focusTrajectoryMs + 16);
+  // Delayed: comes into view later; the original verdict field still reports the failure.
+  const delayed = await runFocusProbe({ tops: [900, 900, 900, 900, 500] });
+  assert.equal(delayed.inViewport, false);
+  assert.ok(delayed.trajectory.some(entry => entry.top < entry.viewportHeight));
+  assert.ok(delayed.trajectory.some(entry => entry.top >= entry.viewportHeight));
+  // Focus moving away is recorded only as the fixed flag.
+  const moved = await runFocusProbe({ tops: [900], blur: 4 });
+  assert.equal(moved.trajectory.find(entry => entry.frame === 2).sameTarget, false);
+  // A page that stops rendering frames ends the trajectory through the time bound, not a hang.
+  const stalled = await runFocusProbe({ tops: [900], ticks: 4 });
+  assert.equal(stalled.trajectory.length, 2);
+  // Privacy: trajectory entries carry only fixed numeric/boolean keys, never text, URLs or tokens.
+  const keys = ['frame', 'ms', 'top', 'bottom', 'left', 'right', 'viewportWidth', 'viewportHeight', 'scrollX', 'scrollY', 'sameTarget'];
+  for (const entry of [...persistent.trajectory, ...delayed.trajectory]) {
+    assert.deepEqual(Object.keys(entry), keys);
+    assert.ok(Object.values(entry).every(value => typeof value === 'number' || typeof value === 'boolean'));
+  }
+  assert.doesNotMatch(JSON.stringify(persistent.trajectory), /secret|https?:|example/);
+  // Negative control: the verdict still fails a delayed stop and passes a visible one.
+  const audit = clean();
+  audit.focus[0].stops[0] = { ...audit.focus[0].stops[0], ...delayed };
+  assert.match(verdict(audit).join('\n'), /focus/);
+  const passing = clean();
+  passing.focus[0].stops[0] = { ...passing.focus[0].stops[0], ...visible };
+  assert.deepEqual(verdict(passing).filter(line => /focus \{/.test(line)), []);
 });
 
 

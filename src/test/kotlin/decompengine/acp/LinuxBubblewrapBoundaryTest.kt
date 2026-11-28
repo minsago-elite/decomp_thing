@@ -739,7 +739,9 @@ class LinuxBubblewrapBoundaryTest {
                             check.javaClass.getDeclaredField("observer").apply { isAccessible = true }.get(check) as (Int) -> Any
                         val boundPath = Files.writeString(sourceRoot.resolve("bound-file"), "borrowed-content\n".repeat(4096))
                         val peerPath = Files.writeString(sourceRoot.resolve("bound-peer"), "peer-content")
+                        val boundControl = newControl()
                         try {
+                            invokePrivate(firstScope, scopeCheckpoint) // Admit the control before recording steady-state checks.
                             requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(boundPath)).use { file ->
                                 requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(peerPath)).use { peer ->
                                     val borrowedFds = openDescriptorCount()
@@ -749,9 +751,14 @@ class LinuxBubblewrapBoundaryTest {
                                     val observedStorage = RootObservationMemory {
                                         assertTrue(Thread.holdsLock(registry), "bound checks retain ACTIVE ownership")
                                         assertTrue(Thread.holdsLock(scratch), "bound observations retain scratch ownership")
+                                        val inRetainedControlCheck = Thread.currentThread().stackTrace.any {
+                                            it.className == "decompengine.acp.ManifestControlIdentity" &&
+                                                it.methodName == "requireUnchanged"
+                                        }
                                         val label = when {
                                             Thread.holdsLock(file) -> "file"
                                             Thread.holdsLock(peer) -> "peer"
+                                            inRetainedControlCheck -> "control"
                                             else -> "root"
                                         }
                                         queries += label
@@ -769,17 +776,31 @@ class LinuxBubblewrapBoundaryTest {
                                         assertTrue(retainedFileObserver !== fileObserver(peerCheck))
                                         assertTrue(retainedFileObserver !== fileObserver(otherScopeCheck))
                                         val rootQueries = List(4) { "root" }
-                                        val completeOrder = rootQueries + "file" + rootQueries
+                                        val retainedControls = synchronized(registry) {
+                                            val controls = field(firstScope, "controls") as Map<*, *>
+                                            assertTrue(boundControl in controls)
+                                            controls.size
+                                        }
+                                        val checkpointQueries = List(retainedControls) { "control" } + rootQueries
+                                        val completeOrder = checkpointQueries + "file" + checkpointQueries
                                         repeat(3) {
                                             queries.clear(); check()
-                                            assertEquals(completeOrder, queries, "original first/body/final observation order")
+                                            assertEquals(
+                                                completeOrder,
+                                                queries,
+                                                "four root observations bracket the retained-control and file observations in order",
+                                            )
                                             assertTrue(retainedFileObserver === fileObserver(check))
                                         }
                                         queries.clear()
                                         invokePrivate(firstScope, originalDescriptorCheck, file, boundPath, false)
-                                        assertEquals(completeOrder, queries, "the original entry retains the same live observations")
+                                        assertEquals(
+                                            completeOrder,
+                                            queries,
+                                            "the original entry retains the same four root observations and control/file order",
+                                        )
                                         queries.clear(); peerCheck()
-                                        assertEquals(rootQueries + "peer" + rootQueries, queries, "fixed file/path inputs do not cross-pair")
+                                        assertEquals(checkpointQueries + "peer" + checkpointQueries, queries, "fixed file/path inputs do not cross-pair")
                                         queries.clear()
                                         val firstFileLocation = synchronized(registry) { file.whileOpen(retainedFileObserver) }
                                         assertEquals(listOf("file"), queries)
@@ -874,7 +895,7 @@ class LinuxBubblewrapBoundaryTest {
                                         }
                                         queries.clear()
                                         assertFailsWith<IllegalStateException> { check() }
-                                        assertEquals(rootQueries, queries, "original root checkpoint precedes closed FILE refusal, with no file query")
+                                        assertEquals(checkpointQueries, queries, "original root checkpoint precedes closed FILE refusal, with no file query")
                                         boundAfterScopeClose = check // Test-only retention to verify scope refusal takes precedence.
                                     } finally {
                                         statistics.set(scratch, previousStorage)
@@ -883,6 +904,7 @@ class LinuxBubblewrapBoundaryTest {
                                 }
                             }
                         } finally {
+                            remove(boundControl)
                             Files.deleteIfExists(peerPath); Files.deleteIfExists(boundPath)
                         }
 
