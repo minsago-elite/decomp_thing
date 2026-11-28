@@ -1,5 +1,11 @@
 package decompengine.analysis
 
+import com.sun.jna.Library
+import com.sun.jna.Memory
+import com.sun.jna.Native
+import com.sun.jna.NativeLong
+import com.sun.jna.Platform
+import com.sun.jna.Pointer
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import java.io.FileDescriptor
@@ -89,25 +95,49 @@ internal object AnalysisNativeIoHelper {
             .toAbsolutePath()
         val reference = readReference(origin)
         val helper = override ?: selectedHelper(origin)
+        return pinExecutable(helper, "analysis native I/O", MAXIMUM_HELPER_BYTES, pins, arguments) { bytes, executable ->
+            verifyArtifact(helper, reference, bytes, executable)
+        }
+    }
+
+    /**
+     * Opens [helper] once, verifies the exact opened bytes with [verify], copies them into a sealed
+     * memfd and returns a command that executes that snapshot through /proc. A later write to the
+     * helper's inode cannot change what runs. The pin follows the launch lifecycle of [beforeLaunch].
+     */
+    internal fun pinExecutable(
+        helper: Path,
+        label: String,
+        maximumBytes: Int,
+        pins: AnalysisNativeIoExecutablePins,
+        arguments: List<String>,
+        verify: (bytes: ByteArray, openedExecutable: Path) -> Unit,
+    ): List<String> {
         val pin = pins.reserve()
         try {
             val before = regularAttributes(helper)
-            val channel = FileChannel.open(helper, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
-            pin.accept(channel)
-            val descriptor = Jdk21IoDescriptor.number(channel)
-            val executable = Path.of("/proc", ProcessHandle.current().pid().toString(), "fd", descriptor.toString())
-            val opened = Files.readAttributes(executable, BasicFileAttributes::class.java)
-            require(sameFile(before, opened) && opened.isRegularFile && channel.size() == before.size()) {
-                "analysis native I/O executable changed while its descriptor was opened"
+            val bytes = FileChannel.open(helper, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                val descriptor = Jdk21IoDescriptor.number(channel)
+                val source = Path.of("/proc", ProcessHandle.current().pid().toString(), "fd", descriptor.toString())
+                val opened = Files.readAttributes(source, BasicFileAttributes::class.java)
+                require(sameFile(before, opened) && opened.isRegularFile && channel.size() == before.size()) {
+                    "$label executable changed while its descriptor was opened"
+                }
+                val bytes = ByteArray(Math.toIntExact(before.size().also {
+                    require(it in 64..maximumBytes.toLong())
+                }))
+                val buffer = ByteBuffer.wrap(bytes)
+                while (buffer.hasRemaining()) require(channel.read(buffer) > 0)
+                require(channel.read(ByteBuffer.allocate(1)) == -1 && channel.size() == before.size() &&
+                    sameFile(before, regularAttributes(helper))) { "$label executable changed while being pinned" }
+                // Permissions are checked on the opened source image; the snapshot is what executes.
+                verify(bytes, source)
+                bytes
             }
-            val bytes = ByteArray(Math.toIntExact(before.size().also {
-                require(it in 64..MAXIMUM_HELPER_BYTES.toLong())
-            }))
-            val buffer = ByteBuffer.wrap(bytes)
-            while (buffer.hasRemaining()) require(channel.read(buffer) > 0)
-            require(channel.read(ByteBuffer.allocate(1)) == -1 && channel.size() == before.size() &&
-                sameFile(before, regularAttributes(helper))) { "analysis native I/O executable changed while being pinned" }
-            verifyArtifact(helper, reference, bytes, executable)
+            val snapshot = SealedExecutableSnapshot.create(helper.fileName.toString(), bytes, label)
+            pin.accept(snapshot)
+            val descriptor = Jdk21IoDescriptor.number(snapshot)
+            val executable = Path.of("/proc", ProcessHandle.current().pid().toString(), "fd", descriptor.toString())
             return PinnedNativeIoCommand(pin, listOf(executable.toString()) + arguments)
         } catch (failure: Throwable) {
             try { pin.notLaunched() } catch (cleanup: Throwable) {
@@ -219,7 +249,7 @@ internal object AnalysisNativeIoHelper {
         return Reference(properties, resources)
     }
 
-    private fun developmentBuildRoot(origin: Path): Path? {
+    internal fun developmentBuildRoot(origin: Path): Path? {
         val suffix = Path.of("build", "classes", "kotlin", "main")
         if (!origin.endsWith(suffix)) return null
         return origin.parent.parent.parent
@@ -238,7 +268,7 @@ internal object AnalysisNativeIoHelper {
             digest(bytes) == reference.properties.getValue("helperSha256")) {
             "analysis native I/O helper does not match the defining application's build tuple"
         }
-        verifyStaticElf(bytes)
+        verifyStaticElf(bytes, "analysis native I/O helper")
         val sidecars = requireNotNull(helper.parent).resolve(RESOURCE_DIRECTORY)
         for ((name, expected) in reference.resources) {
             val installed = readStableFile(sidecars.resolve(name), expected.size)
@@ -248,16 +278,17 @@ internal object AnalysisNativeIoHelper {
         }
     }
 
-    private fun verifyStaticElf(bytes: ByteArray) {
+    /** Requires the qualified static, non-PIE x86-64 ELF64 image with a non-executable stack. */
+    internal fun verifyStaticElf(bytes: ByteArray, label: String) {
         require(bytes.size >= 64 && bytes[0] == 0x7f.toByte() && bytes[1] == 'E'.code.toByte() &&
             bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
             bytes[4] == 2.toByte() && bytes[5] == 1.toByte() && bytes[6] == 1.toByte()) {
-            "analysis native I/O helper is not the qualified ELF64 image"
+            "$label is not the qualified ELF64 image"
         }
         val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         require(elf.getShort(16).toInt() == 2 && elf.getShort(18).toInt() == 62 && elf.getInt(20) == 1 &&
             elf.getShort(52).toInt() == 64 && elf.getShort(54).toInt() == 56) {
-            "analysis native I/O helper has an unsupported ELF ABI"
+            "$label has an unsupported ELF ABI"
         }
         val offset = elf.getLong(32)
         val count = elf.getShort(56).toInt() and 0xffff
@@ -266,7 +297,7 @@ internal object AnalysisNativeIoHelper {
         for (index in 0 until count) {
             val position = Math.toIntExact(offset + index * 56L)
             val kind = elf.getInt(position)
-            require(kind != 2 && kind != 3) { "analysis native I/O helper must have no dynamic loader or dynamic segment" }
+            require(kind != 2 && kind != 3) { "$label must have no dynamic loader or dynamic segment" }
             if (kind == 1) {
                 loads++
                 val fileOffset = elf.getLong(position + 8)
@@ -277,7 +308,7 @@ internal object AnalysisNativeIoHelper {
                     fileOffset <= bytes.size.toLong() - fileSize)
             }
             if (kind == 0x6474e551) require(elf.getInt(position + 4) and 1 == 0) {
-                "analysis native I/O helper has an executable stack"
+                "$label has an executable stack"
             }
         }
         require(loads > 0)
@@ -337,7 +368,7 @@ internal object AnalysisNativeIoHelper {
         }
     }
 
-    private fun parseProperties(bytes: ByteArray): Map<String, String> {
+    internal fun parseProperties(bytes: ByteArray): Map<String, String> {
         require(bytes.isNotEmpty() && bytes.last() == '\n'.code.toByte() &&
             bytes.all { it == '\n'.code.toByte() || it.toInt() in 0x20..0x7e })
         val result = linkedMapOf<String, String>()
@@ -350,7 +381,7 @@ internal object AnalysisNativeIoHelper {
         return result
     }
 
-    private fun readStableFile(path: Path, maximumBytes: Int): ByteArray {
+    internal fun readStableFile(path: Path, maximumBytes: Int): ByteArray {
         val before = regularAttributes(path)
         require(before.size() in 1..maximumBytes.toLong()) { "analysis native I/O artifact exceeds its read bound" }
         val bytes = Files.newInputStream(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { input ->
@@ -362,13 +393,13 @@ internal object AnalysisNativeIoHelper {
         return bytes
     }
 
-    private fun regularAttributes(path: Path): BasicFileAttributes =
+    internal fun regularAttributes(path: Path): BasicFileAttributes =
         Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).also {
             require(it.isRegularFile && it.fileKey() != null) { "analysis native I/O artifact is not a stable regular file" }
         }
-    private fun sameFile(left: BasicFileAttributes, right: BasicFileAttributes): Boolean =
+    internal fun sameFile(left: BasicFileAttributes, right: BasicFileAttributes): Boolean =
         left.fileKey() == right.fileKey() && left.size() == right.size() && left.lastModifiedTime() == right.lastModifiedTime()
-    private fun digest(bytes: ByteArray): String =
+    internal fun digest(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     private fun Map<String, String>.longValue(key: String): Long = getValue(key).let {
         require(it.matches(Regex("0|[1-9][0-9]*"))) { "analysis native I/O provenance number is invalid" }
@@ -451,6 +482,63 @@ internal class NativeIoExecutablePin(
         } catch (failure: Throwable) {
             unconfirmed.set(true)
             throw failure
+        }
+    }
+}
+
+/**
+ * Verified executable bytes in a memfd sealed against writing, growing, shrinking and further sealing,
+ * so neither this process nor a writer of the source inode can change them before exec.
+ */
+private object SealedExecutableSnapshot {
+    private interface Libc : Library {
+        fun memfd_create(name: String, flags: Int): Int
+        fun fcntl(fd: Int, command: Int, argument: Int): Int
+        fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
+        fun close(fd: Int): Int
+    }
+
+    private val libc: Libc by lazy { Native.load(Platform.C_LIBRARY_NAME, Libc::class.java) }
+    private const val MFD_CLOEXEC = 0x1
+    private const val MFD_ALLOW_SEALING = 0x2
+    private const val MFD_EXEC = 0x10
+    private const val F_ADD_SEALS = 1033
+    private const val F_GET_SEALS = 1034
+    private const val REQUIRED_SEALS = 0x1 or 0x2 or 0x4 or 0x8 // SEAL, SHRINK, GROW, WRITE
+    private const val EINTR = 4
+    private const val EINVAL = 22
+
+    fun create(name: String, bytes: ByteArray, label: String): FileChannel {
+        // MFD_EXEC (Linux 6.3) keeps the memfd executable when vm.memfd_noexec defaults to no-exec.
+        var fd = libc.memfd_create(name, MFD_CLOEXEC or MFD_ALLOW_SEALING or MFD_EXEC)
+        if (fd < 0 && Native.getLastError() == EINVAL) fd = libc.memfd_create(name, MFD_CLOEXEC or MFD_ALLOW_SEALING)
+        require(fd >= 0) { "$label snapshot could not be created (errno ${Native.getLastError()})" }
+        try {
+            val memory = Memory(bytes.size.toLong())
+            memory.write(0, bytes, 0, bytes.size)
+            var written = 0L
+            while (written < bytes.size) {
+                val count = libc.write(fd, memory.share(written), NativeLong(bytes.size - written)).toLong()
+                if (count < 0 && Native.getLastError() == EINTR) continue
+                require(count > 0) { "$label snapshot could not be written (errno ${Native.getLastError()})" }
+                written += count
+            }
+            require(libc.fcntl(fd, F_ADD_SEALS, REQUIRED_SEALS) == 0 &&
+                libc.fcntl(fd, F_GET_SEALS, 0) and REQUIRED_SEALS == REQUIRED_SEALS) { "$label snapshot could not be sealed" }
+            val snapshot = FileChannel.open(Path.of("/proc/self/fd/$fd"), StandardOpenOption.READ)
+            try {
+                val copy = ByteBuffer.allocate(bytes.size + 1)
+                while (snapshot.read(copy) > 0) Unit
+                require(copy.position() == bytes.size && MessageDigest.isEqual(bytes, copy.array().copyOf(bytes.size))) {
+                    "$label snapshot differs from its verified bytes"
+                }
+                return snapshot
+            } catch (failure: Throwable) {
+                snapshot.close()
+                throw failure
+            }
+        } finally {
+            libc.close(fd)
         }
     }
 }

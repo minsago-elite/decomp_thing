@@ -541,6 +541,7 @@ jobs:
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
+          DECOMP_REQUIRE_EXPORT_SUPERVISOR_NAMESPACES: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: scripts/ci.sh
       - name: Require every source-declared recovery scenario in core reports
@@ -758,6 +759,8 @@ jobs:
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - name: Verify atomic bundle publication and refusal controls
         run: ./gradlew --no-daemon --offline verifyAtomicGhidraBundlePublication
+      - name: Verify the installed export supervisor authenticates and supervises a worker
+        run: ./gradlew --no-daemon --offline verifyExportSupervisorInstalled
       - name: Verify installed Ghidra publication overlap coordinator controls
         run: python3 scripts/qualify-ghidra-install-overlap.py --self-test
       - name: Qualify real installed reconstruction during same-bundle publication

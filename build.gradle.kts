@@ -448,6 +448,11 @@ val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_ga
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")
 val acpGateHelperCompiler = providers.gradleProperty("acpGateHelperCompiler").orElse("/usr/bin/cc")
+val exportSupervisorSource = layout.projectDirectory.file("src/main/c/decomp_export_supervisor.c")
+val exportSupervisorBinary = layout.buildDirectory.file("native/export/decomp-export-supervisor")
+val exportSupervisorChecksum = layout.buildDirectory.file("native/export/decomp-export-supervisor.sha256")
+val exportSupervisorReferenceDirectory = layout.buildDirectory.dir("native/export/export-supervisor")
+val exportSupervisorCompiler = providers.gradleProperty("exportSupervisorCompiler").orElse("/usr/bin/cc")
 val llvmBehaviorHelperSource = layout.projectDirectory.file("src/main/c/decomp_llvm_behavior_helper.c")
 val llvmBehaviorHelperBinary = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper")
 val llvmBehaviorHelperChecksum = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper.sha256")
@@ -1317,6 +1322,36 @@ val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
     }
 }
 
+val buildExportSupervisor = tasks.register<Exec>("buildExportSupervisor") {
+    group = "build"
+    description = "Builds the static subreaper that owns each bundled Ghidra export worker tree"
+    inputs.file(exportSupervisorSource)
+    inputs.property("compiler", exportSupervisorCompiler)
+    inputs.property("hostArchitecture", providers.systemProperty("os.arch"))
+    outputs.file(exportSupervisorBinary)
+    // A compiler upgrade is security-relevant but is not visible to Gradle's path-based inputs.
+    outputs.upToDateWhen { false }
+
+    doFirst {
+        val osName = System.getProperty("os.name", "").lowercase()
+        val architecture = System.getProperty("os.arch", "")
+        require("linux" in osName && architecture in setOf("amd64", "x86_64", "aarch64")) {
+            "the export supervisor supports only Linux x86-64 or aarch64"
+        }
+        val compiler = file(exportSupervisorCompiler.get()).toPath().toAbsolutePath().normalize().toRealPath()
+        require(Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(compiler)) {
+            "export supervisor compiler is not an executable regular file: $compiler"
+        }
+        val output = exportSupervisorBinary.get().asFile.toPath()
+        Files.createDirectories(output.parent)
+        commandLine(compiler.toString(), "-std=c11", "-O2", "-static", "-no-pie", "-Wall", "-Wextra", "-Werror",
+            "-Wl,--build-id=none", exportSupervisorSource.asFile.absolutePath, "-o", output.toString())
+    }
+    doLast {
+        Files.setPosixFilePermissions(exportSupervisorBinary.get().asFile.toPath(), PosixFilePermissions.fromString("rwxr-xr-x"))
+    }
+}
+
 val buildLlvmBehaviorHelper = tasks.register<JavaExec>("buildLlvmBehaviorHelper") {
     group = "build"
     description = "Runs the bounded Kotlin helper compiler owner and records actual deployment provenance"
@@ -1482,6 +1517,34 @@ val verifyAcpGateHelper = tasks.register("verifyAcpGateHelper") {
     }
 }
 
+val verifyExportSupervisor = tasks.register("verifyExportSupervisor") {
+    group = "verification"
+    description = "Verifies the export supervisor's static ELF and that it starts no worker without a permit"
+    dependsOn(buildExportSupervisor)
+    inputs.file(exportSupervisorBinary)
+
+    doLast {
+        val helper = exportSupervisorBinary.get().asFile.toPath()
+        requireStaticElfExecutable(helper, "export supervisor")
+        fun probe(arguments: List<String>): Int {
+            // Output is discarded, not read, so a stuck helper cannot outlast the timed wait below.
+            val process = ProcessBuilder(listOf(helper.toString()) + arguments).also { it.environment().clear() }
+                .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+            process.outputStream.close()
+            val exited = process.waitFor(5, TimeUnit.SECONDS)
+            if (!exited) {
+                process.destroyForcibly()
+                process.waitFor(2, TimeUnit.SECONDS)
+            }
+            require(exited) { "export supervisor did not exit on a closed control channel" }
+            return process.exitValue()
+        }
+        require(probe(emptyList()) == 121) { "export supervisor accepted a missing worker" }
+        require(probe(listOf("1001", "/bin/true")) == 121) { "export supervisor accepted an unbounded leftover grace" }
+        require(probe(listOf("1000", "/bin/true")) == 120) { "export supervisor started a worker without its launch permit" }
+    }
+}
+
 val verifyLlvmBehaviorHelper = tasks.register("verifyLlvmBehaviorHelper") {
     group = "verification"
     description = "Verifies the LLVM behavior helper's static ELF and fail-closed v2 contract"
@@ -1602,6 +1665,48 @@ val generateAcpGateHelperChecksum = tasks.register("generateAcpGateHelperChecksu
     }
 }
 
+val generateExportSupervisorChecksum = tasks.register("generateExportSupervisorChecksum") {
+    group = "distribution"
+    description = "Writes the content digest shipped with the export supervisor"
+    dependsOn(verifyExportSupervisor)
+    inputs.file(exportSupervisorBinary)
+    outputs.file(exportSupervisorChecksum)
+
+    doLast {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(exportSupervisorBinary.get().asFile.toPath()))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        Files.writeString(exportSupervisorChecksum.get().asFile.toPath(), "$digest  decomp-export-supervisor\n")
+    }
+}
+
+val generateExportSupervisorReference = tasks.register("generateExportSupervisorReference") {
+    group = "build"
+    description = "Writes the reference the application uses to authenticate its packaged export supervisor"
+    dependsOn(verifyExportSupervisor)
+    inputs.files(exportSupervisorBinary, exportSupervisorSource)
+    outputs.dir(exportSupervisorReferenceDirectory)
+
+    doLast {
+        fun sha256(path: Path) = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        val helper = exportSupervisorBinary.get().asFile.toPath()
+        require(System.getProperty("os.arch", "") in setOf("amd64", "x86_64")) {
+            "the export supervisor reference is qualified only for Linux x86-64"
+        }
+        val directory = exportSupervisorReferenceDirectory.get().asFile.toPath()
+        Files.createDirectories(directory)
+        Files.writeString(directory.resolve("decomp-export-supervisor-v1.properties"), listOf(
+            "schemaVersion=1",
+            "binaryName=decomp-export-supervisor",
+            "architecture=linux-x86-64",
+            "helperBytes=${Files.size(helper)}",
+            "helperSha256=${sha256(helper)}",
+            "sourceSha256=${sha256(exportSupervisorSource.asFile.toPath())}",
+        ).joinToString("\n", postfix = "\n"))
+    }
+}
+
 val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHelperChecksum") {
     group = "distribution"
     description = "Writes the digest shipped with the static LLVM behavior helper prerequisite"
@@ -1631,6 +1736,14 @@ distributions {
                 filePermissions { unix("rwxr-xr-x") }
             }
             from(acpGateHelperChecksum) {
+                into("libexec")
+                filePermissions { unix("rw-r--r--") }
+            }
+            from(exportSupervisorBinary) {
+                into("libexec")
+                filePermissions { unix("rwxr-xr-x") }
+            }
+            from(exportSupervisorChecksum) {
                 into("libexec")
                 filePermissions { unix("rw-r--r--") }
             }
@@ -1698,6 +1811,51 @@ private val isolateV3BoundaryTests = providers.gradleProperty("isolateV3Boundary
     .orElse(false)
 private val gccCompilerEnginePlanningTestClass = "decompengine.oracle.gcc.GccCompilerEnginePlanningTest"
 
+/** Requires a bounded little-endian ELF64 executable for the build host with no interpreter or DT_NEEDED. */
+fun requireStaticElfExecutable(helper: Path, label: String) {
+    val size = Files.size(helper)
+    require(size in 64L..(4L * 1024 * 1024)) { "$label must be a bounded ELF64 executable" }
+    val bytes = Files.readAllBytes(helper)
+    require(bytes[0] == 0x7f.toByte() && bytes[1] == 'E'.code.toByte() && bytes[2] == 'L'.code.toByte() &&
+        bytes[3] == 'F'.code.toByte() && bytes[4] == 2.toByte() && bytes[5] == 1.toByte()) {
+        "$label must be a little-endian ELF64 executable"
+    }
+    val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val expectedMachine = when (System.getProperty("os.arch", "")) {
+        "amd64", "x86_64" -> 62
+        "aarch64" -> 183
+        else -> error("unsupported $label architecture")
+    }
+    require(elf.getShort(18).toInt() and 0xffff == expectedMachine) { "$label architecture does not match the build host" }
+    val programOffset = elf.getLong(32)
+    val programEntrySize = elf.getShort(54).toInt() and 0xffff
+    val programCount = elf.getShort(56).toInt() and 0xffff
+    require(programOffset >= 0 && programEntrySize >= 56 && programCount > 0) { "$label has an invalid ELF program-header table" }
+    repeat(programCount) { index ->
+        val offset = Math.addExact(programOffset, Math.multiplyExact(index.toLong(), programEntrySize.toLong()))
+        require(offset <= bytes.size.toLong() - programEntrySize) { "$label program headers exceed the artifact" }
+        when (elf.getInt(offset.toInt())) {
+            3 -> error("$label must not contain PT_INTERP")
+            2 -> {
+                val dynamicOffset = elf.getLong(offset.toInt() + 8)
+                val dynamicSize = elf.getLong(offset.toInt() + 32)
+                require(dynamicOffset >= 0 && dynamicSize >= 0 && dynamicSize % 16L == 0L &&
+                    dynamicOffset <= bytes.size.toLong() - dynamicSize) { "$label dynamic table is malformed" }
+                var cursor = dynamicOffset
+                var terminated = false
+                while (cursor < dynamicOffset + dynamicSize) {
+                    when (elf.getLong(cursor.toInt())) {
+                        0L -> { terminated = true; break }
+                        1L -> error("$label must not contain DT_NEEDED")
+                    }
+                    cursor += 16L
+                }
+                require(terminated) { "$label dynamic table is unterminated" }
+            }
+        }
+    }
+}
+
 private fun configureOracleTestRuntime(testTask: Test) {
     if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
         // The test JVM retains large captured records; this is not aggregate RSS qualification.
@@ -1727,6 +1885,8 @@ private fun configureOracleTestRuntime(testTask: Test) {
     }
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
+    testTask.dependsOn(generateExportSupervisorChecksum)
+    testTask.inputs.files(exportSupervisorBinary, exportSupervisorChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
     testTask.dependsOn(buildAnalysisIoHelper)
     testTask.inputs.files(analysisIoHelperBinary, analysisIoHelperChecksum)
@@ -1766,6 +1926,7 @@ private fun configureOracleTestRuntime(testTask: Test) {
             "decompengine.acp.gateHelperChecksum",
             acpGateHelperChecksum.get().asFile.absolutePath,
         )
+        testTask.systemProperty("decompengine.export.supervisorExecutable", exportSupervisorBinary.get().asFile.absolutePath)
         testTask.systemProperty(
             "decompengine.oracle.behavior.nativeHelperExecutable",
             llvmBehaviorHelperBinary.get().asFile.absolutePath,
@@ -2034,6 +2195,11 @@ dependencies {
 }
 
 tasks.processResources {
+    dependsOn(generateExportSupervisorReference)
+    from(exportSupervisorReferenceDirectory) {
+        into("export-supervisor")
+        duplicatesStrategy = DuplicatesStrategy.FAIL
+    }
     dependsOn(buildAnalysisIoHelper)
     from(analysisIoHelperMetadata) {
         into("analysis-native-io")
@@ -2061,6 +2227,7 @@ tasks.processResources {
 
 listOf("installDist", "distZip", "distTar").forEach { taskName ->
     tasks.named(taskName) { dependsOn(buildAnalysisIoHelper) }
+    tasks.named(taskName) { dependsOn(generateExportSupervisorChecksum) }
     tasks.named(taskName) {
         dependsOn(":ghidra-bridge:stageBundle")
         dependsOn(stageOracleNativeLibraries)
@@ -2321,6 +2488,45 @@ val verifyAnalysisIoHelperInstalled = tasks.register<JavaExec>("verifyAnalysisIo
         environment("XDG_CACHE_HOME", fixture.resolve("jvm-cache").toString())
         jvmArgs("-XX:-UsePerfData", "-XX:+ErrorFileToStderr", "-XX:-CreateCoredumpOnCrash",
             "-XX:-DumpReplayDataOnError", "-Djava.io.tmpdir=$scratch", "-Djna.tmpdir=$scratch", "-Duser.home=$home")
+        setArgs(listOf(fixture.toString()))
+    }
+}
+
+val verifyExportSupervisorInstalled = tasks.register<JavaExec>("verifyExportSupervisorInstalled") {
+    group = "verification"
+    description = "Authenticates the installed export supervisor from the installed JAR and supervises one worker"
+    dependsOn("installDist", "testClasses")
+    mainClass.set("decompengine.project.GhidraExportSupervisorTest\$InstalledProbe")
+    // Installed application/dependency JARs precede test classes. Only dependency JARs enter from
+    // the test configuration: neither development main classes nor development resources qualify.
+    classpath = files(layout.buildDirectory.dir("install/llm_bin_patch/lib").map {
+        fileTree(it.asFile) { include("*.jar") }
+    }, sourceSets["test"].output.classesDirs,
+        configurations.testRuntimeClasspath.map { entries -> entries.filter { it.isFile && it.extension == "jar" } })
+    doFirst {
+        val installed = layout.buildDirectory.dir("install/llm_bin_patch/libexec").get().asFile.toPath()
+        val helper = installed.resolve("decomp-export-supervisor")
+        val checksum = installed.resolve("decomp-export-supervisor.sha256")
+        require(Files.isRegularFile(helper, LinkOption.NOFOLLOW_LINKS) && Files.size(helper) in 64L..(4L * 1024 * 1024))
+        val helperSha256 = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(helper))
+            .joinToString("") { "%02x".format(it) }
+        require(Files.isRegularFile(checksum, LinkOption.NOFOLLOW_LINKS) &&
+            Files.readString(checksum) == "$helperSha256  decomp-export-supervisor\n" &&
+            Files.getPosixFilePermissions(checksum) == PosixFilePermissions.fromString("rw-r--r--") &&
+            Files.getPosixFilePermissions(helper) == PosixFilePermissions.fromString("rwxr-xr-x")) {
+            "installDist changed the export supervisor, its checksum or their permissions"
+        }
+        val fixture = layout.buildDirectory.dir("export-supervisor-installed-check").get().asFile.toPath()
+            .toAbsolutePath().normalize()
+        val home = fixture.resolve("jvm-home")
+        val scratch = fixture.resolve("jvm-tmp")
+        listOf(fixture, home, scratch).forEach { Files.createDirectories(it) }
+        systemProperties.remove("decompengine.export.supervisor")
+        listOf("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS").forEach { environment.remove(it) }
+        environment("HOME", home.toString())
+        environment("TMPDIR", scratch.toString())
+        jvmArgs("-XX:-UsePerfData", "-XX:+ErrorFileToStderr", "-XX:-CreateCoredumpOnCrash",
+            "-XX:-DumpReplayDataOnError", "-Djava.io.tmpdir=$scratch", "-Duser.home=$home")
         setArgs(listOf(fixture.toString()))
     }
 }

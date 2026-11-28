@@ -51,6 +51,52 @@ coordinator JVM. Reconstruction retains its existing wall-clock and descendant-R
 monitor, termination and resumable exporter checks. A separate JVM and RSS sampling
 alone are not a kernel sandbox or cgroup receipt.
 
+### Export process-tree ownership
+
+On Linux, the production platform, every export worker runs under
+`libexec/decomp-export-supervisor`, a static helper built from
+`src/main/c/decomp_export_supervisor.c`. The application authenticates it against
+the size and SHA-256 recorded in its own JAR (`export-supervisor/`), opens it once,
+verifies the bytes it read, copies them into a sealed memfd and executes that
+snapshot, as it does the analysis I/O helper; a later write to the installed file
+cannot change what runs. A missing or
+mismatched supervisor fails the export before any worker starts, as does a Linux
+host other than the qualified x86-64. The worker is
+still the application JDK running the Ghidra-only classpath; the supervisor only
+owns its process tree.
+
+The supervisor makes itself a child subreaper, so descendants the worker orphans
+are reparented to it, not to init. Before the launch permit it requires `/proc` to
+be procfs whose `/proc/self` is the supervisor and whose `NStgid` lists exactly one
+PID, so `/proc` belongs to its own PID namespace rather than an ancestor where the
+same number may name it, and it requires pidfd signalling and `waitid` on a pidfd.
+It starts the worker only after the parent's launch permit and signals only its own
+children: procfs proposes PIDs whose parent is the supervisor, and each is signalled
+through a pidfd only after a non-consuming `waitid` on that exact pidfd shows it is
+the supervisor's own child. A child keeps its PID until the supervisor reaps it, so a PID reused by
+another process, even within the same clock tick, is never signalled. Its standard input is the control channel: `T`
+sends SIGTERM to its children, `K` kills them until none remain, and end of file
+acts as `K`, so the tree cannot outlive the application. Once the worker exits,
+leftovers receive SIGTERM and, after a grace of the export's termination grace
+capped at 1 second, SIGKILL. Export cleanup sends `T`, then `K` once the grace
+passes, and treats the tree as absent only when the supervisor exits with a status
+below 128, which it does only when it has no children left. Any other outcome
+quarantines later export launches. The supervisor passes the worker's exit code
+through when it is below 100, reports 100 for a larger code and 101 when a signal
+ended the worker. Only the worker's first termination counts, so a later child that
+reuses its PID cannot replace it; stop and continue reports, such as those of a
+child that called `PTRACE_TRACEME`, are ignored. If no children remain but the
+worker's own termination was never observed, it exits 254, which proves nothing.
+
+Hosts other than Linux cannot run the supervisor and keep a best-effort
+retained-handle cleanup, which is not race-free and is outside the Linux
+ownership guarantee. It is fail-safe: descendants seen by the resource monitor
+are retained and signalled only after their PID and start instant are read
+again, and a handle that fails that recheck is never signalled, keeps cleanup
+unconfirmed and is named in the cleanup failure. Start instants have clock-tick (10 ms) resolution, so this fallback cannot
+tell apart a PID reused within one tick. `processOwnership` in
+`reports/ghidra_resource_usage.json` records which mode ran.
+
 Patch decompilation, reconstruction, web reconstruction, doctor and the legacy
 reconstruction pipeline use the bundled API worker. The old reflective adapter and
 synthetic-on-missing-export fallback are removed. Real tests statically analyze
