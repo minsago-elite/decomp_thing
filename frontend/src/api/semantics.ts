@@ -529,11 +529,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       if (summary && reportType === 'revision-validation') requireValue('result' in summary);
       if (acceptance === 'accepted') requireValue(summary !== null && 'result' in summary && summary.result === 'passed');
       // Unknown producer bytes may have an explicit unsupported adapter result, never an available summary.
+      // A version-two report that omits its `state` is incomplete: `partial` with no summary.
       const recognizedProducer = (reportType === 'exploration' && (producerSchemaVersion === null
         || (producerSchemaVersion === 1 && state === 'partial' && summary === null
           && document.data.authority === 'observations' && acceptance === 'not-evaluated'
           && document.data.acceptanceArtifactId === null)
-        || (producerSchemaVersion === 2 && state === 'available' && summary !== null
+        || (producerSchemaVersion === 2 && (state === 'available' ? summary !== null : state === 'partial' && summary === null)
           && document.data.authority === 'observations' && acceptance === 'not-evaluated'
           && document.data.acceptanceArtifactId === null)))
         || (reportType === 'revision-validation' && producerSchemaVersion === 2);

@@ -18,6 +18,7 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobRecoveryInventory
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -253,12 +254,15 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
     artifacts: List<WebArtifactSummary>? = null,
     repairEvidenceArtifactStates: Map<String, RepairEvidenceArtifactState>? = null,
     repairReceiptBindingStates: Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>? = null,
-    recordedRepairHistory: RecordedRepairHistoryView? = null): WebApplicationDocument {
+    recordedRepairHistory: RecordedRepairHistoryView? = null,
+    explorationClassification: WebExplorationClassification? = null): WebApplicationDocument {
     requirePublicElfCategories(job.metadata)
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
-        "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${value.toString().trim('"').escapeHtml()}</dd></div>"
+        // The legacy JSON keeps a signed numeric entry point; HTML shows the unsigned address.
+        val display = if (key == "entry_point") "0x" + job.metadata.entryPoint.toString(16) else value.toString().trim('"')
+        "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${display.escapeHtml()}</dd></div>"
     }
     val action = if (reports.runId != null) {
         "<span class=\"status-note\">Legacy workflow actions are unavailable for jobs with durable attempts.</span>"
@@ -358,7 +362,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
                 </ol>
               </section>
             </div>
-            ${runCatching { renderExploration(job, reports, explorationReport) }.getOrElse { renderExploration(job, reports, null) }}
+            ${renderExploration(job, reports, explorationClassification ?: presentWebExploration(WebRedactionPolicy.BASELINE,
+                explorationReport?.toString()?.encodeToByteArray()))}
             ${runCatching { renderReconstructionProgress(reconstructionProgress) }.getOrElse { renderReconstructionProgress(null) }}
             ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
@@ -519,47 +524,108 @@ private fun renderJobList(jobs: List<Job>): String {
     } + "</div>"
 }
 
-private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObject?): String {
-    if (root == null) return """
-        <section class="panel evidence-panel pending-evidence">
-          <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div></div>
-          <p>The exploration report is unavailable or has not been generated for this attempt.</p>
-        </section>
-    """.trimIndent()
-    val confidence = root["confidence"]?.jsonObject
-    val score = confidence?.get("score")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
-    val candidates = root["candidates"]?.jsonArray ?: JsonArray(emptyList())
-    val observations = root["observations"]?.jsonArray?.associateBy {
-        it.jsonObject["candidateId"]?.jsonPrimitive?.contentOrNull.orEmpty()
-    }.orEmpty()
-    val rows = candidates.take(50).joinToString("") { element ->
-        val candidate = element.jsonObject
-        val id = candidate.text("id")
-        val source = candidate.text("source")
+private fun renderExploration(job: Job, reports: WebReportContext, classification: WebExplorationClassification): String {
+    val download = if (classification.downloadAvailable)
+        "<a class=\"text-link\" href=\"${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}\">Download JSON ↓</a>"
+    else ""
+    val heading = "<div class=\"section-heading compact\"><span class=\"step\">03</span><div><p class=\"kicker\">Evidence</p><h2>Exploration report</h2></div>$download</div>"
+    val downloadNote = if (classification.bytesCaptured && !classification.downloadAvailable)
+        "<p>The JSON download is unavailable because this report could not be safely redacted.</p>" else ""
+    if (classification.state != "available") {
+        val (stateLabel, wording) = when (classification.state) {
+            "unknown" -> "unknown" to "Report bytes are unavailable, inaccessible, or changed during the bounded read."
+            "partial" -> "partial" to "The report is incomplete; summary metrics are withheld."
+            "unsupported" -> "unsupported" to "The declared producer schema is not supported by this presentation."
+            "invalid" -> "invalid" to "The captured report is malformed or internally inconsistent."
+            else -> "unknown" to "The report state is not recognized; summary metrics are withheld."
+        }
+        // The unknown wording already states the read limitation; do not repeat it.
+        val limitation = if (stateLabel == "unknown") "" else "<p>${classification.limitation.escapeHtml()}</p>"
+        return "<section class=\"panel evidence-panel pending-evidence\">$heading" +
+            "<p>Evidence state: ${stateLabel.escapeHtml()}.</p><p>${wording.escapeHtml()}</p>" +
+            "$limitation$downloadNote</section>"
+    }
+
+    val summary = classification.summary ?: return "<section class=\"panel evidence-panel pending-evidence\">$heading" +
+        "<p>Evidence state: invalid.</p><p>The available classification omitted its required summary.</p></section>"
+    val confidence = summary["confidence"] as? JsonObject
+    val scorePrimitive = confidence?.get("score") as? JsonPrimitive
+    val score = scorePrimitive?.takeUnless { it.isString }?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
+    val scoreText = scorePrimitive?.content ?: "Not reported"
+    fun exact(value: String?): String =
+        value?.takeIf { it.matches(Regex("0|[1-9][0-9]{0,19}")) && it.toULongOrNull() != null } ?: "Not reported"
+    fun count(objectValue: JsonObject?, name: String): String = exact((objectValue?.get(name) as? JsonPrimitive)?.content)
+    fun reportedBoolean(name: String): String = when ((confidence?.get(name) as? JsonPrimitive)?.booleanOrNull) {
+        true -> "yes"
+        false -> "no"
+        null -> "not reported"
+    }
+    fun capped(value: String, maximum: Int): String = if (value.length > maximum) value.take(maximum) + "…" else value
+    fun hexBytes(value: String?, visibleBytes: Int): String? {
+        if (value == null || value.length % 2 != 0 || !value.matches(Regex("[0-9a-fA-F]*"))) return null
+        if (value.isEmpty()) return ""
+        val prefix = value.take(visibleBytes * 2).chunked(2).joinToString(" ")
+        return if (value.length > visibleBytes * 2) "$prefix …" else prefix
+    }
+    fun stringArray(value: JsonElement?): String = (value as? JsonArray)?.let { args ->
+        if (args.isEmpty()) "—"
+        else if (args.any { it.stringContentOrNull() == null }) "Not reported"
+        else args.mapNotNull { it.stringContentOrNull() }.joinToString(" ") { capped(it, 256) }
+    } ?: "Not reported"
+
+    // Rows hold projected (redacted) fields only, already paired by the original identifiers.
+    val rows = classification.rows?.joinToString("") { row ->
+        val candidate = row.candidate
+        val id = candidate?.get("id").stringContentOrNull()?.takeIf { it.isNotEmpty() }?.let { capped(it, 128) } ?: "Not reported"
+        val source = candidate?.get("source").stringContentOrNull()?.let { capped(it, 64) } ?: "Not reported"
         val sourceClass = when (source.lowercase()) {
             "angr", "mutation", "static_hint", "seed" -> source.lowercase()
             else -> "unknown"
         }
-        val args = candidate["args"]?.jsonArray?.joinToString(" ") { it.jsonPrimitive.content }.orEmpty()
-        val stdinHex = candidate.text("stdinHex")
-        val observation = observations[id]?.jsonObject
-        val exitCode = observation?.get("exitCode")?.jsonPrimitive?.intOrNull?.toString() ?: "—"
-        val output = observation?.text("stdoutHex")?.hexPreview().orEmpty().ifBlank { "∅" }
-        "<tr><td><code>${id.escapeHtml()}</code></td><td><span class=\"source-tag $sourceClass\">${source.escapeHtml()}</span></td><td>${args.escapeHtml().ifBlank { "—" }}</td><td><code>${stdinHex.chunked(2).take(12).joinToString(" ").escapeHtml().ifBlank { "—" }}</code></td><td>$exitCode</td><td><code>${output.escapeHtml()}</code></td></tr>"
+        val exitCode = (row.observation?.get("exitCode") as? JsonPrimitive)?.let { value ->
+            value.takeUnless { it.isString }?.intOrNull?.toString()
+        } ?: "Not reported"
+        val output = row.stdout
+        val outputCell = when {
+            output != null && output.byteCount == 0 -> "<span aria-hidden=\"true\">∅</span><span class=\"sr-only\">empty output</span>"
+            output != null -> output.preview.escapeHtml() + if (output.clipped) " …" else ""
+            row.attribution == WebExplorationAttribution.AMBIGUOUS_CANDIDATE -> "Not reported (ambiguous candidate id)"
+            row.attribution == WebExplorationAttribution.AMBIGUOUS_OBSERVATION -> "Not reported (several observations)"
+            else -> "Not reported"
+        }
+        val stdin = hexBytes(candidate?.get("stdinHex").stringContentOrNull(), 12)
+            ?.let { if (it.isEmpty()) "—" else it } ?: "Not reported"
+        "<tr><th scope=\"row\"><code>${id.escapeHtml()}</code></th><td><span class=\"source-tag $sourceClass\">${source.escapeHtml()}</span></td>" +
+            "<td>${stringArray(candidate?.get("args")).escapeHtml()}</td><td><code>${stdin.escapeHtml()}</code></td>" +
+            "<td>${exitCode.escapeHtml()}</td><td><code>$outputCell</code></td></tr>"
     }
+    val candidateRows = if (rows == null) {
+        // Classification checked the original bytes, but rows are shown only through the redacted projection.
+        val withheld = if (classification.downloadAvailable) "Candidate rows are withheld" else "Candidate rows and the JSON download are withheld"
+        "<p>$withheld because this report could not be safely redacted.</p>"
+    } else """
+        <div class="table-wrap" role="region" aria-labelledby="exploration-candidates-caption" tabindex="0">
+          <table class="exploration-table"><caption id="exploration-candidates-caption">Exploration candidates and recorded observations</caption><thead><tr><th scope="col">Case</th><th scope="col">Source</th><th scope="col">Arguments</th><th scope="col">stdin · hex</th><th scope="col">Exit</th><th scope="col">stdout</th></tr></thead><tbody>$rows</tbody></table>
+        </div>
+        ${if (classification.candidateTotal > classification.rows.orEmpty().size) "<p class=\"table-note\">Showing ${classification.rows.orEmpty().size} of ${classification.candidateTotal} candidates.${if (classification.downloadAvailable) " Download JSON for the full report." else ""}</p>" else ""}
+    """.trimIndent()
     return """
       <section class="panel evidence-panel">
-        <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}">Download JSON ↓</a></div>
+        $heading
+        <p>Evidence state: available.</p>
+        <p>${classification.limitation.escapeHtml()}</p>
+        <p>Isolation is producer-reported: sandboxed ${reportedBoolean("sandboxed")}; network isolated ${reportedBoolean("networkIsolated")}.</p>
         <div class="metric-grid">
-          ${metric("Exploration heuristic", score?.let { "%.3f".format(java.util.Locale.ROOT, it) } ?: "Unavailable", "Uncalibrated", score)}
-          ${metric("Candidates", root.number("candidateCount"), "Generated inputs")}
-          ${metric("Output paths", root.number("expandedOutputSignatures"), "Distinct signatures")}
-          ${metric("New paths", root["newOutputSignatures"]?.jsonArray?.size?.toString() ?: "0", "Beyond baseline")}
+          ${metric("Exploration heuristic", scoreText, "Uncalibrated", score)}
+          ${metric("Candidates", count(summary, "candidateCount"), "Generated inputs")}
+          ${metric("Baseline output signatures", exact(classification.baselineOutputSignatures), "Before exploration")}
+          ${metric("Expanded output signatures", count(summary, "expandedOutputSignatures"), "After exploration")}
+          ${metric("Reported inputs", count(confidence, "inputCount"), "Producer-reported")}
+          ${metric("Reported sources", count(confidence, "sourceCount"), "Producer-reported")}
+          ${metric("Reported output signatures", count(confidence, "outputSignatureCount"), "Producer-reported")}
+          ${metric("Reported new output signatures", count(confidence, "newOutputSignatureCount"), "Producer-reported")}
         </div>
-        <div class="table-wrap">
-          <table><thead><tr><th>Case</th><th>Source</th><th>Arguments</th><th>stdin · hex</th><th>Exit</th><th>stdout</th></tr></thead><tbody>$rows</tbody></table>
-        </div>
-        ${if (candidates.size > 50) "<p class=\"table-note\">Showing 50 of ${candidates.size} candidates. Download JSON for the full report.</p>" else ""}
+        $candidateRows
       </section>
     """.trimIndent()
 }
@@ -824,7 +890,9 @@ fun renderRepairHistory(
     }
     if (iterations.isEmpty() && runs.isEmpty()) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No repair attempts are recorded.</p></section>"
     val items = iterations.joinToString("") { iteration ->
-        val index = iteration.historyCount("index", allowZero = false).let { if (it == "0") "?" else it }
+        val reportedIndex = iteration.historyCount("index", allowZero = false).takeUnless { it == "not reported" }
+        val index = reportedIndex ?: "?"
+        val indexLabel = reportedIndex?.let { "Attempt $it" } ?: "Attempt index not reported"
         val failureKind = safeRepairFailureKind(iteration.historyText("failureKind"))
         val regressions = (iteration["retainedRegressionIds"] as? JsonArray)?.size ?: 0
         val before = renderEvidence("Before", iteration["before"] as? JsonObject, job, reports, authorizedArtifacts, artifactStates)
@@ -833,7 +901,7 @@ fun renderRepairHistory(
         val revision = safeRevisionIdentity(iteration.historyText("revisionId"))
         val rollback = repairRollbackLabel(iteration)
         val assurance = repairEvidenceAssurance(iteration, receiptBindingStates)
-        """<article class="history-item"><div class="history-index" aria-label="Attempt $index">$index</div><div>
+        """<article class="history-item"><div class="history-index" aria-label="$indexLabel">$index</div><div>
           <div class="history-title"><strong>$failureKind — ${outcome.escapeHtml()}</strong>${statusPill(outcome)}</div>
           <p>Attempt revision: <code>${revision.escapeHtml()}</code></p>
           <p>Rollback: ${rollback.escapeHtml()}</p><p>Evidence assurance: ${assurance.escapeHtml()}</p>
@@ -893,8 +961,10 @@ private fun safeRevisionIdentity(value: String?): String =
     value?.takeIf { it == "root" || it == "baseline" || it.matches(Regex("revision_[0-9]{8}_[a-f0-9]{16}")) }
         ?: "unavailable"
 
+/** Shows the recorded canonical count unchanged; absent or malformed values are never rendered as zero. */
 private fun JsonObject.historyCount(name: String, allowZero: Boolean = true): String =
-    historyText(name)?.toIntOrNull()?.takeIf { if (allowZero) it in 0..100_000 else it in 1..100_000 }?.toString() ?: "0"
+    historyText(name)?.takeIf { it.matches(Regex("0|[1-9][0-9]{0,19}")) && it.toULongOrNull() != null && (allowZero || it != "0") }
+        ?: "not reported"
 
 private fun repairRollbackLabel(iteration: JsonObject): String = when (iteration.historyText("disposition")) {
     // Rejection alone carries no canonical restoration state.
@@ -979,8 +1049,13 @@ private fun renderSourceTree(job: Job, source: SourceTreeView, reports: WebRepor
 private fun renderReconstructionProgress(progress: JsonObject?): String {
     if (progress == null) return "<section class=\"panel reconstruction-progress\"><h2>Source reconstruction</h2><p>Reconstruction progress is unavailable or has not been generated for this attempt.</p></section>"
     val phase = progress.text("phase")
-    val completed = progress.number("completed")
-    val total = progress.number("total")
+    fun exactCount(name: String): String {
+        val value = progress[name] as? JsonPrimitive ?: return "Not reported"
+        if (value.isString) return "Not reported"
+        return value.content.takeIf { it.matches(Regex("0|[1-9][0-9]*")) && it.toULongOrNull() != null } ?: "Not reported"
+    }
+    val completed = exactCount("completed")
+    val total = exactCount("total")
     val module = progress.text("module")
     return """
       <section class="panel reconstruction-progress">
@@ -1039,25 +1114,20 @@ $body
     })
 
 private fun JsonObject.text(name: String): String = get(name)?.jsonPrimitive?.contentOrNull.orEmpty()
-private fun JsonObject.number(name: String): String = get(name)?.jsonPrimitive?.contentOrNull ?: "0"
-
-private fun String.hexPreview(): String = runCatching {
-    if (length % 2 != 0) return@runCatching this
-    chunked(2).map { it.toInt(16).toByte() }.toByteArray().decodeToString()
-        .replace("\n", "↵").replace("\r", "").replace(Regex("[\\p{Cntrl}&&[^\\t]]"), "·").take(48)
-}.getOrDefault(take(48))
+private fun JsonElement?.stringContentOrNull(): String? = (this as? JsonPrimitive)?.takeIf { it.isString }?.content
 
 private fun String.escapeHtml(): String =
     replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
 
 private fun String.title(): String = split(' ').joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
 private fun formatTimestamp(value: String): String = value.replace('T', ' ').removeSuffix("Z").substringBefore('.') + " UTC"
-private fun formatBytes(bytes: Int): String = formatBytes(bytes.toLong())
+internal fun formatBytes(bytes: Int): String = formatBytes(bytes.toLong())
 
-private fun formatBytes(bytes: Long): String = when {
-    bytes >= 1024 * 1024 -> "%.1f MiB".format(java.util.Locale.ROOT, bytes / (1024.0 * 1024.0))
-    bytes >= 1024 -> "%.1f KiB".format(java.util.Locale.ROOT, bytes / 1024.0)
-    else -> "$bytes B"
+internal fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024 * 1024 -> "%.1f MiB (%d bytes)".format(java.util.Locale.ROOT, bytes / (1024.0 * 1024.0), bytes)
+    bytes >= 1024 -> "%.1f KiB (%d bytes)".format(java.util.Locale.ROOT, bytes / 1024.0, bytes)
+    bytes == 1L -> "1 byte"
+    else -> "$bytes bytes"
 }
 private fun jsString(value: String): String = "'" + value
     .replace("\\", "\\\\")
@@ -1154,15 +1224,16 @@ h1 em { color: var(--acid); font-style: normal; }
 .workflow-list { list-style: none; padding: 0; margin: 0; }.workflow-list li { display: flex; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--line); }.workflow-list li:last-child { border: 0; }.workflow-list li > span { color: var(--acid); font: 700 11px ui-monospace, monospace; }.workflow-list strong { font-size: 14px; }.workflow-list p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .evidence-panel, .history-panel, .artifacts-panel { margin-top: 18px; }.pending-evidence { color: var(--muted); }
 .text-link { margin-left: auto; color: var(--acid); font-size: 12px; text-decoration: none; }
-.metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }.metric { min-height: 126px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: rgba(8,11,9,.35); }.metric p, .metric small { color: var(--muted); font-size: 11px; }.metric strong { display: block; margin: 12px 0 4px; font-size: 30px; letter-spacing: -.05em; }.gauge { display: block; width: 100%; height: 6px; margin-top: 13px; accent-color: var(--acid); }
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }table { width: 100%; border-collapse: collapse; font-size: 12px; }th { color: var(--muted); background: #101411; font: 700 9px ui-monospace, monospace; letter-spacing: .07em; text-transform: uppercase; text-align: left; }th, td { padding: 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }tbody tr:last-child td { border: 0; }code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d0ca; }.source-tag.angr { color: var(--cyan); }.source-tag.mutation { color: var(--warning); }.source-tag.static_hint { color: #ba9cff; }.source-tag.seed { color: var(--acid); }.table-note { color: var(--muted); font-size: 11px; margin: 12px 0 0; }
-.history-list { display: grid; gap: 10px; }.history-item { display: grid; grid-template-columns: 40px 1fr; gap: 15px; padding: 17px; border: 1px solid var(--line); border-radius: 8px; }.history-index { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: #252d28; color: var(--acid); font: 700 11px ui-monospace, monospace; }.history-title { display: flex; align-items: center; justify-content: space-between; }.history-item p { color: var(--muted); font-size: 12px; }.evidence-line { display: grid; gap: 5px; padding: 9px 11px; border-left: 2px solid var(--cyan); background: rgba(114,215,208,.04); }.evidence-line b { color: var(--ink); }.regressions { margin-bottom: 0; }
+.metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }.metric { min-height: 126px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: rgba(8,11,9,.35); }.metric p, .metric small { color: var(--muted); font-size: 11px; }.metric strong { display: block; margin: 12px 0 4px; font-size: 30px; letter-spacing: -.05em; overflow-wrap: anywhere; }.gauge { display: block; width: 100%; height: 6px; margin-top: 13px; accent-color: var(--acid); }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }table { width: 100%; border-collapse: collapse; font-size: 12px; }th { color: var(--muted); background: #101411; font: 700 9px ui-monospace, monospace; letter-spacing: .07em; text-transform: uppercase; text-align: left; }th, td { padding: 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }tbody tr:last-child td { border: 0; }.exploration-table tbody tr:last-child th { border: 0; }.exploration-table tbody th { color: inherit; background: none; font: inherit; letter-spacing: normal; text-transform: none; }.exploration-table caption { padding: 10px 12px; color: var(--muted); font-size: 11px; text-align: left; }code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d0ca; }.source-tag.angr { color: var(--cyan); }.source-tag.mutation { color: var(--warning); }.source-tag.static_hint { color: #ba9cff; }.source-tag.seed { color: var(--acid); }.table-note { color: var(--muted); font-size: 11px; margin: 12px 0 0; }
+.history-list { display: grid; gap: 10px; }.history-item { display: grid; grid-template-columns: minmax(40px, max-content) 1fr; gap: 15px; padding: 17px; border: 1px solid var(--line); border-radius: 8px; }.history-index { display: grid; place-items: center; min-width: 32px; width: max-content; height: 32px; padding: 0 6px; box-sizing: border-box; border-radius: 16px; background: #252d28; color: var(--acid); font: 700 11px ui-monospace, monospace; }.history-title { display: flex; align-items: center; justify-content: space-between; }.history-item p { color: var(--muted); font-size: 12px; }.evidence-line { display: grid; gap: 5px; padding: 9px 11px; border-left: 2px solid var(--cyan); background: rgba(114,215,208,.04); }.evidence-line b { color: var(--ink); }.regressions { margin-bottom: 0; }
 .artifact-list { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }.artifact-row { display: flex; align-items: center; gap: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; transition: .15s; }.artifact-row:hover { border-color: #526157; background: #202722; }.artifact-row > span:last-child { margin-left: auto; color: var(--acid); }.artifact-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 5px; background: #252d28; color: var(--cyan); font: 700 9px ui-monospace, monospace; }.artifact-row strong, .artifact-row small { display: block; }.artifact-row small { margin-top: 4px; color: var(--muted); font-size: 10px; }
 .source-tree-panel { margin-top: 18px; }.tree-note { color: var(--muted); font-size: 13px; }.source-tree { list-style: none; padding: 0; margin: 18px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }.source-tree li + li { border-top: 1px solid var(--line); }.source-tree a { display: grid; grid-template-columns: 42px 1fr 20px; gap: 11px; align-items: center; min-height: 43px; padding: 7px 12px; text-decoration: none; background: rgba(8,11,9,.25); }.source-depth-1 a { padding-left: 30px; }.source-depth-2 a { padding-left: 48px; }.source-depth-3 a { padding-left: 66px; }.source-depth-4 a { padding-left: 84px; }.source-depth-5 a { padding-left: 102px; }.source-depth-6 a { padding-left: 120px; }.source-depth-7 a { padding-left: 138px; }.source-depth-8 a { padding-left: 156px; }.source-depth-9 a { padding-left: 174px; }.source-depth-10 a { padding-left: 192px; }.source-depth-11 a { padding-left: 210px; }.source-depth-12 a { padding-left: 228px; }.source-tree a:hover { background: #202722; }.source-tree span { color: var(--cyan); font: 700 9px ui-monospace, monospace; }.source-tree i { color: var(--acid); font-style: normal; }.archive-download { width: max-content; }.source-shell { padding-block: 44px 80px; }.source-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 42px 0 24px; }.source-heading h1 { margin: 8px 0 0; font: 700 clamp(1.8rem,4vw,3.5rem)/1.05 ui-monospace, monospace; letter-spacing: -.05em; }.source-view { overflow: auto; min-height: 420px; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: #080b09; line-height: 1.55; tab-size: 4; }.source-view code { font-size: 12px; color: #dbe2dc; }
 .reconstruction-progress { margin-top: 18px; padding: 20px 28px; display: flex; align-items: center; justify-content: space-between; }.reconstruction-progress h2 { margin: 5px 0 0; }.source-provenance { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 16px; }.source-provenance span { padding: 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font: 11px ui-monospace,monospace; }.source-provenance b { display: block; margin-bottom: 6px; color: var(--cyan); text-transform: uppercase; font-size: 9px; }
 .spinner { width: 12px; height: 12px; border: 2px solid rgba(0,0,0,.25); border-top-color: #111; border-radius: 50%; animation: spin .8s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .error-shell { display: grid; place-items: start; align-content: center; min-height: calc(100vh - 150px); max-width: 760px; }.error-shell h1 { font-size: 58px; margin: 5px 0 20px; }.error-shell > p:not(.error-code) { color: var(--muted); font-size: 17px; }.error-code { color: var(--danger); font: 700 12px ui-monospace, monospace; }.error-shell .button { margin-top: 20px; }
 footer { display: flex; justify-content: space-between; padding-block: 32px; margin-top: 60px; border-top: 1px solid var(--line); color: var(--muted); font: 700 10px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .history-panel code { overflow-wrap: anywhere; word-break: break-word; }.history-item > div { min-width: 0; }.history-item .history-title { flex-wrap: wrap; gap: 8px; }
 @media (max-width: 820px) { .dashboard-grid, .job-grid { grid-template-columns: 1fr; }.hero { padding-top: 58px; }.job-header { align-items: flex-start; flex-direction: column; }.job-actions { align-items: flex-start; flex-direction: column; }.metric-grid { grid-template-columns: 1fr 1fr; }.artifact-list { grid-template-columns: 1fr; }.build-label { display: none; } }
 @media (max-width: 520px) { .shell { width: min(100% - 24px, 1180px); }.upload-panel, .queue-panel, .overview-panel, .workflow-panel, .evidence-panel, .history-panel, .artifacts-panel, .source-tree-panel { padding: 19px; }.metric-grid, .metadata-grid { grid-template-columns: 1fr; }.datum:nth-child(odd) { padding-right: 0; }h1 { font-size: 3rem; }.job-row .status-pill { display: none; }.source-heading { align-items: flex-start; flex-direction: column; } }

@@ -1,0 +1,963 @@
+{
+  "description": "Version-two exploration reports shared by the web classifier (WebExplorationReportTest) and the SPA retained-case reader (exploration-cases.test.tsx). 'complete' is the classifier state of the report as written; 'partial' is its state with the top-level 'state' field removed. The SPA accepts a complete report exactly when its classifier state is 'available'.",
+  "base": {
+    "schema": "decomp-exploration",
+    "schemaVersion": 2,
+    "state": "complete",
+    "candidateCount": 1,
+    "coverageIncreased": false,
+    "baselineOutputSignatures": 1,
+    "expandedOutputSignatures": 1,
+    "newOutputSignatures": [],
+    "angr": null,
+    "confidence": {
+      "score": 0.5,
+      "inputCount": 1,
+      "sourceCount": 1,
+      "outputSignatureCount": 1,
+      "newOutputSignatureCount": 0,
+      "sandboxed": true,
+      "networkIsolated": true
+    },
+    "candidates": [
+      {
+        "id": "case_0",
+        "source": "SEED",
+        "args": [
+          "a"
+        ],
+        "stdinHex": "0041"
+      }
+    ],
+    "observations": [
+      {
+        "candidateId": "case_0",
+        "signature": "0:6869:",
+        "exitCode": 0,
+        "stdoutHex": "6869",
+        "stderrHex": "",
+        "networkIsolated": true
+      }
+    ],
+    "retainedInputs": [
+      {
+        "id": "regression_a",
+        "args": [
+          "known"
+        ],
+        "stdinHex": "00ff"
+      }
+    ],
+    "retainedInputsOmitted": 0
+  },
+  "cases": [
+    {
+      "name": "producer shape",
+      "patches": [],
+      "complete": "available",
+      "partial": "partial"
+    },
+    {
+      "name": "negative exit code with its signature",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "exitCode"
+          ],
+          "value": -1
+        },
+        {
+          "path": [
+            "observations",
+            0,
+            "signature"
+          ],
+          "value": "-1:6869:"
+        }
+      ],
+      "complete": "available",
+      "partial": "partial"
+    },
+    {
+      "name": "no observations",
+      "patches": [
+        {
+          "path": [
+            "observations"
+          ],
+          "value": []
+        }
+      ],
+      "complete": "available",
+      "partial": "partial"
+    },
+    {
+      "name": "empty arguments and stdin",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "args"
+          ],
+          "value": []
+        },
+        {
+          "path": [
+            "candidates",
+            0,
+            "stdinHex"
+          ],
+          "value": ""
+        }
+      ],
+      "complete": "available",
+      "partial": "partial"
+    },
+    {
+      "name": "angr diagnostics object",
+      "patches": [
+        {
+          "path": [
+            "angr"
+          ],
+          "value": {
+            "argvStates": 1,
+            "stdinStates": 0,
+            "argvSteps": 2,
+            "stdinSteps": 0
+          }
+        }
+      ],
+      "complete": "available",
+      "partial": "partial"
+    },
+    {
+      "name": "candidate args false",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "args"
+          ],
+          "value": false
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate numeric argument",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "args"
+          ],
+          "value": [
+            1
+          ]
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate too many arguments",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "args"
+          ],
+          "value": [
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a",
+            "a"
+          ]
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate numeric source",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "source"
+          ],
+          "value": 7
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate empty source",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "source"
+          ],
+          "value": ""
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate source over 128 characters",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "source"
+          ],
+          "value": "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate numeric id",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "id"
+          ],
+          "value": 7
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate empty id",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "id"
+          ],
+          "value": ""
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate uppercase stdin",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "stdinHex"
+          ],
+          "value": "00FF"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate odd stdin",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "stdinHex"
+          ],
+          "value": "004"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate missing stdin",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "stdinHex"
+          ],
+          "delete": true
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate unknown field",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "extra"
+          ],
+          "value": 1
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate not an object",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0
+          ],
+          "value": "case_0"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "duplicate candidate ids",
+      "patches": [
+        {
+          "path": [
+            "candidates"
+          ],
+          "value": [
+            {
+              "id": "case_0",
+              "source": "SEED",
+              "args": [
+                "a"
+              ],
+              "stdinHex": "0041"
+            },
+            {
+              "id": "case_0",
+              "source": "SEED",
+              "args": [
+                "a"
+              ],
+              "stdinHex": "0041"
+            }
+          ]
+        },
+        {
+          "path": [
+            "candidateCount"
+          ],
+          "value": 2
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation string exit code",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "exitCode"
+          ],
+          "value": "0"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation fractional exit code",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "exitCode"
+          ],
+          "value": 1.5
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation exit code above 32 bits",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "exitCode"
+          ],
+          "value": 2147483648
+        },
+        {
+          "path": [
+            "observations",
+            0,
+            "signature"
+          ],
+          "value": "2147483648:6869:"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation null exit code",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "exitCode"
+          ],
+          "value": null
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation quoted isolation flag",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "networkIsolated"
+          ],
+          "value": "true"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation uppercase stdout",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "stdoutHex"
+          ],
+          "value": "6A"
+        },
+        {
+          "path": [
+            "observations",
+            0,
+            "signature"
+          ],
+          "value": "0:6A:"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation numeric stderr",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "stderrHex"
+          ],
+          "value": 1
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation signature mismatch",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "signature"
+          ],
+          "value": "1:6869:"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation numeric signature",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "signature"
+          ],
+          "value": 0
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation missing signature",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "signature"
+          ],
+          "delete": true
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation unknown field",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "extra"
+          ],
+          "value": 1
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation numeric candidate id",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "candidateId"
+          ],
+          "value": 0
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "duplicate observations",
+      "patches": [
+        {
+          "path": [
+            "observations"
+          ],
+          "value": [
+            {
+              "candidateId": "case_0",
+              "signature": "0:6869:",
+              "exitCode": 0,
+              "stdoutHex": "6869",
+              "stderrHex": "",
+              "networkIsolated": true
+            },
+            {
+              "candidateId": "case_0",
+              "signature": "0:6869:",
+              "exitCode": 0,
+              "stdoutHex": "6869",
+              "stderrHex": "",
+              "networkIsolated": true
+            }
+          ]
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "observation names no candidate",
+      "patches": [
+        {
+          "path": [
+            "observations",
+            0,
+            "candidateId"
+          ],
+          "value": "unknown"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "partial"
+    },
+    {
+      "name": "retained identity collides with a candidate",
+      "patches": [
+        {
+          "path": [
+            "candidates",
+            0,
+            "id"
+          ],
+          "value": "retained:regression_a"
+        },
+        {
+          "path": [
+            "observations",
+            0,
+            "candidateId"
+          ],
+          "value": "retained:regression_a"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "partial"
+    },
+    {
+      "name": "retained numeric id",
+      "patches": [
+        {
+          "path": [
+            "retainedInputs",
+            0,
+            "id"
+          ],
+          "value": 7
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "retained numeric stdin",
+      "patches": [
+        {
+          "path": [
+            "retainedInputs",
+            0,
+            "stdinHex"
+          ],
+          "value": 12
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "retained unknown field",
+      "patches": [
+        {
+          "path": [
+            "retainedInputs",
+            0,
+            "source"
+          ],
+          "value": "SEED"
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "negative retained omission count",
+      "patches": [
+        {
+          "path": [
+            "retainedInputsOmitted"
+          ],
+          "value": -1
+        }
+      ],
+      "complete": "invalid",
+      "partial": "invalid"
+    },
+    {
+      "name": "candidate count mismatch",
+      "patches": [
+        {
+          "path": [
+            "candidateCount"
+          ],
+          "value": 2
+        }
+      ],
+      "complete": "invalid",
+      "partial": "partial"
+    }
+  ]
+}
