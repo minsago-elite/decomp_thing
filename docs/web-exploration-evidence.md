@@ -94,8 +94,10 @@ values is `available`. Any other `state`, `"complete"` with a missing field, an 
 field, a mistyped `schema`/`schemaVersion` or any present field of the wrong producer
 type (for example `angr: false`, or a numeric retained-input `id`) is `invalid` with
 `producerSchemaVersion: null`. Partial and complete reports share the same per-field
-type checks. [The web API reference](web-api.md#evidence-and-revision-adapters) lists
-the full state mapping.
+type checks, including every candidate and observation field the SPA's retained-case
+reader requires (for example `args: false` or a quoted `exitCode` is `invalid`).
+[The web API reference](web-api.md#evidence-and-revision-adapters) lists the full state
+mapping and the row rules.
 
 When candidate observation throws an exception, automatic exploration can retain
 `schema: "decomp-exploration-failure"`, `schemaVersion: 1` at its existing

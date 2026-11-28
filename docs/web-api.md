@@ -718,10 +718,31 @@ The exploration adapter recognizes success schema `decomp-exploration` version 2
 Every field a report carries must have the producer's JSON type, whether the report is complete
 or partial, and in the legacy unversioned shape as well as version 2. A present but mistyped field
 is `invalid`, never `partial`. For example: `angr` must be an object or `null`; counts are unsigned
-decimal integers; flags are literal booleans; version-2 candidate and retained-input `id` values are
-non-empty JSON strings; retained `stdinHex` is lowercase hexadecimal text. Presence and cross-field
-consistency (for example `candidateCount` equal to the candidate list length) are checked only
-when every field is present.
+decimal integers; flags are literal booleans; retained `stdinHex` is lowercase hexadecimal text.
+Presence and cross-field consistency (for example `candidateCount` equal to the candidate list
+length) are checked only when every field is present.
+
+Version-2 rows are checked against the same rules as the SPA's retained-case reader
+(`frontend/src/jobs/explorationCases.ts`), so a report classified `available` can always be opened
+there:
+
+- A candidate has exactly `id`, `source`, `args` and `stdinHex`. `id` and `source` are non-empty
+  strings of at most 128 characters, `args` is an array of at most 256 strings, and `stdinHex` is
+  lowercase hexadecimal. Candidate ids are distinct, and there are at most 1,000 candidates and
+  64 distinct sources.
+- An observation has exactly `candidateId`, `signature`, `exitCode`, `stdoutHex`, `stderrHex` and
+  `networkIsolated`. `exitCode` is a JSON integer in the signed 32-bit range, `networkIsolated` is a
+  literal boolean, both streams are lowercase hexadecimal, and `signature` equals
+  `exitCode:stdoutHex:stderrHex`. Each candidate has at most one observation, and there are at most
+  1,000 observations.
+- These row rules apply to partial and complete reports. Only a complete report must also have
+  every observation name a listed candidate, retained identities distinct from candidate ids, and
+  at most 64 sources including the retained-regression source.
+
+`WebExplorationReportTest` and `frontend/tests/exploration-cases.test.tsx` share one case list,
+`src/test/resources/web/exploration-v2-agreement.json`. The SPA must accept exactly the complete
+reports that the classifier marks `available`. The legacy unversioned shape keeps its tolerant row
+handling: malformed candidate or observation rows there are shown as not reported.
 
 The exploration classifier parses with the same nesting bound as the redacted report projection
 (`WebReportProjection.MAXIMUM_REPORT_DEPTH`, 32 levels). A report nested more deeply is `invalid`

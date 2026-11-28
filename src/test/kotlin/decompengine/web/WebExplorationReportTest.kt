@@ -189,6 +189,50 @@ class WebExplorationReportTest {
         assertEquals("invalid", report("""{"angr":false}""").getValue("state").jsonPrimitive.content)
     }
 
+    /** Applies one corpus patch: a path of object keys and array indexes, then a replacement value or a deletion. */
+    private fun patch(element: JsonElement, path: List<JsonElement>, value: JsonElement?): JsonElement {
+        val rest = path.drop(1)
+        fun child(current: JsonElement?): JsonElement? = if (rest.isEmpty()) value else patch(requireNotNull(current), rest, value)
+        return when (element) {
+            is JsonObject -> {
+                val name = path.first().jsonPrimitive.content
+                JsonObject(element.toMutableMap().also { fields -> child(fields[name])?.let { fields[name] = it } ?: fields.remove(name) })
+            }
+            is JsonArray -> {
+                val index = path.first().jsonPrimitive.int
+                JsonArray(element.toMutableList().also { items -> items[index] = requireNotNull(child(items[index])) })
+            }
+            else -> error("corpus path does not address a container")
+        }
+    }
+
+    @Test fun `version two rows match the producer types the SPA retained-case reader requires`() {
+        // The same corpus drives `exploration-cases.test.tsx`, which requires the SPA to accept exactly the
+        // complete reports classified `available` here.
+        val corpus = Json.parseToJsonElement(requireNotNull(javaClass.getResource("/web/exploration-v2-agreement.json")).readText()).jsonObject
+        val cases = corpus.getValue("cases").jsonArray
+        assertTrue(cases.size >= 30)
+        val expectedStates = mutableSetOf<String>()
+        for (case in cases.map { it.jsonObject }) {
+            val name = case.getValue("name").jsonPrimitive.content
+            var root: JsonElement = corpus.getValue("base")
+            for (item in case.getValue("patches").jsonArray.map { it.jsonObject }) {
+                val delete = item["delete"]?.jsonPrimitive?.boolean == true
+                root = patch(root, item.getValue("path").jsonArray, if (delete) null else item.getValue("value"))
+            }
+            val complete = root.toString()
+            val partial = JsonObject(root.jsonObject - "state").toString()
+            for ((text, key) in listOf(complete to "complete", partial to "partial")) {
+                val expected = case.getValue(key).jsonPrimitive.content
+                expectedStates += expected
+                val result = report(text)
+                assertEquals(expected, result.getValue("state").jsonPrimitive.content, "$name ($key)")
+                assertEquals(if (expected == "invalid") null else 2, result.getValue("producerSchemaVersion").jsonPrimitive.intOrNull, "$name ($key)")
+            }
+        }
+        assertEquals(setOf("available", "partial", "invalid"), expectedStates)
+    }
+
     @Test fun `available reports are always projectable for depth so rows are never silently empty`() {
         val policy = WebRedactionPolicy.create(emptyMap(), emptyList(), emptyList())
         val states = (WebReportProjection.MAXIMUM_REPORT_DEPTH - 3..WebReportProjection.MAXIMUM_REPORT_DEPTH + 3).map { levels ->

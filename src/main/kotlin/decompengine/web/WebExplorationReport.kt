@@ -96,6 +96,14 @@ private fun classifyCapturedExploration(bytes: ByteArray?): Pair<WebExplorationC
                         val candidateIds = candidates.map { it.jsonObject.getValue("id").jsonPrimitive.content }.toSet()
                         retained.forEach { require("retained:${it.jsonObject.getValue("id").jsonPrimitive.content}" !in candidateIds) }
                         require(retained.size.toULong() + count(root, "retainedInputsOmitted").toULong() <= 10_000u)
+                        // Cross-field rules of the SPA's retained-case reader: every observation names a candidate,
+                        // and the reported sources, including the retained-regression source, stay within 64.
+                        require(root.getValue("observations").jsonArray.all {
+                            it.jsonObject.getValue("candidateId").jsonPrimitive.content in candidateIds
+                        })
+                        val sources = candidates.map { it.jsonObject.getValue("source").jsonPrimitive.content }.toSet() +
+                            (if (retained.isEmpty()) emptySet() else setOf("RETAINED_REGRESSION"))
+                        require(sources.size <= 64)
                     }
                     val candidateCount = count(root, "candidateCount")
                     require(candidateCount.toULong() == root.getValue("candidates").jsonArray.size.toULong())
@@ -151,6 +159,47 @@ private fun text(value: JsonElement): String {
 
 private fun identity(value: JsonElement): String = text(value).also { require(it.isNotEmpty() && it.length <= 128) }
 
+private val CANDIDATE_FIELDS = setOf("id", "source", "args", "stdinHex")
+private val OBSERVATION_FIELDS = setOf("candidateId", "signature", "exitCode", "stdoutHex", "stderrHex", "networkIsolated")
+private val EXIT_CODE = Regex("-?(?:0|[1-9][0-9]{0,9})")
+
+/**
+ * One version-two candidate as the producer writes it and the SPA's retained-case reader (`explorationCases.ts`)
+ * requires it: exactly these fields, a non-empty identity and source of at most 128 characters, at most 256 string
+ * arguments and lowercase hexadecimal stdin. Returns the identity and source for the per-list checks.
+ */
+private fun checkVersionedCandidate(element: JsonElement): Pair<String, String> {
+    val candidate = element.jsonObject
+    require(candidate.keys == CANDIDATE_FIELDS)
+    val source = text(candidate.getValue("source"))
+    require(source.isNotEmpty() && source.length <= 128)
+    val args = candidate.getValue("args").jsonArray
+    require(args.size <= 256)
+    args.forEach(::text)
+    require(text(candidate.getValue("stdinHex")).matches(LOWER_HEX))
+    return identity(candidate.getValue("id")) to source
+}
+
+/**
+ * One version-two observation, matching the SPA reader: exactly these fields, a 32-bit integer exit code, a literal
+ * boolean isolation flag, lowercase hexadecimal streams and the `exit:stdout:stderr` signature they determine.
+ */
+private fun checkVersionedObservation(element: JsonElement): String {
+    val observation = element.jsonObject
+    require(observation.keys == OBSERVATION_FIELDS)
+    val candidateId = text(observation.getValue("candidateId"))
+    require(candidateId.length <= 128)
+    val exitToken = observation.getValue("exitCode").jsonPrimitive
+    require(!exitToken.isString && exitToken.content.matches(EXIT_CODE))
+    val exitCode = requireNotNull(exitToken.content.toIntOrNull())
+    boolean(observation, "networkIsolated")
+    val stdoutHex = text(observation.getValue("stdoutHex"))
+    val stderrHex = text(observation.getValue("stderrHex"))
+    require(stdoutHex.matches(LOWER_HEX) && stderrHex.matches(LOWER_HEX))
+    require(text(observation.getValue("signature")) == "$exitCode:$stdoutHex:$stderrHex")
+    return candidateId
+}
+
 /**
  * The producer's JSON type for every field a report carries. A partial report withholds its summary, but a field it
  * does carry is checked exactly as in a complete one; only presence and cross-field consistency are complete-only.
@@ -161,14 +210,21 @@ private fun checkPresentExplorationFields(root: JsonObject, versioned: Boolean) 
     root["newOutputSignatures"]?.let { values -> values.jsonArray.forEach(::text) }
     // The producer writes angr diagnostics as an object, or null when angr did not run.
     root["angr"]?.let { require(it is JsonObject || it is JsonNull) }
+    // Version-two rows have exactly the producer's fields and types; legacy rows stay display-tolerant.
     root["candidates"]?.jsonArray?.let { candidates ->
-        // Versioned candidates carry distinct non-empty string identities; legacy rows stay display-tolerant.
         if (versioned) {
-            val ids = candidates.map { identity(it.jsonObject.getValue("id")) }
-            require(ids.distinct().size == ids.size)
+            require(candidates.size <= 1000)
+            val rows = candidates.map(::checkVersionedCandidate)
+            require(rows.map { it.first }.toSet().size == rows.size && rows.map { it.second }.toSet().size <= 64)
         }
     }
-    root["observations"]?.jsonArray
+    root["observations"]?.jsonArray?.let { observations ->
+        if (versioned) {
+            require(observations.size <= 1000)
+            val ids = observations.map(::checkVersionedObservation)
+            require(ids.toSet().size == ids.size)
+        }
+    }
     root["retainedInputs"]?.jsonArray?.let { retained ->
         require(retained.size <= 1000)
         val ids = HashSet<String>()
