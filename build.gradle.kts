@@ -17,12 +17,13 @@ import java.io.IOException
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.file.FileVisitResult
+import java.nio.file.DirectoryStream
 import java.nio.file.Files
-import java.nio.file.SimpleFileVisitor
+import java.nio.file.SecureDirectoryStream
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.BasicFileAttributeView
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Duration
@@ -1880,21 +1881,38 @@ val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSig
     }
 }
 // Test fixtures may leave symlinks to system directories (for example /usr/bin) under the
-// temporary root. Delete link entries themselves and never traverse them; File.deleteRecursively
-// follows directory symlinks.
-fun deleteTreeWithoutFollowingLinks(root: Path) {
-    if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return
-    Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
-        override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-            Files.delete(file)
-            return FileVisitResult.CONTINUE
-        }
-        override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
-            if (exc != null) throw exc
-            Files.delete(dir)
-            return FileVisitResult.CONTINUE
-        }
-    })
+// temporary root. Each entry is inspected, opened and deleted relative to its already-open parent
+// SecureDirectoryStream with NOFOLLOW_LINKS, so a directory replaced by a link mid-walk cannot
+// redirect traversal or deletes outside the tree: the open fails instead. There is no path-based
+// fallback. [beforeDescent] exists only so the verification task can inject that race.
+fun deleteTreeWithoutFollowingLinks(root: Path, beforeDescent: (Path) -> Unit = {}) {
+    val absolute = root.toAbsolutePath().normalize()
+    val parent = checkNotNull(absolute.parent) { "refusing to delete a filesystem root: $absolute" }
+    if (!Files.exists(absolute, LinkOption.NOFOLLOW_LINKS)) return
+    requireSecureDirectoryStream(Files.newDirectoryStream(parent), parent).use { stream ->
+        deleteEntryWithoutFollowingLinks(stream, absolute.fileName, absolute, beforeDescent)
+    }
+}
+fun requireSecureDirectoryStream(stream: DirectoryStream<Path>, directory: Path): SecureDirectoryStream<Path> {
+    @Suppress("UNCHECKED_CAST")
+    return stream as? SecureDirectoryStream<Path> ?: run {
+        stream.close()
+        throw IOException("refusing path-based deletion: no SecureDirectoryStream is available for $directory")
+    }
+}
+fun deleteEntryWithoutFollowingLinks(
+    parent: SecureDirectoryStream<Path>, name: Path, path: Path, beforeDescent: (Path) -> Unit,
+) {
+    val attributes = parent.getFileAttributeView(name, BasicFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
+        .readAttributes()
+    // A directory swapped in here fails unlinkat without AT_REMOVEDIR; nothing is followed.
+    if (!attributes.isDirectory) return parent.deleteFile(name)
+    beforeDescent(path)
+    // O_NOFOLLOW: a link swapped in after the attribute read fails to open rather than redirecting.
+    requireSecureDirectoryStream(parent.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS), path).use { child ->
+        child.map { it.fileName }.forEach { deleteEntryWithoutFollowingLinks(child, it, path.resolve(it), beforeDescent) }
+    }
+    parent.deleteDirectory(name)
 }
 val verifyTestTemporaryRootCleanup = tasks.register("verifyTestTemporaryRootCleanup") {
     group = "verification"
@@ -1910,6 +1928,23 @@ val verifyTestTemporaryRootCleanup = tasks.register("verifyTestTemporaryRootClea
         Files.createSymbolicLink(root.resolve("directory-link"), target)
         Files.createSymbolicLink(root.resolve("file-link"), kept)
         Files.createSymbolicLink(base.resolve("root-link"), base.resolve("outside"))
+        // Swap a listed directory for a link to the outside target after its attributes were read
+        // and before descent; cleanup must refuse to follow it and leave the target intact.
+        val swapped = Files.createDirectories(root.resolve("swapped"))
+        Files.writeString(swapped.resolve("inner"), "inner")
+        val race = runCatching {
+            deleteTreeWithoutFollowingLinks(base.resolve("root")) { path ->
+                if (path == swapped) {
+                    Files.delete(swapped.resolve("inner"))
+                    Files.delete(swapped)
+                    Files.createSymbolicLink(swapped, target)
+                }
+            }
+        }
+        check(race.isFailure && Files.isSymbolicLink(swapped)) { "cleanup followed a directory swapped for a link" }
+        check(Files.isRegularFile(kept, LinkOption.NOFOLLOW_LINKS) && Files.readString(kept) == "kept") {
+            "cleanup deleted the target of a directory swapped for a link"
+        }
         deleteTreeWithoutFollowingLinks(base.resolve("root"))
         deleteTreeWithoutFollowingLinks(base.resolve("root-link"))
         check(!Files.exists(base.resolve("root"), LinkOption.NOFOLLOW_LINKS) &&

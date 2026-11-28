@@ -126,8 +126,11 @@ class OracleNativeLibrariesTest {
         }
         val target = root.toRealPath().toString()
         // $0 is the scratch root and $1 is mount; the remaining arguments are the command to run.
+        // --no-mtab keeps libmount from writing userspace mount bookkeeping (for example /run/mount)
+        // outside the checkout: the private namespace still shares the host filesystem.
         val prefix = listOf(tools[0].toString(), "--user", "--map-root-user", "--mount", "--propagation", "private",
-            "/bin/sh", "-c", "set -e; \"\$1\" --bind \"\$0\" \"\$0\"; \"\$1\" -o remount,bind,noexec \"\$0\"; shift; exec \"\$@\"",
+            "/bin/sh", "-c",
+            "set -e; \"\$1\" --no-mtab --bind \"\$0\" \"\$0\"; \"\$1\" --no-mtab -o remount,bind,noexec \"\$0\"; shift; exec \"\$@\"",
             target, tools[1].toString())
         val process = ProcessBuilder(prefix + listOf(tools[2].toString(), "--noheadings", "--output", "TARGET,OPTIONS",
             "--target", target)).redirectErrorStream(true).start()
