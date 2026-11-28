@@ -108,24 +108,40 @@ internal class ReferenceCorpusDefinition private constructor(
         }.toMap())
     }
 
-    /** ASCII policy patterns operate on an octet-preserving view; unmatched bytes are never decoded lossily. */
+    /**
+     * ASCII policy patterns operate on an octet-preserving view; unmatched bytes are never decoded lossily.
+     *
+     * Every pattern matches the original line, and earlier rules own overlapping group-1 spans. Replacement
+     * identities are opaque: a later rule never rewrites an already substituted argv[0], even when it contains
+     * the original install prefix.
+     */
     fun substitute(input: ByteArray, values: Map<String, String>): ByteArray {
         require(values.keys.all { key -> identitySubstitutions.any { it.id == key } }) { "unknown identity substitution" }
         require(values.values.all { it.length <= 4096 && '\u0000' !in it && '\n' !in it && '\r' !in it })
-        var lines = input.toString(Charsets.ISO_8859_1).split('\n')
-        for (rule in identitySubstitutions) {
-            val value = values[rule.id]?.toByteArray(Charsets.UTF_8)?.toString(Charsets.ISO_8859_1) ?: continue
-            for (pattern in rule.patterns) {
-                val regex = Regex(pattern)
-                lines = lines.map { line ->
-                    regex.replace(line) { match ->
-                        val group = checkNotNull(match.groups[1])
-                        val start = group.range.first - match.range.first
-                        val end = group.range.last + 1 - match.range.first
-                        match.value.substring(0, start) + value + match.value.substring(end)
+        val patterns = identitySubstitutions.flatMap { rule ->
+            val value = values[rule.id]?.toByteArray(Charsets.UTF_8)?.toString(Charsets.ISO_8859_1)
+                ?: return@flatMap emptyList()
+            rule.patterns.map { Regex(it) to value }
+        }
+        val lines = input.toString(Charsets.ISO_8859_1).split('\n').map { original ->
+            val replacements = mutableListOf<Triple<Int, Int, String>>()
+            for ((regex, value) in patterns) {
+                for (match in regex.findAll(original)) {
+                    val group = checkNotNull(match.groups[1])
+                    val start = group.range.first
+                    val end = group.range.last + 1
+                    if (replacements.none { (previousStart, previousEnd) -> start < previousEnd && previousStart < end }) {
+                        replacements += Triple(start, end, value)
                     }
                 }
             }
+            val line = StringBuilder(original)
+            for ((start, end, value) in replacements.sortedWith(
+                compareByDescending<Triple<Int, Int, String>> { it.first }.thenByDescending { it.second }.thenByDescending { it.third },
+            )) {
+                line.replace(start, end, value)
+            }
+            line.toString()
         }
         return lines.joinToString("\n").toByteArray(Charsets.ISO_8859_1)
     }

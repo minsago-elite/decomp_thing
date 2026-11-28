@@ -241,6 +241,78 @@ class ReferenceCorpusProfileTest {
     }
 
     @Test
+    fun `configured prefix substitution covers retained verbose output with an independent argv0`() {
+        val definition = ReferenceCorpusDefinition.parse(Files.readAllBytes(PROFILE))
+        val retained = OracleJson.parse(Files.readAllBytes(PROFILE_ROOT.resolve("metadata-diagnostic-reference.json"))) as JsonObject
+        val case = (retained.getValue("cases") as JsonArray).map { it as JsonObject }
+            .single { it.getValue("id") == JsonPrimitive("verbose-configuration") }
+        val stderr = ((case.getValue("observed") as JsonObject).getValue("stderr") as JsonObject).getValue("base64")
+        val original = Base64.getDecoder().decode((stderr as JsonPrimitive).content).decodeToString()
+        val expected = original.replace("--prefix=/oracle/install ", "--prefix=/candidate/install ")
+        assertTrue(expected != original)
+        // argv[0] is an independent identity and does not need to share the install prefix.
+        val actual = definition.substitute(original.toByteArray(),
+            mapOf("driver-argv0" to "/retained/path/gcc", "install-prefix" to "/candidate/install"))
+        assertEquals(expected.replace("COLLECT_GCC=/oracle/install/bin/gcc", "COLLECT_GCC=/retained/path/gcc"),
+            actual.decodeToString())
+    }
+
+    @Test
+    fun `configured prefix substitution has a bounded argument and line`() {
+        val definition = ReferenceCorpusDefinition.parse(Files.readAllBytes(PROFILE))
+        val values = mapOf("install-prefix" to "/candidate")
+        val allowed = "Configured with: /source/configure --prefix=/oracle/install --enable-languages=c\n" +
+            "Configured with: /source/configure --prefix=/oracle/install\n"
+        assertEquals(allowed.replace("--prefix=/oracle/install", "--prefix=/candidate"),
+            definition.substitute(allowed.toByteArray(), values).decodeToString())
+        val unchanged = "Configured with: /source/configure --prefix=/oracle/install-extra --enable-languages=c\n" +
+            "Configured with: /source/configure --exec-prefix=/oracle/install --enable-languages=c\n" +
+            "Configured with: /source/configure --prefix=/unrelated/oracle/install\n" +
+            "gcc: error: unexpected --prefix=/oracle/install argument\n"
+        assertEquals(unchanged, definition.substitute(unchanged.toByteArray(), values).decodeToString())
+    }
+
+    @Test
+    fun `substitutions do not rewrite replacement identities`() {
+        val definition = ReferenceCorpusDefinition.parse(Files.readAllBytes(PROFILE))
+        val original = "COLLECT_GCC=/oracle/install/bin/gcc\n" +
+            "Configured with: /source/configure --prefix=/oracle/install\n" +
+            "install: /oracle/install/lib/gcc/x86_64-pc-linux-gnu/16.2.0/\n"
+        // Invocation paths need not share the configured prefix. A replacement may itself contain the old prefix,
+        // even more than once.
+        for (argv0 in listOf("/oracle/install/bin/gcc", "/oracle/install/bin/candidate-cc",
+            "/oracle/install/oracle/install/bin/candidate-cc")) {
+            assertEquals(
+                "COLLECT_GCC=$argv0\n" +
+                    "Configured with: /source/configure --prefix=/candidate\n" +
+                    "install: /candidate/lib/gcc/x86_64-pc-linux-gnu/16.2.0/\n",
+                definition.substitute(original.toByteArray(), mapOf("driver-argv0" to argv0, "install-prefix" to "/candidate"))
+                    .decodeToString(),
+                argv0,
+            )
+        }
+    }
+
+    @Test
+    fun `substitute replaces only the captured span`() {
+        val definition = ReferenceCorpusDefinition.parse(Files.readAllBytes(PROFILE))
+        val data = "gcc (GCC) 16.2.0\n" +
+            "COLLECT_GCC=/oracle/install/bin/gcc\n" +
+            "install: /oracle/install/lib/gcc/x86_64-pc-linux-gnu/16.2.0/\n" +
+            "gcc version 16.2.0 (GCC) \n" +
+            "gcc: fatal error: no input files\n"
+        val values = mapOf("driver-basename" to "xcc", "driver-argv0" to "/opt/bin/xcc", "install-prefix" to "/opt")
+        assertEquals(
+            "xcc (GCC) 16.2.0\n" +
+                "COLLECT_GCC=/opt/bin/xcc\n" +
+                "install: /opt/lib/gcc/x86_64-pc-linux-gnu/16.2.0/\n" +
+                "gcc version 16.2.0 (GCC) \n" +
+                "xcc: fatal error: no input files\n",
+            definition.substitute(data.toByteArray(), values).decodeToString(),
+        )
+    }
+
+    @Test
     fun `single xz stream requires exact expansion and no trailing data`() {
         val expected = "bounded artifact".toByteArray()
         val output = ByteArrayOutputStream()
