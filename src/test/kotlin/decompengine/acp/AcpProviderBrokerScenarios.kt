@@ -260,7 +260,7 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         }
         // Non-ASCII nested request JSON is decoded too: an escaped capability beside it is still found.
         refused(AcpProviderBrokerFailureKind.SECRET_EXPOSURE) {
-            val inner = "{\\\"city\\\":\\\"$NON_ASCII\\\",\\\"q\\\":\\\"" + capabilityHex.map { "\\\\u%04x".format(it.code) }.joinToString("") + "\\\"}"
+            val inner = "{\\\"city\\\":\\\"$NON_ASCII_TEXT\\\",\\\"q\\\":\\\"" + capabilityHex.map { "\\\\u%04x".format(it.code) }.joinToString("") + "\\\"}"
             channelRequest(it, capability, body = "{\"model\":\"gpt-6\",\"input\":\"$inner\"}")
         }
         // The capability and the credential cannot travel upstream, even behind JSON escapes or in a name.
@@ -396,9 +396,9 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             // Non-ASCII text is longer in UTF-8 than in characters, so the nested bound must count bytes.
             "escaped secret beside non-ASCII text in the final arguments" to
                 event("{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"" +
-                    jsonString("{\"city\":\"$NON_ASCII\",\"query\":\"${escaped(token)}\"}") + "\"}"),
+                    jsonString("{\"city\":\"$NON_ASCII_TEXT\",\"query\":\"${escaped(token)}\"}") + "\"}"),
             "escaped secret beside non-ASCII text split across arguments deltas" to
-                argumentsDelta("fc_1", "{\"city\":\"$NON_ASCII\",\"query\":\"" + escaped(token).take(24)) +
+                argumentsDelta("fc_1", "{\"city\":\"$NON_ASCII_TEXT\",\"query\":\"" + escaped(token).take(24)) +
                 argumentsDelta("fc_1", escaped(token).drop(24) + "\"}"),
             "escaped secret in the completed response's final text" to
                 event("{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\"," +
@@ -837,6 +837,8 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         const val ACCOUNT_ID = "acct_fixture-1"
         /** Tokyo in kanji: six UTF-8 bytes for two characters. */
         const val NON_ASCII = "\u6771\u4eac"
+        /** Non-ASCII text whose UTF-8 form is 48 bytes longer than its character count. */
+        val NON_ASCII_TEXT = NON_ASCII.repeat(12)
         const val BODY = """{"model":"gpt-6","input":[{"role":"user","content":"hello"}],"stream":true,"store":false}"""
     }
 }
