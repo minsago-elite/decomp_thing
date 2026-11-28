@@ -59,7 +59,8 @@ export async function seedHistory(root, { includeAccepted = false } = {}) {
     const time = new Date(Date.parse(at) + index * 2000).toISOString();
     const runId = `run_fixture_${index}`;
     const acceptance = acceptedRevision?.runId === runId ? acceptedRevision : null;
-    return { runId, jobId, workflow: 'reconstruct', state, version: `version_fixture_${index}`,
+    return { runId, jobId, workflow: 'reconstruct', state,
+      version: `version_${createHash('sha256').update(`fixture-attempt-${index}`).digest('hex').slice(0, 32)}`,
       createdAt: time, startedAt: time, endedAt: new Date(Date.parse(time) + 1000).toISOString(),
       previousRunId: index ? `run_fixture_${index - 1}` : null, inputRevisionId: null, harnessCapabilityId: null,
       limits: { wallClockMs: '60000', idleMs: '15000', maxOutputBytes: '1048576', maxToolCalls: '16' },
@@ -69,7 +70,8 @@ export async function seedHistory(root, { includeAccepted = false } = {}) {
       acceptedRevision: acceptance };
   });
   // Durable snapshot versions are validated as version_<32 lowercase hex> (#472).
-  const state = { schemaVersion: 1, jobId, version: `version_${'f'.repeat(32)}`,
+  const state = { schemaVersion: 1, jobId,
+    version: `version_${createHash('sha256').update('fixture-history').digest('hex').slice(0, 32)}`,
     legacy: { originalJobSha256: createHash('sha256').update(jobBytes).digest('hex'), status: 'uploaded', recoveredInterrupted: false },
     attempts, acceptedRevision };
   const retained = { 'input.elf': input, 'job.json': jobBytes, 'workflow-state.json': JSON.stringify(state) };

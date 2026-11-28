@@ -46,7 +46,10 @@ export function SessionStatus({ session, placement = 'any' }: { session: Browser
     return <aside class="session-notice is-connected" aria-label={copy.localSession}>
       <p>{copy.localSessionConnected}</p>
       {state.serverChanged && <p role="status">{copy.applicationInstanceChanged}</p>}
-      <button type="button" onClick={() => { void session.logout(); }}>{copy.signOut}</button>
+      {/* Dev fixture server is GET/HEAD-only; this branch compiles away from production builds. */}
+      {import.meta.env.DEV && import.meta.env.MODE === 'fixtures'
+        ? <button type="button" disabled aria-describedby="decomp-development-notice">{copy.signOut}</button>
+        : <button type="button" onClick={() => { void session.logout(); }}>{copy.signOut}</button>}
     </aside>;
   }
   const canCheck = state.status !== 'unavailable' || !['removal-failed', 'incompatible'].includes(state.reason);

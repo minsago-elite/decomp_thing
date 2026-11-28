@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'preact/hooks';
+import { useCallback, useLayoutEffect, useRef } from 'preact/hooks';
 import type { RefObject } from 'preact';
 
 // The control whose own operation is synchronously re-rendering the view (#512). Chrome reports the removal of a focused
@@ -46,12 +46,12 @@ export function useDepartingFocus(root: RefObject<Element>) {
     return () => { document.removeEventListener('focusin', into, true); document.removeEventListener('focusout', out, true); };
   }, [root]);
   /** The element focus departs from now: the focused element, or the control the page disabled under it. */
-  return () => {
+  return useCallback(() => {
     const active = document.activeElement;
     if (active && active !== document.body) return active;
     const from = disabledFrom.current;
     return from && (!from.isConnected || from.matches(':disabled')) ? from : null;
-  };
+  }, []);
 }
 
 /** Lands on the surviving notice only when the transition removed the departing control and focus is still unowned. */

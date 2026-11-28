@@ -4,9 +4,10 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
-import type { Bootstrap, RevisionDirectory, RevisionFile, SourceChunk, SourceSearch } from '../src/api/generated';
+import type { Bootstrap, RevisionDirectory, RevisionFile, Run, SourceChunk, SourceSearch } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { sourceCopy } from '../src/copy/sources';
+import { archiveCopy } from '../src/copy/archive';
 import { createBrowserSession } from '../src/session/session';
 import { createAttemptCommandRecovery, type AttemptCommand } from '../src/jobs/attemptCommandRecovery';
 import { notifyLibraryChanged } from '../src/jobs/libraryNotify';
@@ -173,7 +174,7 @@ it('ends a search view on RESOURCE_GONE and leaves deliberately moved focus alon
   } finally { auth.dispose(); }
 });
 
-for (const kind of ['sourceSearch', 'sourceChunk'] as const) {
+for (const [kind, url] of [['sourceSearch', searchUrl], ['sourceChunk', fileUrl], ['run', `${revision}/source-diff`]] as const) {
   it(`uses the current fragment's ${kind} read to confirm deletion`, async () => {
     const original = heldRead();
     const next = heldRead();
@@ -184,7 +185,7 @@ for (const kind of ['sourceSearch', 'sourceChunk'] as const) {
       signals.push(options.signal);
       return signals.length === 1 ? original.promise : next.promise;
     });
-    const auth = await mount(kind === 'sourceSearch' ? searchUrl : fileUrl);
+    const auth = await mount(url);
     try {
       if (kind === 'sourceChunk') fireEvent.click(await screen.findByRole('button', { name: sourceCopy.openPreview }));
       await waitFor(() => expect(signals).toHaveLength(1));
@@ -485,5 +486,144 @@ it.each(['notice', 'move', 'blur'] as const)('respects the reader’s focus when
     if (choice === 'notice') expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
     else expect(document.activeElement).toBe(choice === 'blur' ? document.body : signOut);
     expect(reads('sourceSearch')).toBe(2);
+  } finally { auth.dispose(); }
+});
+
+// #1805 × #512: the root archive panel and the revision diff views report their own confirmed tombstones to the route.
+it('ends the directory view when Show source archive status confirms RESOURCE_GONE, leaving no live links or controls', async () => {
+  transport.get.mockImplementation((kind: string) => kind === 'revisionDirectory' ? Promise.resolve({ data: directory })
+    : kind === 'sourceArchive' ? Promise.reject(gone()) : Promise.reject(new Error(kind)));
+  const auth = await mount(directoryUrl);
+  try {
+    const inspect = await screen.findByRole('button', { name: archiveCopy.inspect });
+    retain(jobId);
+    inspect.focus(); fireEvent.click(inspect);
+    await screen.findByText(sourceCopy.jobDeleted, { exact: false });
+    const notice = expectGone();
+    expect([...document.querySelectorAll('section.source-navigation a')].map(link => link.textContent)).toEqual([sourceCopy.returnJobs]);
+    expect(document.querySelectorAll('section.source-navigation button').length).toBe(0);
+    expect(screen.queryByRole('button', { name: archiveCopy.refresh })).toBeNull();
+    expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+    expect(sessionStorage.getItem(slot)).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+for (const [label, failure] of [['ARCHIVE_CHANGED 409', new ApiClientError('http_error', { status: 409, serverCode: 'ARCHIVE_CHANGED' })],
+  ['EVENT_GAP 410', gone('EVENT_GAP')], ['503', new ApiClientError('http_error', { status: 503 })]] as const) {
+  it(`keeps an archive status ${label} inside the archive panel`, async () => {
+    transport.get.mockImplementation((kind: string) => kind === 'revisionDirectory' ? Promise.resolve({ data: directory })
+      : kind === 'sourceArchive' ? Promise.reject(failure) : Promise.reject(new Error(kind)));
+    const auth = await mount(directoryUrl);
+    try {
+      fireEvent.click(await screen.findByRole('button', { name: archiveCopy.inspect }));
+      await waitFor(() => expect(reads('sourceArchive')).toBe(1));
+      await screen.findByRole('button', { name: archiveCopy.refresh });
+      expect(screen.queryByText(sourceCopy.jobDeleted, { exact: false })).toBeNull();
+      expect(screen.getByRole('link', { name: sourceCopy.returnAttempt })).toBeTruthy();
+    } finally { auth.dispose(); }
+  });
+}
+
+it('ends the revision comparison view when its attempt read confirms RESOURCE_GONE', async () => {
+  transport.get.mockImplementation(() => Promise.reject(gone()));
+  const auth = await mount(`${revision}/source-diff`);
+  try {
+    await screen.findByText(sourceCopy.jobDeleted, { exact: false });
+    expectGone();
+  } finally { auth.dispose(); }
+});
+
+it('keeps an ordinary revision comparison failure in place', async () => {
+  transport.get.mockImplementation(() => Promise.reject(gone('EVENT_GAP')));
+  const auth = await mount(`${revision}/source-diff`);
+  try {
+    await waitFor(() => expect(reads('run')).toBe(1));
+    await new Promise(done => setTimeout(done, 20));
+    expect(screen.queryByText(sourceCopy.jobDeleted, { exact: false })).toBeNull();
+    expect(screen.getByRole('link', { name: sourceCopy.returnAttempt })).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+function comparisonAttempts() {
+  const run = fixture<Run>('run-completed-unaccepted');
+  return [
+    { ...run, jobId, runId: binding.runId, resultRevisionId: binding.revisionId, previousRunId: 'run_base' },
+    { ...run, jobId, runId: 'run_base', resultRevisionId: 'revision_base' },
+  ];
+}
+
+for (const moveFocus of [false, true]) {
+  it(`recovers focus after Compare revisions confirms deletion (focus moved: ${moveFocus})`, async () => {
+    chromeRemovalBlur();
+    const pending = heldRead();
+    const attempts = comparisonAttempts();
+    transport.get.mockImplementation((kind: string) => {
+      if (kind === 'run') return Promise.resolve({ data: attempts[0] });
+      if (kind === 'runs') return Promise.resolve({ data: { jobId, items: attempts, page: { nextCursor: null } } });
+      if (kind === 'sourceDiff') return pending.promise;
+      throw new Error(kind);
+    });
+    const auth = await mount(`${revision}/source-diff`);
+    try {
+      const compare = await screen.findByRole('button', { name: sourceCopy.diffCompare });
+      const signOut = screen.getByRole('button', { name: 'Sign out' });
+      retain(jobId);
+      compare.focus();
+      fireEvent.click(compare);
+      await waitFor(() => expect(reads('sourceDiff')).toBe(1));
+      expect(compare.isConnected).toBe(false);
+      if (moveFocus) signOut.focus();
+      await act(async () => { pending.reject(gone()); await Promise.resolve(); });
+      const notice = await waitFor(expectGone);
+      expect(sessionStorage.getItem(slot)).toBeNull();
+      if (moveFocus) expect(document.activeElement).toBe(signOut);
+      else expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+    } finally { auth.dispose(); }
+  });
+}
+
+it('loads the current comparison continuation after a fragment replaces an unfinished page', async () => {
+  const pending = heldRead();
+  const attempts = comparisonAttempts();
+  const cursors: (string | null)[] = [];
+  let previous: AbortSignal | undefined;
+  transport.get.mockImplementation((kind: string, path: string, options: { signal: AbortSignal }) => {
+    if (kind === 'run') return Promise.resolve({ data: attempts[0] });
+    if (kind !== 'runs') throw new Error(kind);
+    const cursor = new URL(path, location.origin).searchParams.get('cursor');
+    cursors.push(cursor);
+    if (cursor === 'old_page') {
+      previous = options.signal;
+      return pending.promise;
+    }
+    if (cursor === 'new_page') {
+      const extra = { ...attempts[1], runId: 'run_older', resultRevisionId: 'revision_older' };
+      return Promise.resolve({ data: { jobId, items: [extra], page: { nextCursor: null } } });
+    }
+    return Promise.resolve({ data: { jobId, items: attempts, page: { nextCursor: previous ? 'new_page' : 'old_page' } } });
+  });
+  const auth = await mount(`${revision}/source-diff`);
+  try {
+    retain(jobId);
+    const saved = sessionStorage.getItem(slot);
+    const name = sourceCopy.diffLoadOlder;
+    fireEvent.click(await screen.findByRole('button', { name }));
+    await waitFor(() => expect(previous).toBeDefined());
+    await act(async () => {
+      history.pushState(null, '', location.pathname + '#source-title');
+      dispatchEvent(new HashChangeEvent('hashchange'));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(cursors).toEqual([null, 'old_page', null]));
+    expect(previous?.aborted).toBe(true);
+    await act(async () => { pending.reject(gone()); await Promise.resolve(); });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(sessionStorage.getItem(slot)).toBe(saved);
+    const older = await screen.findByRole<HTMLButtonElement>('button', { name });
+    expect(older.disabled).toBe(false);
+    fireEvent.click(older);
+    await screen.findByRole('option', { name: /run_older/ });
+    expect(cursors).toEqual([null, 'old_page', null, 'new_page']);
+    expect(screen.queryByRole('button', { name })).toBeNull();
   } finally { auth.dispose(); }
 });
