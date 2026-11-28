@@ -158,14 +158,23 @@ class BuiltinAgentHarness(
          * Journal cleanup covers every exit, including an Error from session teardown or receipt construction. An
          * unclosed journal would keep its JVM-wide lease and refuse every later resume of that path until JVM exit.
          */
-        fun run(binding: AgentExecutionRequestBinding): AgentExecutionReceipt = try { runOwned(binding) } finally {
-            try { journal?.close() } catch (_: Exception) { /* The primary outcome or Throwable is already decided. */ }
+        fun run(binding: AgentExecutionRequestBinding): AgentExecutionReceipt {
+            var primary: Throwable? = null
+            try {
+                return runOwned(binding)
+            } catch (failure: Throwable) {
+                primary = failure; throw failure
+            } finally {
+                // The first failure wins; a journal-close Error is attached to it as suppressed.
+                cleanupPreserving(primary) { journal?.close() }
+            }
         }
 
         private fun runOwned(binding: AgentExecutionRequestBinding): AgentExecutionReceipt {
             var stop: BuiltinStop
             var failureKind: AgentFailureKind? = null
             var cleanup = false
+            var fatal: Throwable? = null
             try {
                 verifyCheckpointIdentity()
                 if (resume == null) journal = journalConfiguration?.let { BuiltinJournal.open(it, request, secrets) }
@@ -195,12 +204,14 @@ class BuiltinAgentHarness(
             } catch (_: Exception) {
                 stop = BuiltinStop.TOOL_FAILED
                 failureKind = AgentFailureKind.INTERNAL
-            } catch (fatal: Throwable) {
+            } catch (failure: Throwable) {
                 // Preserve a crash prefix, but release owned descriptors when unwinding is still possible.
-                try { journal?.close() } catch (_: Exception) { }
-                throw fatal
+                fatal = failure
+                cleanupPreserving(failure) { journal?.close() }
+                throw failure
             } finally {
-                try { session?.close(); cleanup = true } catch (_: Exception) { /* Never claim cleaned-up success. */ }
+                // Never claim cleaned-up success after a teardown failure, and never let teardown replace a pending Error.
+                cleanupPreserving(fatal) { session?.close(); cleanup = true }
             }
             if (!cleanup) {
                 stop = BuiltinStop.TOOL_FAILED

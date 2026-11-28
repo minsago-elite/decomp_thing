@@ -35,16 +35,42 @@ object BuiltinJournalLockProbe {
             "-cp", classPath, BuiltinJournalLockProbe::class.java.name, path.toString())
             .redirectErrorStream(true).redirectOutput(output.toFile()).redirectInput(ProcessBuilder.Redirect.from(java.io.File("/dev/null")))
             .start()
+        var primary: Throwable? = null
         try {
             check(process.waitFor(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) { "lock probe timed out" }
             val text = Files.readString(output)
             check(process.exitValue() == 0) { "lock probe failed: $text" }
             return text
+        } catch (failure: Throwable) {
+            primary = failure; throw failure
         } finally {
             if (process.isAlive) {
                 process.destroyForcibly()
-                check(process.waitFor(REAP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) { "lock probe survived forced termination" }
+                val survived = reap(process)
+                if (survived != null) { if (primary != null) primary.addSuppressed(survived) else throw survived }
             }
+        }
+    }
+
+    /**
+     * Waits for a killed child against one deadline, continuing through interrupts so the test never exits before the
+     * child is confirmed stopped. The interrupt status is restored afterwards. Returns a failure if the child survives.
+     */
+    private fun reap(process: Process): Throwable? {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(REAP_TIMEOUT_SECONDS)
+        var interrupted = false
+        try {
+            while (true) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) return if (process.isAlive) IllegalStateException("lock probe survived forced termination") else null
+                try {
+                    if (process.waitFor(remaining, TimeUnit.NANOSECONDS)) return null
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
         }
     }
 
