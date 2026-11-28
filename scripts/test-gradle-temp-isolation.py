@@ -11,26 +11,58 @@ import unittest
 
 
 REPOSITORY = Path(__file__).resolve().parent.parent
+CHECK = REPOSITORY / "scripts/check-system-temp-isolation.py"
+HOOK_LINE = '. "$APP_HOME/gradle/repository-temp.sh"'
 PROBE_MARKER = "DECOMP_TEMP_PROBE "
 
 FAKE_JAVA = """#!/bin/sh
 { printf '%s\\n' "$@"; printf 'TMPDIR=%s\\n' "$TMPDIR"; } > "$DECOMP_FAKE_JAVA_RECORD"
 """
 
-# Groovy, so the probe does not pay for Kotlin script compilation.
-PROBE = """
+# Groovy, so the probes do not pay for Kotlin script compilation.
+KOTLIN_COMPILE_PROBE = """
 import java.lang.management.ManagementFactory
 gradle.projectsEvaluated { g ->
-    def root = g.rootProject
-    def report = [
-        daemonArguments: ManagementFactory.runtimeMXBean.inputArguments,
-        daemonTemporaryDirectory: System.getProperty("java.io.tmpdir"),
-        daemonEnvironmentTmpdir: System.getenv("TMPDIR"),
-        kotlinDaemonArguments: root.tasks.getByName("compileKotlin").kotlinDaemonJvmArguments.get(),
-        acpGateHelperTmpdir: root.tasks.getByName("buildAcpGateHelper").environment["TMPDIR"]?.toString(),
-        acpGateHelperTemporaryDirectory: root.tasks.getByName("buildAcpGateHelper").temporaryDir.absolutePath,
-    ]
-    println("DECOMP_TEMP_PROBE " + groovy.json.JsonOutput.toJson(report))
+    g.rootProject.tasks.named("compileKotlin") { task ->
+        task.doLast {
+            def report = [
+                strategy: task.compilerExecutionStrategy.get().toString(),
+                daemonArguments: ManagementFactory.runtimeMXBean.inputArguments,
+                temporaryDirectory: System.getProperty("java.io.tmpdir"),
+                environmentTmpdir: System.getenv("TMPDIR"),
+                kotlinDaemons: ProcessHandle.current().descendants()
+                    .map { it.info().commandLine().orElse("") }
+                    .filter { it.contains("KotlinCompileDaemon") }.toList(),
+            ]
+            println("DECOMP_TEMP_PROBE " + groovy.json.JsonOutput.toJson(report))
+        }
+    }
+}
+"""
+
+# Moves only the root build directory, so a real `clean` cannot touch the checkout's build/.
+BUILD_DIRECTORY_PROBE = """
+beforeProject { project ->
+    if (project.path == ":") {
+        project.layout.buildDirectory.set(new File(System.getenv("DECOMP_TEST_BUILD_DIRECTORY")))
+    }
+}
+"""
+
+RECORDING_COMPILER = """#!/bin/sh
+{ printf 'TMPDIR=%s\\n' "$TMPDIR"; if [ -d "$TMPDIR" ]; then echo exists; else echo missing; fi; } \\
+    > "$DECOMP_TEST_COMPILER_RECORD"
+exec /usr/bin/cc "$@"
+"""
+
+# Redirects the wrapper task's outputs, so regeneration cannot rewrite the checked-in wrapper.
+WRAPPER_PROBE = """
+gradle.projectsEvaluated { g ->
+    g.rootProject.tasks.named("wrapper") { task ->
+        def root = new File(System.getenv("DECOMP_TEST_WRAPPER_ROOT"))
+        task.scriptFile = new File(root, "gradlew")
+        task.jarFile = new File(root, "gradle/wrapper/gradle-wrapper.jar")
+    }
 }
 """
 
@@ -39,120 +71,159 @@ def within(path, parent):
     return Path(path).resolve().is_relative_to(Path(parent).resolve())
 
 
-class GradleWrapperTemporaryDirectoryTest(unittest.TestCase):
-    """Runs the checked-in wrapper script against a fake java, so no JVM starts."""
+def scratch(test, prefix):
+    (REPOSITORY / "build").mkdir(exist_ok=True)
+    temporary = tempfile.TemporaryDirectory(prefix=prefix, dir=REPOSITORY / "build")
+    test.addCleanup(temporary.cleanup)
+    return Path(temporary.name)
 
-    def setUp(self):
-        (REPOSITORY / "build").mkdir(exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(prefix="gradle-temp-wrapper-", dir=REPOSITORY / "build")
-        self.root = Path(self.temporary.name)
-        shutil.copy2(REPOSITORY / "gradlew", self.root / "gradlew")
-        java_home = self.root / "java-home"
-        (java_home / "bin").mkdir(parents=True)
-        java = java_home / "bin/java"
-        java.write_text(FAKE_JAVA)
-        java.chmod(0o755)
-        self.record = self.root / "java-arguments.txt"
-        self.environment = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(self.root),
-            "JAVA_HOME": str(java_home),
-            "DECOMP_FAKE_JAVA_RECORD": str(self.record),
-            # A caller's own settings must not move build-tool temporary files out of the repository.
-            "TMPDIR": "/elsewhere",
-            "GRADLE_OPTS": "-Djava.io.tmpdir=/elsewhere",
-        }
 
-    def tearDown(self):
-        self.temporary.cleanup()
+def checked(label, command, environment=None, cwd=REPOSITORY, timeout=900):
+    """Runs command through the system temporary directory check and returns (result, report)."""
+    result = subprocess.run([str(CHECK), "--label", label, "--", *command], cwd=cwd, timeout=timeout,
+                            env={**os.environ, **(environment or {})}, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    reports = sorted((REPOSITORY / "build/system-temp-isolation").glob(f"{label}-*"))
+    return result, reports[-1] if reports else None
+
+
+class GradleWrapperHookTest(unittest.TestCase):
+    """Runs the checked-in wrapper script and hook against a fake java, so no JVM starts."""
+
+    def test_wrapper_sources_the_hook_once_after_the_default_jvm_options(self):
+        lines = (REPOSITORY / "gradlew").read_text().splitlines()
+        self.assertEqual(1, lines.count(HOOK_LINE))
+        self.assertTrue(lines[lines.index(HOOK_LINE) - 1].startswith("DEFAULT_JVM_OPTS="))
 
     def test_wrapper_client_disables_perf_data_and_uses_repository_temporary_directory(self):
-        subprocess.run(["sh", str(self.root / "gradlew"), "help"], cwd=self.root, env=self.environment,
-                       check=True, timeout=60)
-        lines = self.record.read_text().splitlines()
-        expected = self.root / ".gradle/tmp"
+        root = scratch(self, "gradle-temp-wrapper-")
+        shutil.copy2(REPOSITORY / "gradlew", root / "gradlew")
+        (root / "gradle").mkdir()
+        shutil.copy2(REPOSITORY / "gradle/repository-temp.sh", root / "gradle")
+        java = root / "java-home/bin/java"
+        java.parent.mkdir(parents=True)
+        java.write_text(FAKE_JAVA)
+        java.chmod(0o755)
+        record = root / "java-arguments.txt"
+        subprocess.run(["sh", str(root / "gradlew"), "help"], cwd=root, check=True, timeout=60, env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root),
+            "JAVA_HOME": str(java.parent.parent), "DECOMP_FAKE_JAVA_RECORD": str(record),
+            # A caller's own settings must not move build-tool temporary files out of the repository.
+            "TMPDIR": "/elsewhere", "GRADLE_OPTS": "-Djava.io.tmpdir=/elsewhere -XX:+UsePerfData",
+        })
+        lines = record.read_text().splitlines()
+        expected = root / ".gradle/tmp"
         self.assertTrue(expected.is_dir(), "gradlew must create the temporary directory before java starts")
         self.assertIn(f"TMPDIR={expected}", lines)
         arguments = lines[:lines.index("-jar")]
-        self.assertIn("-XX:-UsePerfData", arguments)
+        perf_data = [argument for argument in arguments if argument.endswith("UsePerfData")]
+        self.assertEqual("-XX:-UsePerfData", perf_data[-1], "the last UsePerfData option wins")
         temporary = [argument for argument in arguments if argument.startswith("-Djava.io.tmpdir=")]
         self.assertEqual(f"-Djava.io.tmpdir={expected}", temporary[-1], "the last java.io.tmpdir wins")
 
 
+class WrapperRegenerationTest(unittest.TestCase):
+    def test_regenerated_wrapper_matches_the_checked_in_wrapper_with_the_hook(self):
+        root = scratch(self, "gradle-temp-regenerate-")
+        probe = root / "probe.gradle"
+        probe.write_text(WRAPPER_PROBE)
+        subprocess.run(["./gradlew", "--no-daemon", "--quiet", "--init-script", str(probe), "wrapper"],
+                       cwd=REPOSITORY, check=True, timeout=900, env={**os.environ, "DECOMP_TEST_WRAPPER_ROOT": str(root)})
+        self.assertEqual((REPOSITORY / "gradlew").read_text(), (root / "gradlew").read_text(),
+                         "the wrapper task must reproduce the checked-in gradlew, hook line included")
+
+
 class SystemTemporaryDirectoryCheckTest(unittest.TestCase):
-    """Runs the before/after check against a stand-in system temporary directory under build/."""
+    """Runs the check on small commands; their /tmp is the check's private observed directory."""
 
     def setUp(self):
-        (REPOSITORY / "build").mkdir(exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(prefix="system-temp-check-", dir=REPOSITORY / "build")
-        self.root = Path(self.temporary.name)
-        (self.root / "scripts").mkdir()
-        shutil.copy2(REPOSITORY / "scripts/check-system-temp-isolation.sh", self.root / "scripts")
-        self.system_temp = self.root / "system-tmp"
-        user = subprocess.run(["id", "-un"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
-        self.perf_data = self.system_temp / f"hsperfdata_{user}"
-        self.perf_data.mkdir(parents=True)
-        (self.system_temp / "existing").touch()
-        (self.perf_data / "100").touch()
+        self.marker = f"decomp-check-{os.getpid()}-{self.id().rsplit('.', 1)[-1]}"
 
     def tearDown(self):
-        self.temporary.cleanup()
+        self.assertFalse(any(name.startswith(self.marker) for name in os.listdir("/tmp")),
+                         "the check must redirect the command's /tmp away from the host /tmp")
 
-    def check(self, command):
-        return subprocess.run(["bash", str(self.root / "scripts/check-system-temp-isolation.sh"), "sh", "-c", command],
-                              env={**os.environ, "DECOMP_SYSTEM_TEMP_DIR": str(self.system_temp)},
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+    def summary(self, report):
+        return json.loads((report / "summary.json").read_text())
 
-    def test_reports_no_new_entries_when_the_command_leaves_none(self):
-        result = self.check(f"rm {self.perf_data}/100")
+    def test_passes_a_command_that_writes_only_to_its_own_temporary_directory(self):
+        private = scratch(self, "system-temp-private-")
+        result, report = checked("selftest-clean", ["sh", "-c", 'mktemp "$TMPDIR/x.XXXXXX" >/dev/null'],
+                                 {"TMPDIR": str(private)})
         self.assertEqual(0, result.returncode, result.stdout)
-        self.assertIn("No new entries", result.stdout)
-        self.assertEqual("", (self.root / "build/system-temp-isolation/new-entries.txt").read_text())
+        self.assertEqual("clean", self.summary(report)["result"])
+        self.assertEqual("/tmp", self.summary(report)["systemTemporaryDirectory"])
+        for name in ("events.txt", "remaining.txt", "host-before.txt", "host-after.txt", "host-new.txt"):
+            self.assertTrue((report / name).is_file(), name)
 
-    def test_fails_and_lists_new_top_level_and_perf_data_entries(self):
-        result = self.check(f"mkdir {self.system_temp}/cc-leak && touch {self.perf_data}/4242")
+    def test_fails_on_an_entry_kept_under_a_subdirectory(self):
+        result, report = checked("selftest-nested", ["sh", "-c",
+                                 f"mkdir -p /tmp/{self.marker}/existing && touch /tmp/{self.marker}/existing/kept"])
         self.assertEqual(1, result.returncode, result.stdout)
-        self.assertEqual(["cc-leak", f"{self.perf_data.name}/4242"],
-                         (self.root / "build/system-temp-isolation/new-entries.txt").read_text().splitlines())
+        self.assertIn(f"{self.marker}/existing/kept", (report / "remaining.txt").read_text().splitlines())
 
-    def test_preserves_the_command_failure_status(self):
-        self.assertEqual(7, self.check("exit 7").returncode)
+    def test_fails_on_a_top_level_entry_deleted_before_the_command_exits(self):
+        result, report = checked("selftest-transient", ["sh", "-c",
+                                 f"touch /tmp/{self.marker} && rm /tmp/{self.marker}"])
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertEqual("", (report / "remaining.txt").read_text())
+        self.assertIn(f"create {self.marker}", (report / "events.txt").read_text().splitlines())
+
+    def test_fails_on_a_hotspot_perf_data_file(self):
+        result, report = checked("selftest-hsperfdata", ["java", "-XX:+UsePerfData", "-version"])
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertTrue(any(line.startswith("create hsperfdata_")
+                            for line in (report / "events.txt").read_text().splitlines()), result.stdout)
+
+    def test_preserves_the_command_failure_status_and_writes_one_report_per_invocation(self):
+        first = checked("selftest-status", ["sh", "-c", "exit 7"])
+        second = checked("selftest-status", ["true"])
+        self.assertEqual(7, first[0].returncode)
+        self.assertEqual(0, second[0].returncode)
+        self.assertNotEqual(first[1], second[1])
+        self.assertEqual(7, self.summary(first[1])["commandExitStatus"])
 
 
-class GradleDaemonTemporaryDirectoryTest(unittest.TestCase):
-    """Configures the real build in a single-use daemon and reports its effective settings."""
+class GradleBuildTemporaryDirectoryTest(unittest.TestCase):
+    """Real builds inside the check: a Kotlin compile, and `clean` before the native helper."""
 
-    def setUp(self):
-        (REPOSITORY / "build").mkdir(exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(prefix="gradle-temp-daemon-", dir=REPOSITORY / "build")
-        self.probe = Path(self.temporary.name) / "probe.gradle"
-        self.probe.write_text(PROBE)
-
-    def tearDown(self):
-        self.temporary.cleanup()
-
-    def test_gradle_and_kotlin_daemons_and_native_compiler_use_repository_temporary_directories(self):
-        result = subprocess.run(
-            ["./gradlew", "--no-daemon", "--offline", "--quiet", "--init-script", str(self.probe), "help"],
-            cwd=REPOSITORY, check=True, timeout=900, stdout=subprocess.PIPE, text=True)
+    def test_real_kotlin_compile_runs_in_process_with_repository_temporary_directories(self):
+        root = scratch(self, "gradle-temp-kotlin-")
+        probe = root / "probe.gradle"
+        probe.write_text(KOTLIN_COMPILE_PROBE)
+        result, report = checked("kotlin-compile", ["./gradlew", "--no-daemon", "--init-script", str(probe),
+                                                     "compileKotlin", "--rerun"])
+        self.assertEqual(0, result.returncode, result.stdout[-6000:])
         reports = [line[len(PROBE_MARKER):] for line in result.stdout.splitlines() if line.startswith(PROBE_MARKER)]
-        self.assertEqual(1, len(reports), result.stdout)
-        report = json.loads(reports[0])
-        repository_temporary = REPOSITORY / ".gradle/tmp"
+        self.assertEqual(1, len(reports), result.stdout[-6000:])
+        compile_report = json.loads(reports[0])
+        repository_temporary = (REPOSITORY / ".gradle/tmp").resolve()
+        self.assertEqual("IN_PROCESS", compile_report["strategy"])
+        self.assertEqual([], compile_report["kotlinDaemons"])
+        self.assertIn("-XX:-UsePerfData", compile_report["daemonArguments"])
+        self.assertEqual(repository_temporary, Path(compile_report["temporaryDirectory"]).resolve())
+        self.assertEqual(repository_temporary, Path(compile_report["environmentTmpdir"]).resolve())
+        self.assertEqual("clean", json.loads((report / "summary.json").read_text())["result"])
 
-        self.assertIn("-XX:-UsePerfData", report["daemonArguments"])
-        self.assertEqual(repository_temporary.resolve(), Path(report["daemonTemporaryDirectory"]).resolve())
-        self.assertEqual(repository_temporary.resolve(), Path(report["daemonEnvironmentTmpdir"]).resolve())
-
-        kotlin = report["kotlinDaemonArguments"]
-        self.assertIn("-XX:-UsePerfData", kotlin)
-        self.assertIn("-Xmx2048m", kotlin, "the gradle.properties Kotlin daemon heap must be preserved")
-        kotlin_temporary = [argument for argument in kotlin if argument.startswith("-Djava.io.tmpdir=")]
-        self.assertEqual(1, len(kotlin_temporary), kotlin)
-        self.assertTrue(within(kotlin_temporary[0].split("=", 1)[1], REPOSITORY), kotlin_temporary)
-
-        self.assertEqual(report["acpGateHelperTemporaryDirectory"], report["acpGateHelperTmpdir"])
-        self.assertTrue(within(report["acpGateHelperTmpdir"], REPOSITORY / "build"), report)
+    def test_clean_then_native_helper_build_gives_the_compiler_an_existing_repository_tmpdir(self):
+        root = scratch(self, "gradle-temp-clean-")
+        probe = root / "probe.gradle"
+        probe.write_text(BUILD_DIRECTORY_PROBE)
+        compiler = root / "recording-cc"
+        compiler.write_text(RECORDING_COMPILER)
+        compiler.chmod(0o755)
+        record = root / "compiler-record.txt"
+        build_directory = root / "build"
+        result, report = checked("clean-native-helper", [
+            "./gradlew", "--no-daemon", "--init-script", str(probe), ":clean", ":buildAcpGateHelper",
+            f"-PacpGateHelperCompiler={compiler}"],
+            {"DECOMP_TEST_BUILD_DIRECTORY": str(build_directory), "DECOMP_TEST_COMPILER_RECORD": str(record)})
+        self.assertEqual(0, result.returncode, result.stdout[-6000:])
+        lines = record.read_text().splitlines()
+        self.assertEqual(f"TMPDIR={build_directory / 'tmp/buildAcpGateHelper'}", lines[0])
+        self.assertEqual("exists", lines[1], "clean must not leave the compiler a deleted TMPDIR")
+        self.assertTrue((build_directory / "native/acp/decomp-acp-gate-helper").is_file())
+        self.assertEqual("clean", json.loads((report / "summary.json").read_text())["result"])
 
 
 if __name__ == "__main__":

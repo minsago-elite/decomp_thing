@@ -169,9 +169,10 @@ llm_bin_patch runs follow ./output/program-source [run-id]
 
 ## Development
 
-`./gradlew` keeps Gradle, Kotlin daemon and native compiler temporary files under
-`.gradle/tmp` instead of `/tmp`; see
-[docs/ci.md](docs/ci.md#build-tool-temporary-files).
+`./gradlew` keeps Gradle, in-process Kotlin compiler and native compiler temporary
+files under `.gradle/tmp` instead of `/tmp`; see
+[docs/ci.md](docs/ci.md#build-tool-temporary-files). Run Gradle on Java 21; the build no
+longer auto-detects other local JDKs.
 
 The required LLVM lanes validate the checked source/build/artifact manifest and
 recompute both complete ELF files plus their exact twin-equivalence commitments

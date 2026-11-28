@@ -182,35 +182,79 @@ evidence independently.
 
 Gradle build tools keep their temporary files under the repository (#2008):
 
-- `./gradlew` creates `.gradle/tmp`, starts the wrapper JVM with
-  `-XX:-UsePerfData` and `-Djava.io.tmpdir=.gradle/tmp`, and exports
-  `TMPDIR=.gradle/tmp`. Gradle starts its daemon with the client's
-  `java.io.tmpdir`. The daemon passes `TMPDIR` to the tools it runs (`cc`, npm
-  and Python). A `TMPDIR` or `java.io.tmpdir` from the caller's `GRADLE_OPTS` is
-  overridden. `.gradle/` is ignored by Git and survives `clean`. Delete
+- `./gradlew` sources `gradle/repository-temp.sh`. The hook creates `.gradle/tmp`,
+  exports `TMPDIR=.gradle/tmp` and appends `-XX:-UsePerfData` and
+  `-Djava.io.tmpdir=.gradle/tmp` to `GRADLE_OPTS`. Those are the last JVM options
+  `gradlew` passes, so they override a caller's own. Gradle starts its daemon with the
+  client's `java.io.tmpdir`. The daemon passes `TMPDIR` to the tools it runs (`cc`,
+  npm and Python). `.gradle/` is ignored by Git and survives `clean`. Delete
   `.gradle/tmp` only while no build of this checkout is running.
-- `org.gradle.jvmargs` in `gradle.properties` repeats Gradle's daemon defaults
-  and adds `-XX:-UsePerfData`, because HotSpot otherwise writes
-  `/tmp/hsperfdata_<user>/<pid>` whatever `java.io.tmpdir` says. `--no-daemon`
-  builds already forked a single-use daemon before this change.
-- The Kotlin compiler daemon receives `kotlin.daemon.jvmargs` plus
-  `-Djava.io.tmpdir=.gradle/tmp/kotlin-daemon`. Its logs and client marker files
-  follow the Gradle daemon's `java.io.tmpdir`. Kotlin reuses any running daemon
-  whose heap is large enough, including one started by another checkout or by an
-  older build, and that daemon keeps its own settings. Stop stale Kotlin daemons
-  to apply these settings locally. Hosted CI always starts a fresh one.
-- `buildAcpGateHelper` runs the compiler with `TMPDIR` set to its Gradle task
-  temporary directory. The JVM helper builders already use their own scratch
-  `tmp` directories.
+- Regenerating the wrapper (`./gradlew wrapper`) rewrites `gradlew`. The root
+  `wrapper` task then re-adds the single sourcing line after `DEFAULT_JVM_OPTS`.
+  `scripts/test-gradle-temp-isolation.py` regenerates the wrapper into a scratch
+  directory and requires it to match the checked-in `gradlew` byte for byte.
+- `org.gradle.jvmargs` adds `-XX:-UsePerfData`, because HotSpot otherwise writes
+  `/tmp/hsperfdata_<user>/<pid>` whatever `java.io.tmpdir` says.
+- Kotlin compiles in-process (`kotlin.compiler.execution.strategy=in-process`), so
+  compiler temporary files follow the Gradle daemon's `java.io.tmpdir`. A separate
+  Kotlin daemon would be shared with any checkout whose heap request it satisfies,
+  and would keep the temporary and log directories of the build that started it. The
+  Gradle daemon heap is therefore 3 GiB with 512 MiB metaspace. A clean
+  `compileKotlin compileTestKotlin` peaked at 1.73 GiB live heap after GC and
+  184 MiB metaspace. The previous setup used a 512 MiB Gradle daemon plus a
+  2 GiB Kotlin daemon.
+- `org.gradle.java.installations.auto-detect=false`: every toolchain is Java 21, the
+  JVM that runs Gradle in CI and in the Dockerfile. Auto-detection would start every
+  other local JDK once per `--no-daemon` build to read its version, and each of those
+  JVMs writes an hsperfdata file. **Developer-visible change:** run Gradle on Java 21
+  (`JAVA_HOME`), or list a Java 21 installation in `org.gradle.java.installations.paths`
+  in `~/.gradle/gradle.properties`.
+- `buildAcpGateHelper` sets the compiler's `TMPDIR` to its Gradle task temporary
+  directory when the task runs, after any `clean` in the same build. The JVM helper
+  builders already use their own scratch `tmp` directories.
 
-Builds that bypass `./gradlew`, for example through IDE Tooling API imports, do
-not get the wrapper settings. `scripts/check-system-temp-isolation.sh` lists the
-current user's `/tmp` entries and `hsperfdata_<user>` files before and after a
-command. It fails on any new entry. The default command is
-`./gradlew --no-daemon test -PciTestShard=core`. Other work by the same user on a
-shared host shows up as noise. The core and oracle Kotlin CI shards run their
-Gradle command through this check. `scripts/test-gradle-temp-isolation.py` covers
-the wrapper, daemon and Kotlin daemon settings and the check itself.
+Builds that bypass `./gradlew`, such as IDE Tooling API imports, do not get the hook.
+
+`scripts/check-system-temp-isolation.py [--label NAME] -- command...` fails when the
+command's process tree writes to `/tmp`. Its default command is
+`./gradlew --no-daemon test -PciTestShard=core`. It works as follows:
+
+1. The command runs in a private mount namespace. That namespace's `/tmp` is an empty
+   directory under `build/system-temp-isolation/<label>-<time>-<pid>/observed-tmp`,
+   and the scan target is always `/tmp`.
+2. inotify records every entry created there, including entries deleted again, and
+   the directory is listed after the command.
+3. Any recorded creation or remaining entry fails the check. Only that process tree
+   can see the directory, so concurrent work on a shared host is not attributed to the
+   build.
+4. The host `/tmp` is listed recursively before and after, for context. New host
+   entries are reported as unattributed but do not fail the check.
+5. Each run writes `summary.json`, `events.txt`, `remaining.txt` and the host
+   listings.
+
+As root, or with passwordless `sudo -n` (hosted CI), the namespace keeps real user
+and group IDs. Otherwise the check uses an unprivileged user namespace, where files
+owned by other users appear as the overflow user and setuid programs such as `sudo`
+fail.
+
+Limits:
+
+- Work handed to a process outside the namespace is not observed. Examples are an
+  already-running Gradle daemon, Docker and systemd services. Run Gradle with
+  `--no-daemon`.
+- A short-lived entry inside a newly created subdirectory can be missed. Creating
+  the subdirectory is still recorded and fails the check.
+
+In the Kotlin CI job, the first Gradle builds run through the check: the oracle runtime
+and bundled Ghidra preparation. So do the core-main and core-oracle `scripts/ci.sh` runs,
+which together form `-PciTestShard=core`. Each job uploads `build/system-temp-isolation`
+as the `system-temp-isolation-<shard>` artifact. `scripts/test-gradle-temp-isolation.py`
+covers:
+
+- the wrapper hook and its regeneration;
+- the check against nested, transient and hsperfdata writes;
+- a real in-process `compileKotlin`;
+- `clean` followed by `buildAcpGateHelper`, all inside the check.
 
 Run the frontend checks locally with the pinned tools:
 
