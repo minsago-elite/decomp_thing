@@ -332,11 +332,14 @@ job's current accepted revision. A different expected input is 409
 `INPUT_UNVERIFIED`, so recovery never silently starts from an unverified
 workspace. `retry` always publishes a new queued attempt linked through
 `previousRunId`, with `recovery.mode: retry` and no restored state. `resume`
-requires the registered adapter's trusted checkpoint policy, the exact recorded
-harness identity and a verified checkpoint; the new attempt records
-`recovery.restores` (`agent-session` or `project-evidence`) and the checkpoint
-digest, and the adapter receives the predecessor's workflow-owned report
-directory. Unsupported or unsafe resume is 409 with a specific code
+requires the exact recorded harness identity and an adapter that can both
+verify and consume a checkpoint. The successor records the admitted restoration
+mode in `recovery.restores` (`agent-session` or `project-evidence`) and the
+checkpoint digest. At dispatch the service rechecks both attempts, the digest
+of the captured bytes, and the restoration mode. The continuation receives
+a detached capture of at most 1 MiB. A changed checkpoint leaves the
+successor `failed` with reason `refused` and no candidate. Replaying the
+same command returns that successor. Unsupported or unsafe resume at admission is 409 with a specific code
 (`RESUME_UNSUPPORTED`, `HARNESS_CHANGED`, `CHECKPOINT_MISSING`,
 `CHECKPOINT_MISMATCH`, `CHECKPOINT_UNVERIFIED`, `WORKSPACE_UNVERIFIED`,
 `SESSION_QUARANTINED`, `CLEANUP_UNVERIFIED`). A newer attempt is 409
