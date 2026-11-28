@@ -46,11 +46,12 @@ class GhidraExportLaunchTest {
         val priorCalls = "previous call evidence\n".toByteArray()
         reports.resolve("program_model.json").writeBytes(priorModel)
         reports.resolve("program_model_calls.json").writeBytes(priorCalls)
-        val child = fixtureHandle(1002L, initialAlive = true, refusesTermination = true)
+        val rootHandle = fixtureHandle(1001L, initialAlive = true, refusesTermination = false)
+        val child = fixtureHandle(1002L, initialAlive = true, refusesTermination = true, parent = rootHandle)
         val clock = AtomicLong()
         val launches = AtomicInteger()
         val controller = BoundedAnalysisProcessLaunch()
-        val process = FixtureOwnedProcess(fixtureHandle(1001L, initialAlive = true, refusesTermination = false))
+        val process = FixtureOwnedProcess(rootHandle)
         val analyzer = GhidraHeadlessProgramModelAnalyzer(
             commandFactory = { listOf("fixture-owned-export") },
             limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
@@ -117,8 +118,9 @@ class GhidraExportLaunchTest {
         ).terminate()
         assertTrue(confirmed.confirmedAbsent)
 
-        val stubborn = fixtureHandle(2003L, initialAlive = true, refusesTermination = true)
-        val stuck = FixtureOwnedProcess(fixtureHandle(2002L, initialAlive = true, refusesTermination = false))
+        val stuckRoot = fixtureHandle(2002L, initialAlive = true, refusesTermination = false)
+        val stubborn = fixtureHandle(2003L, initialAlive = true, refusesTermination = true, parent = stuckRoot)
+        val stuck = FixtureOwnedProcess(stuckRoot)
         val failedObservation = ExportProcessTree(
             stuck, Duration.ZERO,
             nanoTime = clock::get,
@@ -138,7 +140,7 @@ class GhidraExportLaunchTest {
     fun `monitor observed child remains owned after it disappears from root snapshots`() {
         for (refusesTermination in listOf(false, true)) {
             val process = FixtureOwnedProcess(fixtureHandle(2301L, initialAlive = true, refusesTermination = false))
-            val child = fixtureHandle(2302L, initialAlive = true, refusesTermination = refusesTermination)
+            val child = fixtureHandle(2302L, initialAlive = true, refusesTermination = refusesTermination, parent = process.toHandle())
             val observations = AtomicInteger()
             val clock = AtomicLong()
             val tree = ExportProcessTree(
@@ -169,7 +171,7 @@ class GhidraExportLaunchTest {
     @Test
     fun `monitor observation failure retains yielded child and remains fail closed`() {
         val process = FixtureOwnedProcess(fixtureHandle(2401L, initialAlive = true, refusesTermination = false))
-        val child = fixtureHandle(2402L, initialAlive = true, refusesTermination = false)
+        val child = fixtureHandle(2402L, initialAlive = true, refusesTermination = false, parent = process.toHandle())
         val observations = AtomicInteger()
         val clock = AtomicLong()
         val tree = ExportProcessTree(
@@ -196,7 +198,9 @@ class GhidraExportLaunchTest {
     @Test
     fun `monitor inventory enforces existing handle bound without dropping retained identities`() {
         val process = FixtureOwnedProcess(fixtureHandle(2501L, initialAlive = true, refusesTermination = false))
-        val children = (1..32).map { fixtureHandle(2510L + it, initialAlive = true, refusesTermination = false) }
+        val children = (1..32).map {
+            fixtureHandle(2510L + it, initialAlive = true, refusesTermination = false, parent = process.toHandle())
+        }
         val observations = AtomicInteger()
         val clock = AtomicLong()
         val tree = ExportProcessTree(
@@ -229,9 +233,10 @@ class GhidraExportLaunchTest {
             reports.resolve("program_model_calls.json").writeBytes(priorCalls)
             val monitored = CountDownLatch(1)
             val reparented = AtomicBoolean()
-            val child = fixtureHandle(2602L, initialAlive = true, refusesTermination = true)
+            val rootHandle = fixtureHandle(2601L, initialAlive = true, refusesTermination = false)
+            val child = fixtureHandle(2602L, initialAlive = true, refusesTermination = true, parent = rootHandle)
             val process = FixtureOwnedProcess(
-                fixtureHandle(2601L, initialAlive = true, refusesTermination = false),
+                rootHandle,
                 beforeWait = {
                     check(monitored.await(3, TimeUnit.SECONDS)) { "actual resource monitor did not observe the child" }
                     reparented.set(true)
@@ -275,8 +280,9 @@ class GhidraExportLaunchTest {
     fun `interrupted cleanup waits still confirm later exit and restore interruption`() {
         for (grace in listOf(Duration.ZERO, Duration.ofMillis(100))) {
             val childAlive = AtomicBoolean(true)
-            val child = fixtureHandle(2102L, initialAlive = true, refusesTermination = true, alive = childAlive)
-            val process = FixtureOwnedProcess(fixtureHandle(2101L, initialAlive = true, refusesTermination = false))
+            val rootHandle = fixtureHandle(2101L, initialAlive = true, refusesTermination = false)
+            val child = fixtureHandle(2102L, initialAlive = true, refusesTermination = true, alive = childAlive, parent = rootHandle)
+            val process = FixtureOwnedProcess(rootHandle)
             val clock = AtomicLong()
             val waits = AtomicInteger()
             val tree = ExportProcessTree(
@@ -311,7 +317,7 @@ class GhidraExportLaunchTest {
         val primary = IllegalStateException("authored wait failure before interrupted cleanup")
         val process = FixtureOwnedProcess(fixtureHandle(2201L, initialAlive = true, refusesTermination = false), primary)
         val childAlive = AtomicBoolean(true)
-        val child = fixtureHandle(2202L, initialAlive = true, refusesTermination = true, alive = childAlive)
+        val child = fixtureHandle(2202L, initialAlive = true, refusesTermination = true, alive = childAlive, parent = process.toHandle())
         val clock = AtomicLong()
         val waits = AtomicInteger()
         val controller = BoundedAnalysisProcessLaunch()
@@ -346,9 +352,15 @@ class GhidraExportLaunchTest {
 
     @Test
     fun `process tree retains a new process identity that reuses a dead handle PID`() {
-        val rootProcess = FixtureOwnedProcess(fixtureHandle(6201L, initialAlive = true, refusesTermination = false))
-        val oldDeadHandle = fixtureHandle(6210L, initialAlive = false, refusesTermination = true)
-        val newLiveHandle = fixtureHandle(6210L, initialAlive = true, refusesTermination = true)
+        val rootHandle = fixtureHandle(6201L, initialAlive = true, refusesTermination = false)
+        val rootProcess = FixtureOwnedProcess(rootHandle)
+        val oldAlive = AtomicBoolean(true)
+        val oldDeadHandle = fixtureHandle(
+            6210L, initialAlive = true, refusesTermination = true, alive = oldAlive, parent = rootHandle, startMillis = 6_210_000L,
+        )
+        val newLiveHandle = fixtureHandle(
+            6210L, initialAlive = true, refusesTermination = true, parent = rootHandle, startMillis = 6_210_500L,
+        )
         assertEquals(oldDeadHandle.pid(), newLiveHandle.pid())
         val observations = AtomicInteger()
         val clock = AtomicLong()
@@ -357,15 +369,94 @@ class GhidraExportLaunchTest {
             nanoTime = clock::get,
             sleepNanos = { nanos -> clock.addAndGet(nanos) },
             descendantObservation = { _, retain ->
-                retain(if (observations.getAndIncrement() == 0) oldDeadHandle else newLiveHandle)
+                if (observations.getAndIncrement() == 0) {
+                    retain(oldDeadHandle)
+                    oldAlive.set(false) // Exits after being retained; the root then reuses its PID.
+                } else retain(newLiveHandle)
             },
         )
+        // Both identities are observed while the owned root is alive, as the resource monitor does.
+        tree.residentBytes()
+        tree.residentBytes()
+        assertEquals(3, tree.retainedHandleCount())
 
         val result = tree.terminate()
 
         assertFalse(result.confirmedAbsent, "the later live identity must not be hidden by its reused PID")
         assertTrue(newLiveHandle.isAlive)
         assertEquals(3, tree.retainedHandleCount(), "root and both distinct same-PID handles must remain retained")
+    }
+
+    @Test
+    fun `descendants enumerated through a reused root PID are refused and never signalled`() {
+        for (boundBeforeReuse in listOf(true, false)) {
+            val table = FixtureProcessTable()
+            val owned = table.spawn(7001L, startMillis = 1_000L, parent = null)
+            val process = FixtureOwnedProcess(table.bound(owned))
+            val clock = AtomicLong()
+            fun processTree() = ExportProcessTree(
+                process, Duration.ZERO,
+                nanoTime = clock::get,
+                sleepNanos = { nanos -> clock.addAndGet(nanos) },
+            )
+            val boundTree = if (boundBeforeReuse) processTree().also { it.residentBytes() } else null
+            // The owned root exits and is reaped; an unrelated process tree then reuses its PID.
+            process.destroy()
+            table.exit(owned)
+            val stranger = table.spawn(7001L, startMillis = 2_000L, parent = null)
+            val strangerChild = table.spawn(7002L, startMillis = 2_100L, parent = stranger)
+            table.spawn(7003L, startMillis = 2_200L, parent = strangerChild)
+            val tree = boundTree ?: processTree()
+            assertEquals(listOf(7002L, 7003L), table.bound(owned).descendants().map { it.pid() }.toList(),
+                "a stale root handle enumerates the PID's new holder, as OpenJDK does")
+
+            val result = tree.terminate()
+
+            assertEquals(emptyList(), table.signalled.toList(), "no process outside the owned launch may be signalled")
+            assertTrue(result.confirmedAbsent, "the owned root is absent; refused processes are not owned")
+            assertEquals(null, result.failure)
+            assertEquals(1, tree.retainedHandleCount(), "only the owned root may remain retained")
+            assertEquals(
+                listOf(7002L to 2_100L, 7003L to 2_200L),
+                result.refusedHandles.map { it.pid to it.startInstant?.toEpochMilli() },
+                "refused handles must be recorded in the cleanup evidence",
+            )
+            assertTrue(result.diagnostic.orEmpty().startsWith("refused unowned identities: 7002@2100"), result.diagnostic)
+        }
+    }
+
+    @Test
+    fun `retained descendant handle is not signalled after its PID is reused`() {
+        val table = FixtureProcessTable()
+        val owned = table.spawn(7101L, startMillis = 1_000L, parent = null)
+        val ownedChild = table.spawn(7102L, startMillis = 1_100L, parent = owned)
+        val process = FixtureOwnedProcess(table.bound(owned))
+        val clock = AtomicLong()
+        val tree = ExportProcessTree(
+            process, Duration.ZERO,
+            nanoTime = clock::get,
+            sleepNanos = { nanos -> clock.addAndGet(nanos) },
+            // Retain handles without a recorded start time: they signal whichever process holds the PID.
+            descendantObservation = { root, retain ->
+                root.descendants().use { stream -> stream.forEach { retain(table.byPid(it.pid())) } }
+            },
+        )
+        tree.residentBytes()
+        assertEquals(2, tree.retainedHandleCount())
+        // The owned child exits and an unrelated process reuses its PID before cleanup.
+        table.exit(ownedChild)
+        val stranger = table.spawn(7102L, startMillis = 3_000L, parent = null)
+
+        val result = tree.terminate()
+
+        assertEquals(listOf(owned), table.signalled.toList(), "only the owned root may be signalled")
+        assertTrue(table.holder(7102L) === stranger)
+        assertTrue(result.confirmedAbsent, "the retained identity is absent even though its PID is live")
+        assertEquals(null, result.failure)
+        assertEquals(
+            listOf(ExportProcessRefusal(7102L, java.time.Instant.ofEpochMilli(3_000L), "reuses the PID of retained 7102@1100")),
+            result.refusedHandles,
+        )
     }
 
     @Test
@@ -376,7 +467,7 @@ class GhidraExportLaunchTest {
         )
         val clock = AtomicLong()
         val controller = BoundedAnalysisProcessLaunch()
-        val child = fixtureHandle(3002L, initialAlive = true, refusesTermination = true)
+        val child = fixtureHandle(3002L, initialAlive = true, refusesTermination = true, parent = process.toHandle())
         val analyzer = GhidraHeadlessProgramModelAnalyzer(
             commandFactory = { listOf("fixture-owned-export") },
             limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
@@ -611,8 +702,8 @@ class GhidraExportLaunchTest {
             FixtureOwnedProcess(fixtureHandle(5002L, initialAlive = true, refusesTermination = false)),
         )
         val children = listOf(
-            fixtureHandle(5011L, initialAlive = true, refusesTermination = true),
-            fixtureHandle(5012L, initialAlive = true, refusesTermination = true),
+            fixtureHandle(5011L, initialAlive = true, refusesTermination = true, parent = processes[0].toHandle()),
+            fixtureHandle(5012L, initialAlive = true, refusesTermination = true, parent = processes[1].toHandle()),
         )
         val processIndex = AtomicInteger()
         val launches = AtomicInteger()
@@ -1232,6 +1323,8 @@ class GhidraExportLaunchTest {
         initialAlive: Boolean,
         refusesTermination: Boolean,
         alive: AtomicBoolean = AtomicBoolean(initialAlive),
+        parent: ProcessHandle? = null,
+        startMillis: Long = pid,
     ): ProcessHandle {
         lateinit var handle: ProcessHandle
         handle = Proxy.newProxyInstance(
@@ -1241,12 +1334,13 @@ class GhidraExportLaunchTest {
             when (method.name) {
                 "pid" -> pid
                 "isAlive" -> alive.get()
+                "info" -> fixtureInfo(startMillis.takeIf { alive.get() })
                 "destroy", "destroyForcibly" -> {
                     if (!refusesTermination) alive.set(false)
                     !refusesTermination
                 }
                 "supportsNormalTermination" -> true
-                "parent" -> java.util.Optional.empty<ProcessHandle>()
+                "parent" -> java.util.Optional.ofNullable(parent)
                 "children", "descendants" -> java.util.stream.Stream.empty<ProcessHandle>()
                 "onExit" -> CompletableFuture.completedFuture(handle)
                 "compareTo" -> java.lang.Long.compare(pid, (arguments!![0] as ProcessHandle).pid())
@@ -1259,7 +1353,83 @@ class GhidraExportLaunchTest {
         return handle
     }
 
+    /**
+     * Deterministic native process table in which an exited PID can be reused by an unrelated process.
+     * [bound] handles behave like OpenJDK handles with a recorded start time; [byPid] handles resolve
+     * whichever process holds the PID when used, as a handle without a recorded start time would.
+     */
+    private class FixtureProcessTable {
+        class Entry(val pid: Long, val startMillis: Long, val parentPid: Long?) {
+            override fun toString() = "FixtureProcess[$pid@$startMillis]"
+        }
+
+        private val holders = HashMap<Long, Entry>()
+        val signalled = java.util.concurrent.CopyOnWriteArrayList<Entry>()
+
+        @Synchronized
+        fun spawn(pid: Long, startMillis: Long, parent: Entry?): Entry {
+            check(pid !in holders) { "PID $pid is still held" }
+            return Entry(pid, startMillis, parent?.pid).also { holders[pid] = it }
+        }
+
+        @Synchronized
+        fun exit(entry: Entry) = check(holders.remove(entry.pid, entry)) { "$entry does not hold its PID" }
+
+        @Synchronized
+        fun holder(pid: Long): Entry? = holders[pid]
+
+        @Synchronized
+        private fun children(parent: Entry): List<Entry> =
+            holders.values.filter { it.parentPid == parent.pid && it.startMillis >= parent.startMillis }.sortedBy { it.pid }
+
+        fun bound(entry: Entry): ProcessHandle = handle(entry.pid) { holder(entry.pid)?.takeIf { it === entry } }
+
+        fun byPid(pid: Long): ProcessHandle = handle(pid) { holder(pid) }
+
+        private fun handle(pid: Long, resolve: () -> Entry?): ProcessHandle {
+            lateinit var handle: ProcessHandle
+            handle = Proxy.newProxyInstance(
+                ProcessHandle::class.java.classLoader,
+                arrayOf(ProcessHandle::class.java),
+            ) { _, method, arguments ->
+                when (method.name) {
+                    "pid" -> pid
+                    "isAlive" -> resolve() != null
+                    "info" -> fixtureInfo(resolve()?.startMillis)
+                    "parent" -> java.util.Optional.ofNullable(resolve()?.parentPid?.let(::holder)?.let(::bound))
+                    // Like OpenJDK, enumerate breadth-first from whichever process holds this PID now.
+                    "descendants" -> generateSequence(listOfNotNull(holder(pid))) { level ->
+                        level.flatMap(::children).takeIf { it.isNotEmpty() }
+                    }.drop(1).flatten().map(::bound).toList().stream()
+                    "children" -> java.util.stream.Stream.empty<ProcessHandle>()
+                    "destroy", "destroyForcibly" -> resolve()?.let { signalled.add(it); exit(it); true } ?: false
+                    "supportsNormalTermination" -> true
+                    "onExit" -> CompletableFuture.completedFuture(handle)
+                    "compareTo" -> java.lang.Long.compare(pid, (arguments!![0] as ProcessHandle).pid())
+                    "toString" -> "FixtureTableHandle[$pid]"
+                    "hashCode" -> pid.hashCode()
+                    "equals" -> handle === arguments?.get(0)
+                    else -> null
+                }
+            } as ProcessHandle
+            return handle
+        }
+    }
+
     private companion object {
+        fun fixtureInfo(startMillis: Long?): ProcessHandle.Info = Proxy.newProxyInstance(
+            ProcessHandle.Info::class.java.classLoader,
+            arrayOf(ProcessHandle.Info::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "startInstant" -> java.util.Optional.ofNullable(startMillis?.let(java.time.Instant::ofEpochMilli))
+                "toString" -> "FixtureProcessInfo[$startMillis]"
+                "hashCode" -> startMillis.hashCode()
+                "equals" -> false
+                else -> java.util.Optional.empty<Any>()
+            }
+        } as ProcessHandle.Info
+
         // Fixture-only: keep the first failure and attempt every already-owned cleanup action in order.
         private fun preserveFixtureFailure(body: () -> Unit, vararg cleanup: () -> Unit) {
             var failure: Throwable? = null
