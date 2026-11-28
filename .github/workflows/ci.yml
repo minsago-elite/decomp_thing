@@ -473,8 +473,9 @@ jobs:
           --session "${{ github.run_id }}-${{ github.run_attempt }}-kotlin-${{ matrix.shard }}"
           --root "$GITHUB_WORKSPACE"
           --root "$GITHUB_WORKSPACE/build"
+      # The first Gradle build in this job, so no earlier build can leak into /tmp unobserved (#2008).
       - name: Prepare root-owned oracle JVM and system libraries
-        run: bash scripts/ci-prepare-oracle-runtime.sh
+        run: python3 -B scripts/check-system-temp-isolation.py --label prepare-oracle-runtime -- bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Prepare finite ACP quota fixture
@@ -488,7 +489,7 @@ jobs:
       - name: Prepare separate bundled resume fresh-control scratch
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-resume-control
       - name: Prepare executable root-owned application-bundled Ghidra
-        run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
+        run: python3 -B scripts/check-system-temp-isolation.py --label prepare-bundled-ghidra -- bash scripts/ci-prepare-bundled-ghidra-runtime.sh
       - name: Cache verified pinned Goose archive
         uses: actions/cache@v6
         if: matrix.shard == 'live'
@@ -533,12 +534,33 @@ jobs:
             build/angr-qualification
             build/test-results/realAngrQualification
             build/reports/tests/realAngrQualification
+      - name: Check build-tool temporary directory controls
+        if: matrix.shard == 'core'
+        run: python3 -B scripts/test-gradle-temp-isolation.py
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
-        run: scripts/ci.sh
+        # The core-main and core-oracle shards together are -PciTestShard=core; their process
+        # trees must not write to /tmp (#2008).
+        run: |
+          case "$DECOMP_CI_TEST_SHARD" in
+            core-main|core-oracle)
+              python3 -B scripts/check-system-temp-isolation.py --label "kotlin-$DECOMP_CI_TEST_SHARD" -- scripts/ci.sh ;;
+            *) scripts/ci.sh ;;
+          esac
+      - name: Retain system temporary directory observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: system-temp-isolation-${{ matrix.shard }}
+          retention-days: 14
+          if-no-files-found: ignore
+          # Reports only; observed-tmp holds whatever a failing build leaked.
+          path: |
+            build/system-temp-isolation/*/summary.json
+            build/system-temp-isolation/*/*.txt
       - name: Require every source-declared recovery scenario in core reports
         if: always() && matrix.shard == 'core'
         run: >-

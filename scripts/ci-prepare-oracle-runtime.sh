@@ -104,7 +104,8 @@ for runtime_root in "${!runtime_roots[@]}"; do
 done
 
 sudo -n chmod 0755 -- "$trusted_java_home"
-"$trusted_java_home/bin/java" -version
-"$trusted_java_home/bin/javac" -version
+# -XX:-UsePerfData: HotSpot otherwise writes /tmp/hsperfdata_<user>/<pid> (#2008).
+"$trusted_java_home/bin/java" -XX:-UsePerfData -version
+"$trusted_java_home/bin/javac" -J-XX:-UsePerfData -version
 printf 'JAVA_HOME=%s\n' "$trusted_java_home" >>"$GITHUB_ENV"
 printf '%s/bin\n' "$trusted_java_home" >>"$GITHUB_PATH"
