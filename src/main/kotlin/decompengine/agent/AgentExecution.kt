@@ -83,9 +83,10 @@ class AgentPathRule(
     }
 }
 
-class AgentAccessPolicy(
+class AgentAccessPolicy @JvmOverloads constructor(
     pathRules: Collection<AgentPathRule>,
     allowedOperations: Collection<AgentOperation> = pathRules.flatMap { it.operations }.toSet(),
+    val mutationAuthority: AgentMutationAuthority? = null,
 ) {
     val pathRules: List<AgentPathRule> = immutableList(pathRules)
     val allowedOperations: Set<AgentOperation> = immutableSet(allowedOperations)
@@ -97,7 +98,80 @@ class AgentAccessPolicy(
     }
 
     fun allows(path: AgentWorkspacePath, operation: AgentOperation): Boolean =
-        operation in allowedOperations && pathRules.any { it.matches(path, operation) }
+        operation in allowedOperations && pathRules.any { it.matches(path, operation) } &&
+            (operation !in MUTATION_OPERATIONS || mutationAuthority?.allows(path, operation) != false)
+
+    /** Check a mutation against the same observed bytes that are being accepted or installed. */
+    fun allowsMutation(
+        path: AgentWorkspacePath,
+        operation: AgentOperation,
+        sizeBytes: Long? = null,
+        validUtf8: Boolean? = null,
+    ): Boolean = allows(path, operation) &&
+        (operation !in MUTATION_OPERATIONS || mutationAuthority?.allowsContent(path, operation, sizeBytes, validUtf8) != false)
+
+    private companion object {
+        val MUTATION_OPERATIONS = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE, AgentOperation.DELETE_FILE)
+    }
+}
+
+/** Immutable, request-bound role/ownership restriction layered on top of path permissions. */
+class AgentMutationAuthority(
+    val policyId: String,
+    val ownerId: String,
+    val profileSha256: String,
+    grants: Collection<AgentMutationGrant>,
+) {
+    val grants: List<AgentMutationGrant> = immutableList(grants.sortedWith(compareBy({ it.path.rootId }, { it.path.relativePath })))
+    private val byPath = this.grants.associateBy { it.path }
+
+    init {
+        require(policyId.matches(Regex("[a-z][a-z0-9.-]{0,63}"))) { "mutation policy id is invalid" }
+        require(ownerId.isNotBlank() && ownerId.length <= 256) { "mutation owner identity is invalid" }
+        require(profileSha256.matches(Regex("[0-9a-f]{64}"))) { "mutation profile digest is invalid" }
+        require(this.grants.map { it.path }.distinct().size == this.grants.size) { "mutation grants must have unique paths" }
+        require(this.grants.all { it.ownerId == ownerId && it.profileSha256 == profileSha256 }) {
+            "mutation grant identity differs from authority identity"
+        }
+    }
+
+    fun allows(path: AgentWorkspacePath, operation: AgentOperation): Boolean =
+        byPath[path]?.operations?.contains(operation) == true
+
+    fun allowsContent(path: AgentWorkspacePath, operation: AgentOperation, sizeBytes: Long?, validUtf8: Boolean?): Boolean {
+        val grant = byPath[path] ?: return false
+        if (operation !in grant.operations) return false
+        if (sizeBytes == null || sizeBytes > grant.maximumBytes) return false
+        if (grant.contentKind == AgentMutationContentKind.UTF8_TEXT && validUtf8 != true) return false
+        return true
+    }
+}
+
+enum class AgentMutationContentKind { UTF8_TEXT, BINARY }
+
+/** Exact file authority derived from an admitted declaration and trusted workflow ownership. */
+class AgentMutationGrant(
+    val path: AgentWorkspacePath,
+    operations: Collection<AgentOperation>,
+    val ownerId: String,
+    val profileSha256: String,
+    val declarationId: String,
+    roles: Collection<String>,
+    val contentKind: AgentMutationContentKind,
+    val maximumBytes: Long,
+) {
+    val operations: Set<AgentOperation> = immutableSet(operations)
+    val roles: Set<String> = immutableSet(roles)
+
+    init {
+        require(this.operations.isNotEmpty() && this.operations.all {
+            it in setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE, AgentOperation.DELETE_FILE)
+        }) { "mutation grant operations are invalid" }
+        require(ownerId.isNotBlank() && profileSha256.matches(Regex("[0-9a-f]{64}")))
+        require(declarationId.matches(Regex("[A-Za-z][A-Za-z0-9._-]*")))
+        require(this.roles.isNotEmpty() && this.roles.all { it.matches(Regex("[a-z][a-z0-9-]{0,63}")) })
+        require(maximumBytes > 0) { "mutation grant byte limit must be positive" }
+    }
 }
 
 /** Context is copied into the request as immutable text and is never a writable workspace artifact. */
@@ -302,6 +376,26 @@ data class AgentFileChange(
     }
 }
 
+/**
+ * A deterministic content-matched move candidate derived from two complete snapshots.
+ *
+ * This records a unique non-empty content match between a deletion and creation. Snapshot
+ * equality cannot prove that the filesystem performed a rename, so consumers must retain the
+ * underlying deletion and creation as the authoritative path changes.
+ */
+data class AgentFileMoveCandidate(
+    val sourcePath: AgentWorkspacePath,
+    val destinationPath: AgentWorkspacePath,
+    val contentSha256: String,
+    val sizeBytes: Long,
+) {
+    init {
+        require(sourcePath != destinationPath) { "move candidate endpoints must differ" }
+        require(contentSha256.isSha256()) { "move candidate digest must be SHA-256" }
+        require(sizeBytes > 0) { "empty files do not identify a unique move candidate" }
+    }
+}
+
 data class AgentFileChangeEvent(
     override val sequence: Long,
     val change: AgentFileChange,
@@ -351,8 +445,15 @@ class AgentExecutionResult(
     changes: Collection<AgentFileChange> = emptyList(),
     val session: AgentSessionReference? = null,
     val usage: AgentUsage? = null,
+    moveCandidates: Collection<AgentFileMoveCandidate> = emptyList(),
 ) {
     val changes: List<AgentFileChange> = immutableList(changes)
+    val moveCandidates: List<AgentFileMoveCandidate> = immutableList(
+        moveCandidates.sortedWith(compareBy(
+            { it.sourcePath.rootId }, { it.sourcePath.relativePath },
+            { it.destinationPath.rootId }, { it.destinationPath.relativePath },
+        )),
+    )
 
     init {
         require(this.changes.map { it.path }.distinct().size == this.changes.size) {
@@ -360,6 +461,21 @@ class AgentExecutionResult(
         }
         require(stopReason != AgentStopReason.NO_CHANGES || this.changes.isEmpty()) {
             "a no-change result cannot report file changes"
+        }
+        val candidateEndpoints = this.moveCandidates.flatMap { listOf(it.sourcePath, it.destinationPath) }
+        require(candidateEndpoints.distinct().size == candidateEndpoints.size) {
+            "move candidates must not reuse endpoints"
+        }
+        val changesByPath = this.changes.associateBy { it.path }
+        this.moveCandidates.forEach { move ->
+            require(changesByPath[move.sourcePath]?.let {
+                it.kind == AgentFileChangeKind.DELETED &&
+                    it.beforeSha256 == move.contentSha256 && it.afterSha256 == null
+            } == true) { "move candidate source must remain an explicit matching deletion" }
+            require(changesByPath[move.destinationPath]?.let {
+                it.kind == AgentFileChangeKind.CREATED &&
+                    it.beforeSha256 == null && it.afterSha256 == move.contentSha256 && it.sizeBytes == move.sizeBytes
+            } == true) { "move candidate destination must remain an explicit matching creation" }
         }
     }
 }

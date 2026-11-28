@@ -4,11 +4,11 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import { ApiClientError, withApiFailureReference } from '../api/client';
-import { jobPath } from '../app/paths';
+import { appPath, jobPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import type { UploadProgress } from '../api/generated';
 import { createUploadRecovery } from './uploadRecovery';
-import type { UploadTicket } from './uploadRecovery';
+import type { UploadRecovery, UploadTicket } from './uploadRecovery';
 import { useSession } from '../session/useSession';
 
 import { receive } from '../shared/receiptTime';
@@ -16,6 +16,10 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 
 type Attempt = { file: File; ticket: UploadTicket };
+type Feedback = { message: string; kind: 'status' | 'error' | 'input-error' | 'refused' };
+const EMPTY: UploadRecovery = { kind: 'empty' };
+// A panel that finds an earlier refused ticket has no response to quote, so it states the refusal without a reference.
+const REFUSED_NOTICE: Feedback = { message: copy.theJobLibraryIsAtItsCapacityDeleteJobsYouNoLonger, kind: 'refused' };
 
 function failureMessage(error: unknown): string {
   if (!(error instanceof ApiClientError)) return copy.theResultIsUnknownRetryThisFileToRecoverIts;
@@ -27,6 +31,7 @@ function failureMessage(error: unknown): string {
     case 'IDEMPOTENCY_CONFLICT': return copy.thisRetryIdentityBelongsToDifferentContentCheckTheJob;
     case 'UPLOAD_RECEIPT_UNAVAILABLE': case 'RECOVERY_REQUIRED':
       return copy.uploadStorageNeedsAttentionKeepThisPageOpenAndRetry;
+    case 'JOB_LIBRARY_FULL': return copy.theJobLibraryIsAtItsCapacityDeleteJobsYouNoLonger;
     case 'UPLOAD_CAPACITY': case 'UPLOAD_STORAGE':
       return copy.theServerHasNoUploadCapacityWaitOrFreeStorage;
     default:
@@ -37,21 +42,33 @@ function failureMessage(error: unknown): string {
 }
 
 /** File bytes stay in memory; one tab-scoped retry ticket survives view destruction. */
-export function Upload({ basePath, session }: { basePath: string; session: BrowserSession }) {
+export function Upload({ basePath, session, inLibrary = false }: { basePath: string; session: BrowserSession; inLibrary?: boolean }) {
   const state = useSession(session);
   const location = useLocation();
   const recovery = useMemo(() => createUploadRecovery(basePath), [basePath]);
-  const [retained, setRetained] = useState(() => recovery.read());
+  // A refused ticket that storage would not remove is shown as uncleared, never as pending, in every panel of this tab.
+  const [initial] = useState(() => recovery.read());
+  const [retained, setRetained] = useState<UploadRecovery>(initial.kind === 'refused' ? EMPTY : initial);
   const [attempt, setAttempt] = useState<Attempt | null>(null);
-  const [phase, setPhase] = useState<'idle' | 'pending' | 'retry'>(retained.kind === 'empty' ? 'idle' : 'retry');
+  const [phase, setPhase] = useState<'idle' | 'pending' | 'retry'>(initial.kind === 'empty' || initial.kind === 'refused' ? 'idle' : 'retry');
   const [observation, setProgress] = useState<Received<UploadProgress> | null>(null);
   const progress = observation?.value;
-  const [feedback, setFeedback] = useState<{ message: string; kind: 'status' | 'error' | 'input-error' }>({ message: '', kind: 'status' });
+  // 'refused' is a definite server refusal: nothing was published and retrying the same request cannot succeed.
+  const [feedback, setFeedback] = useState<Feedback>(initial.kind === 'refused' ? REFUSED_NOTICE : { message: '', kind: 'status' });
   const [rejectedFileMessage, setRejectedFileMessage] = useState<string | null>(null);
+  // A refused ticket that storage would not remove: never shown as pending and never reused; uploads wait until it is cleared.
+  const [uncleared, setUncleared] = useState(initial.kind === 'refused');
+  const unclearedRef = useRef(uncleared);
+  unclearedRef.current = uncleared;
+  // Each failed retry of the clear remounts the uncleared sentence so the alert region announces it again.
+  const [clearFailures, setClearFailures] = useState(0);
   const active = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const live = useRef(true);
   const focusPicker = useRef(false);
+  // Only a refusal this panel just received takes focus; a panel mounted onto an earlier refusal does not.
+  const focusNotice = useRef(false);
+  const notice = useRef<HTMLParagraphElement>(null);
   const { client } = usePrivateTransport(basePath, 120_000);
   const limits = state?.status === 'authenticated' ? state.runtime.limits : null;
   const maxBytes = limits ? BigInt(limits.maxUploadBytes) : 0n;
@@ -60,6 +77,9 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   useLayoutEffect(() => {
     if (phase === 'idle' && focusPicker.current) { focusPicker.current = false; input.current?.focus(); }
   }, [phase]);
+  useLayoutEffect(() => {
+    if (feedback.kind === 'refused' && focusNotice.current) { focusNotice.current = false; notice.current?.focus(); }
+  }, [feedback]);
   useEffect(() => {
     live.current = true;
     return () => { live.current = false; active.current?.abort(); };
@@ -76,12 +96,17 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       }
       return;
     }
-    const next = recovery.read();
+    const read = recovery.read();
+    const refused = unclearedRef.current || read.kind === 'refused';
+    const next = refused ? EMPTY : read;
     setRetained(next);
     setAttempt(null);
     setProgress(null);
     setPhase(next.kind === 'empty' ? 'idle' : 'retry');
-    setFeedback({ message: copy.theSessionChangedInAnotherTabReconnectBeforeRetryingThis, kind: 'status' });
+    // An uncleared refusal keeps its notice: the user must still clear the record, and the
+    // disconnected-session line below already asks for a reconnect.
+    if (!refused) setFeedback({ message: copy.theSessionChangedInAnotherTabReconnectBeforeRetryingThis, kind: 'status' });
+    else if (!unclearedRef.current) { setUncleared(true); setFeedback(REFUSED_NOTICE); }
     if (input.current) input.current.value = '';
   }), [recovery, session]);
   useEffect(() => {
@@ -92,7 +117,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   }, [phase]);
 
   function select(files: FileList | null) {
-    if (active.current || (phase === 'retry' && attempt) || retained.kind === 'blocked') return;
+    if (active.current || (phase === 'retry' && attempt) || retained.kind === 'blocked' || uncleared) return;
     if (!files || files.length !== 1) { setFeedback({ message: copy.chooseOneBinaryAtATime, kind: attempt ? 'error' : 'input-error' }); return; }
     const file = files[0];
     if (!file) return;
@@ -106,9 +131,9 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   }
   async function submit() {
     const csrfToken = session.csrf();
-    if (!attempt || active.current || !csrfToken || !connected) return;
+    if (!attempt || active.current || !csrfToken || !connected || uncleared) return;
     try { recovery.save(attempt.ticket); setRetained(recovery.read()); }
-    catch { setRetained(recovery.read()); setPhase('retry'); setFeedback({ message: copy.retryIdentityCouldNotBeSavedNoUploadWasSent, kind: 'error' }); return; }
+    catch { const read = recovery.read(); setRetained(read.kind === 'refused' ? EMPTY : read); setPhase('retry'); setFeedback({ message: copy.retryIdentityCouldNotBeSavedNoUploadWasSent, kind: 'error' }); return; }
     const controller = new AbortController(); active.current = controller;
     setPhase('pending'); setFeedback({ message: '', kind: 'status' }); setProgress(null);
     const uploadId = crypto.randomUUID().replaceAll('-', '');
@@ -130,11 +155,29 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       location.route(jobPath(basePath, result.data.jobId));
     } catch (error) {
       if (!live.current || active.current !== controller) return;
-      const invalidInput = error instanceof ApiClientError && ['INVALID_ELF', 'UPLOAD_TOO_LARGE'].includes(error.serverCode ?? '');
       const message = withApiFailureReference(failureMessage(error), error);
+      if (error instanceof ApiClientError && error.serverCode === 'JOB_LIBRARY_FULL') {
+        // A definite refusal before staging: drop the retry identity so nothing suggests the upload may be pending.
+        let cleared = true;
+        try { recovery.clear(); } catch { cleared = false; recovery.refuse(attempt.ticket.key); }
+        // Do not re-read storage: a ticket that survived the failed clear belongs to the refused request.
+        setUncleared(!cleared); setClearFailures(0); setRetained({ kind: 'empty' }); setAttempt(null); setRejectedFileMessage(null); setPhase('idle');
+        focusNotice.current = true; setFeedback({ message, kind: 'refused' });
+        if (input.current) input.current.value = '';
+        return;
+      }
+      const invalidInput = error instanceof ApiClientError && ['INVALID_ELF', 'UPLOAD_TOO_LARGE'].includes(error.serverCode ?? '');
       if (invalidInput) setRejectedFileMessage(message);
       setPhase('retry'); setFeedback({ message, kind: invalidInput ? 'input-error' : 'error' });
     } finally { clearTimeout(pollTimer); controller.abort(); if (active.current === controller) active.current = null; }
+  }
+  function clearRefused() {
+    if (active.current) return;
+    // On failure focus stays on this button; the remounted sentence announces that clearing failed again.
+    try { recovery.clear(); } catch { setClearFailures(count => count + 1); return; }
+    setUncleared(false); setClearFailures(0); setRetained({ kind: 'empty' });
+    // The clear button disappears, so return focus to the refusal notice.
+    notice.current?.focus();
   }
   function discard() {
     if (active.current) return;
@@ -145,7 +188,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     if (input.current) input.current.value = '';
   }
   const invalidField = feedback.kind === 'input-error' || rejectedFileMessage !== null;
-  const errorFeedback = feedback.kind !== 'status' || rejectedFileMessage !== null;
+  const errorFeedback = feedback.kind !== 'status' || rejectedFileMessage !== null || uncleared;
   const feedbackMessage = rejectedFileMessage && feedback.message !== rejectedFileMessage
     ? [rejectedFileMessage, feedback.message].filter(Boolean).join(' ') : feedback.message;
   return <section class="upload-panel" aria-labelledby="upload-title">
@@ -158,7 +201,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
         <label htmlFor="binary-file">{copy.binaryFile}</label>
         <input ref={input} id="binary-file" type="file" aria-describedby="upload-guidance upload-feedback"
           aria-invalid={invalidField || undefined} aria-errormessage={invalidField ? 'upload-feedback' : undefined}
-          disabled={phase === 'pending' || (phase === 'retry' && attempt !== null) || retained.kind === 'blocked'} onChange={event => select(event.currentTarget.files)} />
+          disabled={phase === 'pending' || (phase === 'retry' && attempt !== null) || retained.kind === 'blocked' || uncleared} onChange={event => select(event.currentTarget.files)} />
         <p>{copy.useTheFilePickerOrDropOneFileHere}</p>
       </div>
       {retained.kind === 'pending' && !attempt && <p>{displayMessage(copy.retained, { filename: retained.ticket.filename, bytes: retained.ticket.size })}</p>}
@@ -174,13 +217,17 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
           : progress?.state === 'unconfirmed' ? copy.publicationIsUnconfirmedWaitingForTheUploadResponse
           : copy.transferringTheFileReceivedBytesDoNotConfirmJobPublication}</p></div>}
       {phase === 'pending' && progress && <MetadataReceipt kind="upload" receipt={observation?.receipt} />}
-      <p id="upload-feedback" role={errorFeedback ? 'alert' : 'status'}
-        class={errorFeedback ? 'notice notice-error' : undefined}>{feedbackMessage}</p>
+      <p id="upload-feedback" ref={notice} role={errorFeedback ? 'alert' : 'status'} tabIndex={feedback.kind === 'refused' || uncleared ? -1 : undefined}
+        class={errorFeedback ? 'notice notice-error' : undefined}>{feedbackMessage}
+        {/* While the refused record is uncleared, a fresh panel elsewhere could show it as pending: clear it first. */}
+        {feedback.kind === 'refused' && !inLibrary && !uncleared && <> <a href={appPath(basePath, '/')}>{copy.openTheJobLibrary}</a></>}
+        {uncleared && <span key={clearFailures}> {clearFailures ? copy.theSavedUploadRecordStillCouldNotBeClearedCheckTab : copy.theSavedUploadRecordCouldNotBeClearedClearItBefore}</span>}</p>
       {phase === 'retry' && <p>{copy.retryKeepsTheSameJobIdentityChoosingAnotherFileDiscards}</p>}
       <div class="job-actions">
         <button type="submit" disabled={!connected || !attempt || phase === 'pending'}>{phase === 'retry' ? copy.retryThisUpload : copy.uploadBinary}</button>
         {phase === 'pending' && <button type="button" onClick={() => active.current?.abort()}>{copy.stopTransfer}</button>}
         {phase === 'retry' && <button type="button" onClick={discard}>{copy.chooseAnotherFile}</button>}
+        {uncleared && <button type="button" onClick={clearRefused}>{copy.clearSavedUploadRecord}</button>}
       </div>
     </form>
     <p>{copy.thisTabRetainsTheRetryKeyAndFilenameSizeFor}</p>

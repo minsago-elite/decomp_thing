@@ -50,7 +50,12 @@ class WebContainmentHttpTest {
 
     private fun assertDiagnostics(failures: List<String>, lines: List<String>) {
         val pattern = Regex("web-http-failure request_id=([0-9a-f-]{36}) status=[45][0-9]{2} code=[A-Z_]+")
-        assertTrue(lines.all { pattern.matches(it) }, "diagnostics carry only fixed fields: $lines")
+        // The listener's stop-time capacity summary (#591) shares this stream: aggregate counters only.
+        val capacity = Regex("web-capacity-summary(?: [a-z_]+=[0-9]+){9}")
+        assertTrue(lines.count { capacity.matches(it) } <= 1, "at most one capacity summary per listener: $lines")
+        val requestLines = lines.filterNot { capacity.matches(it) }
+        assertTrue(requestLines.all { pattern.matches(it) }, "diagnostics carry only fixed fields: $lines")
+        @Suppress("NAME_SHADOWING") val lines = requestLines
         assertEquals(failures.size, failures.distinct().size, "each refusal has a distinct response ID")
         assertEquals(failures.associateWith { 1 },
             lines.map { pattern.matchEntire(it)!!.groupValues[1] }.groupingBy { it }.eachCount(),
@@ -149,7 +154,11 @@ class WebContainmentHttpTest {
                 assertEquals(JsonNull, data.getValue("sourceArtifact"), "$label must not describe an artifact")
                 requireContained(report, "$label report")
                 val refused = call(content, cookie + mapOf("Accept" to "application/octet-stream"))
-                assertEquals(404, refused.statusCode(), "$label download: ${refused.body().decodeToString()}")
+                // The digest-bound catalog route hashes before sending: a still-regular file whose bytes no longer
+                // match the displayed digest is a documented 409 conflict; indirection and absence are unavailable.
+                val expected = if (label == "sparse oversize") 409 to "ARTIFACT_CHANGED" else 404 to null
+                assertEquals(expected.first, refused.statusCode(), "$label download: ${refused.body().decodeToString()}")
+                expected.second?.let { assertTrue(refused.body().decodeToString().contains("\"code\":\"$it\""), label) }
                 requireContained(refused, "$label download")
             }
             reset()

@@ -13,8 +13,8 @@ EXPECTED = {
     "decompengine.agent.AgentExecutionContractTest": 10,
     "decompengine.builtin.BuiltinAgentHarnessTest": 16,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
-    "decompengine.builtin.BuiltinCapturedContextToolsTest": 6,
-    "decompengine.builtin.BuiltinContextPackageTest": 5,
+    "decompengine.builtin.BuiltinCapturedContextToolsTest": 11,
+    "decompengine.builtin.BuiltinContextPackageTest": 8,
     "decompengine.builtin.BuiltinJournalTest": 11,
     "decompengine.builtin.BuiltinCheckpointTest": 11,
     "decompengine.builtin.BuiltinDeterminismTest": 4,
@@ -22,7 +22,7 @@ EXPECTED = {
     "decompengine.builtin.BuiltinSourceStoreTest": 9,
     "decompengine.builtin.BuiltinInvocationArchiveTest": 8,
     "decompengine.builtin.BuiltinTerminalToolsTest": 7,
-    "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
+    "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 26,
 }
 
 
@@ -34,7 +34,9 @@ def main():
     summary.unlink(missing_ok=True)
     environment = dict(os.environ, DECOMP_REQUIRE_LIVE_ACP_CONTRACT="1")
     result = subprocess.run(
-        [str(ROOT / "gradlew"), "--no-daemon", "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
+        [str(ROOT / "gradlew"), "--no-daemon",
+         "-Dorg.gradle.internal.repository.max.tentatives=5", "-Dorg.gradle.internal.repository.initial.backoff=2000",
+         "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
          "--tests", "decompengine.agent.*", "--console=plain"], cwd=ROOT, env=environment,
     )
     suites, failures = [], []
