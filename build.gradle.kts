@@ -61,6 +61,17 @@ kotlin {
     jvmToolchain(21)
 }
 
+// The Kotlin daemon logs under the Gradle daemon's java.io.tmpdir (./gradlew keeps that in the
+// repository); give the daemon JVM its own repository-local java.io.tmpdir too (#2008).
+val kotlinDaemonTemporaryDirectory = layout.projectDirectory.dir(".gradle/tmp/kotlin-daemon").asFile
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    kotlinDaemonJvmArguments.set(providers.gradleProperty("kotlin.daemon.jvmargs").orElse("").map { arguments ->
+        arguments.split(Regex("\\s+")).filter(String::isNotEmpty) +
+            "-Djava.io.tmpdir=${kotlinDaemonTemporaryDirectory.absolutePath}"
+    })
+    doFirst { Files.createDirectories(kotlinDaemonTemporaryDirectory.toPath()) }
+}
+
 application {
     mainClass.set("decompengine.MainKt")
     applicationName = "llm_bin_patch"
@@ -1281,6 +1292,8 @@ val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
     outputs.file(acpGateHelperBinary)
     // A compiler upgrade is security-relevant but is not visible to Gradle's path-based inputs.
     outputs.upToDateWhen { false }
+    // The compiler driver's cc*.s/cc*.o intermediates otherwise land in the system temp directory (#2008).
+    environment("TMPDIR", temporaryDir.absolutePath)
 
     doFirst {
         val osName = System.getProperty("os.name", "").lowercase()

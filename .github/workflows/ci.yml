@@ -533,12 +533,21 @@ jobs:
             build/angr-qualification
             build/test-results/realAngrQualification
             build/reports/tests/realAngrQualification
+      - name: Check build-tool temporary directory controls
+        if: matrix.shard == 'core'
+        run: python3 -B scripts/test-gradle-temp-isolation.py
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
-        run: scripts/ci.sh
+        # The core-main and core-oracle shards together are -PciTestShard=core; they must
+        # leave no new entries in the system temporary directory (#2008).
+        run: |
+          case "$DECOMP_CI_TEST_SHARD" in
+            core-main|core-oracle) bash scripts/check-system-temp-isolation.sh scripts/ci.sh ;;
+            *) scripts/ci.sh ;;
+          esac
       - name: Require every source-declared recovery scenario in core reports
         if: always() && matrix.shard == 'core'
         run: >-

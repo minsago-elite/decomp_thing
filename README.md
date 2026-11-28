@@ -169,6 +169,10 @@ llm_bin_patch runs follow ./output/program-source [run-id]
 
 ## Development
 
+`./gradlew` keeps Gradle, Kotlin daemon and native compiler temporary files under
+`.gradle/tmp` instead of `/tmp`; see
+[docs/ci.md](docs/ci.md#build-tool-temporary-files).
+
 The required LLVM lanes validate the checked source/build/artifact manifest and
 recompute both complete ELF files plus their exact twin-equivalence commitments
 through the Kotlin/JVM `verifyLlvmOracleArtifacts` gate. The fixed command takes

@@ -200,7 +200,17 @@ fi
 
 
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
-DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+# -XX:-UsePerfData: HotSpot otherwise writes /tmp/hsperfdata_<user>/<pid> regardless of java.io.tmpdir (#2008).
+DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m" "-XX:-UsePerfData"'
+
+# Keep build-tool temporary files under the repository (#2008). The client's java.io.tmpdir is
+# immutable, so Gradle starts its daemon with the same value; the Kotlin daemon logs there too.
+# The exported TMPDIR reaches the daemon environment and the tools it runs (cc, npm, python).
+# .gradle/ survives `clean`, which would otherwise delete a running daemon's temporary directory.
+DECOMP_GRADLE_TMPDIR=$APP_HOME/.gradle/tmp
+mkdir -p "$DECOMP_GRADLE_TMPDIR" || die "ERROR: cannot create $DECOMP_GRADLE_TMPDIR"
+TMPDIR=$DECOMP_GRADLE_TMPDIR
+export TMPDIR
 
 # Collect all arguments for the java command:
 #   * DEFAULT_JVM_OPTS, JAVA_OPTS, and optsEnvironmentVar are not allowed to contain shell fragments,
@@ -210,6 +220,7 @@ DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
 
 set -- \
         "-Dorg.gradle.appname=$APP_BASE_NAME" \
+        "-Djava.io.tmpdir=$DECOMP_GRADLE_TMPDIR" \
         -jar "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" \
         "$@"
 

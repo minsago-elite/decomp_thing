@@ -178,6 +178,40 @@ reuse. Cache configuration, a cache hit or elapsed time alone establishes no fix
 speedup or whole-CI cost improvement; preserve the required execution and report
 evidence independently.
 
+### Build-tool temporary files
+
+Gradle build tools keep their temporary files under the repository (#2008):
+
+- `./gradlew` creates `.gradle/tmp`, starts the wrapper JVM with
+  `-XX:-UsePerfData` and `-Djava.io.tmpdir=.gradle/tmp`, and exports
+  `TMPDIR=.gradle/tmp`. Gradle starts its daemon with the client's
+  `java.io.tmpdir`. The daemon passes `TMPDIR` to the tools it runs (`cc`, npm
+  and Python). A `TMPDIR` or `java.io.tmpdir` from the caller's `GRADLE_OPTS` is
+  overridden. `.gradle/` is ignored by Git and survives `clean`. Delete
+  `.gradle/tmp` only while no build of this checkout is running.
+- `org.gradle.jvmargs` in `gradle.properties` repeats Gradle's daemon defaults
+  and adds `-XX:-UsePerfData`, because HotSpot otherwise writes
+  `/tmp/hsperfdata_<user>/<pid>` whatever `java.io.tmpdir` says. `--no-daemon`
+  builds already forked a single-use daemon before this change.
+- The Kotlin compiler daemon receives `kotlin.daemon.jvmargs` plus
+  `-Djava.io.tmpdir=.gradle/tmp/kotlin-daemon`. Its logs and client marker files
+  follow the Gradle daemon's `java.io.tmpdir`. Kotlin reuses any running daemon
+  whose heap is large enough, including one started by another checkout or by an
+  older build, and that daemon keeps its own settings. Stop stale Kotlin daemons
+  to apply these settings locally. Hosted CI always starts a fresh one.
+- `buildAcpGateHelper` runs the compiler with `TMPDIR` set to its Gradle task
+  temporary directory. The JVM helper builders already use their own scratch
+  `tmp` directories.
+
+Builds that bypass `./gradlew`, for example through IDE Tooling API imports, do
+not get the wrapper settings. `scripts/check-system-temp-isolation.sh` lists the
+current user's `/tmp` entries and `hsperfdata_<user>` files before and after a
+command. It fails on any new entry. The default command is
+`./gradlew --no-daemon test -PciTestShard=core`. Other work by the same user on a
+shared host shows up as noise. The core and oracle Kotlin CI shards run their
+Gradle command through this check. `scripts/test-gradle-temp-isolation.py` covers
+the wrapper, daemon and Kotlin daemon settings and the check itself.
+
 Run the frontend checks locally with the pinned tools:
 
 ```bash
