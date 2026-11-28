@@ -426,6 +426,47 @@ class GitReadsTest {
         assertTrue(patch.text.contains("int shared = 1;") && patch.text.contains("int shared = 2;"), patch.text)
     }
 
+    @Test fun `a capture cut inside a multibyte character never invents a replacement character`(): Unit = GitTestRepositories().use { f ->
+        // Earlier files use most of the whole-tree capture, so it ends inside the selected section while that
+        // section is still under the selected-patch limit. Three pad widths cover every cut offset in a 3-byte character.
+        for (pad in 450_000..450_002) {
+            val (gitDir, workTree) = f.managed("utf8-cut-$pad")
+            f.write(workTree, "a.txt", "a".repeat(pad))
+            f.write(workTree, "b.txt", "界".repeat(50_000))
+            f.raw(gitDir, workTree, "add", "--", "a.txt", "b.txt")
+            val listing = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+            val selected = listing.files.single { it.path.exact == "b.txt" }
+            val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, selected)
+            assertTrue(patch.truncated, "pad $pad: the capture ended inside the selected section")
+            assertFalse(patch.binary)
+            val size = patch.text.toByteArray().size
+            assertTrue(size in 64 * 1024 until GitReads.MAX_PATCH_BYTES, "pad $pad: $size bytes")
+            assertFalse(patch.text.contains('\uFFFD'), "pad $pad: no replacement character the source did not contain")
+            assertTrue(patch.text.endsWith("界"), "pad $pad")
+        }
+        // A complete capture that genuinely holds U+FFFD keeps it.
+        val (gitDir, workTree) = f.managed("utf8-genuine")
+        f.write(workTree, "c.txt", "kept \uFFFD here\n")
+        f.raw(gitDir, workTree, "add", "--", "c.txt")
+        val listing = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, listing.files.single())
+        assertFalse(patch.truncated)
+        assertTrue(patch.text.contains("+kept \uFFFD here\n"), patch.text)
+    }
+
+    @Test fun `utf8 prefix drops only an incomplete final sequence`() {
+        val bytes = "a界".toByteArray(Charsets.UTF_8) + "\uFFFD".toByteArray(Charsets.UTF_8)
+        assertEquals(bytes.size, GitReads.completeUtf8Prefix(bytes, bytes.size))
+        assertEquals(4, GitReads.completeUtf8Prefix(bytes, 6))
+        assertEquals(4, GitReads.completeUtf8Prefix(bytes, 5))
+        assertEquals(1, GitReads.completeUtf8Prefix(bytes, 3))
+        assertEquals(1, GitReads.completeUtf8Prefix(bytes, 2))
+        assertEquals(0, GitReads.completeUtf8Prefix(bytes, 0))
+        val emoji = "😀".toByteArray(Charsets.UTF_8)
+        for (cut in 1..3) assertEquals(0, GitReads.completeUtf8Prefix(emoji, cut))
+        assertEquals(4, GitReads.completeUtf8Prefix(emoji, 4))
+    }
+
     @Test fun `a subtree exhausting the patch capture cannot hide a selected rename as complete`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("rename-after-bound")
         f.write(workTree, "old.c", (1..30).joinToString("") { "int original_$it = $it;\n" })

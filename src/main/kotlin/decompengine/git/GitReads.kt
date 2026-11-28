@@ -407,7 +407,11 @@ object GitReads {
         val result = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("-p", "-U3", "--full-index"),
             gitDir = gitDir, workTree = if (scope == GitDiffScope.COMMIT) null else workTree, truncateStdout = true,
             limits = LIMITS.copy(maxStdoutBytes = MAX_PATCH_BYTES * 4)))
-        val text = result.stdout.toString(Charsets.UTF_8)
+        // A truncated capture can end inside a multibyte character; decode only complete characters so the
+        // cut never appears as a replacement character the source bytes did not contain.
+        val captured = result.stdout
+        val text = (if (result.stdoutTruncated) captured.copyOf(completeUtf8Prefix(captured, captured.size)) else captured)
+            .toString(Charsets.UTF_8)
         // An unresolved conflict prints a combined `diff --cc <path>` section instead of `diff --git`.
         val sections = Regex("(?m)^diff --(?:git|cc|combined) ").findAll(text).map { it.range.first }.toList().let { starts ->
             starts.mapIndexed { index, start -> text.substring(start, starts.getOrElse(index + 1) { text.length }) }
@@ -443,8 +447,26 @@ object GitReads {
         // Conservatively report incompleteness whenever the source capture was incomplete; an
         // empty selection in that case must never masquerade as a complete empty patch.
         val cut = bytes.size > MAX_PATCH_BYTES || result.stdoutTruncated
-        return GitPatch(if (bytes.size > MAX_PATCH_BYTES) bytes.copyOf(MAX_PATCH_BYTES).toString(Charsets.UTF_8).trimEnd('\uFFFD') else selected,
+        return GitPatch(if (bytes.size > MAX_PATCH_BYTES) bytes.copyOf(completeUtf8Prefix(bytes, MAX_PATCH_BYTES)).toString(Charsets.UTF_8) else selected,
             cut, binary = false)
+    }
+
+    /**
+     * The longest prefix of `bytes[0 until limit]` that does not end inside a UTF-8 sequence. Only a final
+     * sequence the cut left incomplete is dropped; earlier bytes, including genuine U+FFFD, are kept as they are.
+     */
+    internal fun completeUtf8Prefix(bytes: ByteArray, limit: Int): Int {
+        val end = minOf(limit, bytes.size)
+        var lead = end - 1
+        while (lead >= 0 && end - lead <= 3 && (bytes[lead].toInt() and 0xc0) == 0x80) lead--
+        if (lead < 0) return end
+        val width = when (bytes[lead].toInt() and 0xff) {
+            in 0xc2..0xdf -> 2
+            in 0xe0..0xef -> 3
+            in 0xf0..0xf4 -> 4
+            else -> 1
+        }
+        return if (lead + width > end) lead else end
     }
 
     /**
