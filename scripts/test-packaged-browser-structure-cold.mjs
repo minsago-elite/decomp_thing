@@ -12,6 +12,7 @@ import { structureServerTimingSummary, COLD_PROFILES, STRUCTURE_QUALIFICATION_SO
 import { liveProcessGroupMembers, readChildReport, waitForProcessGroupExit } from './packaged-browser-structure-cold.mjs';
 import { publishReport } from './packaged-browser-restart.mjs';
 import { createContext, runInContext } from 'node:vm';
+import { recordCleanupTruth } from './packaged-browser-capture.mjs';
 
 function gitBlob(bytes) { return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex'); }
 const approvedBrowserIdentity = Object.freeze({verified:true,product:'chrome',platform:'linux64',version:'149.0.7827.55',archiveSha256:'b'.repeat(64),
@@ -406,7 +407,8 @@ async function runDriverFinalizer(t, { mode, structureQualification, forceBrowse
   const processFake = { exitCode: undefined };
   const context = createContext({ report, root, sensitiveValues: [], values: { mode, 'keep-workdir': false }, structureQualification,
     process: processFake, join: (...parts) => parts.join('/'), publishReport, setTimeout, Date, launchErrors: new WeakMap(),
-    delay: ms => new Promise(resolveDelay => setTimeout(resolveDelay, ms)), cdp: { call: async () => {} }, browser, application,
+    delay: ms => new Promise(resolveDelay => setTimeout(resolveDelay, ms)), recordCleanupTruth,
+    cdp: { call: async () => {}, lateEvidence: () => ({ settlements: [], dropped: 0 }) }, browser, application,
     vite: null, profile: resolve(root, 'profile'), browserTmp: null, safeDiagnostic: String, cdpDiagnostics: { snapshot: () => ({}) },
     removeOwnedWork: async () => {}, fs: { rm: async () => {} }, applicationError: '',
     structureServerTimingSummary: () => ({ timings: [], limit: 512, overflow: 0 }), console: { log: () => {} } });

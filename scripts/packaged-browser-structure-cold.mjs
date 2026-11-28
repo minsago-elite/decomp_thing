@@ -35,6 +35,8 @@ export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
   'scripts/packaged-browser-cdp-diagnostics.mjs',
   'scripts/packaged-browser-target-lifecycle.mjs',
   'scripts/packaged-browser-temp-parent.mjs',
+  'scripts/packaged-browser-capture.mjs',
+  'scripts/packaged-browser-session-semantics.mjs',
   'scripts/packaged-browser-log-server-phases.mjs',
   'scripts/packaged-browser-logs.mjs',
   'scripts/packaged-browser-log-projection-evidence.mjs',

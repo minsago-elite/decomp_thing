@@ -1242,6 +1242,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
   let current, page, onRequest;
   const calls = [];
   const counts = { layout: 0, contrast: 0, focus: 0, chart: 0, navigations: 0, chartCaptureEvaluations: 0 };
+  const screenshots = [];
   const completed = new Error('stop before worker/browser qualification');
   const cdp = {
     on(event, callback) { if (event === 'Fetch.requestPaused') onRequest = callback; },
@@ -1260,7 +1261,8 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
     },
   };
   await assert.rejects(qualifyAudit({ origin, repo, manifest, evidenceDirectory: repo, cdp,
-    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => pngBytes(300, 150),
+    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {},
+    capture: async (_tab, name, phase, expectedSize) => { screenshots.push({ name, phase, expectedSize }); return pngBytes(300, 150); },
     profile: 'constrained',
     ready: async (tab, expression, label) => current.ready(tab, expression, label),
     evaluate: async (tab, expression) => {
@@ -1288,6 +1290,25 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
     ['Network.emulateNetworkConditions', { offline: false, latency: 100,
       downloadThroughput: 1_250_000, uploadThroughput: 250_000 }],
   ], 'the active audit path applies the constrained profile before navigation');
+  const expectedPixels = new Map([
+    ['desktop 1440x900', { width: 1440, height: 900 }],
+    ['narrow 390x844', { width: 390, height: 844 }],
+    ['reflow 320', { width: 320, height: 640 }],
+    ['zoom 200% of 1280x800', { width: 1280, height: 800 }],
+    ['zoom 400% of 1280x800', { width: 1280, height: 800 }],
+  ]);
+  const expectedScreenshots = auditViewports.flatMap(viewport => fixtures.pages
+    .filter(page => (viewport.width === 320 && viewport.deviceScaleFactor === 4)
+      || ['workspace', 'job detail', 'source directory', 'source file'].includes(page.name))
+    .map(page => ({ name: `audit-${viewport.name.split(' ')[0]}-${viewport.width}-${page.name.replaceAll(' ', '-')}.png`,
+      phase: `audit:${viewport.name}:${page.name}`,
+      expectedSize: expectedPixels.get(viewport.name) })));
+  assert.deepEqual(screenshots.filter(shot => shot.name.startsWith('audit-')), expectedScreenshots,
+    'every audit capture carries its exact device-pixel viewport size');
+  const chartShots = screenshots.filter(shot => !shot.name.startsWith('audit-'));
+  assert.equal(chartShots.length, 2, 'one chart tile per captured chart viewport');
+  assert.ok(chartShots.every(shot => shot.phase && typeof shot.phase === 'object' && shot.phase.scale === 1 && shot.expectedSize === undefined),
+    'chart captures pass a unit-scale page clip, routed to the clipped capture path');
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
@@ -1622,12 +1643,12 @@ test('connection DOM check ignores legacy status asides outside the notice secti
   const h1 = { tagName: 'H1', id: '', textContent: 'Workspace' };
   const document = {
     activeElement: h1,
-    querySelector: selector => selector === 'aside.session-notice.is-connected' ? connectedSession : null,
+    querySelector: selector => selector === '.session-notice.is-connected' ? connectedSession : null,
     querySelectorAll(selector) {
       if (selector === 'section.connection-notice') return [section];
       if (selector === '[role="status"]') return [status];
       if (selector === 'aside[role="status"]') return [{ tagName: 'ASIDE' }]; // unrelated session notice
-      if (selector === 'aside.session-notice.is-connected') return connectedSession;
+      if (selector === '.session-notice.is-connected') return [connectedSession];
       throw new Error(`unexpected selector ${selector}`);
     },
     getElementById: () => ({ textContent: connectionNoticeNames.offline }),
