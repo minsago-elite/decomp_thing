@@ -26,7 +26,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GccBundledGhidraRuntimeTest {
     @Test
-    fun `native runtime admits only its paired fresh cc1 worker and distinct v5 definition`() {
+    fun `native runtime admits its paired fresh cc1 or driver worker and distinct v5 definition`() {
         val base = runtime()
         val identity = GccBundledNativeCallCollectorIdentityV1(64, SHA_A, 128, SHA_B)
         val native = GccBundledGhidraRuntime(base.root, base.classPath, 8, identity)
@@ -54,6 +54,15 @@ class GccBundledGhidraRuntimeTest {
         assertEquals(native.toJson(), assertNotNull(parsed.bundledRuntime).toJson())
         assertEquals("false", document.getValue("startAuthorized").jsonPrimitive.content)
         assertEquals("false", document.getValue("releaseEligible").jsonPrimitive.content)
+        val driver = GccCompilerEngineContainmentRequest("driver", selected.runKind, inputs,
+            selected.analysisState, command, selected.environment, selected.outputLease, selected.budgets, native)
+        val driverAssessment = GccCompilerEngineContainmentContract.assessDefinition(driver)
+        val driverDefinition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(driverAssessment.canonicalBytes)
+        assertEquals("driver", driverDefinition.engineId)
+        assertEquals(command, driverDefinition.command)
+        assertEquals(native.toJson(), assertNotNull(driverDefinition.bundledRuntime).toJson())
+        assertNotEquals(parsed.bindingSha256, driverDefinition.bindingSha256)
+        assertFalse(driverAssessment.startAuthorized)
         for (kind in listOf(GccCompilerEngineContainmentRunKind.INTERRUPTED, GccCompilerEngineContainmentRunKind.RESUMED)) {
             assertFailsWith<IllegalArgumentException> { native.command(inputs, state(), lease(), kind) }
         }
@@ -77,6 +86,32 @@ class GccBundledGhidraRuntimeTest {
             JsonObject(runtimeDocument + ("workerOperation" to JsonPrimitive("analyze-diagnostics-v1"))),
             JsonObject(runtimeDocument + ("nativeCallCollector" to JsonObject(identity.toJson() + ("extra" to JsonPrimitive(true))))))
         for (value in bad) assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime.parse(value) }
+    }
+
+    @Test
+    fun `driver definition permits only ordinary full or native runtime while preserving other engine contracts`() {
+        for (version in 1..8) {
+            val selected = GccBundledGhidraRuntime(ROOT, classPath(), version,
+                if (version == 8) GccBundledNativeCallCollectorIdentityV1(64, SHA_A, 128, SHA_B) else null)
+            val inputs = artifacts(selected)
+            val state = if (version == 4) GccCompilerEngineAnalysisStateIdentity(
+                GccCompilerEngineAnalysisStateMode.RESUME_MANIFEST, lease().path.resolve("state"), SHA_A, 1, 1) else state()
+            val kind = if (version == 4) GccCompilerEngineContainmentRunKind.RESUMED
+                else GccCompilerEngineContainmentRunKind.FRESH_CONTROL
+            val command = selected.command(inputs, state, lease(), kind)
+            fun request(engine: String) = GccCompilerEngineContainmentRequest(engine, kind, inputs, state,
+                command, ENVIRONMENT, lease(), GccCompilerEngineContainmentBudgets(1_800_000, 16L * 1024 * 1024 * 1024, 256), selected)
+            assertEquals("cc1", GccCompilerEngineContainmentContract.parseDefinitionForLiveController(
+                GccCompilerEngineContainmentContract.assessDefinition(request("cc1")).canonicalBytes).engineId)
+            if (version in setOf(5, 8)) {
+                val assessment = GccCompilerEngineContainmentContract.assessDefinition(request("driver"))
+                val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(assessment.canonicalBytes)
+                assertEquals("driver", definition.engineId)
+                assertEquals(version, assertNotNull(definition.bundledRuntime).invocationVersion)
+                assertFalse(assessment.startAuthorized)
+            } else assertFailsWith<IllegalArgumentException> { request("driver") }
+            if (version in setOf(6, 7, 8)) assertFailsWith<IllegalArgumentException> { request("lto1") }
+        }
     }
     @Test
     fun `bundled worker command binds writable JVM home and temp before shared prefix and exporter arguments`() {

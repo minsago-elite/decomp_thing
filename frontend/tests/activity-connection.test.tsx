@@ -4,14 +4,18 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/preact
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
-import type { Snapshot, WebEvent } from '../src/api/generated';
+import type { Bootstrap, Snapshot, WebEvent } from '../src/api/generated';
 import { Activity } from '../src/jobs/Activity';
+import { PrivateSessionContext } from '../src/session/PrivateTransport';
+import { createBrowserSession } from '../src/session/session';
+import type { SessionGateway } from '../src/session/session';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 vi.mock('../src/api/eventStream', () => ({ createEventStream: () => async function* () { await Promise.resolve(); yield* []; throw new ApiClientError('http_error', { status: 406 }); } }));
 const fixture = <T,>(name: string): T => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
 const snapshot = fixture<{ data: Snapshot }>('snapshot-progress-omissions');
+const bootstrap = fixture<{ data: Bootstrap }>('bootstrap').data;
 const events = fixture<{ data: { items: WebEvent[]; nextCursor: string; hasMore: boolean } }>('events-observation-poll');
 const idle = { data: { items: [], nextCursor: events.data.nextCursor, hasMore: false } };
 let visible = true;
@@ -63,6 +67,32 @@ it('retries a transient read with jittered backoff and snapshot reconciliation',
   expect(transport.get.mock.calls[4]![1]).toContain(`after=${events.data.nextCursor}`);
   expect(screen.getByRole('status').textContent).toContain('Following retained activity');
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
+});
+
+it('treats 503 as transient and revalidates the authenticated session after activity recovers', async () => {
+  const data = { ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = {
+    exchange: vi.fn<SessionGateway['exchange']>(),
+    bootstrap: vi.fn<SessionGateway['bootstrap']>().mockResolvedValue(data),
+    logout: vi.fn<SessionGateway['logout']>(),
+  };
+  const session = createBrowserSession(gateway, '/nested');
+  await session.initialize({ kind: 'absent' });
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(events)
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 503 }))
+    .mockResolvedValueOnce(snapshot).mockResolvedValueOnce(idle);
+  render(<PrivateSessionContext.Provider value={session}>
+    <Activity jobId={snapshot.data.run.jobId} runId={snapshot.data.run.runId} basePath="/nested" />
+  </PrivateSessionContext.Provider>);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Follow activity' })); await Promise.resolve(); });
+  await advance(2500);
+  expect(screen.getByRole('status').textContent).toContain('retry 1 of 4');
+  await advance(1000);
+  expect(transport.get).toHaveBeenCalledTimes(5);
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+  expect(gateway.exchange).not.toHaveBeenCalled(); expect(gateway.logout).not.toHaveBeenCalled();
+  expect(screen.getByRole('status').textContent).toContain('Following retained activity');
+  session.dispose();
 });
 
 it('stops after four retries and starts no further reads without explicit recovery', async () => {

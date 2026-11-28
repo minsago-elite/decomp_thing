@@ -22,7 +22,7 @@ internal fun revisionSourceFileIndex(fileId: String): Int {
 
 internal fun resolveRevisionSourceFile(snapshot: WebRevisionSourceSnapshot, fileId: String): WebRevisionSourceFile {
     val index = revisionSourceFileIndex(fileId)
-    val file = snapshot.files.getOrNull(index) ?: sourceFileNotFound()
+    val file = snapshot.identityFiles.getOrNull(index) ?: sourceFileNotFound()
     if (!MessageDigest.isEqual(revisionSourceFileId(snapshot.reference, index, file.evidence.path).toByteArray(), fileId.toByteArray())) sourceFileNotFound()
     return file
 }
@@ -33,10 +33,12 @@ internal fun selectRevisionSourceFile(snapshot: WebRevisionSourceSnapshot, fileI
     val role = if (purpose == WebSourceReadPurpose.PREVIEW) ProjectFileRole.VIEWABLE else ProjectFileRole.ARCHIVE_PAYLOAD
     if (role !in file.evidence.roles) throw WebAccessDenied(403, "SOURCE_REPRESENTATION_UNAVAILABLE",
         "The configured source declaration does not permit this representation.")
-    if (file.sizeBytes > WebRevisionSourceContent.MAXIMUM_FILE_BYTES) throw WebAccessDenied(413, "SOURCE_FILE_TOO_LARGE",
-        "The selected source file exceeds this reader's byte limit.")
+    if ((file.sizeBytes ?: 0) > WebRevisionSourceContent.MAXIMUM_FILE_BYTES) sourceFileTooLarge()
     return file
 }
+
+internal fun sourceFileTooLarge(): Nothing = throw WebAccessDenied(413, "SOURCE_FILE_TOO_LARGE",
+    "The selected source file exceeds this reader's byte limit.")
 
 private fun sourceFileNotFound(): Nothing = throw WebAccessDenied(404, "SOURCE_FILE_NOT_FOUND",
     "The requested file is not registered in this revision source input set.")
@@ -77,7 +79,8 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
     private val reference = snapshot.reference
     private val metadataVersion = snapshot.metadataVersion
     private val bytes = captured.bytes.also {
-        if (it.size.toLong() != file.sizeBytes || it.size.toLong() > MAXIMUM_FILE_BYTES) revisionSourceChanged()
+        // Manifest-only entries have no recorded size; their digest below remains the binding check.
+        if ((file.sizeBytes != null && it.size.toLong() != file.sizeBytes) || it.size.toLong() > MAXIMUM_FILE_BYTES) revisionSourceChanged()
     }.copyOf()
     private val sha256 = file.evidence.sha256
     private val identity = captured.identity
@@ -87,8 +90,7 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
     private val fallback: String?
 
     init {
-        val index = revisionSourceFileIndex(fileId)
-        check(snapshot.files.getOrNull(index) === file && revisionSourceFileId(reference, index, file.evidence.path) == fileId)
+        check(resolveRevisionSourceFile(snapshot, fileId) === file)
         if (captured.sha256 != sha256 || WebExplorationArtifact.sha256(bytes) != sha256) revisionSourceChanged()
         fallback = if (file.evidence.contentKind != ProjectContentKind.UTF8_TEXT) "declared-binary" else textFallback(bytes)
     }
@@ -96,6 +98,15 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
     fun requireSame(current: StableRegularFile) {
         if (current.identity != identity || current.sha256 != sha256 || !bytes.contentEquals(current.bytes)) revisionSourceChanged()
     }
+
+    /** Digest-verified bytes for a bounded comparison; requires the same viewable declaration as previews. */
+    internal fun previewBytes(): ByteArray {
+        if (!previewAvailable) representationUnavailable()
+        return bytes.copyOf()
+    }
+
+    /** Null for displayable UTF-8; otherwise the same fallback reason a preview would report. */
+    internal val fallbackReason: String? get() = fallback
 
     fun download(): ByteArray {
         if (!downloadAvailable) representationUnavailable()
@@ -153,7 +164,7 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
         private fun continuation(byte: Byte): Boolean = (byte.toInt() and 0xc0) == 0x80
 
         /** Validate without retaining a decoded whole-file string or replacing malformed bytes. */
-        private fun textFallback(bytes: ByteArray): String? {
+        internal fun textFallback(bytes: ByteArray): String? {
             var index = 0; var lineBytes = 0; var longLine = false
             while (index < bytes.size) {
                 val first = bytes[index].toInt() and 255

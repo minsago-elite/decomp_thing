@@ -70,11 +70,56 @@ const typesText = header + '// String bounds and cross-field/conditional constra
   `export type ResponseOf<K extends ResponseKind> = Extract<ContractDocument, { kind: K }>;\n` +
   `export type RequestData<K extends RequestKind> = Extract<ContractDocument, { kind: K }>['data'];\n`;
 const runtimeSchema = structuredClone(schema);
-delete runtimeSchema.$schema; delete runtimeSchema.title; delete runtimeSchema.description;
+delete runtimeSchema.$schema; delete runtimeSchema.title;
+// Annotations never affect validation; keep them out of the browser bundles.
+(function stripDescriptions(node) {
+  if (!node || typeof node !== 'object') return;
+  if (!Array.isArray(node) && typeof node.description === 'string') delete node.description;
+  for (const child of Object.values(node)) stripDescriptions(child);
+})(runtimeSchema);
+// Kinds decoded only by lazily loaded routes. Definitions reachable from them alone are emitted to separate
+// modules those routes register at load, so the initial bundle carries only core contracts; decode.ts refuses
+// them until registered. The shared extension is registered with registerContractExtension; a named group
+// also carries its own semantic checks and is registered with registerContractGroup.
+const lazyExtensionKinds = ['jobDeletionPreview', 'storageSummary', 'maintenancePreview', 'jobOrganizationRequest', 'jobDeletionRequest',
+  'supportExport', 'capacity', 'sourceChunk', 'revisionFile', 'revisionDirectory', 'validationHistory'];
+const lazyGroups = { structure: ['functionInventory', 'moduleInventory', 'moduleDetail', 'entityDetail'] };
+const kindOf = (variant) => variant.properties?.kind?.const;
+const lazyKinds = new Set([...lazyExtensionKinds, ...Object.values(lazyGroups).flat()]);
+if (lazyKinds.size !== lazyExtensionKinds.length + Object.values(lazyGroups).flat().length) throw Error('A lazy contract kind is listed twice');
+for (const kind of lazyKinds) if (!runtimeSchema.oneOf.some((variant) => kindOf(variant) === kind)) throw Error(`Unknown lazy contract kind: ${kind}`);
+for (const kind of Object.values(lazyGroups).flat()) if (!responses.includes(kind)) throw Error(`Unknown lazy response kind: ${kind}`);
+function reach(nodes) {
+  const seen = new Set();
+  const visit = (key) => { if (!seen.has(key)) { seen.add(key); for (const target of references(runtimeSchema.definitions[key])) visit(target); } };
+  for (const node of nodes) for (const key of references(node)) visit(key);
+  return seen;
+}
+const lazyReach = reach(runtimeSchema.oneOf.filter((variant) => lazyKinds.has(kindOf(variant))));
+const eager = reach([...runtimeSchema.oneOf.filter((variant) => !lazyKinds.has(kindOf(variant))),
+  ...Object.keys(runtimeSchema.definitions).filter((key) => !lazyReach.has(key)).map((key) => ({ $ref: `#/definitions/${key}` }))]);
+const split = (keys, variants) => ({
+  definitions: Object.fromEntries(Object.entries(runtimeSchema.definitions).filter(([key]) => keys(key))),
+  oneOf: runtimeSchema.oneOf.filter(variants),
+});
 const files = {
   'frontend/src/api/generated.ts': typesText,
-  'frontend/src/api/generated-schema.ts': header + `import type { Schema } from './schema-types';\n\nexport const contractSchema: Schema = ${JSON.stringify(runtimeSchema, null, 2)};\n`,
+  'frontend/src/api/generated-schema.ts': header + `import type { Schema } from './schema-types';\n\nexport const contractSchema: Schema = ${
+    JSON.stringify(split((key) => eager.has(key), (variant) => !lazyKinds.has(kindOf(variant))), null, 2)};\n`,
 };
+const lazyModules = [
+  { file: 'lazy', kinds: lazyExtensionKinds, name: 'lazyContractSchema', doc: 'Register with registerContractExtension before decoding these kinds.' },
+  ...Object.entries(lazyGroups).map(([group, kinds]) => ({ file: group, kinds, name: `${group}ContractGroup`,
+    doc: `Register with registerContractGroup before decoding ${kinds.join(', ')}.` })),
+];
+const claimed = new Set();
+for (const { file, kinds, name, doc } of lazyModules) {
+  const own = [...reach(runtimeSchema.oneOf.filter((variant) => kinds.includes(kindOf(variant))))].filter((key) => !eager.has(key));
+  for (const key of own) { if (claimed.has(key)) throw Error(`Lazy definition shared by two groups: ${key}`); claimed.add(key); }
+  files[`frontend/src/api/generated-schema-${file}.ts`] = header + `import type { Schema } from './schema-types';\n\n` +
+    `/** ${doc} */\n` +
+    `export const ${name}: Schema = ${JSON.stringify(split((key) => own.includes(key), (variant) => kinds.includes(kindOf(variant))), null, 2)};\n`;
+}
 if (process.argv.slice(2).some((arg) => arg !== '--check')) throw Error('Usage: generate-web-api.mjs [--check]');
 for (const [path, contents] of Object.entries(files)) {
   const destination = resolve(root, path);

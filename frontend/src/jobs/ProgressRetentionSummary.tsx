@@ -1,6 +1,6 @@
 import { progressRetentionSummaryCopy as copy } from '../copy/runtime';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from './metadataFormat';
+import { formatExactTimestamp } from '../copy/format';
 import type { ProgressRetention } from '../api/generated';
 
 export function ProgressRetentionSummary({ retention }: { retention?: ProgressRetention | undefined }) {

@@ -383,7 +383,9 @@ npm --prefix frontend run api:check
 
 Use the [pinned repository-local setup](web-packaging.md#repository-local-frontend-setup-and-rebuilds)
 and [fixture generation workflow](web-workflow-fixtures.md#generating-and-selecting-development-fixtures)
-for these commands. Generation owns `generated.ts` and `generated-schema.ts`; keep
+for these commands. Generation owns `generated.ts`, `generated-schema.ts` and lazy route groups such as
+`generated-schema-structure.ts`, whose exclusive definitions load with their route and
+are admitted with `registerContractGroup`; keep
 handwritten decoding/view behavior in its own modules. Check the generated diff
 and the source-schema hash. Consumer decoding discards unknown fields, while
 producer/request checks reject them. Unknown kinds/versions and invalid known

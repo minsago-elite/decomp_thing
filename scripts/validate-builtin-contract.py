@@ -10,18 +10,18 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED = {
-    "decompengine.agent.AgentExecutionContractTest": 8,
-    "decompengine.builtin.BuiltinAgentHarnessTest": 15,
+    "decompengine.agent.AgentExecutionContractTest": 10,
+    "decompengine.builtin.BuiltinAgentHarnessTest": 16,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
-    "decompengine.builtin.BuiltinCapturedContextToolsTest": 6,
-    "decompengine.builtin.BuiltinContextPackageTest": 5,
+    "decompengine.builtin.BuiltinCapturedContextToolsTest": 11,
+    "decompengine.builtin.BuiltinContextPackageTest": 8,
     "decompengine.builtin.BuiltinJournalTest": 11,
     "decompengine.builtin.BuiltinCheckpointTest": 11,
     "decompengine.builtin.BuiltinCapturedResumeTest": 8,
     "decompengine.builtin.BuiltinSourceStoreTest": 9,
     "decompengine.builtin.BuiltinInvocationArchiveTest": 8,
     "decompengine.builtin.BuiltinTerminalToolsTest": 7,
-    "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
+    "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 26,
 }
 
 
@@ -33,7 +33,9 @@ def main():
     summary.unlink(missing_ok=True)
     environment = dict(os.environ, DECOMP_REQUIRE_LIVE_ACP_CONTRACT="1")
     result = subprocess.run(
-        [str(ROOT / "gradlew"), "--no-daemon", "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
+        [str(ROOT / "gradlew"), "--no-daemon",
+         "-Dorg.gradle.internal.repository.max.tentatives=5", "-Dorg.gradle.internal.repository.initial.backoff=2000",
+         "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
          "--tests", "decompengine.agent.*", "--console=plain"], cwd=ROOT, env=environment,
     )
     suites, failures = [], []
@@ -60,7 +62,7 @@ def main():
     if not source_clean:
         failures.append("Source worktree is not clean")
     verdict = {
-        "schemaVersion": 1, "corpus": "builtin-core-contract-v9",
+        "schemaVersion": 1, "corpus": "builtin-core-contract-v10",
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "requiredHost": True, "sourceClean": source_clean, "forcedTestExecution": True, "gradleExitCode": result.returncode,
         "passed": result.returncode == 0 and not failures,

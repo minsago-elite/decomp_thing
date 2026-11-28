@@ -195,6 +195,27 @@ class MetadataDiagnosticReferenceTest(unittest.TestCase):
         )
         self.assertEqual(substitute(unchanged, {"install-prefix": "/candidate"}), unchanged)
 
+    def test_substitutions_do_not_rewrite_replacement_identities(self) -> None:
+        original = (
+            b"COLLECT_GCC=/oracle/install/bin/gcc\n"
+            b"Configured with: /source/configure --prefix=/oracle/install\n"
+            b"install: /oracle/install/lib/gcc/x86_64-pc-linux-gnu/16.2.0/\n"
+        )
+        # Invocation paths need not share the configured prefix. A replacement
+        # may itself contain the old prefix, even more than once.
+        for argv0 in (
+            "/oracle/install/bin/gcc",
+            "/oracle/install/bin/candidate-cc",
+            "/oracle/install/oracle/install/bin/candidate-cc",
+        ):
+            with self.subTest(argv0=argv0):
+                self.assertEqual(
+                    substitute(original, {"driver-argv0": argv0, "install-prefix": "/candidate"}),
+                    f"COLLECT_GCC={argv0}\n".encode()
+                    + b"Configured with: /source/configure --prefix=/candidate\n"
+                    + b"install: /candidate/lib/gcc/x86_64-pc-linux-gnu/16.2.0/\n",
+                )
+
     def test_substitute_replaces_only_the_captured_span(self) -> None:
         data = (
             b"gcc (GCC) 16.2.0\n"

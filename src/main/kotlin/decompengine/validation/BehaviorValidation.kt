@@ -99,6 +99,18 @@ class BehaviorExecutionTimeoutException(message: String) : RuntimeException(mess
 
 class BehaviorExecutionOutcomeException(message: String) : RuntimeException(message)
 
+class BehaviorExecutionLaunchException(cause: Throwable) :
+    RuntimeException("sandbox invocation wrapper process could not start", cause)
+
+/** Keep a failed ProcessBuilder.start distinct from I/O after a process was created. */
+internal fun startBehaviorSandboxProcess(start: () -> Process): Process = try {
+    start()
+} catch (failure: IOException) {
+    throw BehaviorExecutionLaunchException(failure)
+} catch (failure: SecurityException) {
+    throw BehaviorExecutionLaunchException(failure)
+}
+
 internal fun rejectReservedWrapperExit(exitCode: Int) {
     if (exitCode !in 0..123) {
         throw BehaviorExecutionOutcomeException(
@@ -284,7 +296,7 @@ class SandboxRunner(
         val builder = ProcessBuilder(launchCommand).redirectErrorStream(false)
         builder.environment().clear()
         builder.environment()["PATH"] = "/usr/bin"
-        val process = builder.start()
+        val process = startBehaviorSandboxProcess { builder.start() }
         val executor = Executors.newFixedThreadPool(3) { runnable ->
             Thread(runnable, "behavior-process-io").apply { isDaemon = true }
         }

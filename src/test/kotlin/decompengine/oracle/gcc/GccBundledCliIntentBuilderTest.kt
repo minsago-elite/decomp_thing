@@ -114,7 +114,8 @@ class GccBundledCliIntentBuilderTest {
     private fun privateDirectory(path: Path): Path = Files.createDirectory(path,
         PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
     private fun fixture(action: (Path) -> Unit) {
-        val root = Files.createTempDirectory("gcc-cli-intent-").toRealPath()
+        val parent = Files.createDirectories(Path.of("build/test-tmp").toAbsolutePath().normalize())
+        val root = Files.createTempDirectory(parent, "gcc-cli-intent-").toRealPath()
         try { action(root) } finally {
             Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
         }

@@ -31,7 +31,7 @@ class AngrQualificationSelectionTest(unittest.TestCase):
         self.write("README.md", "initial\n")
         self.write("Dockerfile", "ARG ANGR_VERSION=9.2.213\n")
         self.write("requirements/angr-qualification.txt", "angr==9.2.213\n")
-        self.write("requirements/angr-compatibility.txt", "bitstring==4.4.0\n")
+        self.write("requirements/angr-compatibility.txt", "bitstring==4.4.0\npycparser==3.1\n")
         self.base = self.commit("initial authored fixture")
         self.git("push", "--quiet", "origin", "HEAD:refs/heads/fixture")
 
@@ -117,6 +117,7 @@ class AngrQualificationSelectionTest(unittest.TestCase):
         record = json.loads(result.stdout)
         self.assertEqual("9.2.213", record["angrVersion"])
         self.assertEqual("4.4.0", record["bitstringVersion"])
+        self.assertEqual("3.1", record["pycparserVersion"])
         self.assertEqual(64, len(record["dockerfileSha256"]))
 
     def test_mismatched_or_ambiguous_pin_is_rejected(self):
@@ -132,6 +133,14 @@ class AngrQualificationSelectionTest(unittest.TestCase):
             result = self.check_pin()
             self.assertNotEqual(0, result.returncode)
             self.assertIn("one shared bitstring compatibility pin", result.stderr)
+
+    def test_missing_unpinned_or_ambiguous_pycparser_is_rejected(self):
+        for parser in ("", "pycparser>=3.0\n", "pycparser==3.1\npycparser==3.1\n"):
+            with self.subTest(parser=parser):
+                self.write("requirements/angr-compatibility.txt", "bitstring==4.4.0\n" + parser)
+                result = self.check_pin()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("one shared pycparser compatibility pin", result.stderr)
 
 
 if __name__ == "__main__":

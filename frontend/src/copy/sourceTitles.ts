@@ -1,5 +1,8 @@
-/** Source page titles are shell copy; the remaining source navigation copy stays in its lazy routes. */
+/** Source page titles used by the shell. The remaining source copy loads with the source routes. */
 export const sourceTitleCopy = {
   title: 'Recorded source inputs',
   fileTitle: 'Recorded source file',
+  searchTitle: 'Search recorded source inputs',
+  diffTitle: 'Compare recorded revisions',
+  fileDiffTitle: 'Compare a recorded file',
 } as const;

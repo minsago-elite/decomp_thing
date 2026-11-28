@@ -1,0 +1,234 @@
+{
+  "actions": {
+    "artifactId": 12608161177,
+    "artifactName": "gcc-driver-live-full-export-40212192598-1",
+    "headSha": "202de6b234500419c37c412f385a0da948b98a78",
+    "jobConclusion": "success",
+    "jobId": 121225604948,
+    "runConclusion": "success",
+    "runId": 40212192598
+  },
+  "oracle": {
+    "bytes": 12558460,
+    "path": "oracle/gcc/16.2.0/function-recovery-oracle.json",
+    "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae"
+  },
+  "payloads": [
+    {
+      "bytes": 8819191,
+      "gzipBytes": 992357,
+      "gzipSha256": "878295e2583dd11537b9858c0fa174b7b2f7265d4422e21f1849935cad1689bf",
+      "path": "model.json.gz",
+      "role": "model",
+      "sha256": "0c8f89f9346782f4bcc9ee4d421200aa7ba29122ce762eb4b267b64b0496d1c1"
+    },
+    {
+      "bytes": 1331,
+      "gzipBytes": 762,
+      "gzipSha256": "e9140324e276e92f5f5ba307872445ef6cf0ac8683d67af76feafdf23a587d47",
+      "path": "qualification.json.gz",
+      "role": "qualification",
+      "sha256": "d77a4ce906ad11c5aa0415e6d69c51425aa074935e6b54d70a9468af90ed69a7"
+    },
+    {
+      "bytes": 2779,
+      "gzipBytes": 1168,
+      "gzipSha256": "747b673c101ba5029196d2b21922d13ff8543709523b86f5a540893251317a66",
+      "path": "result.json.gz",
+      "role": "result",
+      "sha256": "f82839adb63f856b2df54330db420a39bf555176134d8f2e1a9806b12e1aae8a"
+    },
+    {
+      "bytes": 5542,
+      "gzipBytes": 1395,
+      "gzipSha256": "7a248cf49ee6783be4200aedf767c858950fa8409216b9dc6d1b44c2f3e50127",
+      "path": "accuracy.json.gz",
+      "role": "accuracy",
+      "sha256": "9cd2e64c2d59cf9e9c637890edd7fb936052146abbec365fa196aef45a29a1bf"
+    },
+    {
+      "bytes": 14417504,
+      "gzipBytes": 562456,
+      "gzipSha256": "619e018253d7054f0ee003f160c46b41b2f6e0d754e968ec16140b8561429021",
+      "path": "boundary-score.json.gz",
+      "role": "boundary-score",
+      "sha256": "8c1346ef5e772dc3125ad6510c27c81cea751c3db17d5c2aeb6cbecab6de5cac"
+    },
+    {
+      "bytes": 13521211,
+      "gzipBytes": 554482,
+      "gzipSha256": "f34d23e1bdcff991c2566a95eaf0e221e7e079c1554c16b1134e31014db536ef",
+      "path": "boundary-observation.json.gz",
+      "role": "boundary-observation",
+      "sha256": "fed0905fafd29b120ef5fd2802e3f8a9d5ad8caa9a8ce3096dcb7e959d035d5d"
+    },
+    {
+      "bytes": 2740,
+      "gzipBytes": 1392,
+      "gzipSha256": "4d612f054e1deddc0d9e0f5275f5221a68decb379b1adda68235fbdc73d7fd7e",
+      "path": "full-export-binding.json.gz",
+      "role": "full-export-binding",
+      "sha256": "c450403ed85b759985c48df7b134548b968f56d876ee5d68f0cf100bc76da0df"
+    },
+    {
+      "bytes": 1343,
+      "gzipBytes": 647,
+      "gzipSha256": "d1a092137ec6193666b1caef633428d04ded32fb143489f6bd94a314c57e2fcb",
+      "path": "replay-request.json.gz",
+      "role": "replay-request",
+      "sha256": "2703f789273a79c3d3c636b5270582be97fdd7d3842e63c2adc4a27f850cf1c4"
+    },
+    {
+      "bytes": 979,
+      "gzipBytes": 577,
+      "gzipSha256": "43b9841f296ebc28e73038a7dda9dc94175cc07502051f3e6a306ff8c42433fc",
+      "path": "replay-output.json.gz",
+      "role": "replay-output",
+      "sha256": "dce99d30425b6fd270148b576cffefba4eac5c8a99b2de839f46431c81543854"
+    },
+    {
+      "bytes": 764,
+      "gzipBytes": 421,
+      "gzipSha256": "704cca69c2d7fc01d82492900e49ea85433fc2ba2b23dcbf0b9b17b6c09e7d01",
+      "path": "replay-capture.json.gz",
+      "role": "replay-capture",
+      "sha256": "32622c0cc4c06ff842ef64c2f205059f1ebe0a949369e993b088858c5481d8d8"
+    },
+    {
+      "bytes": 2212,
+      "gzipBytes": 1045,
+      "gzipSha256": "23317de701ffc374bb8243b43202cab679362f8161b93b08c84dfc843c67fd2e",
+      "path": "replay-execution.json.gz",
+      "role": "replay-execution",
+      "sha256": "20eba118a8aab4ad7276d8a6a871fd0d436af34078d1691abdf268f15073f938"
+    },
+    {
+      "bytes": 2093,
+      "gzipBytes": 868,
+      "gzipSha256": "4c43e6700998d4d3141f75438f723c330ea1f7ad9bbba20c9a205bb1eab5744a",
+      "path": "replay-attachment.json.gz",
+      "role": "replay-attachment",
+      "sha256": "d2ecb69415da1cb5426870d34bb65a6c568682b8459553bf02b7823a5e9e8033"
+    },
+    {
+      "bytes": 428,
+      "gzipBytes": 307,
+      "gzipSha256": "1423afdeffbb914495a7ab2ed79b332f1c71c8d4f7042d284f84523976568bfa",
+      "path": "start-authorized.json.gz",
+      "role": "start-authorized",
+      "sha256": "fbe33c4ea343f6fff8a81e4990a4e601ec5f18a9d0e95750815194c6b76b7663"
+    },
+    {
+      "bytes": 2906,
+      "gzipBytes": 1299,
+      "gzipSha256": "e6d77631f7a3ca8ff58c24bb7537ce460ef4d15b8236561a86620e97e358e3a8",
+      "path": "export-execution.json.gz",
+      "role": "export-execution",
+      "sha256": "86483cd513bffad1b1bead73fad7cac52cb1669787fa56778647d40b503c66b8"
+    },
+    {
+      "bytes": 2804,
+      "gzipBytes": 1159,
+      "gzipSha256": "b537a21343cdfe2f8cccb837cd3bbc99b38c0f57c3611c6e4fb87dd314c144c1",
+      "path": "export-attachment.json.gz",
+      "role": "export-attachment",
+      "sha256": "67dff1b3ca3334e73870a848bfb1c25dacbdc43115431985db31b3841ff3e52a"
+    },
+    {
+      "bytes": 2160,
+      "gzipBytes": 1118,
+      "gzipSha256": "834657a71445ca23ca1be4d5c10014a4967f2b9b99aa28d6a2e00824acfb329d",
+      "path": "export-assessment.json.gz",
+      "role": "export-assessment",
+      "sha256": "33851c026faf8627f9f1d9ecf3cf90a6eb139206da20150dbf56d4ea6946a115"
+    },
+    {
+      "bytes": 60097,
+      "gzipBytes": 13184,
+      "gzipSha256": "48c2837620498a43662c3d96750a26de824fe6820d2067676201ec57d43d4197",
+      "path": "intent.json.gz",
+      "role": "intent",
+      "sha256": "9792d4ac0b87c3e30baf677b54277a6ea95be8d1e295794bdc233d01729448c5"
+    },
+    {
+      "bytes": 798628,
+      "gzipBytes": 227826,
+      "gzipSha256": "2993d725a0fc1569e786f8c0a7797447754e5b36c2b9fedf6842795c9af6b105",
+      "path": "tree-manifest.json.gz",
+      "role": "tree-manifest",
+      "sha256": "ab11d9942ea3be01a3ae924ce6e23d90f87ecc73225a247dd6396ef3194fc58d"
+    },
+    {
+      "bytes": 237,
+      "gzipBytes": 194,
+      "gzipSha256": "77a26bafe8a05444c403cd1d3e2eae1400c573ea11a6a1f00070af70bdafc640",
+      "path": "launcher-summary.json.gz",
+      "role": "launcher-summary",
+      "sha256": "430604fc6469ce37ded43f88ffd893d9219004bb5b0c077c479abb9d8be88706"
+    },
+    {
+      "bytes": 2004,
+      "gzipBytes": 523,
+      "gzipSha256": "a7357b62429d67ae461f3aec1109418d1a032b3714151758216519cf767835df",
+      "path": "invocation.json.gz",
+      "role": "invocation",
+      "sha256": "e8fd778ee79e8d0b93ab5354d82d78b8d2022d89a8d60de2511e06e322b18275"
+    },
+    {
+      "bytes": 237369,
+      "gzipBytes": 28175,
+      "gzipSha256": "a7fd237a7ab0802e7af27475ded39351b6647ae9fe16599384a3b419e79d0a7e",
+      "path": "actions.log.gz",
+      "role": "actions-log",
+      "sha256": "5c147b72ca668858548821fd75b04e5849a77ca986700d3260f0bc7210f9c5a0"
+    },
+    {
+      "bytes": 962,
+      "gzipBytes": 505,
+      "gzipSha256": "eb8464491cdfde6717381fb9c9216daaa7693124835eb8488a011a23d64f48cd",
+      "path": "launcher-invocation.json.gz",
+      "role": "launcher-invocation",
+      "sha256": "04eb227d7f2d2d529ce61eab63f00cb9ac757329b351c7041e9e99eb31894971"
+    },
+    {
+      "bytes": 405,
+      "gzipBytes": 278,
+      "gzipSha256": "fa5c8a18163b0e633fc9a1e66dbc6067d80757a19f438fd85aebd84e135308cf",
+      "path": "launcher-result.json.gz",
+      "role": "launcher-result",
+      "sha256": "1ef59ebd2a0c533021bfd996221ea3f7e3cfdc3b38e2975201fbe98724c367fc"
+    }
+  ],
+  "provider": "gcc-driver-production-function-replay-evidence-v1",
+  "schemaVersion": 1,
+  "scope": {
+    "complete": false,
+    "fullStructuralScored": false,
+    "productionDomains": [
+      "model-provenance",
+      "function-boundaries",
+      "surviving-symbol-identities"
+    ],
+    "releaseEligible": false
+  },
+  "source": {
+    "checkoutCommit": "f4904e7d21063636ee8a77b298eac08eb1894283",
+    "checkoutCommitObject": {
+      "bytes": 1175,
+      "path": "source-checkout.commit",
+      "sha256": "82052f07d1743c6e20e8c348ca1519f23ed830e3ded03f81256bab48e475aaaf"
+    },
+    "commit": "202de6b234500419c37c412f385a0da948b98a78",
+    "commitObject": {
+      "bytes": 767,
+      "path": "source-head.commit",
+      "sha256": "7d19905c019a6366dd9bd6610b6024180229a972352af6d0c28fccc48df2dc60"
+    },
+    "inventory": {
+      "bytes": 279259,
+      "path": "source-tree.nul",
+      "sha256": "b93def8f639912a8ba98de7cfca258c0af60941071a5987bad0f792b7374f508"
+    },
+    "treeSha1": "7fc1055b170b357c0759e3307375765da24b6109"
+  }
+}

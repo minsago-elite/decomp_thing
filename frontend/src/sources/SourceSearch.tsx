@@ -1,0 +1,166 @@
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useLocation } from 'preact-iso/router';
+import type { SourceSearch as SourceSearchPage } from '../api/generated';
+import { ApiClientError } from '../api/errors';
+import { sourceDirectoryPath } from '../app/paths';
+import type { SourceSelection } from '../app/paths';
+import { sourceCopy as copy } from '../copy/sources';
+import { useHeadingHandoff } from '../shared/useHeadingHandoff';
+import { holdFocusThroughTransition } from '../shared/departingFocus';
+import { message, textMessage } from '../shared/messages';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
+import type { SourceHistoryEntry, SourceReadState } from './navigation';
+import { SOURCE_SEARCH_PATH_LIMIT, SOURCE_SEARCH_QUERY_LIMIT, bindSourceSearch, sourceSearchFits, sourceSearchLiteral, sourceSearchPath,
+  sourceSearchResultPath, sourceSearchRoute, sourceSearchSelection, sourceSearchSkipped } from './search';
+import type { SourceSearchRequest } from './search';
+import { visibleSourceText } from './viewer';
+
+/** A continued page shows only its own matches, so empty continued pages never claim the whole search found nothing. */
+function SearchStatus({ data, continued }: { data: SourceSearchPage; continued: boolean }) {
+  const skipped = sourceSearchSkipped(data);
+  const missing = skipped.reduce((total, entry) => total + entry.count, 0);
+  const complete = data.status === 'complete';
+  const unread = data.coverageGaps.unsearchableText + data.coverageGaps.unavailableFiles;
+  const searchable = data.scope.searchableFiles;
+  const matches = data.items.length;
+  const searched = searchable - unread;
+  const remaining = data.progress.remainingFiles;
+  const reason = data.stopReason ? copy.searchStopped[data.stopReason] : '';
+  return <div class={`source-search-status ${complete && missing === 0 ? 'source-search-status-complete' : 'source-search-status-incomplete'}`}
+    role="status" data-search-state={complete ? (matches ? 'complete' : continued ? 'no-further-matches' : 'no-matches') : (matches ? 'partial' : 'partial-empty')}>
+    {complete
+      ? <p><strong>{searchable === 0 ? copy.searchNothingSearchable
+        : matches ? message(matches === 1 ? copy.searchCompleteMatch : copy.searchCompleteMatches, { count: matches })
+          : continued ? copy.searchNoFurtherMatches
+          : unread ? message(searched === 1 ? copy.searchNoMatchesSearchedOne : copy.searchNoMatchesSearched, { count: searched })
+            : message(searchable === 1 ? copy.searchNoMatchesOneFile : copy.searchNoMatches, { count: searchable })}</strong> {searchable > 0 && (unread
+          ? message(searchable === 1 ? copy.searchOnlyFileUnread : copy.searchCompleteUnread, { count: unread, total: searchable })
+          : message(searchable === 1 ? copy.searchCompleteOne : copy.searchComplete, { count: searchable }))}</p>
+      : <p><strong>{message(matches ? copy.searchIncomplete : continued ? copy.searchIncompleteNoFurther : copy.searchIncompleteEmpty,
+        { reason })} {message(remaining === 1 ? copy.searchRemainingOne : copy.searchRemaining, { count: remaining })}</strong></p>}
+    {missing > 0 && <>
+      <p><strong>{message(missing === 1 ? copy.searchSkippedOne : copy.searchSkipped, { count: missing })}</strong></p>
+      <ul>{skipped.map(entry => <li key={entry.reason}>{message(copy.searchSkippedReasons[entry.reason], { count: entry.count })}</li>)}</ul>
+    </>}
+    <p>{message(copy.searchProgress, { files: message(data.progress.scannedFiles === 1 ? copy.searchFileRead : copy.searchFilesRead, { count: data.progress.scannedFiles }),
+      bytes: message(data.progress.scannedBytes === '1' ? copy.searchByteRead : copy.searchBytesRead, { count: data.progress.scannedBytes }) })}</p>
+  </div>;
+}
+
+/** One explicit bounded search page. Continuation is user-initiated; no page is fetched in the background. */
+export function SourceSearch({ selected, basePath, search, historyEntry, onDeleted }: {
+  selected: SourceSelection; basePath: string; search: string; historyEntry?: SourceHistoryEntry; onDeleted?: (failure: unknown) => void;
+}) {
+  const location = useLocation();
+  const { client } = usePrivateTransport(basePath);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const moveFocus = useHeadingHandoff(heading, false);
+  let selection: ReturnType<typeof sourceSearchSelection> | null;
+  try { selection = sourceSearchSelection(search); } catch { selection = null; }
+  const request = selection?.request ?? null;
+  const directory = selection?.directory ?? 'root';
+  // Bookmarks/history bypass submit(): reserve continuation room before any transport or navigation.
+  const tooLong = request !== null && !sourceSearchFits(directory, request);
+  const [text, setText] = useState(request?.q ?? '');
+  const [symbol, setSymbol] = useState(request?.match === 'symbol');
+  const [exactCase, setExactCase] = useState(request?.caseSensitive ?? true);
+  const [path, setPath] = useState(request?.path ?? '');
+  const [formError, setFormError] = useState<'invalid' | 'too-long' | null>(null);
+  // The view stays mounted across query navigation so focus intent survives; history moves refresh the fields.
+  const shownSearch = useRef(search);
+  useEffect(() => {
+    if (shownSearch.current === search) return;
+    shownSearch.current = search;
+    setText(request?.q ?? ''); setSymbol(request?.match === 'symbol');
+    setExactCase(request?.caseSensitive ?? true); setPath(request?.path ?? ''); setFormError(null);
+  }, [search]);
+  const [refresh, setRefresh] = useState(0);
+  const key = [selected.jobId, selected.runId, selected.revisionId, search, refresh].join('/');
+  const [read, setRead] = useState<SourceReadState<SourceSearchPage>>({ key, state: 'loading' });
+  useEffect(() => {
+    if (!request || tooLong) return undefined;
+    return beginSourceRead(key, async signal => {
+      const response = await client.get('sourceSearch', sourceSearchRoute(selected, directory, request), { signal });
+      if (signal.aborted) throw new ApiClientError('aborted');
+      return bindSourceSearch(response.data, selected, directory, request);
+    }, setRead, onDeleted);
+  }, [client, key, historyEntry]);
+  const current = request && !tooLong ? currentSourceRead(read, key) : null;
+  const data = current?.state === 'ready' ? current.value : null;
+  useLayoutEffect(() => {
+    if (current && current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
+  }, [current?.state, key]);
+
+  function go(next: SourceSearchRequest, pagingButton?: HTMLButtonElement) {
+    if (pagingButton) holdFocusThroughTransition(pagingButton);
+    moveFocus.current = true;
+    location.route(sourceSearchPath(basePath, selected, directory, next));
+  }
+  function submit(event: Event) {
+    event.preventDefault();
+    const trimmedPath = path === '' ? null : path;
+    const match = symbol ? 'symbol' as const : 'text' as const;
+    if (!sourceSearchLiteral(text, SOURCE_SEARCH_QUERY_LIMIT) || (symbol && !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(text))
+      || (trimmedPath !== null && !sourceSearchLiteral(trimmedPath, SOURCE_SEARCH_PATH_LIMIT))) { setFormError('invalid'); return; }
+    const next = { q: text, match, caseSensitive: exactCase, path: trimmedPath, cursor: null };
+    // Explicit encoded-length check: accepted code points can still exceed the address ceiling once percent-encoded.
+    if (!sourceSearchFits(directory, next)) { setFormError('too-long'); return; }
+    setFormError(null);
+    if (request && request.cursor === null && request.q === next.q && request.match === next.match
+      && request.caseSensitive === next.caseSensitive && request.path === next.path) { moveFocus.current = true; setRefresh(value => value + 1); }
+    else go(next);
+  }
+  if (!selection) return <p role="alert">{copy.searchInvalid}</p>;
+  return <section class="source-search" aria-labelledby="source-search-results">
+    <form role="search" aria-label={copy.searchForm} class="source-search-form" onSubmit={submit} noValidate>
+      <label>{copy.searchText}
+        <input type="search" name="q" value={text} maxLength={SOURCE_SEARCH_QUERY_LIMIT * 2} required aria-describedby="source-search-hint"
+          aria-invalid={formError !== null} onInput={event => setText((event.target as HTMLInputElement).value)} />
+      </label>
+      <p id="source-search-hint">{copy.searchTextHint}</p>
+      <fieldset><legend>{copy.searchMatch}</legend>
+        <label><input type="radio" name="match" checked={!symbol} onChange={() => setSymbol(false)} /> {copy.searchMatchText}</label>
+        <label><input type="radio" name="match" checked={symbol} onChange={() => setSymbol(true)} /> {copy.searchMatchSymbol}</label>
+      </fieldset>
+      <label><input type="checkbox" name="case" checked={exactCase} onChange={event => setExactCase((event.target as HTMLInputElement).checked)} /> {copy.searchCase}</label>
+      <label>{copy.searchPath}
+        <input type="text" name="path" value={path} maxLength={SOURCE_SEARCH_PATH_LIMIT * 2} aria-describedby="source-search-path-hint"
+          onInput={event => setPath((event.target as HTMLInputElement).value)} />
+      </label>
+      <p id="source-search-path-hint">{copy.searchPathHint}</p>
+      {formError && <p role="alert">{formError === 'too-long' ? copy.searchTooLong : copy.searchInvalid}</p>}
+      <button type="submit" disabled={current?.state === 'loading'}>{copy.searchSubmit}</button>
+    </form>
+    {directory !== 'root' && <p>{copy.searchScopeDirectory} <a href={sourceSearchPath(basePath, selected, 'root', request && !tooLong ? { ...request, cursor: null } : null)}>{copy.searchAll}</a></p>}
+    <p>{copy.searchBoundary}</p>
+    <h2 id="source-search-results" ref={heading} tabIndex={-1}>{copy.searchResults}</h2>
+    {!request && <p>{copy.searchPrompt}</p>}
+    {tooLong && <p role="alert">{copy.searchTooLong}</p>}
+    {current?.state === 'loading' && <p role="status">{copy.searching}</p>}
+    {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
+    {data && request && <>
+      <SearchStatus data={data} continued={request.cursor !== null} />
+      {request.cursor !== null && <p>{copy.searchContinued}</p>}
+      <p>{message(copy.searchLimits, { results: data.limits.maxResults, bytes: data.limits.maxScannedBytes, deadline: data.limits.deadlineMs })}</p>
+      {data.items.length > 0 && <>
+        <p>{copy.searchSnapshot}</p>
+        <ol class="source-search-results" aria-label={copy.searchResults}>
+          {data.items.map(item => <li key={`${item.fileId}/${item.offsetBytes}`}>
+            <a href={sourceSearchResultPath(basePath, selected, data, item)}
+              aria-label={textMessage(copy.searchMatchLink, { path: item.displayName, line: item.line })}><bdi>{item.displayName}</bdi></a>
+            <p>{message(copy.searchMatchAt, { line: item.line, column: item.column })}</p>
+            <pre dir="ltr">{item.truncatedBefore && copy.searchTruncated}{visibleSourceText(item.before)}<mark>{visibleSourceText(item.match)}</mark>{visibleSourceText(item.after)}{item.truncatedAfter && copy.searchTruncated}</pre>
+          </li>)}
+        </ol>
+      </>}
+      <nav aria-label={copy.searchResults}>
+        <button type="button" disabled={request.cursor === null} onClick={event => go({ ...request, cursor: null }, event.currentTarget)}>{copy.searchRestart}</button>
+        <button type="button" disabled={data.page.nextCursor === null} onClick={event => {
+          if (data.page.nextCursor !== null) go({ ...request, cursor: data.page.nextCursor }, event.currentTarget);
+        }}>{copy.searchContinue}</button>
+      </nav>
+    </>}
+    <p><a href={sourceDirectoryPath(basePath, selected, directory)}>{copy.returnDirectory}</a></p>
+  </section>;
+}

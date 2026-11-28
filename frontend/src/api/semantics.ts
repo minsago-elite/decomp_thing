@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { Artifact, AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceArchive, SourceChunk, SourceDiff, SourceFileDiff, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -164,12 +164,28 @@ function checkRun(run: Run): void {
   const reasons: Record<Run['state'], readonly Run['terminalReason'][]> = {
     queued: [null], running: [null], cancelling: [null],
     completed: ['COMPLETED', 'NO_CHANGES'],
-    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED'],
+    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED', 'TIMED_OUT', 'INFRASTRUCTURE_FAILED'],
     cancelled: ['CANCELLED'], interrupted: ['PROCESS_INTERRUPTED'],
   };
   requireValue(reasons[run.state].includes(run.terminalReason));
   if (run.state === 'queued') requireValue(run.startedAt === null);
   if (run.state === 'running' || run.state === 'completed') requireValue(run.startedAt !== null);
+  const recovery = run.recovery;
+  if (recovery) {
+    requireValue(run.previousRunId !== null && (recovery.restores === null) === (recovery.checkpointSha256 === null));
+    requireValue((recovery.mode === 'retry') === (recovery.restores === null));
+  }
+}
+
+/** Eligibility per command; never a reservation, result or authorization. */
+function checkAttemptControls(value: AttemptControls): void {
+  const { cancel, retry, resume } = value;
+  for (const control of [cancel, retry, resume]) requireValue(control.available === (control.reason === null));
+  requireValue((value.resumeRestores !== null) === value.resume.available);
+  if (value.cancel.available) requireValue(value.state === 'queued' || value.state === 'running');
+  const recoverable = ['failed', 'cancelled', 'interrupted'].includes(value.state);
+  if (value.retry.available || value.resume.available) requireValue(recoverable && value.successorRunId === null);
+  requireValue(value.successorRunId !== value.runId);
 }
 
 function checkSourcePage(items: ReadonlyArray<{ fileId: string; displayName: string }>, totalFiles: number, page: Page, version: string): void {
@@ -236,10 +252,110 @@ export function checkSourceChunk(data: SourceChunk): void {
   }
 }
 
+const codePoints = (value: string): number => Array.from(value).length;
+const ARTIFACT_CODES = { 'exploration-report': 'exploration', 'progress-journal': 'progress', 'source-manifest': 'manifest',
+  'build-contract': 'contract', 'source-archive': 'archive' } as const;
+
+/** Mirrors verify.py: counts partition the changed total and modifications keep their path. */
+export function checkSourceDiff(data: SourceDiff): void {
+  const { counts, items, page } = data;
+  requireValue(counts.added + counts.removed + counts.modified + counts.renamed === data.totalChanged);
+  requireValue(items.length <= page.limit && items.length <= data.totalChanged);
+  for (const item of items) {
+    if (item.status === 'renamed') requireValue(item.baseFile!.sha256 === item.headFile!.sha256);
+    // A declared content-kind change of identical bytes is a modification too.
+    if (item.status === 'modified') requireValue(item.baseFile!.displayName === item.headFile!.displayName
+      && (item.baseFile!.sha256 !== item.headFile!.sha256 || item.baseFile!.declaredUtf8Text !== item.headFile!.declaredUtf8Text));
+  }
+}
+
+/** Hunk pages are contiguous, line numbers sequential per side and truncation explicit. */
+export function checkSourceFileDiff(data: SourceFileDiff): void {
+  const end = data.hunkOffset + data.hunks.length;
+  requireValue(data.nextHunk === null || data.nextHunk === end);
+  requireValue((data.nextHunk === null) === (end === data.totalHunks || data.totalHunks === 0));
+  requireValue(data.representation !== 'text' || data.totalHunks === 0 || data.hunks.length > 0);
+  for (const hunk of data.hunks) {
+    let base = hunk.baseStart, head = hunk.headStart;
+    for (const line of hunk.lines) {
+      if (line.baseLine !== null) { requireValue(line.baseLine === base && base <= (data.baseLines ?? 0)); base++; }
+      if (line.headLine !== null) { requireValue(line.headLine === head && head <= (data.headLines ?? 0)); head++; }
+      requireValue(line.characters >= line.text.length && line.truncated === line.characters > line.text.length);
+    }
+    requireValue(base - hunk.baseStart === hunk.baseCount && head - hunk.headStart === hunk.headCount);
+  }
+}
+
+/** Mirrors verify.py: the download is this job's digest-bound archive and states agree with the retained file. */
+export function checkSourceArchive(data: SourceArchive, basePath = '/'): void {
+  const { archive, verification } = data;
+  if (archive.state === 'present') {
+    requireValue(new RegExp(`^archive_[a-f0-9]{32}_${archive.sha256}$`).test(archive.artifactId!));
+    try {
+      validateResourceHref(basePath, archive.contentHref!, { kind: 'artifact-content', jobId: data.binding.jobId, artifactId: archive.artifactId! });
+    } catch { throw new ApiClientError('invalid_response'); }
+  }
+  requireValue((archive.state === 'present') === (verification.state !== 'missing' && verification.state !== 'too-large'));
+  requireValue(archive.state === 'present' || verification.state === archive.state);
+  requireValue(verification.state !== 'stale' || verification.previousVerifiedSha256 !== archive.sha256);
+  if (data.git.state === 'mapped') {
+    requireValue(data.git.mapping.revisionId === data.binding.revisionId && data.git.mapping.sourceSha256 === data.sourceSha256);
+  }
+}
+
+export function checkSourceSearch(data: SourceSearch): void {
+  const { page, limits, scope, progress, query, items } = data;
+  requireValue(page.snapshotVersion === data.metadataVersion && page.limit === limits.maxResults && items.length <= page.limit);
+  const complete = data.status === 'complete';
+  requireValue(complete === (data.stopReason === null) && complete === (page.nextCursor === null));
+  requireValue((progress.remainingFiles === 0) === complete && progress.remainingFiles <= scope.searchableFiles);
+  requireValue(scope.searchableFiles + scope.notViewable + scope.declaredBinary + scope.tooLarge === scope.filesInScope);
+  // A page that stops inside a file counts that file as both scanned and remaining.
+  requireValue(progress.unsearchableText <= progress.scannedFiles
+    && progress.scannedFiles + progress.unavailableFiles + progress.remainingFiles <= scope.searchableFiles + (complete ? 0 : 1)
+    && BigInt(progress.scannedBytes) <= BigInt(limits.maxScannedBytes));
+  const gaps = data.coverageGaps;
+  requireValue(gaps.unsearchableText >= progress.unsearchableText && gaps.unavailableFiles >= progress.unavailableFiles
+    && gaps.unsearchableText + gaps.unavailableFiles <= scope.searchableFiles);
+  if (query.match === 'symbol') requireValue(/^[A-Za-z_][A-Za-z0-9_]*$/u.test(query.text));
+  const seen = new Set<string>(); let previous: SourceSearch['items'][number] | undefined;
+  for (const item of items) {
+    const line = BigInt(item.line), column = BigInt(item.column), offset = BigInt(item.offsetBytes), lineOffset = BigInt(item.lineOffsetBytes);
+    requireValue(line >= 1n && column >= 1n && lineOffset <= offset && (line === 1n) === (lineOffset === 0n));
+    requireValue(![item.before, item.match, item.after].some(text => text.includes('\n')));
+    const before = codePoints(item.before), after = codePoints(item.after);
+    requireValue(before <= 80 && after <= 80 && (!item.truncatedBefore || before === 80) && (!item.truncatedAfter || after === 80)
+      && column - 1n >= BigInt(before) && (item.truncatedBefore || column - 1n === BigInt(before)));
+    requireValue((!query.caseSensitive || item.match === query.text) && codePoints(item.match) === codePoints(query.text));
+    if (query.match === 'symbol') requireValue(!/[A-Za-z0-9_]$/u.test(item.before) && !/^[A-Za-z0-9_]/u.test(item.after));
+    if (previous?.fileId === item.fileId) {
+      requireValue(previous.displayName === item.displayName
+        && offset >= BigInt(previous.offsetBytes) + BigInt(new TextEncoder().encode(previous.match).length));
+    } else {
+      requireValue(!seen.has(item.fileId) && (previous === undefined || previous.displayName < item.displayName));
+    }
+    seen.add(item.fileId); previous = item;
+  }
+}
+
 /** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
 export function checkSemantics(document: ContractDocument, basePath = '/'): void {
   function checkHref(href: string, resource: ApiResource) {
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
+  }
+  // Catalog entries carry family, verification and content together; only revision-bound source metadata is verified.
+  function checkCatalogArtifact(item: Artifact) {
+    checkHref(item.contentHref, { kind: 'artifact-content', jobId: item.binding.jobId, artifactId: item.artifactId });
+    requireValue((item.family === undefined) === (item.verification === undefined));
+    if (item.family === undefined) return;
+    // Reports are served only as the redacted projection (or refused); source families are verbatim.
+    const report = item.family === 'exploration-report' || item.family === 'progress-journal';
+    requireValue(item.content !== undefined && (item.content.projection === 'verbatim') !== report);
+    requireValue(item.artifactId === `${ARTIFACT_CODES[item.family]}_${item.artifactId.split('_')[1] ?? ''}_${item.sha256}`
+      && /^[a-z]+_[a-f0-9]{32}_[a-f0-9]{64}$/u.test(item.artifactId) && item.binding.runId !== null);
+    if (item.verification === 'source-inventory-checked') {
+      requireValue((item.family === 'source-manifest' || item.family === 'build-contract') && item.binding.revisionId !== null);
+    }
   }
   switch (document.kind) {
     case 'validationHistory':
@@ -265,6 +381,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'run':
       checkRun(document.data);
       break;
+    case 'attemptControls':
+      checkAttemptControls(document.data);
+      break;
     case 'runs': {
       const { items, page, jobId } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map(item => item.runId)).size === items.length);
@@ -288,6 +407,26 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'sourceChunk':
       checkSourceChunk(document.data);
       break;
+    case 'sourceSearch':
+      checkSourceSearch(document.data);
+      break;
+    case 'sourceDiff':
+      checkSourceDiff(document.data);
+      break;
+    case 'sourceFileDiff':
+      checkSourceFileDiff(document.data);
+      break;
+    case 'sourceArchive':
+      checkSourceArchive(document.data, basePath);
+      break;
+    case 'operation': {
+      // Mirrors verify.py: archive verification has no repository, worktree or result object.
+      const operation = document.data;
+      if (operation.action === 'archive.verify') {
+        requireValue(operation.repositoryId === null && operation.worktreeId === null && operation.resultObjectId === null);
+      }
+      break;
+    }
     case 'revisionFile': {
       const { item, parentDirectoryId } = document.data;
       requireValue(item.displayName.split('/').every(part => part.length <= 255 && isDirectoryLabel(part)));
@@ -329,6 +468,34 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       }
       break;
     }
+    case 'queuePosition': {
+      const sample = document.data;
+      if (sample.state === 'queued') {
+        requireValue(BigInt(sample.ahead) === BigInt(sample.position) - 1n);
+        requireValue(BigInt(sample.position) <= BigInt(sample.queuedTasks));
+        requireValue(BigInt(sample.activeWorkers) <= BigInt(sample.workerLimit));
+      }
+      break;
+    }
+    case 'logRange': {
+      const log = document.data;
+      if (log.state === 'available') {
+        const total = BigInt(log.totalLines), first = BigInt(log.range.firstLine), count = BigInt(log.range.lineCount);
+        requireValue(count === BigInt(log.lines.length));
+        log.lines.forEach((line, index) => requireValue(BigInt(line.number) === first + BigInt(index)));
+        requireValue(first <= total + 1n);
+        requireValue(log.range.truncatedBefore === first > 1n);
+        requireValue(log.range.truncatedAfter === first + count - 1n < total);
+        requireValue(BigInt(log.redactedLines) <= total && BigInt(log.lines.filter(line => line.redacted).length) <= BigInt(log.redactedLines));
+        if (log.search) {
+          const matches = log.search.matches.map(value => BigInt(value));
+          matches.forEach((value, index) => requireValue(value <= total && (index === 0 || value > matches[index - 1]!)));
+          requireValue(BigInt(matches.length) <= BigInt(log.search.matchCount));
+          requireValue(log.search.matchesTruncated === BigInt(log.search.matchCount) > BigInt(matches.length));
+        }
+      }
+      break;
+    }
     case 'bootstrap': {
       const retention = document.data.runtime.progressRetention;
       if (retention && (BigInt(retention.expired) > BigInt(retention.examined)
@@ -341,6 +508,10 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const { limits, capabilities, apiVersions } = document.data;
       requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
       requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);
+      // An agent contract version is reported exactly for launch options that contact an agent;
+      // older v1 producers omit launch, which means no launch facts were reported.
+      requireValue(capabilities.every((item) => item.launch == null
+        || item.launch.contactsAgent === (item.agentContractVersion !== null)));
       if (!apiVersions.includes(1)) throw new ApiClientError('unsupported_contract');
       try {
         requireValue(document.data.basePath === `${normalizeBasePath(basePath)}/`);
@@ -361,6 +532,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const recognizedProducer = (reportType === 'exploration' && (producerSchemaVersion === null
         || (producerSchemaVersion === 1 && state === 'partial' && summary === null
           && document.data.authority === 'observations' && acceptance === 'not-evaluated'
+          && document.data.acceptanceArtifactId === null)
+        || (producerSchemaVersion === 2 && state === 'available' && summary !== null
+          && document.data.authority === 'observations' && acceptance === 'not-evaluated'
           && document.data.acceptanceArtifactId === null)))
         || (reportType === 'revision-validation' && producerSchemaVersion === 2);
       if (adapterVersion !== 1 || ((state === 'available' || state === 'partial') && !recognizedProducer)) {
@@ -377,10 +551,20 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'artifact':
-      checkHref(document.data.contentHref, {
-        kind: 'artifact-content', jobId: document.data.binding.jobId, artifactId: document.data.artifactId,
-      });
+      checkCatalogArtifact(document.data);
       break;
+    case 'artifacts': {
+      const { binding, items, page, catalogedFamilies } = document.data;
+      requireValue((binding.revisionId === null || binding.runId !== null) && items.length <= page.limit
+        && new Set(items.map(item => item.artifactId)).size === items.length);
+      for (const item of items) {
+        checkCatalogArtifact(item);
+        requireValue(item.family !== undefined && catalogedFamilies.includes(item.family) && item.binding.jobId === binding.jobId
+          && (binding.runId === null || item.binding.runId === binding.runId)
+          && (binding.revisionId === null || item.binding.revisionId === binding.revisionId));
+      }
+      break;
+    }
     case 'event':
       if (document.type === 'retention.gap') checkHref(document.payload.snapshotHref, {
         kind: 'snapshot', jobId: document.jobId, runId: document.runId,
@@ -416,7 +600,11 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'gitWorkspace': {
-      const { objectFormat, headObjectId, refs, mapping, repositoryId } = document.data;
+      const { objectFormat, headObjectId, refs, mapping, repositoryId, headState, headRefId, headRefName } = document.data;
+      const expected = { attached: [true, true, true], unborn: [true, false, false], detached: [false, true, false] }[headState];
+      requireValue(expected[0] === (headRefName !== null) && expected[1] === (headObjectId !== null) && expected[2] === (headRefId !== null));
+      if (headRefId !== null) requireValue(refs.some((ref) => ref.refId === headRefId && ref.objectId === headObjectId && ref.displayName === headRefName));
+      requireValue(new Set(refs.map((ref) => ref.refId)).size === refs.length);
       const length = objectFormat === 'sha1' ? 40 : objectFormat === 'sha256' ? 64 : undefined;
       const ids = [headObjectId, ...refs.map((ref) => ref.objectId)];
       if (mapping) {

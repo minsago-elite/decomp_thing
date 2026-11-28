@@ -33,19 +33,27 @@ export function createApiClient(options: ClientOptions) {
     || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_JSON_BYTES) throw new ApiClientError('invalid_request');
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
-  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false, artifact?: Artifact, sourceHead?: SourceDigestExpectation): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> {
+  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false, artifact?: Artifact, sourceHead?: SourceDigestExpectation): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> {
     let url: string;
     try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
     const headers = new Headers({ Accept: artifact || sourceHead ? 'application/octet-stream' : 'application/json' });
+    // Explicitly negotiate the broader inventory. Older v1 servers ignore this header and return inputs only.
+    if (method === 'GET' && (kind === 'revisionSources' || kind === 'revisionDirectory' || kind === 'revisionFile')) {
+      headers.set('X-Decomp-Source-Inventory', 'manifest');
+    }
     const mutating = method !== 'GET' && method !== 'HEAD';
     if (mutating && !upload) headers.set('Content-Type', 'application/json');
     // The agent preflight is a single-flight server action with no resource version: session, Origin and
     // CSRF authorize it, and a caller-supplied If-Match or idempotency key would have undefined meaning.
     const unversioned = method === 'POST' && path === '/agent/preflight';
     if (unversioned && (session || upload || settings.ifMatch !== undefined || settings.idempotencyKey !== undefined || settings.uploadId !== undefined)) throw new ApiClientError('invalid_request');
+    // Archive verification binds the displayed digest in its body; its key makes replay idempotent without If-Match.
+    const digestBound = method === 'POST'
+      && /^\/jobs\/[0-9a-f]{32}\/runs\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/revisions\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/archive-verifications$/.test(path);
+    if (digestBound && settings.ifMatch !== undefined) throw new ApiClientError('invalid_request');
     if (mutating) {
-      if (!session && !upload && !unversioned && settings.ifMatch === undefined) throw new ApiClientError('invalid_request');
+      if (!session && !upload && !unversioned && !digestBound && settings.ifMatch === undefined) throw new ApiClientError('invalid_request');
       if (!session && !unversioned && (!settings.idempotencyKey || !/^[A-Za-z0-9_-]{16,128}$/.test(settings.idempotencyKey))) throw new ApiClientError('invalid_request');
       if ((!session || method === 'DELETE') && (!settings.csrfToken || !/^[A-Za-z0-9_-]{32,256}$/.test(settings.csrfToken))) throw new ApiClientError('invalid_request');
       if (settings.idempotencyKey !== undefined && !/^[A-Za-z0-9_-]{16,128}$/.test(settings.idempotencyKey)) throw new ApiClientError('invalid_request');
@@ -78,8 +86,11 @@ export function createApiClient(options: ClientOptions) {
       controller.signal.addEventListener('abort', stop, { once: true });
     });
     const operation = async (): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> => {
+      // The document policy is no-referrer, under which Fetch serializes a mutation's Origin as
+      // "null" (Firefox and WebKit follow this; Chromium does not), and the server requires the
+      // exact origin. `origin` sends only the scheme/host/port, never the page path (#631).
       response = await fetcher(url, {
-        method, headers, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
+        method, headers, credentials: 'same-origin', mode: 'same-origin', redirect: 'error', referrerPolicy: 'origin',
         cache: 'no-store', signal: controller.signal, ...(body === undefined ? {} : { body }),
       });
       if (controller.signal.aborted) {
@@ -99,10 +110,19 @@ export function createApiClient(options: ClientOptions) {
         if (response.headers.get('Content-Type') !== 'application/octet-stream') throw new ApiClientError('invalid_headers');
         const text = await boundedBody(response, maxBytes, controller.signal);
         const bytes = new TextEncoder().encode(text);
-        if (BigInt(bytes.byteLength) !== BigInt(artifact.sizeBytes)) throw new ApiClientError('invalid_response');
+        const projected = artifact.content?.projection === 'redacted';
+        const expectedSize = projected ? response.headers.get('Content-Length') : artifact.sizeBytes;
+        const expectedDigest = projected ? response.headers.get('X-Decomp-Content-SHA256') : artifact.sha256;
+        if (projected && (response.headers.get('X-Decomp-Artifact-SHA256') !== artifact.sha256
+          || response.headers.get('X-Decomp-Content-Projection') !== 'redacted'
+          || response.headers.get('X-Decomp-Artifact-ID') !== artifact.artifactId
+          || !expectedSize || !/^(0|[1-9][0-9]*)$/.test(expectedSize)
+          || !expectedDigest || !/^[0-9a-f]{64}$/.test(expectedDigest)
+          || response.headers.get('ETag') !== `"${expectedDigest}"`)) throw new ApiClientError('invalid_headers');
+        if (expectedSize === null || BigInt(bytes.byteLength) !== BigInt(expectedSize)) throw new ApiClientError('invalid_response');
         const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes));
         const actual = Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
-        if (actual !== artifact.sha256) throw new ApiClientError('invalid_response');
+        if (actual !== expectedDigest) throw new ApiClientError('invalid_response');
         return text;
       }
       if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(response.headers.get('Content-Type') ?? '')) throw new ApiClientError('invalid_headers');
@@ -141,10 +161,12 @@ export function createApiClient(options: ClientOptions) {
     async readArtifactText(artifact: Artifact, expected: { jobId: string; runId: string }, settings: RequestOptions = {}): Promise<string> {
       const observed = { ...artifact };
       observed.binding = { ...observed.binding };
+      if (observed.content) observed.content = { ...observed.content };
       if (observed.binding.jobId !== expected.jobId || observed.binding.runId !== expected.runId
         || observed.binding.revisionId !== null || observed.role !== 'raw-evidence' || observed.derivedFromArtifactId !== null || observed.mediaType !== 'application/json'
         || observed.sha256.length !== 64 || !/^[0-9a-f]{64}$/.test(observed.sha256) || !/^(0|[1-9][0-9]{0,19})$/.test(observed.sizeBytes)
-        || BigInt(observed.sizeBytes).toString() !== observed.sizeBytes || BigInt(observed.sizeBytes) > BigInt(maxBytes)) throw new ApiClientError('invalid_request');
+        || BigInt(observed.sizeBytes).toString() !== observed.sizeBytes || BigInt(observed.sizeBytes) > BigInt(maxBytes)
+        || (observed.content !== undefined && !['verbatim', 'redacted'].includes(observed.content.projection))) throw new ApiClientError('invalid_request');
       try {
         validateResourceHref(basePath, observed.contentHref, { kind: 'artifact-content', jobId: expected.jobId, artifactId: observed.artifactId });
       } catch { throw new ApiClientError('invalid_request'); }
@@ -159,9 +181,11 @@ export function createApiClient(options: ClientOptions) {
         || (requestKind === 'agentPreflightRequest' && kind !== 'agentPreflight')) throw new ApiClientError('invalid_request');
       return await request(kind, path, 'POST', encodeRequest(requestKind, data), settings, session) as ResponseOf<K>;
     },
-    async put<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
-      if (requestKind === 'agentPreflightRequest') throw new ApiClientError('invalid_request');
-      return await request(kind, path, 'PUT', encodeRequest(requestKind, data), settings) as ResponseOf<K>;
+    /** PUT by default; PATCH/DELETE carry only their closed job organization/deletion bodies. */
+    async put<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}, method: 'PUT' | 'PATCH' | 'DELETE' = 'PUT'): Promise<ResponseOf<K>> {
+      if (requestKind === 'agentPreflightRequest' || (method !== 'PUT') !== /^job(Organization|Deletion)Request$/.test(requestKind)
+        || (method === 'PATCH') !== (requestKind === 'jobOrganizationRequest')) throw new ApiClientError('invalid_request');
+      return await request(kind, path, method, encodeRequest(requestKind, data), settings) as ResponseOf<K>;
     },
     async upload(file: File, settings: MutationOptions): Promise<ResponseOf<'job'>> {
       const body = new FormData();

@@ -26,7 +26,7 @@ it('keeps absent limits distinct from zero without promoting any capability stat
   const states = ['supported', 'unavailable', 'unsupported', 'unknown'] as const;
   for (const state of states) {
     const report: Capability = { id: 'harness_report', state, workflows: ['repair'], reasonCode: null,
-      message: null, agentContractVersion: null, limits };
+      message: null, agentContractVersion: null, limits, launch: null };
     const facts = reportedCapabilityFacts(report);
     expect(facts.map(fact => fact.value)).toEqual(['Not reported', '0 ms', '0 ms', '0 bytes', '0']);
     expect(facts.some(fact => fact.key === 'executionLimits')).toBe(false);

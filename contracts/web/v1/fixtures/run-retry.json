@@ -1,0 +1,33 @@
+{
+  "apiVersion": 1,
+  "kind": "run",
+  "requestId": "request_retry_1",
+  "data": {
+    "runId": "run_retry_2",
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "workflow": "reconstruct",
+    "state": "queued",
+    "version": "run_version_5",
+    "createdAt": "2026-09-05T00:00:00Z",
+    "startedAt": null,
+    "endedAt": null,
+    "previousRunId": "run_failed_1",
+    "inputRevisionId": null,
+    "resultRevisionId": null,
+    "acceptance": "not-evaluated",
+    "harnessCapabilityId": "harness_acp",
+    "terminalReason": null,
+    "usage": null,
+    "limits": {
+      "wallClockMs": "60000",
+      "idleMs": "15000",
+      "maxOutputBytes": "1048576",
+      "maxToolCalls": "16"
+    },
+    "recovery": {
+      "mode": "retry",
+      "restores": null,
+      "checkpointSha256": null
+    }
+  }
+}
