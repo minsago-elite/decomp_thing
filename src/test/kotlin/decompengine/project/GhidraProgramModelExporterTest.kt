@@ -195,8 +195,7 @@ class GhidraProgramModelExporterTest {
     }
 
     @Test
-    fun `imported Program attestation comes only from one worker pipe frame bound to the model it read`() {
-        val temp = createTempDirectory("program-model-attestation-")
+    fun `imported Program attestation comes only from one worker pipe frame bound to the model it read`() = inControlTemporaryDirectory { temp ->
         val binary = temp.resolve("input/program").also {
             it.parent.createDirectories()
             it.writeText("binary fixture")

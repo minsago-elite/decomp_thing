@@ -314,7 +314,7 @@ internal class WebInputSnapshot private constructor(private val directory: Path,
             var target: Path? = null
             try {
                 Files.createDirectories(workDirectory)
-                val created = Files.createDirectory(workDirectory.resolve(".input-snapshot-${randomToken()}"),
+                val created = Files.createDirectory(workDirectory.resolve("input-snapshot-${randomToken()}"),
                     PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY)).also { directory = it }
                 val owner = Files.readAttributes(created, PosixFileAttributes::class.java, NOFOLLOW_LINKS)
                 require(owner.isDirectory && owner.permissions() == PRIVATE_DIRECTORY) { "snapshot directory is not owner-private" }

@@ -532,7 +532,7 @@ class WebProductionWorkflowsTest {
         val (path, bytes) = consumed.single()
         assertNotEquals(job.binaryPath, path)
         assertEquals(root.resolve("snapshot"), path.parent.parent)
-        assertTrue(path.parent.fileName.toString().startsWith(".input-snapshot-"))
+        assertTrue(path.parent.fileName.toString().startsWith("input-snapshot-"))
         assertContentEquals(original, bytes, "the importer consumed the owner's snapshot, not the replaced upload")
         assertEquals(sha256(bytes), committed.inputSha256)
         assertNotEquals(sha256(Files.readAllBytes(job.binaryPath)), committed.inputSha256)
@@ -548,8 +548,15 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
-    fun `opt in real bundled Ghidra imports the owner snapshot while the upload path is replaced`() = withRoot { root ->
-        if (System.getenv("RUN_REAL_GHIDRA") != "true") return@withRoot
+    fun `opt in real bundled Ghidra imports the owner snapshot while the upload path is replaced`() {
+        if (System.getenv("RUN_REAL_GHIDRA") != "true") return
+        // Ghidra refuses a project path with a dot-prefixed element, so like the other real imports this uses
+        // java.io.tmpdir rather than the repository scratch root, and removes it afterwards.
+        val root = kotlin.io.path.createTempDirectory("snapshot-real-")
+        try { realSnapshotImport(root) } finally { root.toFile().deleteRecursively() }
+    }
+
+    private fun realSnapshotImport(root: Path) {
         fun compile(name: String, result: Int): ByteArray {
             val source = root.resolve("$name.c").also { it.writeText("int main(void) { return $result; }\n") }
             val binary = root.resolve(name)
