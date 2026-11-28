@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { recordCleanupTruth } from './packaged-browser-capture.mjs';
 import {
   createServerPhaseCollector, serverPhaseReport, UNAVAILABLE_NO_RECORD, COLLECTOR_ERROR_RESULT,
   MAX_LINE_BYTES, MAX_SCANNED_BYTES,
@@ -428,7 +429,8 @@ async function runFinalizer(body, { mode = 'logs', collector = null, rejectAppli
   const processFake = { exitCode: 1 };
   const application = { name: 'application' };
   const context = vm.createContext({
-    cdp: { call: async (method) => { log.push(`cdp:${method}`); } },
+    cdp: { call: async (method) => { log.push(`cdp:${method}`); }, lateEvidence: () => ({ settlements: [], dropped: 0 }) },
+    recordCleanupTruth,
     stop: async (child) => {
       log.push(`stop:${child?.name}`);
       if (child === application && recordDuringStop) collector.push(Buffer.from(recordDuringStop));
