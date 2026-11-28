@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { promises as fs, readFileSync, createReadStream } from 'node:fs';
-import { join, basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedStructure, qualifyStructure, structureFailureEvidence } from './packaged-browser-structure.mjs';
+import { resolveBrowserTempParent, createBrowserTemp } from './packaged-browser-temp-parent.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
@@ -67,13 +68,13 @@ if (values.mode === 'upgrade') {
   await fs.access(values['previous-archive']);
 } else assert.equal(values['previous-archive'], undefined, '--previous-archive is only supported with --mode upgrade');
 assert.ok(isAbsolute(values['work-parent']), '--work-parent must be an absolute directory');
-assert.ok(isAbsolute(values['browser-temp-parent']), '--browser-temp-parent must be an absolute directory');
 const archive = values.archive;
 const javaHome = values['java-home'];
 const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
 assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
-assert.ok((await fs.stat(values['browser-temp-parent'])).isDirectory(), '--browser-temp-parent must already exist');
+// Resolved through symbolic links and checked against the real repository root before anything is created (R6).
+const browserTempParent = await resolveBrowserTempParent(repo, values['browser-temp-parent']);
 if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
 const sensitiveValues = [];
 const safeDiagnostic = (value) => {
@@ -555,10 +556,9 @@ try {
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(values['browser-temp-parent'], '.ct-'));
-  const browserTmpForProcess = relative(repo, browserTmp);
-  assert(!isAbsolute(browserTmpForProcess) && browserTmpForProcess !== '..' && !browserTmpForProcess.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`),
-    'Browser temporary directory (--browser-temp-parent) must remain inside the repository');
+  const ownedBrowserTemp = await createBrowserTemp(browserTempParent);
+  browserTmp = ownedBrowserTemp.directory;
+  const browserTmpForProcess = ownedBrowserTemp.forProcess;
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
