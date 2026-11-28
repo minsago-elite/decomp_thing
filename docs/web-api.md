@@ -2029,14 +2029,17 @@ domain-separated SHA-256 hashes for correlating entries, not secrecy: anyone hol
 value offline, so low-entropy IDs stay guessable. The field is additive and present only on revision-bound entries;
 other entries keep their earlier shape. The idempotency key and request body are never recorded.
 
-**Audit log compatibility.** Audit log v1 entries written by this version may contain actions
-(`revision.archive-verify`) and fields (`target.revisionId`) that older versions reject. This version reads segments
-that mix older and newer entries and keeps appending to them, but no downgrade is supported: an older version that
-opens such a segment hides every entry in it from exports, reports the audit incomplete, and refuses new appends
-(counting them as unrecorded). Downgrading after the first such write requires stopping the server and moving the
-whole `<store>/.web-audit/` directory aside (preserve it, and read it with this or a later version) before starting
-the older version, which then begins a new log. Restarting this or a later version on the original directory instead
-restores the full history and appends. An entry records a
+**Audit log compatibility.** Audit log v1 entries written by this version may contain a new action
+(`revision.archive-verify`) and a new field (`target.revisionId`). An older version ignores `target.revisionId` on
+actions it already knows, so those entries stay readable there without their revision target. It rejects any segment
+that contains `revision.archive-verify`: it hides every entry in that segment from exports, reports the audit
+incomplete, and refuses new appends whenever startup must read such a segment. This version reads segments that mix
+older and newer entries and keeps appending to them, but no downgrade is supported. To downgrade after the first
+`revision.archive-verify` write, stop the server and move the whole `<store>/.web-audit/` directory aside, keeping it
+intact, before starting the older version. The older version then writes a separate, new audit log. To return to this
+or a later version, stop the server, move the rollback-era `<store>/.web-audit/` aside as well (preserve it: it holds
+the records written during the rollback), then restore the original directory. Both logs remain readable by this or a
+later version; they are not merged automatically. An entry records a
 sequence, time, the response request ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
 identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
 commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the
