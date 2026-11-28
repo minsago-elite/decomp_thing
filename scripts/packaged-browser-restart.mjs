@@ -246,7 +246,7 @@ export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl =
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
 export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay, readOutput, restartApplication,
-  captureSafe, sensitiveValues }) {
+  captureSafe, sensitiveValues, sessionSemantics }) {
   const basePath = '/nested';
   const runPath = `${basePath}/jobs/${fixture.jobId}/runs/${RUN}`;
   const pinUrl = `${origin}${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/progress-pin`;
@@ -301,6 +301,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const stateBefore = await fs.readFile(statePath);
   assert.equal(await fs.readFile(statePath, 'utf8'), fixture.retained['workflow-state.json']);
   const old = track(await makeTarget());
+  if (sessionSemantics) await sessionSemantics.observeDocumentStart(old);
   await cdp.call('Page.navigate', { url: first.url }, old.sessionId);
   await ready(old, `document.body.innerText.includes('Local session connected.')`, 'first-process session');
   const instanceBefore = await serverInstance(old);
@@ -321,6 +322,8 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const mutationsBeforeRestart = old.requests.filter(r => !['GET', 'HEAD'].includes(r.method)).length;
   assert.equal(mutationsBeforeRestart, automaticMutationsBaseline,
     'Unexpected mutation occurred before the restart');
+  // Both live paragraphs must already exist empty in this retained document before instance mutation.
+  if (sessionSemantics) await sessionSemantics.prepareAnnouncement(old);
   const restarted = await restartApplication();
   assert.equal(restarted.origin, origin, 'Restart did not preserve the origin');
   evidence.shutdown = restarted.exit;
@@ -378,6 +381,13 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assert.ok(instanceAfter && instanceAfter !== instanceBefore, 'serverInstanceId did not change across the restart');
   evidence.serverInstanceChanged = true;
   evidence.serverRestartNoticeShown = true;
+  // #1895: the real restart is the only packaged path to the application-instance-changed status.
+  if (sessionSemantics) {
+    await sessionSemantics.verifyAnnouncement(old, { place: 'header', text: 'Application instance changed.' });
+    await sessionSemantics.checkpoint(old, 'connected-instance-changed', { container: 'connected',
+      statusText: 'Application instance changed.', buttons: ['Sign out'] });
+    evidence.sessionSemantics = sessionSemantics.results;
+  }
 
   // Reconciliation: durable bytes, pin policy and activity match the pre-restart view.
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Restart changed workflow-state bytes');
