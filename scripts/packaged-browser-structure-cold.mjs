@@ -175,16 +175,61 @@ export async function verifyStructureBrowser({ repoRoot, chromePath, sourceLockP
     revision: sourceLock.revision, archiveSha256: sourceLock.sha256, executableSha256, lockSha256: createHash('sha256').update(sourceLockBytes).digest('hex') };
 }
 
-async function waitForProcessGroupExit(pid, timeoutMs) {
+/**
+ * Live (not zombie or dead) members of a Linux process group, read from /proc. Returns null when absence cannot be
+ * established: an unreadable /proc, an unreadable entry other than one that exited meanwhile, or a malformed record.
+ */
+export async function liveProcessGroupMembers(processGroupId, { readdir = fs.readdir, readFile = fs.readFile } = {}) {
+  let names;
+  try { names = await readdir('/proc'); }
+  catch { return null; }
+  const pids = names.filter(name => /^[1-9][0-9]{0,9}$/.test(name));
+  const live = [];
+  for (let start = 0; start < pids.length; start += 64) {
+    const batch = await Promise.all(pids.slice(start, start + 64).map(name => Promise.resolve().then(() => readFile(`/proc/${name}/stat`, 'utf8'))
+      .then(stat => ({ name, stat }), error => ({ name, error }))));
+    for (const { name, stat, error } of batch) {
+      if (error) {
+        if (error?.code === 'ENOENT' || error?.code === 'ESRCH') continue; // Exited after the listing.
+        return null;
+      }
+      const member = liveMember(stat, processGroupId);
+      if (member === null) return null; // A malformed record cannot prove absence.
+      if (member) live.push(Number(name));
+    }
+  }
+  return live;
+}
+
+/** True for a live member of the group, false for another group or a zombie or dead member, null when malformed. */
+function liveMember(stat, processGroupId) {
+  const commandEnd = typeof stat === 'string' ? stat.lastIndexOf(') ') : -1;
+  const fields = commandEnd < 0 ? [] : stat.slice(commandEnd + 2).trim().split(/\s+/);
+  const state = fields[0];
+  const group = Number(fields[2]);
+  if (!/^[A-Za-z]$/.test(state ?? '') || !Number.isSafeInteger(group)) return null;
+  return group === processGroupId && !['Z', 'X', 'x'].includes(state);
+}
+
+/**
+ * Confirms that no live member of the process group remains. kill(-group, 0) still succeeds while the group holds only
+ * zombies that a non-reaping PID 1 never collects (R4), so those are read from /proc: two zombie-only observations one
+ * poll apart mean no member can still run or fork. Anything that cannot be established stays unconfirmed.
+ */
+export async function waitForProcessGroupExit(pid, timeoutMs, { members = liveProcessGroupMembers, pollMs = 100 } = {}) {
   if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return false;
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  let zombieOnlyObservations = 0;
+  for (;;) {
     try { process.kill(-pid, 0); }
     catch (error) { return error?.code === 'ESRCH'; }
-    await new Promise(resolve => setTimeout(resolve, 100));
+    const live = await members(pid);
+    zombieOnlyObservations = Array.isArray(live) && live.length === 0 ? zombieOnlyObservations + 1 : 0;
+    if (zombieOnlyObservations >= 2) return true;
+    // A zombie-only observation at the deadline gets exactly one more poll to complete its pair.
+    if (Date.now() >= deadline && zombieOnlyObservations === 0) return false;
+    await new Promise(resolve => setTimeout(resolve, pollMs));
   }
-  try { process.kill(-pid, 0); return false; }
-  catch (error) { return error?.code === 'ESRCH'; }
 }
 
 async function forceStopProcessGroup(pid, timeoutMs = 10_000) {

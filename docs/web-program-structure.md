@@ -173,6 +173,10 @@ ignores cleanup, and refuses to treat forced cleanup as a passing sample. On a
 sample timeout, it sends `SIGTERM`, waits for the bounded grace period, then uses
 `SIGKILL` if the launcher or any descendant remains; that sample is recorded as
 timed out and failed even when cleanup is confirmed.
+A process group counts as stopped only when the signal-zero probe finds no members or
+`/proc` shows only zombie or dead members on two polls in a row. A host PID 1 that does
+not reap orphans therefore cannot hold the remaining samples back, and an unreadable or
+malformed `/proc` record keeps cleanup unconfirmed.
 Loopback first-page p95 is limited to 500 ms. The constrained profile applies 4× CPU
 slowdown, 100 ms round-trip latency, 10 Mbit/s download and 2 Mbit/s upload and limits
 first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budgets.

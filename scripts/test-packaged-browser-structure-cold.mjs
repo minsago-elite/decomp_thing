@@ -9,6 +9,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
   verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
+import { liveProcessGroupMembers, waitForProcessGroupExit } from './packaged-browser-structure-cold.mjs';
 
 function gitBlob(bytes) { return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex'); }
 const approvedBrowserIdentity = Object.freeze({verified:true,product:'chrome',platform:'linux64',version:'149.0.7827.55',archiveSha256:'b'.repeat(64),
@@ -281,6 +282,116 @@ test('runner refuses a child report attributed to a different pull-request head 
       structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}})});
   assert.equal(baseMismatch.successfulSamples,0);
   assert.match(baseMismatch.samples[0].error,/declared pull-request base SHA/);
+});
+
+// R4: kill(-group, 0) succeeds for zombie-only groups under a non-reaping PID 1; only live members may block cleanup.
+const procStat = (pid, state, group, command = 'node') => `${pid} (${command}) ${state} 1 ${group} ${group} 0 -1 4194560 0 0 0 0`;
+const fakeProc = (entries, { listingError = null, readErrors = {} } = {}) => ({
+  readdir: async () => { if (listingError) throw listingError; return ['self', 'cpuinfo', ...Object.keys(entries), ...Object.keys(readErrors)]; },
+  readFile: async (path) => {
+    const pid = path.split('/')[2];
+    if (readErrors[pid]) throw readErrors[pid];
+    return entries[pid];
+  },
+});
+
+test('process-group membership counts only live members and fails closed when /proc cannot prove absence (R4)', async () => {
+  assert.deepEqual(await liveProcessGroupMembers(700, fakeProc({ 700: procStat(700, 'Z', 700), 701: procStat(701, 'X', 700),
+    702: procStat(702, 'S', 9), 703: procStat(703, 'Z', 9) })), [], 'zombie and dead members, and other groups, are not live');
+  for (const state of ['R', 'S', 'D', 'T', 't', 'I']) {
+    assert.deepEqual(await liveProcessGroupMembers(700, fakeProc({ 700: procStat(700, 'Z', 700), 704: procStat(704, state, 700) })), [704], state);
+  }
+  assert.deepEqual(await liveProcessGroupMembers(700, fakeProc({ 705: procStat(705, 'S', 700, 'odd) S 1 9 9 name') })), [705],
+    'the command name may contain ") " and spaces; fields follow its last closing parenthesis');
+  const gone = Object.assign(new Error('gone'), { code: 'ENOENT' });
+  assert.deepEqual(await liveProcessGroupMembers(700, fakeProc({ 700: procStat(700, 'Z', 700) }, { readErrors: { 706: gone } })), [],
+    'an entry that exited after the listing is absent');
+  const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
+  assert.equal(await liveProcessGroupMembers(700, fakeProc({}, { readErrors: { 706: denied } })), null);
+  assert.equal(await liveProcessGroupMembers(700, fakeProc({}, { listingError: denied })), null);
+  assert.equal(await liveProcessGroupMembers(700, fakeProc({ 707: '707 truncated' })), null);
+  assert.equal(await liveProcessGroupMembers(700, fakeProc({ 708: procStat(708, 'S', 'not-a-group') })), null);
+});
+
+async function zombieOnlyProcessGroup(t) {
+  // The helper forks a child into its own process group, lets it exit and never reaps it, so the group holds
+  // only a zombie while the helper lives. Nothing is written to disk.
+  const helper = spawn('python3', ['-I', '-c', [
+    'import os, sys, time',
+    'pid = os.fork()',
+    'if pid == 0:',
+    '    os.setpgid(0, 0)',
+    '    os._exit(0)',
+    'print(pid, flush=True)',
+    'time.sleep(60)',
+  ].join('\n')], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => helper.kill('SIGKILL'));
+  const pid = await new Promise((resolvePid, rejectPid) => {
+    helper.stdout.once('data', chunk => resolvePid(Number(chunk.toString('utf8').trim())));
+    helper.once('error', rejectPid);
+  });
+  for (let waited = 0; waited < 5000; waited += 20) {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8').catch(() => '');
+    const fields = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
+    if (fields[0] === 'Z' && Number(fields[2]) === pid) return pid;
+    await new Promise(resolveWait => setTimeout(resolveWait, 20));
+  }
+  throw new Error('zombie-only process group did not form');
+}
+
+test('a real zombie-only process group is confirmed while a live one is not (R4)', { skip: process.platform !== 'linux' }, async (t) => {
+  const zombie = await zombieOnlyProcessGroup(t);
+  assert.doesNotThrow(() => process.kill(-zombie, 0), 'the signal-zero probe alone still reports the zombie-only group');
+  assert.deepEqual(await liveProcessGroupMembers(zombie), []);
+  assert.equal(await waitForProcessGroupExit(zombie, 150), true);
+  const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true });
+  t.after(() => { try { process.kill(-sleeper.pid, 'SIGKILL'); } catch {} });
+  await new Promise(resolveSpawn => sleeper.once('spawn', resolveSpawn));
+  assert.deepEqual(await liveProcessGroupMembers(sleeper.pid), [sleeper.pid]);
+  assert.equal(await waitForProcessGroupExit(sleeper.pid, 150), false);
+  // A single zombie-only observation is not enough, and unknown membership never confirms.
+  let polls = 0;
+  assert.equal(await waitForProcessGroupExit(zombie, 150, { members: async () => (++polls % 2 ? [] : [1]), pollMs: 10 }), false);
+  assert.equal(await waitForProcessGroupExit(zombie, 150, { members: async () => null, pollMs: 10 }), false);
+  // A /proc scan slower than the grace still completes its pair: one extra poll, never an unbounded wait.
+  let slowScans = 0;
+  const slow = async () => { slowScans++; await new Promise(resolveScan => setTimeout(resolveScan, 120)); return []; };
+  assert.equal(await waitForProcessGroupExit(zombie, 100, { members: slow, pollMs: 10 }), true);
+  assert.equal(slowScans, 2);
+  let liveScans = 0;
+  const slowLive = async () => { liveScans++; await new Promise(resolveScan => setTimeout(resolveScan, 120)); return [1]; };
+  assert.equal(await waitForProcessGroupExit(zombie, 100, { members: slowLive, pollMs: 10 }), false);
+  assert.equal(liveScans, 1, 'a live observation at the deadline ends the wait');
+});
+
+test('runner keeps sampling after a launcher leaves a zombie-only process group, without forced cleanup (R4)', { skip: process.platform !== 'linux' }, async (t) => {
+  const zombie = await zombieOnlyProcessGroup(t);
+  let launches = 0;
+  const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback', processGroupGraceMs:150,
+    expectedHeadCommit:null, expectedBaseCommit:null,
+    spawnImpl:() => {
+      ++launches;
+      // The launcher has exited and been reaped; its process group still holds an unreaped zombie descendant.
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.pid = zombie;
+      child.kill = () => true;
+      setImmediate(() => { child.stdout.end('Report: /tmp/child/report.json\n'); child.stderr.end(); child.emit('close', 0); });
+      return child;
+    },
+    reportReader:async () => {
+      const sample = launches;
+      return {path:`/tmp/report-${sample}.json`,sha256:String(sample),report:{status:'passed',driverCommit:'a'.repeat(40),
+        sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],revisionBinding:revisionBinding('a'.repeat(40))},browserIdentity:approvedBrowserIdentity,archiveSha256:'b'.repeat(64),
+        applicationJarSha256:'c'.repeat(64),testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/profile`,
+        tools:{chromeSha256:approvedBrowserIdentity.executableSha256},
+        runtimeProcesses:{applicationPid:90_000+sample,applicationStartTimeTicks:91_000+sample,browserPid:92_000+sample,browserStartTimeTicks:93_000+sample},
+        structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}};
+    }});
+  assert.equal(launches, 20, 'a zombie-only group must not abandon the remaining samples');
+  for (const sample of result.samples) {
+    assert.equal(sample.shutdownConfirmed, true, JSON.stringify(sample));
+    assert.equal(sample.processTreeForced, false, 'zombies need no forced group kill');
+    assert.equal(sample.status, 'passed', JSON.stringify(sample));
+  }
 });
 
 test('runner records the timeout state even when the child exits during termination grace', { skip: process.platform !== 'linux' }, async () => {
