@@ -493,7 +493,8 @@ class WorkspaceSnapshotLimitsTest {
         val root = workspace()
         val socket = root.resolve("src/socket")
         java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
-            server.bind(java.net.UnixDomainSocketAddress.of(socket))
+            // Bind relative to the working directory: the repository-local fixture path can exceed the AF_UNIX path limit.
+            server.bind(java.net.UnixDomainSocketAddress.of(Path.of("").toAbsolutePath().relativize(socket)))
             assertEquals("special-file", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
                 capture(request(root), WorkspaceSnapshotLimits())
             }.reason)
@@ -712,7 +713,7 @@ class WorkspaceSnapshotLimitsTest {
     private fun workspace(): Path = createTempDirectory(
         Files.createDirectories(Path.of("build", "test-tmp", "workspace-snapshot-limits").toAbsolutePath()), "ws-",
     ).also {
-        workspaces += it
+        workspaces.add(it)
         Files.createDirectory(it.resolve("src"))
     }
 
