@@ -91,15 +91,18 @@ function useCatalogSelection(revisionId: string | null): {
     if (window.location.pathname !== address.pathname) return;
     const current = window.location.search;
     const target = { scope: next.revisionOnly && revisionId !== null ? 'revision' : 'run', cursor: next.cursor } as const;
+    let saved: ArtifactLocation = null;
+    try { saved = artifactLocation(current); } catch { /* an invalid saved selection is replaced below */ }
+    // Compare the parsed selection, not the raw query, whose key order other owners may change. A matching address
+    // already restores this list, so it is read again without being serialized, which may expand it past the limit.
+    if (saved !== null && saved.scope === target.scope && saved.cursor === target.cursor) {
+      setOverflow(null); activated.current = true; setRefresh(value => value + 1); return;
+    }
     let search: string;
     // Other attempt query state can leave no room for the catalog keys; explain it rather than drop that state.
     try { search = artifactRouteSearch(current, target); } catch { setOverflow(current); return; }
     setOverflow(null);
     activated.current = true;
-    let saved: ArtifactLocation = null;
-    try { saved = artifactLocation(current); } catch { /* an invalid saved selection is replaced below */ }
-    // Compare the parsed selection, not the raw query, whose key order other owners may change.
-    if (saved !== null && saved.scope === target.scope && saved.cursor === target.cursor) { setRefresh(value => value + 1); return; }
     route.route(`${address.pathname}${search}`, replace || invalid);
   } };
 }

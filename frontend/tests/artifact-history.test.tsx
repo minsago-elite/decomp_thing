@@ -162,6 +162,25 @@ it('refreshes in place when other owners have reordered the attempt query after 
   } finally { auth.dispose(); cleanup(); }
 });
 
+it('refreshes in place when the saved address restores the list although serializing it would exceed the limit', async () => {
+  const auth = await session();
+  const search = `?artifacts=run&filter=${'~'.repeat(1400)}`;
+  expect(search).toHaveLength(1422);
+  // Serialization percent-encodes each literal "~", so rewriting this address would expand it past 4,096 characters.
+  expect(new URLSearchParams(search).toString()).toHaveLength(4221);
+  history.replaceState(null, '', `${overview}${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('Showing 3 artifacts on this page.')).toBeTruthy();
+    const entries = history.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh artifact list from its first page' }));
+    await waitFor(() => expect(artifactReads()).toEqual([catalog(''), catalog('')]));
+    expect(screen.queryByText(/^The address is too long to also save the artifact list\./u)).toBeNull();
+    expect(location.search).toBe(search);
+    expect(history.length).toBe(entries);
+  } finally { auth.dispose(); cleanup(); }
+});
+
 it('explains when other attempt query state leaves no room for the catalog in the address and keeps that state', async () => {
   const auth = await session();
   const search = `?note=${'a'.repeat(4089)}`;
