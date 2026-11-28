@@ -1527,10 +1527,10 @@ val verifyExportSupervisor = tasks.register("verifyExportSupervisor") {
         val helper = exportSupervisorBinary.get().asFile.toPath()
         requireStaticElfExecutable(helper, "export supervisor")
         fun probe(arguments: List<String>): Int {
+            // Output is discarded, not read, so a stuck helper cannot outlast the timed wait below.
             val process = ProcessBuilder(listOf(helper.toString()) + arguments).also { it.environment().clear() }
-                .redirectErrorStream(true).start()
+                .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
             process.outputStream.close()
-            process.inputStream.readNBytes(4096)
             val exited = process.waitFor(5, TimeUnit.SECONDS)
             if (!exited) {
                 process.destroyForcibly()

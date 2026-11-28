@@ -541,6 +541,7 @@ jobs:
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
+          DECOMP_REQUIRE_EXPORT_SUPERVISOR_NAMESPACES: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: scripts/ci.sh
       - name: Require every source-declared recovery scenario in core reports

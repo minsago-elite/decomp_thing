@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.exists
+import kotlin.io.path.readLines
 import kotlin.io.path.readText
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -17,11 +18,12 @@ class ExportSupervisorNativeTest {
     @Test
     fun `no launch permit starts no worker`() = inControlTemporaryDirectory { root ->
         val marker = root.resolve("worker-started")
-        val supervisor = start("/bin/sh", "-c", "touch '$marker'")
-        supervisor.outputStream.close()
+        supervised(start("/bin/sh", "-c", "touch '$marker'")) { supervisor ->
+            supervisor.outputStream.close()
 
-        assertEquals(120, awaitExit(supervisor))
-        assertFalse(marker.exists())
+            assertEquals(120, exitOnItsOwn(supervisor))
+            assertFalse(marker.exists())
+        }
     }
 
     @Test
@@ -32,21 +34,41 @@ class ExportSupervisorNativeTest {
     }
 
     @Test
-    fun `reparented grandchild is adopted and killed before absence is proven`() = inControlTemporaryDirectory { root ->
+    fun `T alone ends the tree, and a reparented grandchild is adopted and killed`() = inControlTemporaryDirectory { root ->
         val orphanFile = root.resolve("orphan")
         // The subshell exits at once, so the TERM-ignoring sleep is orphaned while the worker runs.
-        val supervisor = start("/bin/sh", "-c",
-            "( (trap '' TERM; exec sleep 30) & echo \$! > '$orphanFile' ); exec sleep 30")
-        supervisor.outputStream.write("1\n".toByteArray())
-        supervisor.outputStream.flush()
-        val orphan = awaitPid(orphanFile)
-        awaitParent(orphan, supervisor.pid())
+        supervised(start("/bin/sh", "-c", "( (trap '' TERM; exec sleep 30) & echo \$! > '$orphanFile' ); exec sleep 30")) { supervisor ->
+            permit(supervisor)
+            val orphan = awaitPid(orphanFile)
+            awaitParent(orphan, supervisor.pid())
 
-        supervisor.outputStream.write('T'.code)
-        supervisor.outputStream.flush()
+            supervisor.outputStream.write('T'.code)
+            supervisor.outputStream.flush()
 
-        assertEquals(101, awaitExit(supervisor), "the worker ends by SIGTERM; the supervisor then kills the orphan")
-        assertFalse(alive(orphan), "the orphan ignored SIGTERM but cannot outlive the supervisor's proof")
+            // The control channel stays open: only T may end this tree, not end-of-file cleanup.
+            assertEquals(101, exitOnItsOwn(supervisor), "the worker ends by SIGTERM; the supervisor then kills the orphan")
+            assertFalse(alive(orphan), "the orphan ignored SIGTERM but cannot outlive the supervisor's proof")
+        }
+    }
+
+    @Test
+    fun `descendants adopted while the supervisor kills are killed too`() = inControlTemporaryDirectory { root ->
+        val spawned = root.resolve("spawned")
+        // A TERM-ignoring child keeps forking TERM-ignoring grandchildren until it is killed itself.
+        supervised(start("/bin/sh", "-c",
+            "(trap '' TERM; while :; do (trap '' TERM; exec sleep 30) & echo \$! >> '$spawned'; sleep 0.02; done) & " +
+                "exec sleep 30")) { supervisor ->
+            permit(supervisor)
+            while (!spawned.exists() || spawned.readLines().size < 5) Thread.sleep(10)
+
+            supervisor.outputStream.write('K'.code)
+            supervisor.outputStream.flush()
+
+            assertEquals(101, exitOnItsOwn(supervisor))
+            val pids = spawned.readLines().mapNotNull { it.trim().toLongOrNull() }
+            assertTrue(pids.size >= 5)
+            assertTrue(pids.none(::alive), "every adopted grandchild must be killed before the supervisor exits")
+        }
     }
 
     @Test
@@ -56,47 +78,112 @@ class ExportSupervisorNativeTest {
             val stubbornFile = root.resolve("stubborn")
             val politeExit = root.resolve("polite-exited")
             // Each leftover installs its trap before the worker exits, so SIGTERM cannot arrive first.
-            val supervisor = startWithGrace(400, "/bin/sh", "-c",
+            supervised(startWithGrace(400, "/bin/sh", "-c",
                 "(trap 'touch \"$politeExit\"; exit 0' TERM; touch '$root/polite-ready'; while :; do sleep 0.05; done) & " +
                     "echo \$! > '$politeFile'; (trap '' TERM; touch '$root/stubborn-ready'; exec sleep 30) & " +
-                    "echo \$! > '$stubbornFile'; while [ ! -e '$root/polite-ready' ] || [ ! -e '$root/stubborn-ready' ]; do sleep 0.01; done; exit 0")
-            val started = System.nanoTime()
-            supervisor.outputStream.write("1\n".toByteArray())
-            supervisor.outputStream.flush()
+                    "echo \$! > '$stubbornFile'; while [ ! -e '$root/polite-ready' ] || [ ! -e '$root/stubborn-ready' ]; do sleep 0.01; done; exit 0")) { supervisor ->
+                val started = System.nanoTime()
+                permit(supervisor)
 
-            assertEquals(0, awaitExit(supervisor))
-            val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-            assertTrue(politeExit.exists(), "a leftover first receives SIGTERM")
-            assertFalse(alive(awaitPid(politeFile)))
-            assertFalse(alive(awaitPid(stubbornFile)), "a TERM-ignoring leftover is killed after the grace")
-            assertTrue(elapsedMillis >= 400, "the stubborn leftover kept the supervisor alive for the grace: $elapsedMillis ms")
-            supervisor.outputStream.close()
+                assertEquals(0, exitOnItsOwn(supervisor))
+                val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                assertTrue(politeExit.exists(), "a leftover first receives SIGTERM")
+                assertFalse(alive(awaitPid(politeFile)))
+                assertFalse(alive(awaitPid(stubbornFile)), "a TERM-ignoring leftover is killed after the grace")
+                assertTrue(elapsedMillis >= 400, "the stubborn leftover kept the supervisor alive for the grace: $elapsedMillis ms")
+            }
         }
 
     @Test
     fun `closing the control channel kills the whole tree`() = inControlTemporaryDirectory { root ->
         val workerFile = root.resolve("worker")
-        val supervisor = start("/bin/sh", "-c", "echo $$ > '$workerFile'; exec sleep 30")
-        supervisor.outputStream.write("1\n".toByteArray())
-        supervisor.outputStream.flush()
-        val worker = awaitPid(workerFile)
+        supervised(start("/bin/sh", "-c", "echo $$ > '$workerFile'; exec sleep 30")) { supervisor ->
+            permit(supervisor)
+            val worker = awaitPid(workerFile)
 
-        supervisor.outputStream.close()
+            supervisor.outputStream.close()
 
-        assertEquals(101, awaitExit(supervisor))
-        assertFalse(alive(worker))
+            assertEquals(101, exitOnItsOwn(supervisor))
+            assertFalse(alive(worker))
+        }
+    }
+
+    @Test
+    fun `a stop report from a traced worker is not its termination`() {
+        val python = Path.of("/usr/bin/python3")
+        assumeTrue(Files.isExecutable(python), "python3 is needed to call PTRACE_TRACEME")
+        assumeTrue(runCatching { Files.readString(Path.of("/proc/sys/kernel/yama/ptrace_scope")).trim() != "3" }.getOrDefault(true))
+        // The worker makes the supervisor its tracer and stops; waitpid reports that stop even without WUNTRACED.
+        val worker = "import ctypes, os, signal\n" +
+            "assert ctypes.CDLL(None, use_errno=True).ptrace(0, 0, None, None) == 0\n" +
+            "os.kill(os.getpid(), signal.SIGSTOP)\nos._exit(0)\n"
+        supervised(start(python.toString(), "-I", "-c", worker)) { supervisor ->
+            permit(supervisor)
+
+            assertFalse(supervisor.waitFor(700, TimeUnit.MILLISECONDS), "a stopped worker has not terminated")
+
+            supervisor.outputStream.write('K'.code)
+            supervisor.outputStream.flush()
+            assertEquals(101, exitOnItsOwn(supervisor), "K kills the stopped, traced worker")
+        }
+    }
+
+    @Test
+    fun `a procfs from another PID namespace or another filesystem starts no worker`() = inControlTemporaryDirectory { root ->
+        requireNamespaces()
+        val marker = root.resolve("worker-started")
+        val worker = listOf("/bin/sh", "-c", "touch '$marker'")
+        // A new PID namespace whose /proc still shows the parent namespace.
+        val foreign = namespaced(listOf("unshare", "-Urpf", supervisor().toString(), "0") + worker)
+        assertEquals(121 to true, foreign.first to foreign.second.contains("/proc belongs to another PID namespace"), foreign.second)
+        // A mount namespace with a tmpfs over /proc.
+        val notProc = namespaced(listOf("unshare", "-Urm", "/bin/sh", "-c", "mount -t tmpfs none /proc && exec \"\$@\"", "sh",
+            supervisor().toString(), "0") + worker)
+        assertEquals(121 to true, notProc.first to notProc.second.contains("/proc is not procfs"), notProc.second)
+        assertFalse(marker.exists(), "no worker may start without the supervisor's own procfs")
+    }
+
+    @Test
+    fun `a child that reuses the worker's PID cannot replace the worker's status`() = inControlTemporaryDirectory { root ->
+        requireNamespaces()
+        // After the supervisor reaps the worker (exit 7), a leftover forks a process onto the worker's PID,
+        // orphans it to the supervisor, and that process exits 99.
+        val driver = """
+            set -eu
+            sup=${'$'}1 work=${'$'}2
+            { printf '1\n'; sleep 2; } | "${'$'}sup" 1000 /bin/sh -c '
+                w=${'$'}${'$'} out=${'$'}1
+                echo ${'$'}w > "${'$'}out/worker"
+                (
+                    trap "" TERM
+                    while kill -0 ${'$'}w 2>/dev/null; do sleep 0.01; done
+                    echo ${'$'}((w - 1)) > /proc/sys/kernel/ns_last_pid
+                    /bin/sh -c "echo \${'$'}\${'$'} > \"${'$'}out/reuser\"; sleep 0.3; exit 99" &
+                    exit 0
+                ) &
+                exit 7' worker "${'$'}work" &
+            supervisor=${'$'}!
+            status=0
+            wait ${'$'}supervisor || status=${'$'}?
+            read worker < "${'$'}work/worker"
+            read reuser < "${'$'}work/reuser"
+            echo "worker=${'$'}worker reuser=${'$'}reuser status=${'$'}status"
+        """.trimIndent()
+        val result = driverResult(driver, root)
+        assertEquals(result.getValue("worker"), result.getValue("reuser"), "the leftover's child must take the worker's PID: $result")
+        assertEquals("7", result.getValue("status"), "only the worker's first termination counts: $result")
     }
 
     @Test
     fun `a process reusing an exited descendant's PID in the same clock tick is never signalled`() = inControlTemporaryDirectory { root ->
-        assumeTrue(namespacesAvailable(), "unprivileged user and PID namespaces are unavailable on this host")
+        requireNamespaces()
         var sameTickRuns = 0
         // PID reuse is forced each run; reuse inside one 10 ms clock tick depends on scheduling, so retry for it.
         for (attempt in 1..20) {
             val work = Files.createDirectory(root.resolve("run-$attempt"))
             val result = namespacedReuse(work)
             assertEquals(result.getValue("x"), result.getValue("s"), "ns_last_pid must force the stranger onto the exited PID")
-            assertEquals("yes", result.getValue("alive"), "the stranger at the reused PID must survive the kill: $result")
+            assertEquals("yes", result.getValue("alive"), "the stranger at the reused PID must answer after the kill: $result")
             assertEquals("101", result.getValue("status"), "the supervisor must still prove its own tree absent: $result")
             if (result.getValue("xstart") == result.getValue("sstart")) sameTickRuns++
             if (sameTickRuns > 0) break
@@ -106,12 +193,13 @@ class ExportSupervisorNativeTest {
 
     // Inside a fresh user and PID namespace, a worker descendant X records its own start tick, exits and
     // is reaped by the worker. The namespace's init then sets ns_last_pid so its own unrelated child S
-    // receives X's PID, and only then asks the supervisor to kill its tree.
+    // receives X's PID, and only then asks the supervisor to kill its tree. S proves it is still running
+    // by answering on a FIFO, which a zombie cannot do.
     private fun namespacedReuse(work: Path): Map<String, String> {
         val driver = """
             set -eu
             sup=${'$'}1 work=${'$'}2
-            mkfifo "${'$'}work/go" "${'$'}work/reaped"
+            mkfifo "${'$'}work/go" "${'$'}work/reaped" "${'$'}work/ping" "${'$'}work/pong"
             { printf '1\n'; read release < "${'$'}work/go"; printf K; } | "${'$'}sup" 0 /bin/sh -c '
                 w=${'$'}1
                 /bin/sh -c "f=\${'$'}1; read -r st < /proc/\${'$'}\${'$'}/stat; set -- \${'$'}st; echo \"\${'$'}{22}\" > \"\${'$'}f\"" x "${'$'}w/xstart" & x=${'$'}!
@@ -123,33 +211,54 @@ class ExportSupervisorNativeTest {
             read ignored < "${'$'}work/reaped"
             read x < "${'$'}work/x"
             echo ${'$'}((x - 1)) > /proc/sys/kernel/ns_last_pid
-            sleep 30 & s=${'$'}!
+            /bin/sh -c 'read ping < "${'$'}1/ping"; echo alive > "${'$'}1/pong"' stranger "${'$'}work" & s=${'$'}!
             sstart=${'$'}(cut -d" " -f22 /proc/${'$'}s/stat)
             echo > "${'$'}work/go"
             status=0
             wait ${'$'}supervisor || status=${'$'}?
+            exec 3<>"${'$'}work/ping"
+            echo ping >&3
             alive=no
-            if kill -0 ${'$'}s 2>/dev/null; then alive=yes; fi
-            kill -KILL ${'$'}s 2>/dev/null || true
+            if [ "${'$'}(timeout 5 cat "${'$'}work/pong" || true)" = alive ]; then alive=yes; fi
             read xstart < "${'$'}work/xstart"
             echo "x=${'$'}x s=${'$'}s xstart=${'$'}xstart sstart=${'$'}sstart status=${'$'}status alive=${'$'}alive"
         """.trimIndent()
-        val process = ProcessBuilder("unshare", "-Urpfm", "--mount-proc", "/bin/sh", "-c", driver, "driver",
-            supervisor().toString(), work.toString()).redirectErrorStream(true).start()
+        return driverResult(driver, work)
+    }
+
+    // Runs [driver] as init of a fresh user, PID and mount namespace and parses its last key=value line.
+    private fun driverResult(driver: String, work: Path): Map<String, String> {
+        val (status, output) = namespaced(listOf("unshare", "-Urpfm", "--mount-proc", "/bin/sh", "-c", driver, "driver",
+            supervisor().toString(), work.toString()))
+        assertEquals(0, status, output)
+        val fields = Regex("""[a-z]+=\S*( [a-z]+=\S*)+""")
+        return output.lineSequence().last { fields.matches(it) }
+            .split(' ').associate { field -> field.substringBefore('=') to field.substringAfter('=') }
+    }
+
+    private fun namespaced(command: List<String>): Pair<Int, String> {
+        val process = ProcessBuilder(command).redirectErrorStream(true).start()
         process.outputStream.close()
-        val output = String(process.inputStream.readNBytes(64 * 1024), Charsets.UTF_8)
-        assertTrue(process.waitFor(30, TimeUnit.SECONDS), output)
-        assertEquals(0, process.exitValue(), output)
-        return output.lineSequence().last { it.startsWith("x=") }.split(' ')
-            .associate { field -> field.substringBefore('=') to field.substringAfter('=') }
+        val output = java.util.concurrent.CompletableFuture.supplyAsync {
+            String(process.inputStream.readNBytes(64 * 1024), Charsets.UTF_8)
+        }
+        val exited = process.waitFor(30, TimeUnit.SECONDS)
+        if (!exited) process.destroyForcibly()
+        assertTrue(exited, "namespace driver did not finish")
+        return process.exitValue() to output.get(5, TimeUnit.SECONDS)
+    }
+
+    // Hosted CI sets the requirement, so the namespace checks fail there instead of being skipped.
+    private fun requireNamespaces() {
+        if (namespacesAvailable()) return
+        check(System.getenv("DECOMP_REQUIRE_EXPORT_SUPERVISOR_NAMESPACES") != "true") {
+            "unprivileged user and PID namespaces are required for the export supervisor checks"
+        }
+        assumeTrue(false, "unprivileged user and PID namespaces are unavailable on this host")
     }
 
     private fun namespacesAvailable(): Boolean = runCatching {
-        val probe = ProcessBuilder("unshare", "-Urpfm", "--mount-proc", "/bin/sh", "-c",
-            "echo 1 > /proc/sys/kernel/ns_last_pid").redirectErrorStream(true).start()
-        probe.outputStream.close()
-        probe.inputStream.readNBytes(4096)
-        probe.waitFor(10, TimeUnit.SECONDS) && probe.exitValue() == 0
+        namespaced(listOf("unshare", "-Urpfm", "--mount-proc", "/bin/sh", "-c", "echo 1 > /proc/sys/kernel/ns_last_pid")).first == 0
     }.getOrDefault(false)
 
     private fun supervisor(): Path = Path.of(requireNotNull(System.getProperty("decompengine.export.supervisorExecutable")) {
@@ -162,18 +271,28 @@ class ExportSupervisorNativeTest {
         ProcessBuilder(listOf(supervisor().toString(), leftoverGraceMillis.toString()) + worker)
             .redirectError(ProcessBuilder.Redirect.DISCARD).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
 
-    private fun run(vararg worker: String): Int {
-        val supervisor = start(*worker)
+    private fun permit(supervisor: Process) {
         supervisor.outputStream.write("1\n".toByteArray())
         supervisor.outputStream.flush()
-        return awaitExit(supervisor).also { supervisor.outputStream.close() }
     }
 
-    private fun awaitExit(process: Process): Int {
-        if (!process.waitFor(10, TimeUnit.SECONDS)) {
-            process.outputStream.close()
-            check(process.waitFor(5, TimeUnit.SECONDS)) { "supervisor did not exit after its control channel closed" }
+    private fun run(vararg worker: String): Int = supervised(start(*worker)) { supervisor ->
+        permit(supervisor)
+        exitOnItsOwn(supervisor)
+    }
+
+    // Assertions run with the control channel open; closing it (and so K) is only the fixture's cleanup.
+    private fun <T> supervised(supervisor: Process, body: (Process) -> T): T {
+        try {
+            return body(supervisor)
+        } finally {
+            runCatching { supervisor.outputStream.close() }
+            if (!supervisor.waitFor(5, TimeUnit.SECONDS)) supervisor.destroyForcibly()
         }
+    }
+
+    private fun exitOnItsOwn(process: Process): Int {
+        assertTrue(process.waitFor(10, TimeUnit.SECONDS), "supervisor did not exit while its control channel stayed open")
         return process.exitValue()
     }
 
@@ -195,6 +314,7 @@ class ExportSupervisorNativeTest {
         error("process $pid was not adopted by the supervisor $parent")
     }
 
+    // The supervisor reaps every child before it exits, so no zombie of its tree can remain here.
     private fun alive(pid: Long): Boolean {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
         while (System.nanoTime() < deadline) {

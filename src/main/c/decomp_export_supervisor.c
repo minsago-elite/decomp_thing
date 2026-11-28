@@ -7,8 +7,11 @@
  *
  * The supervisor becomes a child subreaper before it starts the worker, so every descendant the
  * worker orphans is reparented here instead of to init. It signals only its own children, found by
- * their parent PID. A child keeps its PID until this process reaps it, and this process reaps only
- * in its own loop, so a signal can never reach a process that reused a PID.
+ * their parent PID in its own procfs: before the permit it requires /proc to be procfs whose
+ * /proc/self is this process, so /proc belongs to this PID namespace. Each signal goes through a pidfd
+ * opened for that PID and is sent only if the PID's parent is still this supervisor. A child keeps its
+ * PID until this process reaps it, and this process reaps only in its own loop, so the pidfd names
+ * that child and a signal can never reach a process that reused a PID.
  *
  * Standard input is the parent's control channel:
  *   "1\n"  the launch permit. The worker starts only after it and receives the same two bytes on a
@@ -27,7 +30,11 @@
  *   0..99  the worker's exit code      100  the worker's exit code was 100 or more
  *   101    a signal ended the worker   120  no launch permit; the worker never started
  *   121    supervisor failure; any worker was killed and reaped first
- * A status of 128 or more means the supervisor itself was killed, which proves nothing.
+ *   254    no children remain, but the worker's own termination was never observed
+ * A status of 128 or more proves nothing: 254, or the supervisor itself was killed.
+ *
+ * Only the worker's first termination report counts; a later child that reuses its PID cannot change
+ * it. Stop and continue reports, such as those of a child that called PTRACE_TRACEME, are ignored.
  */
 
 #include <dirent.h>
@@ -40,6 +47,8 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/signalfd.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -50,6 +59,17 @@
 #define EXIT_SIGNALLED_WORKER 101
 #define EXIT_NO_PERMIT 120
 #define EXIT_SUPERVISOR_FAILURE 121
+#define EXIT_WORKER_UNOBSERVED 254
+#ifndef PROC_SUPER_MAGIC
+#define PROC_SUPER_MAGIC 0x9fa0
+#endif
+/* The same numbers on both admitted LP64 ABIs (x86-64 and the generic table used by aarch64). */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_send_signal
+#define SYS_pidfd_send_signal 424
+#endif
 #define RESCAN_MILLIS 20
 #define MAXIMUM_LEFTOVER_GRACE_MILLIS 1000
 
@@ -86,9 +106,18 @@ static pid_t parent_of(pid_t pid) {
     return (pid_t)parent;
 }
 
+static int open_pidfd(pid_t pid) {
+    return (int)syscall(SYS_pidfd_open, pid, 0);
+}
+
+static int pidfd_signal(int pidfd, int signal_number) {
+    return (int)syscall(SYS_pidfd_send_signal, pidfd, signal_number, NULL, 0);
+}
+
 /*
- * Signals every process whose parent is this supervisor. Between reading a child's parent and
- * signalling it, nothing reaps it, so its PID cannot have been reused. Returns -1 if /proc fails.
+ * Signals every process whose parent is this supervisor. The pidfd is opened for the PID first and
+ * used only if that PID's parent is still this supervisor: an unreaped child keeps its PID, so the
+ * descriptor then names that child. Returns -1 if /proc cannot be enumerated.
  */
 static int signal_children(int signal_number) {
     DIR *proc = opendir("/proc");
@@ -98,10 +127,32 @@ static int signal_children(int signal_number) {
         char *end;
         long pid = strtol(entry->d_name, &end, 10);
         if (*end != '\0' || pid <= 0 || pid == self_pid) continue;
-        if (parent_of((pid_t)pid) == self_pid) kill((pid_t)pid, signal_number);
+        if (parent_of((pid_t)pid) != self_pid) continue;
+        int pidfd = open_pidfd((pid_t)pid);
+        if (pidfd < 0) continue;
+        if (parent_of((pid_t)pid) == self_pid) pidfd_signal(pidfd, signal_number);
+        close(pidfd);
     }
     closedir(proc);
     return 0;
+}
+
+/* /proc must be procfs for this PID namespace, and pidfd signalling must work, before any permit. */
+static void require_own_procfs_and_pidfd(void) {
+    struct statfs filesystem;
+    if (statfs("/proc", &filesystem) != 0 || filesystem.f_type != PROC_SUPER_MAGIC) {
+        fail_before_worker(EXIT_SUPERVISOR_FAILURE, "/proc is not procfs");
+    }
+    char link[32];
+    char expected[32];
+    ssize_t count = readlink("/proc/self", link, sizeof link - 1);
+    if (count <= 0) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "/proc/self cannot be read");
+    link[count] = '\0';
+    snprintf(expected, sizeof expected, "%d", (int)self_pid);
+    if (strcmp(link, expected) != 0) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "/proc belongs to another PID namespace");
+    int pidfd = open_pidfd(self_pid);
+    if (pidfd < 0 || pidfd_signal(pidfd, 0) != 0) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "pidfd signalling is unavailable");
+    close(pidfd);
 }
 
 static long long monotonic_millis(void) {
@@ -170,9 +221,15 @@ int main(int argc, char **argv) {
     if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) {
         fail_before_worker(EXIT_SUPERVISOR_FAILURE, "cannot become a child subreaper");
     }
-    DIR *proc = opendir("/proc");
-    if (proc == NULL) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "procfs is unavailable");
-    closedir(proc);
+    require_own_procfs_and_pidfd();
+
+    /* An inherited SIG_IGN or SA_NOCLDWAIT would let the kernel reap children and free their PIDs. */
+    struct sigaction child_default;
+    memset(&child_default, 0, sizeof child_default);
+    child_default.sa_handler = SIG_DFL;
+    if (sigaction(SIGCHLD, &child_default, NULL) != 0) {
+        fail_before_worker(EXIT_SUPERVISOR_FAILURE, "cannot restore SIGCHLD");
+    }
 
     sigset_t handled;
     sigset_t original;
@@ -208,6 +265,8 @@ int main(int argc, char **argv) {
         execv(argv[2], argv + 2);
         _exit(127);
     }
+    /* The unreaped worker cannot have been recycled, so this descriptor names it until it is reaped. */
+    int worker_pidfd = open_pidfd(worker);
     close(permit_pipe[0]);
     write_permit(permit_pipe[1]);
     close(permit_pipe[1]);
@@ -223,15 +282,31 @@ int main(int argc, char **argv) {
     for (;;) {
         int status;
         pid_t reaped;
-        while ((reaped = waitpid(-1, &status, WNOHANG)) > 0) {
-            if (reaped == worker) {
-                worker_status = status;
-                worker_reaped = 1;
+        for (;;) {
+            reaped = waitpid(-1, &status, WNOHANG | __WALL);
+            if (reaped > 0) {
+                /* A stop or continue report, for example from a traced child, is not a termination. */
+                if (!WIFEXITED(status) && !WIFSIGNALED(status)) continue;
+                /* Only the worker's first termination counts; a later child may reuse its PID. */
+                if (reaped == worker && !worker_reaped) {
+                    worker_status = status;
+                    worker_reaped = 1;
+                    if (worker_pidfd >= 0) close(worker_pidfd);
+                    worker_pidfd = -1;
+                }
+                continue;
             }
+            if (reaped < 0 && errno == EINTR) continue;
+            break;
         }
         if (reaped < 0 && errno == ECHILD) {
-            /* No children: the whole tree, including the worker, is absent. */
+            /* No children: the whole tree is absent. Without the worker's own report, prove nothing. */
+            if (!worker_reaped) _exit(EXIT_WORKER_UNOBSERVED);
             _exit(failed ? EXIT_SUPERVISOR_FAILURE : encode_worker_status(worker_status));
+        }
+        if (reaped < 0) {
+            failed = 1;
+            killing = 1;
         }
         if (worker_reaped && !killing && !draining) {
             /* Leftovers get SIGTERM and a bounded grace before SIGKILL. */
@@ -249,7 +324,7 @@ int main(int argc, char **argv) {
         if (killing && signal_children(SIGKILL) != 0) {
             /* Without /proc the worker itself can still be killed; adopted children wait for it. */
             failed = 1;
-            if (!worker_reaped) kill(worker, SIGKILL);
+            if (worker_pidfd >= 0) pidfd_signal(worker_pidfd, SIGKILL);
         }
 
         struct pollfd ready[2] = {{events, POLLIN, 0}, {control_open ? STDIN_FILENO : -1, POLLIN, 0}};
