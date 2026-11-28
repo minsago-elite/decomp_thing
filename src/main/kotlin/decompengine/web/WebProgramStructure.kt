@@ -277,22 +277,27 @@ internal class WebProgramStructureIndex(
     }
 
     /**
-     * The selectors this policy publishes unchanged, mapped to their rows. Requests resolve through it only, so a
-     * concealed selector and an unrecorded one take the same single map miss and the supplied value is never scanned.
-     * Built once per projection and policy scope, and charged to the structure cache like every derived value.
+     * The selectors of one entity kind that this policy publishes unchanged, mapped to their rows. Requests resolve
+     * through it only, so a concealed selector and an unrecorded one take the same single map miss and the supplied
+     * value is never scanned. Each kind's map is built on first use for one policy scope and charged to the structure
+     * cache like every derived value; a request builds only the map it resolves against.
      */
-    internal fun publishedSelectors(policy: WebRedactionPolicy): WebPublishedSelectors =
-        derived("published-selectors:${policy.selectorScope}", WebPublishedSelectors::retainedBytes) {
-            fun published(id: String) = WebProgramStructurePages.addressable(id) && policy.preservesOpaque(id)
-            val entities = tables.map { table ->
-                HashMap<String, Int>().also { map -> for (row in 0 until table.size) if (published(table.ids[row])) map[table.ids[row]] = row }
-            }
-            val planned = available && planOutcome.state == "available"
-            val moduleRows = HashMap<String, Int>().also { map ->
-                if (planned) this.modules.forEachIndexed { row, module -> if (published(module.id)) map[module.id] = row }
-            }
-            WebPublishedSelectors(if (available) entities else emptyList(), moduleRows)
+    internal fun publishedEntities(kind: WebStructureKind, policy: WebRedactionPolicy): WebPublishedSelectors =
+        derived("published-${kind.route}:${policy.selectorScope}", WebPublishedSelectors::retainedBytes) {
+            val rows = HashMap<String, Int>()
+            if (available) table(kind).let { table -> for (row in 0 until table.size) if (published(table.ids[row], policy)) rows[table.ids[row]] = row }
+            WebPublishedSelectors(rows)
         }
+
+    /** The module selectors this policy publishes unchanged, mapped to their plan rows; empty without an available plan. */
+    internal fun publishedModules(policy: WebRedactionPolicy): WebPublishedSelectors =
+        derived("published-modules:${policy.selectorScope}", WebPublishedSelectors::retainedBytes) {
+            val rows = HashMap<String, Int>()
+            if (available && planOutcome.state == "available") modules.forEachIndexed { row, module -> if (published(module.id, policy)) rows[module.id] = row }
+            WebPublishedSelectors(rows)
+        }
+
+    private fun published(id: String, policy: WebRedactionPolicy) = WebProgramStructurePages.addressable(id) && policy.preservesOpaque(id)
 
     private val derivedLock = Any()
     private val derivedValues = HashMap<String, Any>()
@@ -327,19 +332,15 @@ internal class WebProgramStructureIndex(
 
 internal class WebStructureRecord(val path: String, val sha256: String, val sizeBytes: Long)
 
-/** Published selectors of one projection under one policy scope: per entity kind and for modules. */
-internal class WebPublishedSelectors(private val entities: List<Map<String, Int>>, private val modules: Map<String, Int>) {
+/** Published selectors of one entity kind, or of the modules, under one policy scope. */
+internal class WebPublishedSelectors(private val rows: Map<String, Int>) {
     /** Map lookups made; lets checks prove a request resolved through this map. */
     internal val lookups = java.util.concurrent.atomic.AtomicLong()
 
-    fun entity(kind: WebStructureKind, selector: String): Int? = entities.getOrNull(kind.ordinal).let { map ->
-        lookups.incrementAndGet(); map?.get(selector)
-    }
-
-    fun module(selector: String): Int? { lookups.incrementAndGet(); return modules[selector] }
+    fun row(selector: String): Int? { lookups.incrementAndGet(); return rows[selector] }
 
     /** Map nodes and boxed rows; the keys are the projection's own identity strings, already charged with it. */
-    val retainedBytes: Long = 256L + 96L * (entities.sumOf { it.size } + modules.size)
+    val retainedBytes: Long = 128L + 96L * rows.size
 }
 
 /** Reads one manifest-committed record of the selected revision again, refused unless it still has its recorded digest. */

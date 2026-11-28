@@ -191,12 +191,6 @@ internal class WebRedactionPolicy private constructor(
     /** Opaque-field checks made by this policy; request paths that must not scan a supplied selector are measured by it. */
     internal val opaqueChecks = java.util.concurrent.atomic.AtomicLong()
 
-    /** True when a configured credential value occurs in [value]; record content checks use it on decoded text. */
-    internal fun containsConfiguredValue(value: String): Boolean = leaksLiteral(value)
-
-    /** The longest configured value, so a streaming scan can keep exactly the overlap that may span two chunks. */
-    internal val longestConfiguredValue: Int = literals.maxOfOrNull { it.length } ?: 0
-
     /**
      * Identifies which addressable identities this policy publishes unchanged. Those depend only on the configured
      * values, so equally configured policies share one scope and a cached projection can key derived lookups by it.
