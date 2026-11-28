@@ -106,6 +106,7 @@ export function assertAuthenticatedMutations(requests, { origin, gitScaleJobId =
   const sessionMutations = mutations.filter(request => request.url === session);
   assert.equal(sessionMutations.filter(request => request.method === 'POST').length, 2, 'Expected exactly two session POSTs');
   assert.equal(sessionMutations.filter(request => request.method === 'DELETE').length, 1, 'Expected exactly one session DELETE');
+  assert.equal(sessionMutations.length, 3, 'Expected exactly three session mutations');
   const expected = gitScaleJobId === null ? [] : [
     { method: 'POST', url: `${origin}/nested/api/v1/jobs` },
     { method: 'POST', url: `${origin}/nested/api/v1/jobs/${gitScaleJobId}/repositories` },

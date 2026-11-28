@@ -149,6 +149,11 @@ test('authenticated mutation allowlist admits Git-scale POSTs only in git-scale 
   // A stray job POST in a non-git-scale session mode fails, whether added or replacing a session POST.
   assert.throws(() => assertAuthenticatedMutations([...session, upload], { origin }), /non-session mutation/);
   assert.throws(() => assertAuthenticatedMutations([session[0], session[1], session[2], upload], { origin }), /two session POSTs/);
+  // The session endpoint accepts exactly two POSTs and one DELETE, nothing else.
+  const sessionPatch = { method: 'PATCH', url: `${origin}/nested/api/v1/session` };
+  assert.throws(() => assertAuthenticatedMutations([...session, sessionPatch], { origin }), /three session mutations/);
+  assert.throws(() => assertAuthenticatedMutations([...session, sessionPatch, upload, attach], { origin, gitScaleJobId: jobId }),
+    /three session mutations/);
   // git-scale accepts exactly its two POSTs, by method and exact URL.
   assert.doesNotThrow(() => assertAuthenticatedMutations([...session, upload, attach], { origin, gitScaleJobId: jobId }));
   for (const invalid of [

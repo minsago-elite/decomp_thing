@@ -295,7 +295,7 @@ function once(text, anchor) {
   return index;
 }
 const IMPORT = "import { createServerPhaseCollector, serverPhaseReport } from './packaged-browser-log-server-phases.mjs';\n";
-const LAUNCH = "async function launchApplication(installation, port = '0', frontendOrigin) {";
+const LAUNCH = "async function launchApplication(installation, port = '0', frontendOrigin, gitImportRoot) {";
 const RING_CALLBACK = "  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); phases?.push(chunk); });\n";
 const ALL_SETTLED = '  const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);\n';
 const FIELD = "  if (values.mode === 'logs') report.serverDownloadPhases = serverPhaseReport(applicationPhases);\n";
