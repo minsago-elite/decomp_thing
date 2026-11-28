@@ -39,9 +39,15 @@ byte equality. The rebuild uses three inputs:
 
 Admission captures the working directory before creating any output child. A searchable but
 unreadable working directory is therefore admitted, and a failed capture leaves `--output` empty
-for a retry. The installed launcher passes `-XX:-UsePerfData`, because HotSpot's perf-data setup
-would otherwise move an unreadable working directory into `/tmp/hsperfdata_<user>`. Capture also
-refuses a working directory that was relocated that way. It then re-derives the production intent from the current inputs and the
+for a retry.
+
+HotSpot's perf-data setup changes into `/tmp/hsperfdata_<user>` and cannot change back from an
+unreadable directory. The installed POSIX start script therefore adds `-XX:-UsePerfData` only when
+`[ -r . ]` fails, so ordinary launches keep `jps`, `jcmd` and `jstat` monitoring. The script also
+exports the physical launch directory (`pwd -P`) as `LLM_BIN_PATCH_LAUNCH_DIRECTORY`. When that
+variable is present, the pinned working directory must match it by canonical path, device and
+inode, or it is refused. A direct `java` launch without the variable binds the kernel working
+directory as captured. No pathname heuristic is used. It then re-derives the production intent from the current inputs and the
 two staged controls, which it reuses but never rewrites.
 `GccBundledOperationCoordinator.recoverInterrupted` then takes the journal-root,
 operation-journal and scratch-mount locks without blocking, in `prepareNew`'s order. A lock that
@@ -78,7 +84,8 @@ retained reuse go through one validator, which rebuilds every key and value and 
 equality: the absence assertions, the stopped worker absence record digest, the unit, the run
 root, the lease evidence, and the operation and state identity. Two values come from the record
 itself and are checked by rule. The recorded argv must be the intent's own CLI argv plus exactly
-one `--recover-operation` selector naming this operation, and it must be empty for an operation
+one `--recover-operation` selector naming this operation. It must also parse with the CLI's own
+option parser as the original selection plus that selector. It must be empty for an operation
 without a CLI invocation. The allowance must be whole seconds within the committed cap.
 `resume-prepared.json` may not stage a resume definition above that adopted allowance.
 
@@ -109,7 +116,8 @@ Evidence and limits:
   - a self-consistent retained adoption, as either the final file or its `.atomic` temporary,
     that carries a foreign argv, absence digest, unit, run root, lease or allowance, or is
     missing lock or cgroup assertions;
-  - a CLI argv without exactly one selector for this operation over the unchanged original;
+  - a CLI argv without exactly one selector for this operation over the unchanged original, or one
+    the CLI's own option parser rejects, such as a selector between an option and its value;
   - a resume definition staged above the adopted allowance;
   - a commit snapshot from another deadline, or one earlier than the execution receipt;
   - an allowance above the commit cap;
@@ -117,8 +125,15 @@ Evidence and limits:
   - a changed or reordered argv, or a finished output.
 
   They also reuse a published adoption, and complete an adoption temporary, with the original
-  allowance. The CLI tests admit a searchable but unreadable working directory through the
-  actual CLI, and show that a failed capture leaves `--output` usable for a retry.
+  allowance. The CLI tests cover the launch path:
+
+  - the real installed start script adds `-XX:-UsePerfData` only for an unreadable launch
+    directory, and exports the physical launch directory;
+  - the real installed GCC CLI admits an unreadable but searchable launch directory without a
+    caller-supplied flag;
+  - a working directory that differs from the exported launch directory is refused before any
+    output exists;
+  - a failed capture leaves `--output` usable for a retry.
 - **`kotlin-oracle`, ext4 lease test:** it reacquires a crashed child process's active run, and
   refuses while any other holder has the mount. It fails, rather than skips, when
   `DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH` is set.

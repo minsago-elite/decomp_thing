@@ -349,6 +349,8 @@ class GccBundledOperationJournalTest {
             // Removing these selectors restores the original, but the recorded argv itself does not parse.
             "inside-checkpoint-option" to original.dropLast(1) + selector + original.last(),
             "inside-profile-option" to original.take(4) + selector + original.drop(4),
+            // Parses to the same selection, but is not the exact retained argv.
+            "reordered-original" to original.take(3) + original.subList(5, 7) + original.subList(3, 5) + original.drop(7) + selector,
         )
         for (argv in accepted) withJournalRoot { root ->
             recoverableStoppedJournal(root, intent).close()
