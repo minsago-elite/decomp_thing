@@ -43,6 +43,9 @@ class AcpProviderBrokerTest {
     @Test fun `event stream echoes are detected after JSON decoding and across split deltas`() =
         run("eventStreamEchoesAreDetectedAfterDecoding")
     @Test fun `event stream framing and content coding are strict`() = run("eventStreamFramingAndEncodingAreStrict")
+    @Test fun `nested JSON arguments and per-item deltas are scanned`() = run("nestedArgumentsAndPerItemDeltasAreScanned")
+    @Test fun `delivery never holds the lock close needs and is bounded`() = run("deliveryNeverHoldsTheCloseLock")
+    @Test fun `the source walk fails closed and checks identities below the root`() = run("sourceWalkFailsClosedAndChecksBelowTheRoot")
 
     @Test
     fun `every scenario has a test`() {

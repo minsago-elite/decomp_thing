@@ -198,7 +198,7 @@ internal class ObservedProviderRequest(val serverNames: List<String>, val head: 
  */
 internal class LocalProviderServer(
     serverStore: Path,
-    private val response: (ObservedProviderRequest) -> ByteArray = { sseResponse("data: {\"type\":\"response.completed\"}\n\n") },
+    private val response: (ObservedProviderRequest) -> ByteArray = { sseResponse(COMPLETED_EVENT) },
 ) : AutoCloseable {
     private val server = providerServerContext(serverStore).serverSocketFactory
         .createServerSocket(0, 8, InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))) as SSLServerSocket
@@ -257,6 +257,9 @@ internal class LocalProviderServer(
         }
     }
 }
+
+/** A minimal terminal event in the Responses streaming shape. */
+internal const val COMPLETED_EVENT = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fixture\"}}\n\n"
 
 internal fun sseResponse(events: String, framing: String = "length"): ByteArray {
     val body = events.toByteArray(StandardCharsets.UTF_8)

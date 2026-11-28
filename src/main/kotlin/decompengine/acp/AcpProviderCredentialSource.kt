@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
 
@@ -26,18 +27,16 @@ internal class AcpProviderCredentialUnavailable(val failure: AcpProviderCredenti
  * Host-only credential material for one broker. It never leaves the broker: it is not serializable, it has
  * no public accessor, and it is never put in a process environment, argument, file, archive or diagnostic.
  *
- * [sourceIdentities] are the device and inode keys of the credential file, its directory and every ancestor
- * of that directory, pinned while the credential was read. They are not secret. A sandbox launch that makes
- * any of these objects visible, under any path, would expose the credential.
+ * [source] records, without any secret, where the credential came from: the device and inode keys of the
+ * credential file and its directory, the keys of every ancestor of that directory, and the file's size and
+ * SHA-256. A sandbox launch that makes any of these objects visible, under any path, would expose the credential.
  */
 internal class AcpProviderCredential private constructor(
     val reference: AcpProviderCredentialReference,
     private val accessToken: String,
     private val accountId: String?,
-    sourceIdentities: Set<LinuxFileKey>,
+    internal val source: AcpProviderCredentialSourceIdentity,
 ) {
-    internal val sourceIdentities: Set<LinuxFileKey> = sourceIdentities.toSet()
-
     /** Broker-owned upstream authorization headers. Validated syntax prevents header injection. */
     internal fun authorizationHeaders(): List<Pair<String, String>> = buildList {
         add("Authorization" to "Bearer $accessToken")
@@ -54,9 +53,28 @@ internal class AcpProviderCredential private constructor(
     override fun toString(): String = "AcpProviderCredential(reference=${reference.name}, <redacted>)"
 
     internal companion object {
-        fun chatGptCachedAccessToken(accessToken: String, accountId: String?, sourceIdentities: Set<LinuxFileKey>): AcpProviderCredential =
-            AcpProviderCredential(AcpProviderCredentialReference.LOCAL_CODEX_CACHED_AUTH, accessToken, accountId, sourceIdentities)
+        fun chatGptCachedAccessToken(accessToken: String, accountId: String?, source: AcpProviderCredentialSourceIdentity): AcpProviderCredential =
+            AcpProviderCredential(AcpProviderCredentialReference.LOCAL_CODEX_CACHED_AUTH, accessToken, accountId, source)
     }
+}
+
+/**
+ * Where a resolved credential came from, pinned while it was read. None of it is secret: the file and directory
+ * keys, the ancestor keys, and the file's size and content digest (a digest of a high-entropy document).
+ */
+internal class AcpProviderCredentialSourceIdentity(
+    val file: LinuxFileKey,
+    val directory: LinuxFileKey,
+    ancestors: Set<LinuxFileKey>,
+    val fileBytes: Long,
+    val fileSha256: String,
+) {
+    val ancestors: Set<LinuxFileKey> = ancestors.toSet()
+
+    /** The keys a launch must never expose: the file, the directory and every ancestor of the directory. */
+    val exposureKeys: Set<LinuxFileKey> get() = setOf(file, directory) + ancestors
+
+    override fun toString(): String = "AcpProviderCredentialSourceIdentity(<host>)"
 }
 
 /**
@@ -84,15 +102,19 @@ internal sealed class AcpProviderCredentialSource {
     class LocalCodexCachedAuth internal constructor(
         codexHome: Path,
         private val afterPin: () -> Unit,
+        private val expectedOwner: () -> Int,
     ) : AcpProviderCredentialSource() {
-        constructor(codexHome: Path) : this(codexHome, {})
+        constructor(codexHome: Path) : this(codexHome, {}, ::currentProcessUid)
+
+        /** Race controls only: [afterPin] runs between the pinned checks and the read. */
+        internal constructor(codexHome: Path, afterPin: () -> Unit) : this(codexHome, afterPin, ::currentProcessUid)
 
         private val home: Path = codexHome.toAbsolutePath().normalize()
         override val reference: AcpProviderCredentialReference get() = AcpProviderCredentialReference.LOCAL_CODEX_CACHED_AUTH
         override val hostPaths: List<Path> get() = listOfNotNull(home, runCatching { home.toRealPath() }.getOrNull()).distinct()
 
         override fun resolve(now: Instant): AcpProviderCredential {
-            val (document, identities) = readPinnedAuthDocument(home, afterPin)
+            val (document, identities) = readPinnedAuthDocument(home, afterPin, expectedOwner)
             document["auth_mode"]?.let { mode ->
                 if (mode !is JsonPrimitive || !mode.isString || !mode.content.equals("chatgpt", ignoreCase = true)) {
                     unavailable(AcpProviderCredentialFailure.MECHANISM_UNSUPPORTED)
@@ -135,7 +157,11 @@ private fun unavailable(failure: AcpProviderCredentialFailure): Nothing = throw 
  * bound. Returns the parsed document and the identities of the file, its directory and the directory's
  * ancestors. [afterPin] runs between the checks and the read, for race controls only.
  */
-private fun readPinnedAuthDocument(home: Path, afterPin: () -> Unit): Pair<JsonObject, Set<LinuxFileKey>> {
+private fun readPinnedAuthDocument(
+    home: Path,
+    afterPin: () -> Unit,
+    expectedOwner: () -> Int,
+): Pair<JsonObject, AcpProviderCredentialSourceIdentity> {
     val directoryPath = try {
         home.toRealPath()
     } catch (_: NoSuchFileException) {
@@ -144,7 +170,7 @@ private fun readPinnedAuthDocument(home: Path, afterPin: () -> Unit): Pair<JsonO
         unavailable(AcpProviderCredentialFailure.UNREADABLE)
     }
     val uid = try {
-        (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
+        expectedOwner()
     } catch (_: Exception) {
         unavailable(AcpProviderCredentialFailure.UNREADABLE)
     }
@@ -167,7 +193,10 @@ private fun readPinnedAuthDocument(home: Path, afterPin: () -> Unit): Pair<JsonO
                 val content = LinuxFilesystemSyscalls.openReadableFrom(file).use { readable ->
                     LinuxFilesystemSyscalls.read(readable, MAXIMUM_AUTH_DOCUMENT_BYTES) {}
                 }
-                content to (setOf(identity.key, directoryIdentity.key) + ancestorIdentities(directoryPath))
+                content to AcpProviderCredentialSourceIdentity(
+                    identity.key, directoryIdentity.key, ancestorIdentities(directoryPath), content.size.toLong(),
+                    MessageDigest.getInstance("SHA-256").digest(content).joinToString("") { "%02x".format(it) },
+                )
             }
         }
     } catch (failure: AcpProviderCredentialUnavailable) {
@@ -194,6 +223,8 @@ private fun ancestorIdentities(directory: Path): Set<LinuxFileKey> =
     }.toSet()
 
 private const val AUTH_DOCUMENT_NAME = "auth.json"
+
+private fun currentProcessUid(): Int = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
 
 private fun strictUtf8(bytes: ByteArray): String = StandardCharsets.UTF_8.newDecoder()
     .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)

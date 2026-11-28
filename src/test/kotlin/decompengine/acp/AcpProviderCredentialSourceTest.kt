@@ -66,6 +66,19 @@ class AcpProviderCredentialSourceTest {
     }
 
     @Test
+    fun `a cache whose directory and file are owned by another user is refused`() {
+        val token = syntheticAccessToken(now.plusSeconds(3600))
+        val home = syntheticCodexHome(syntheticChatGptAuth(token))
+        val owner = (Files.getAttribute(java.nio.file.Path.of("/proc/self"), "unix:uid") as Number).toInt()
+        AcpProviderCredentialSource.LocalCodexCachedAuth(home, {}, { owner }).resolve(now)
+        // The owner check is injectable only so this control can name another owner without privileges.
+        val failure = assertFailsWith<AcpProviderCredentialUnavailable> {
+            AcpProviderCredentialSource.LocalCodexCachedAuth(home, {}, { owner + 1 }).resolve(now)
+        }
+        assertEquals(AcpProviderCredentialFailure.UNREADABLE, failure.failure)
+    }
+
+    @Test
     fun `a name swapped after the pinned checks cannot supply other bytes or block the read`() {
         val pinnedToken = syntheticAccessToken(now.plusSeconds(3600))
         val replacementToken = syntheticAccessToken(now.plusSeconds(3600))

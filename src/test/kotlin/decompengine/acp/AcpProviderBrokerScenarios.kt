@@ -343,10 +343,178 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         assertRefused(AcpProviderBrokerFailureKind.SECRET_EXPOSURE) { broker.exchange(channelRequest(1, capabilityChannel.toByteArray())) }
 
         // Benign escapes pass, and the agent receives exactly the bytes that were checked.
-        val benign = delta("a\\/b \\u0041") + "event: response.completed\ndata: {\"type\":\"response.completed\"}\r\n\r\n"
+        val benign = delta("a\\/b \\u0041") + "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\r\n\r\n"
         val passing = server { sseResponse(benign) }
         val accepted = broker(connector = connector(passing))
         assertEquals(benign, accepted.exchange(channelRequest(1, capability(accepted))).body.toString(StandardCharsets.UTF_8))
+    }
+
+    fun nestedArgumentsAndPerItemDeltasAreScanned() {
+        val split = token.length / 2
+        // One JSON escape per character, for example \u0074.
+        fun escaped(value: String) = value.map { "\\u%04x".format(it.code) }.joinToString("")
+        fun jsonString(value: String) = value.replace("\\", "\\\\").replace("\"", "\\\"")
+        fun event(json: String) = "data: $json\n\n"
+        fun argumentsDelta(item: String, text: String) =
+            event("{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"$item\",\"output_index\":0,\"delta\":\"${jsonString(text)}\"}")
+        fun textDelta(text: String, item: String? = null) =
+            event("{\"type\":\"response.output_text.delta\"${item?.let { ",\"item_id\":\"$it\",\"content_index\":0" } ?: ""},\"delta\":\"$text\"}")
+        // Function-call arguments carry JSON inside a JSON string, so an escape there survives one decode.
+        val escapedArguments = "{\"query\":\"" + escaped(token) + "\"}"
+        val cases = listOf(
+            "escaped secret inside one arguments delta" to argumentsDelta("fc_1", escapedArguments),
+            "escaped secret split across arguments deltas" to
+                argumentsDelta("fc_1", escapedArguments.substring(0, escapedArguments.length / 2)) +
+                argumentsDelta("fc_1", escapedArguments.substring(escapedArguments.length / 2)),
+            "plain secret split across one item's deltas with unrelated events between" to
+                argumentsDelta("fc_1", "{\"query\":\"" + token.substring(0, split)) +
+                textDelta("hello", item = "msg_1") +
+                event("{\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_1\"}}") +
+                argumentsDelta("fc_2", "{\"other\":1}") +
+                argumentsDelta("fc_1", token.substring(split) + "\"}"),
+            "keyless text deltas joined in arrival order around another type" to
+                textDelta(token.substring(0, split)) +
+                event("{\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}") +
+                textDelta(token.substring(split)),
+            "escaped secret in the final arguments" to
+                event("{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"${jsonString(escapedArguments)}\"}"),
+            "escaped secret in a completed function-call item" to
+                event("{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\"," +
+                    "\"arguments\":\"${jsonString(escapedArguments)}\"}}"),
+            "escaped secret in a completed MCP result" to
+                event("{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"mcp_call\",\"id\":\"mcp_1\"," +
+                    "\"arguments\":\"{}\",\"output\":\"${jsonString(escapedArguments)}\"}}"),
+            "escaped secret in the completed response's final text" to
+                event("{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\"," +
+                    "\"text\":\"${escaped(token)}\"}]}]}}"),
+        )
+        cases.forEach { (label, events) ->
+            val server = server { sseResponse(events) }
+            val broker = broker(connector = connector(server))
+            val failure = assertFailsWith<AcpProviderBrokerFailure>(label) { broker.exchange(channelRequest(1, capability(broker))) }
+            assertEquals(AcpProviderBrokerFailureKind.SECRET_EXPOSURE, failure.kind, label)
+        }
+        // The same shapes without a secret pass unchanged, including JSON arguments and unknown event types.
+        val benign = argumentsDelta("fc_1", "{\"query\":") + argumentsDelta("fc_1", "\"a\\u0041\"}") +
+            event("{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"query\\\":\\\"aA\\\"}\"}") +
+            event("{\"type\":\"response.vendor_extension\",\"anything\":[1,{\"x\":\"y\"}]}")
+        val passing = server { sseResponse(benign) }
+        val accepted = broker(connector = connector(passing))
+        assertEquals(benign, accepted.exchange(channelRequest(1, capability(accepted))).body.toString(StandardCharsets.UTF_8))
+
+        // The supported shapes are validated.
+        listOf(
+            event("{\"type\":\"response.output_text.delta\",\"delta\":7}"),
+            event("{\"type\":\"response.output_text.delta\",\"delta\":\"x\",\"content_index\":-1}"),
+            event("{\"type\":\"response.function_call_arguments.delta\"}"),
+            event("{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\"}"),
+            event("{\"type\":\"response.output_item.done\",\"item\":\"fc_1\"}"),
+            event("{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"arguments\":{}}}"),
+            event("{\"type\":\"response.completed\"}"),
+            event("{\"type\":7}"),
+        ).forEach { events ->
+            val server = server { sseResponse(events) }
+            val broker = broker(connector = connector(server))
+            assertRefused(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE) { broker.exchange(channelRequest(1, capability(broker))) }
+        }
+    }
+
+    fun deliveryNeverHoldsTheCloseLock() {
+        val server = server()
+        // A stream that never drains: its write blocks until the stream is closed.
+        val blocking = BlockingChannel()
+        val broker = broker(connector = connector(server))
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val delivery = executor.submit<Result<Unit>> { runCatching { broker.deliverChannelCapability(blocking) } }
+            assertTrue(blocking.entered.await(10, TimeUnit.SECONDS), "the delivery write is blocked")
+            val started = System.nanoTime()
+            broker.close()
+            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2), "close was not held up by the blocked write")
+            val failure = delivery.get(10, TimeUnit.SECONDS).exceptionOrNull() as AcpProviderBrokerFailure
+            assertEquals(AcpProviderBrokerFailureKind.CHANNEL_REFUSED, failure.kind)
+            assertTrue(blocking.closed)
+            // The write got a temporary copy, zeroed afterwards; the broker's own array was never handed out.
+            assertTrue(blocking.written!!.all { it == 0.toByte() })
+            assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(RecordingChannel()) }
+            assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(1, ByteArray(32))) }
+        } finally {
+            executor.shutdownNow()
+        }
+
+        // A completed delivery also zeroes its temporary copy, while the delivered bytes still authorize.
+        val capturing = CapturingChannel()
+        val open = broker(connector = connector(server))
+        open.deliverChannelCapability(capturing)
+        assertTrue(capturing.passed!!.all { it == 0.toByte() }, "the array handed to the stream was a zeroed temporary copy")
+        capabilities += capabilityHex(capturing.toByteArray())
+        assertEquals(200, open.exchange(channelRequest(1, capturing.toByteArray())).status)
+
+        // With nobody calling close, the idle bound closes a stream that never drains.
+        val bounded = broker(connector = connector(server), brokerPolicy = approvedProviderPolicy("idleTimeoutMillis" to "200"))
+        val stuck = BlockingChannel()
+        val started = System.nanoTime()
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { bounded.deliverChannelCapability(stuck) }
+        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5))
+        assertTrue(stuck.closed)
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { bounded.deliverChannelCapability(RecordingChannel()) }
+    }
+
+    fun sourceWalkFailsClosedAndChecksBelowTheRoot() {
+        val broker = broker(connector = LoopbackProviderConnector(1, AcpProviderUpstreamTls.platform(policy)))
+        capability(broker)
+        val workspace = providerFixtureDirectory("walk")
+        // A hard link to auth.json deep inside an unrelated directory.
+        val unrelated = Files.createDirectories(providerFixtureDirectory("unrelated").resolve("a").resolve("b")).parent.parent
+        Files.writeString(unrelated.resolve("readme.txt"), "unrelated")
+        Files.createLink(unrelated.resolve("a").resolve("b").resolve("copy.json"), codexHome.resolve("auth.json"))
+        assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) {
+            broker.requireNoProviderAuthority(launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(unrelated, Path.of("/opt/unrelated")))))
+        }
+        // An unresolvable source never counts as admitted.
+        val missing = providerFixtureDirectory("missing").resolve("absent")
+        assertRefused(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED) {
+            broker.requireNoProviderAuthority(launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(missing, Path.of("/opt/absent")))))
+        }
+        // A tree beyond the walk limits, or a directory at the depth limit, cannot be verified.
+        val wide = providerFixtureDirectory("wide").also { root -> repeat(5) { Files.writeString(root.resolve("f$it"), "x") } }
+        assertRefused(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED) {
+            broker.requireEffectiveLaunchCarriesNoProviderAuthority(emptyList(), emptyMap(), listOf(wide), AcpRuntimeClosureLimits(maximumEntries = 3))
+        }
+        val deep = providerFixtureDirectory("deep").also { Files.createDirectories(it.resolve("1").resolve("2").resolve("3")) }
+        assertRefused(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED) {
+            broker.requireEffectiveLaunchCarriesNoProviderAuthority(emptyList(), emptyMap(), listOf(deep), AcpRuntimeClosureLimits(maximumDepth = 2))
+        }
+        broker.requireEffectiveLaunchCarriesNoProviderAuthority(emptyList(), emptyMap(), listOf(deep), AcpRuntimeClosureLimits(maximumDepth = 4))
+        // An entry the walk cannot read refuses the launch (meaningless as root, which bypasses permissions).
+        if ((Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt() != 0) {
+            val sealed = Files.createDirectories(providerFixtureDirectory("sealed").resolve("locked"))
+            Files.setPosixFilePermissions(sealed, java.nio.file.attribute.PosixFilePermissions.fromString("---------"))
+            try {
+                assertRefused(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED) {
+                    broker.requireEffectiveLaunchCarriesNoProviderAuthority(emptyList(), emptyMap(), listOf(sealed.parent))
+                }
+            } finally {
+                Files.setPosixFilePermissions(sealed, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))
+            }
+        }
+        broker.requireNoProviderAuthority(launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(wide, Path.of("/opt/wide")))))
+
+        // The pinned-source entry point walks the objects behind the boundary's descriptors.
+        LinuxFilesystemSyscalls.openRoot(unrelated).use { pinned ->
+            assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) { broker.requirePinnedSourcesExcludeCredential(listOf(pinned)) }
+        }
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(unrelated.resolve("a").resolve("b").resolve("copy.json"))!!.use { pinned ->
+            assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) { broker.requirePinnedSourcesExcludeCredential(listOf(pinned)) }
+        }
+        LinuxFilesystemSyscalls.openRoot(wide).use { pinned -> broker.requirePinnedSourcesExcludeCredential(listOf(pinned)) }
+
+        // The boundary's own pin-time walk refuses a hard link or a byte-identical copy as a forbidden runtime file.
+        val forbidden = broker.credentialForbiddenRuntimeFiles()
+        assertFailsWith<java.io.IOException> { buildRuntimeManifest(unrelated, AcpRuntimeClosureLimits(), forbidden) }
+        val copied = providerFixtureDirectory("copied").also { Files.copy(codexHome.resolve("auth.json"), it.resolve("auth-copy.json")) }
+        assertFailsWith<java.io.IOException> { buildRuntimeManifest(copied, AcpRuntimeClosureLimits(), forbidden) }
+        buildRuntimeManifest(wide, AcpRuntimeClosureLimits(), forbidden)
     }
 
     fun eventStreamFramingAndEncodingAreStrict() {
@@ -363,7 +531,7 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             val broker = broker(connector = connector(server))
             assertRefused(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE) { broker.exchange(channelRequest(1, capability(broker))) }
         }
-        val body = "data: {\"type\":\"response.completed\"}\n\n"
+        val body = COMPLETED_EVENT
         listOf("gzip", "br", "identity, gzip").forEach { coding ->
             val server = server { rawResponse("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: $coding\r\n" +
                 "Content-Length: ${body.length}\r\n\r\n$body") }
@@ -523,8 +691,9 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
     private fun broker(
         resolver: AcpProviderDestinationResolver = FixedProviderResolver(listOf(pinned)),
         connector: AcpProviderUpstreamConnector,
+        brokerPolicy: AcpProviderTransportPolicy.Approved = policy,
     ): AcpProviderBroker = AcpProviderBroker.open(
-        policy, providerFixtureRequest(), AcpProviderCredentialSource.LocalCodexCachedAuth(codexHome), resolver, connector, clock,
+        brokerPolicy, providerFixtureRequest(), AcpProviderCredentialSource.LocalCodexCachedAuth(codexHome), resolver, connector, clock,
     ).also(closeables::add).also { diagnostics += it.toString() }
 
     /** The contained relay's side of the private channel setup: read the one delivery from its stream. */
@@ -581,6 +750,38 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         return failure
     }
 
+    /** A stream that never drains: write blocks until close, then fails. Records the array it was handed. */
+    private class BlockingChannel : java.io.OutputStream() {
+        val entered = CountDownLatch(1)
+        private val release = CountDownLatch(1)
+        @Volatile var written: ByteArray? = null
+        @Volatile var closed = false
+
+        override fun write(b: Int) = write(byteArrayOf(b.toByte()))
+
+        override fun write(b: ByteArray) {
+            written = b
+            entered.countDown()
+            release.await(30, TimeUnit.SECONDS)
+            throw java.io.IOException("channel closed while writing")
+        }
+
+        override fun close() {
+            closed = true
+            release.countDown()
+        }
+    }
+
+    /** Keeps a reference to the exact array the broker hands to write, alongside the bytes it received. */
+    private class CapturingChannel : ByteArrayOutputStream() {
+        var passed: ByteArray? = null
+
+        override fun write(b: ByteArray) {
+            passed = b
+            super.write(b)
+        }
+    }
+
     /** A private channel stream that records writes and close, and can fail its writes. */
     private class RecordingChannel(private val failWrites: Boolean = false) : ByteArrayOutputStream() {
         var writes = 0
@@ -625,6 +826,9 @@ object AcpProviderBrokerScenarios {
         "channelCapabilityDeliveredOnceToOwnedStream" to AcpProviderBrokerScenario::channelCapabilityDeliveredOnceToOwnedStream,
         "eventStreamEchoesAreDetectedAfterDecoding" to AcpProviderBrokerScenario::eventStreamEchoesAreDetectedAfterDecoding,
         "eventStreamFramingAndEncodingAreStrict" to AcpProviderBrokerScenario::eventStreamFramingAndEncodingAreStrict,
+        "nestedArgumentsAndPerItemDeltasAreScanned" to AcpProviderBrokerScenario::nestedArgumentsAndPerItemDeltasAreScanned,
+        "deliveryNeverHoldsTheCloseLock" to AcpProviderBrokerScenario::deliveryNeverHoldsTheCloseLock,
+        "sourceWalkFailsClosedAndChecksBelowTheRoot" to AcpProviderBrokerScenario::sourceWalkFailsClosedAndChecksBelowTheRoot,
     )
 
     @JvmStatic

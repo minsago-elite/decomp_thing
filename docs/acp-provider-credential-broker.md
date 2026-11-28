@@ -67,17 +67,27 @@ they keep no cause.
 
 The access token is key material. The account ID is not, but it identifies the operator's account and is
 sent only upstream, so the broker treats it as secret too: it is matched in request bodies, responses and
-sandbox launch inputs exactly like the token. The resolved credential also records the device and inode keys
-of the file, its directory and every ancestor of that directory, for the launch check below. These keys are
-not secret and outlive the credential.
+sandbox launch inputs exactly like the token. The resolved credential also records where it came from: the
+device and inode keys of the file, its directory and every ancestor of that directory, and the file's size and
+SHA-256, for the launch checks below. None of these is secret, and they outlive the credential.
+
+The owner the checks expect is the broker's own user. A test control injects another owner to show that a
+cache owned by someone else is refused; production always uses the process's own user.
 
 ## Invocation-bound channel
 
-The broker creates a fresh 32-byte random channel capability and holds the only copy.
-`deliverChannelCapability` writes it once, from that storage, to the host-owned private stream to the contained
-relay. The broker takes ownership of the stream and closes it on `close`. The stream is bound before the write,
-so a failed delivery cannot be retried on another stream. A second delivery, or one after close, is refused
-with `CHANNEL_REFUSED`, and an undelivered capability is zeroed on close.
+The broker creates a fresh 32-byte random channel capability. `deliverChannelCapability` writes it once to the
+host-owned private stream to the contained relay, and the broker takes ownership of that stream and closes it on
+`close`.
+
+- The stream is reserved under the broker lock, so a failed delivery cannot be retried on another stream. A
+  second delivery, or one after close, is refused with `CHANNEL_REFUSED`.
+- The write happens outside the lock that `close` needs, so a stream that never drains cannot stop `close` from
+  revoking and zeroing the capability. `close` also closes the stream, which unblocks the write.
+- The stream is handed a temporary copy, never the broker's own array, and the copy is zeroed after the write.
+- If the write does not finish within the policy idle bound, a watchdog closes the stream.
+- Delivery is committed only if the write finished first and the broker is still open. Otherwise the stream is
+  closed and delivery is refused for good.
 
 The capability is never an environment variable, argument or file. Analyzed programs, candidate build and
 validation processes and ACP terminal children therefore cannot inherit it through process ancestry or find it
@@ -138,36 +148,89 @@ within the policy bounds. Every byte of the head, including the final LF, counts
   LF or CRLF line ends and no byte-order mark, contain only `data`, `event`, `id` and `retry` fields or
   comments, end every event with an empty line, and carry one strict JSON object as each event's data.
   Anything else is `MALFORMED_RESPONSE`.
+- The supported Responses event shapes are checked for the fields a consumer reads:
+  - text, refusal, reasoning and argument deltas need a string `delta`;
+  - `response.output_text.done` and the reasoning `.done` events need a string `text`;
+  - the function-call and MCP argument `.done` events need a string `arguments`;
+  - output item events need an `item` object with a string `type`, and string `arguments` when present;
+  - response lifecycle events need a `response` object;
+  - optional `item_id` values must be strings, and indexes non-negative integers.
+  Other event types are allowed and scanned generically.
 - The capability, the access token and the account ID are matched in the raw text, every field value and
-  comment, every decoded JSON name and string, and the concatenation of the `delta` strings of each event stream
-  (keyed by `type`, `item_id`, `output_index`, `content_index` and `summary_index`) and of all deltas in order.
-  JSON escapes such as `\u0074` and values split across deltas are therefore caught. A match is
-  `SECRET_EXPOSURE`, and the body is zeroed and not returned.
+  comment, and every decoded JSON name and string. A string that is itself a JSON object or array is decoded
+  one layer further and scanned again. That covers function-call and MCP `arguments` and MCP `output`, in
+  deltas, in `*.done` events and in completed items, including the final text and arguments in
+  `response.completed`.
+- Deltas are joined as a consumer joins them, per event type and `item_id`, and for content deltas per
+  (`item_id`, `content_index`) or (`item_id`, `summary_index`). When those keys are absent the deltas join in
+  arrival order, because Codex emits text deltas without indexes. All deltas are also joined in arrival order.
+  Each joined value is matched as text and, when it is JSON, one decoded layer further.
+- So JSON escapes such as `\u0074`, secrets inside argument JSON, and values split across one item's deltas with
+  unrelated events in between are caught. A match is `SECRET_EXPOSURE`, and the body is zeroed and not returned.
 
-The whole body is read before it is returned. Streaming buffers and backpressure belong to #960.
+This scan is defense in depth against accidental reflection of the credential, such as a provider error or a
+model echoing a header. It is not a defense against an adversarial provider, and no pattern scan can be,
+because such a provider could encode the value, for example in base64. The approved provider is inside the
+trust model. The primary guarantee is structural: the agent never holds the credential and never receives it
+through the broker interface. The credential lives only in the host broker and is written only into upstream
+request headers.
+
+The whole body is read before it is returned. Streaming buffers and backpressure belong to #960. Compatibility
+with the real Codex gateway's event framing, such as its terminal event and any keepalive comments, is
+qualified later with the real-agent lane (#964).
 
 ## Sandbox launches
 
 `requireNoProviderAuthority` checks an `AcpSandboxLaunch` for any purpose: agent, terminal, candidate or
-analysis. It checks every input that becomes the sandbox argv, environment or mount set: the command,
-environment names and values, the working directory, both sides of every read-only mount, the staging roots and
-the empty directories.
+analysis.
 
-- If the capability, the access token or the account ID appears in any of them, the launch is refused with
-  `SECRET_EXPOSURE`.
-- If a read-only mount source, a staging root or the working directory is the credential source, lies inside
-  it or contains it, the launch is refused with `CREDENTIAL_SOURCE_VISIBLE`. This is checked by lexical and real
-  path, and also by device and inode against the keys pinned when the credential was read. So another path, a
-  symbolic link, an alternate bind of the file, its directory or an ancestor, or a hard link made after the read
-  is refused as well.
+- **Secrets.** It scans every input that becomes the sandbox argv, environment or mount set: the command,
+  environment names and values, the working directory, both sides of every read-only mount, the staging roots
+  and the empty directories. If the capability, the access token or the account ID appears in any of them, the
+  launch is refused with `SECRET_EXPOSURE`.
+- **Host sources.** It checks every host source the launch makes visible (mount sources and staging roots) with
+  `requireEffectiveLaunchCarriesNoProviderAuthority`, below. The working directory is a sandbox path, so it is
+  only checked by path against the credential source.
 
-`requireEffectiveLaunchCarriesNoProviderAuthority` applies the same checks to the final effective argv (for
-example a boundary's bubblewrap command with its bind paths), environment and visible host paths. A boundary
-calls it before those inputs reach a command observer or launch evidence. The path and identity checks stay in
-force after the broker closes. The secret checks stop then, because the broker no longer holds the values.
+`requireEffectiveLaunchCarriesNoProviderAuthority` takes the final effective argv (for example a boundary's
+bubblewrap command with its bind paths), environment and host sources. A boundary calls it before those inputs
+reach a command observer or launch evidence. It scans the argv and environment for secrets, then checks each
+source, and it fails closed:
 
-Nothing calls either check yet. Descriptor isolation and host `/proc` isolation through the real boundary are
-qualified later, once the contained-side relay is wired.
+- The source must resolve to a real path. A source that cannot be resolved is refused with
+  `LAUNCH_SOURCE_UNVERIFIED`; a resolution error never counts as admission.
+- A source that is, contains or lies inside the credential source by lexical or real path is refused with
+  `CREDENTIAL_SOURCE_VISIBLE`.
+- The source is walked without following links, within the boundary's existing runtime-closure limits
+  (100,000 entries and depth 64 by default).
+  - Every entry's device and inode is compared with the credential file and its directory, and the source
+    itself also with their ancestors. A match anywhere below the source, such as a hard link to `auth.json` in
+    an unrelated directory or an alternate bind, is refused with `CREDENTIAL_SOURCE_VISIBLE`.
+  - An entry that cannot be read, a tree beyond the entry limit, or a directory at the depth limit is refused
+    with `LAUNCH_SOURCE_UNVERIFIED`.
+
+The path and identity checks stay in force after the broker closes. The secret checks stop then, because the
+broker no longer holds the values.
+
+Two further entry points bind the check to the exact objects a boundary mounts:
+
+- `requirePinnedSourcesExcludeCredential` takes the descriptors the boundary pinned for its sources. It checks
+  each one's identity has not changed, then walks the pinned object through its descriptor, not through a name.
+  The boundary must hold those descriptors open from this check until the mount.
+- `credentialForbiddenRuntimeFiles` returns the credential file as a `ForbiddenRuntimeFile` (device, inode,
+  size and SHA-256). The boundary's own pin-time source walk, `PinnedReadOnlyMount.pin` through
+  `buildRuntimeManifest`, refuses an entry with the same inode, or with the same size and digest. So a hard link
+  or a byte-identical copy below a mount is refused when the boundary pins the object it actually mounts.
+
+**Deferred: boundary wiring.** No boundary calls these checks yet, because no factory path opens a broker. The
+`LinuxBubblewrapBoundary` integration that lands with the contained-side relay must do three things:
+
+- call `requireEffectiveLaunchCarriesNoProviderAuthority` on its final bubblewrap argv, environment and sources
+  before its command observer and launch evidence;
+- call `requirePinnedSourcesExcludeCredential` with the descriptors it pinned, held until the mount;
+- merge `credentialForbiddenRuntimeFiles` into the forbidden set it passes to `PinnedReadOnlyMount.pin`.
+
+Descriptor isolation and host `/proc` isolation through the real boundary are qualified then too.
 
 The credential and capability live only in host JVM memory, and upstream sockets are host-owned descriptors
 that child processes do not inherit. The integration control starts a child process while an upstream TLS
@@ -212,11 +275,15 @@ The tests use no real credentials and make no external connection. Hosted CI sta
   - the upstream head is exactly the policy-owned headers and the credential headers, and the body is the
     validated body;
   - the capability is delivered once to a broker-owned stream, never again, and is erased on close;
+  - a delivery blocked on a stream that never drains cannot stop `close`, and the idle bound closes it;
   - capability and sequence binding hold;
   - routing, framing and disclosure refusals send nothing upstream;
   - responses are redacted, including escaped and split echoes, and the event stream and content coding are
     strict;
-  - sandbox launches are checked;
+  - sandbox launches are checked, and the source walk fails closed and finds a hard link below an unrelated
+    mount, through a path, a pinned descriptor and the boundary's own forbidden-file walk;
+  - secrets inside function-call and MCP argument JSON, and secrets split across one item's deltas with
+    unrelated events in between, are caught;
   - a child process inherits nothing;
   - closing aborts an in-flight exchange.
 

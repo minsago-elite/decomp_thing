@@ -18,12 +18,20 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Clock
 import java.time.Duration
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
 
@@ -36,6 +44,7 @@ enum class AcpProviderBrokerFailureKind {
     REQUEST_REFUSED,
     SECRET_EXPOSURE,
     CREDENTIAL_SOURCE_VISIBLE,
+    LAUNCH_SOURCE_UNVERIFIED,
     TLS_REFUSED,
     REDIRECT_REFUSED,
     MALFORMED_RESPONSE,
@@ -143,8 +152,8 @@ internal class AcpProviderBroker private constructor(
     private val lock = Any()
     private val capability = ByteArray(PROVIDER_CHANNEL_CAPABILITY_BYTES).also(SecureRandom()::nextBytes)
     private var credential: AcpProviderCredential? = credential
-    // Not secret: the device and inode keys that no sandbox launch may make visible. Kept after close.
-    private val credentialSourceIdentities: Set<LinuxFileKey> = credential.sourceIdentities
+    // Not secret: where the credential came from, which no sandbox launch may make visible. Kept after close.
+    private val credentialSourceIdentity: AcpProviderCredentialSourceIdentity = credential.source
     private var privateChannel: OutputStream? = null
     private var delivered = false
     private var closed = false
@@ -165,23 +174,36 @@ internal class AcpProviderBroker private constructor(
 
     /**
      * The only provider authority a contained agent receives: the broker's fresh random capability, bound to this
-     * broker and so to one admitted invocation, one policy and one channel. It is written once, from the broker's
-     * own storage, to [channel], the host-owned private stream to the contained relay. The broker takes ownership
-     * of that stream and closes it on [close]. No copy of the capability exists outside the broker, it is never
-     * an environment variable, argument or file, and a second delivery, or one after close, is refused.
+     * broker and so to one admitted invocation, one policy and one channel. It is written once to [channel], the
+     * host-owned private stream to the contained relay. The broker takes ownership of that stream and closes it on
+     * [close]. The capability is never an environment variable, argument or file, and a second delivery, or one
+     * after close, is refused.
+     *
+     * The stream is reserved under the broker lock, but written outside it, so a stream that never drains cannot
+     * stop [close] from revoking. The write gets a temporary copy, never the broker's own array, and the copy is
+     * zeroed afterwards. If the write does not finish within the idle bound, the stream is closed. Delivery is
+     * committed only if the broker is still open when the write finishes.
      */
-    fun deliverChannelCapability(channel: OutputStream) = synchronized(lock) {
-        if (closed || privateChannel != null) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
-        // Bound before the write: a failed delivery cannot be retried on another stream.
-        privateChannel = channel
-        try {
-            channel.write(capability)
-            channel.flush()
-        } catch (_: Exception) {
-            runCatching { channel.close() }
-            refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+    fun deliverChannelCapability(channel: OutputStream) {
+        val copy = synchronized(lock) {
+            if (closed || privateChannel != null) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+            // Reserved before the write: a failed delivery cannot be retried on another stream.
+            privateChannel = channel
+            capability.copyOf()
         }
-        delivered = true
+        val written = try {
+            writeWithinBound(channel, copy, policy.bounds.idleTimeout)
+        } finally {
+            copy.fill(0)
+        }
+        synchronized(lock) {
+            if (written && !closed) {
+                delivered = true
+                return
+            }
+        }
+        runCatching { channel.close() }
+        refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
     }
 
     /** Forwards one channel request. Nothing is sent upstream unless every check before it passes. */
@@ -214,43 +236,151 @@ internal class AcpProviderBroker private constructor(
 
     /**
      * Refuses a sandbox launch that would carry provider authority into an agent, terminal, candidate or analyzed
-     * process. Every launch input that becomes the sandbox argv, environment or mount set is checked: the
-     * command, environment names and values, the working directory, both sides of every read-only mount, the
-     * staging roots and the empty directories. None may contain the capability or a credential value. No mount
-     * source, staging root or working directory may be, contain or lie inside the credential source, by path or
-     * by device and inode, so another path, a symbolic link, an alternate bind or a later hard link to the
-     * pinned file, its directory or an ancestor of that directory is refused as well.
+     * process. Every launch input that becomes the sandbox argv, environment or mount set is scanned for the
+     * capability and credential values: the command, environment names and values, the working directory, both
+     * sides of every read-only mount, the staging roots and the empty directories. Every host source the launch
+     * makes visible (mount sources and staging roots) is then checked by [requireEffectiveLaunchCarriesNoProviderAuthority].
      */
     fun requireNoProviderAuthority(launch: AcpSandboxLaunch) {
         // A Path is itself Iterable<Path>, so each path is listed explicitly rather than added with `+`.
-        val visible = launch.readOnlyMounts.map { it.source } + launch.stagingRoots.map { it.stagingRoot.path } + listOf(launch.workingDirectory)
+        val sources = launch.readOnlyMounts.map { it.source } + launch.stagingRoots.map { it.stagingRoot.path }
         val texts = launch.command + listOf(launch.workingDirectory.toString()) +
             launch.readOnlyMounts.flatMap { listOf(it.source.toString(), it.destination.toString()) } +
             launch.stagingRoots.map { it.stagingRoot.path.toString() } + launch.emptyDirectories.map(Path::toString)
-        requireEffectiveLaunchCarriesNoProviderAuthority(texts, launch.environment, visible)
+        requireEffectiveLaunchCarriesNoProviderAuthority(texts, launch.environment, sources)
+        // The working directory is a sandbox path, not a host source; it still may not name the credential source.
+        if (pathOverlapsCredentialSource(launch.workingDirectory)) refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
     }
 
     /**
      * The same check on the final effective launch inputs: the exact argv a boundary will execute (for example
-     * its bubblewrap command, including every bind path), the exact environment, and every host path it makes
+     * its bubblewrap command, including every bind path), the exact environment, and every host source it makes
      * visible. A boundary calls this before the inputs reach a command observer or launch evidence.
+     *
+     * It fails closed. Each source must resolve to a real path, must not overlap the credential source by path,
+     * and is walked without following links, within [limits]. Every entry's device and inode is compared with the
+     * credential file and its directory, and the source itself with their ancestors too. So a hard link or an
+     * alternate bind anywhere below a source is refused. A source that cannot be resolved, an entry that cannot
+     * be read, a tree beyond the limits or a directory at the depth limit refuses the launch with
+     * `LAUNCH_SOURCE_UNVERIFIED`; an error never counts as admission.
      */
-    fun requireEffectiveLaunchCarriesNoProviderAuthority(argv: List<String>, environment: Map<String, String>, visible: List<Path>) {
+    fun requireEffectiveLaunchCarriesNoProviderAuthority(
+        argv: List<String>,
+        environment: Map<String, String>,
+        sources: List<Path>,
+        limits: AcpRuntimeClosureLimits = AcpRuntimeClosureLimits(),
+    ) {
         val secrets = synchronized(lock) { if (closed) emptyList() else liveSecrets(credential) }
         val texts = argv + environment.keys + environment.values
         if (texts.any { text -> secrets.any { text.contains(it, ignoreCase = true) } }) {
             refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
         }
-        val protectedPaths = credentialSource.hostPaths
-        visible.forEach { path ->
-            val absolute = path.toAbsolutePath().normalize()
-            val real = runCatching { path.toRealPath() }.getOrNull()
-            if (listOfNotNull(absolute, real).any { candidate -> protectedPaths.any { candidate.startsWith(it) || it.startsWith(candidate) } }) {
+        sources.forEach { source ->
+            val real = try {
+                source.toRealPath()
+            } catch (_: Exception) {
+                refuse(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED)
+            }
+            if (pathOverlapsCredentialSource(source) || pathOverlapsCredentialSource(real)) {
                 refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
             }
-            val key = real?.let { runCatching { LinuxFilesystemSyscalls.openAbsolutePathOrNull(it)?.use { pinned -> pinned.identity.key } }.getOrNull() }
-            if (key != null && key in credentialSourceIdentities) refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
+            requireSourceTreeExcludesCredential(real, limits)
         }
+    }
+
+    /**
+     * The check bound to the objects a boundary actually mounts: the descriptors it pinned for its sources, held
+     * open across the check and the mount. Each pinned source is walked through its descriptor, so a name swapped
+     * after pinning is not what is checked. The boundary must call this with the descriptors it will mount and
+     * must not release them before the mount. No boundary calls it yet (see the provider credential broker doc).
+     */
+    fun requirePinnedSourcesExcludeCredential(
+        sources: List<LinuxDescriptor>,
+        limits: AcpRuntimeClosureLimits = AcpRuntimeClosureLimits(),
+    ) {
+        sources.forEach { source ->
+            source.whileOpen { fd ->
+                val current = try {
+                    LinuxFilesystemSyscalls.identity(fd)
+                } catch (_: Exception) {
+                    refuse(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED)
+                }
+                if (current.key != source.identity.key || current.isSymbolicLink) {
+                    refuse(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED)
+                }
+                when {
+                    // The trailing "." makes the kernel resolve the descriptor link, then walk the pinned object itself.
+                    current.isDirectory -> requireSourceTreeExcludesCredential(Path.of("/proc/self/fd/$fd", "."), limits)
+                    current.isRegularFile -> if (current.key == credentialSourceIdentity.file) {
+                        refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
+                    }
+                    else -> refuse(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED)
+                }
+            }
+        }
+    }
+
+    /**
+     * The credential file as a forbidden runtime file, for the boundary's own pin-time source walk
+     * (`PinnedReadOnlyMount.pin`). That walk refuses an entry with the same device and inode, or with the same
+     * size and content digest, so a hard link or a copy of the file below any mount is refused when the boundary
+     * pins the exact object it mounts. Nothing here is secret.
+     */
+    internal fun credentialForbiddenRuntimeFiles(): Set<ForbiddenRuntimeFile> = setOf(
+        ForbiddenRuntimeFile(
+            credentialSourceIdentity.file.device, credentialSourceIdentity.file.inode,
+            credentialSourceIdentity.fileBytes, credentialSourceIdentity.fileSha256,
+        ),
+    )
+
+    private fun pathOverlapsCredentialSource(path: Path): Boolean {
+        val absolute = path.toAbsolutePath().normalize()
+        return credentialSource.hostPaths.any { absolute.startsWith(it) || it.startsWith(absolute) }
+    }
+
+    /** Walks one resolved source without following links, comparing every entry's identity. Fails closed. */
+    private fun requireSourceTreeExcludesCredential(root: Path, limits: AcpRuntimeClosureLimits) {
+        val inside = setOf(credentialSourceIdentity.file, credentialSourceIdentity.directory)
+        var entries = 0
+        var exposed = false
+        var unverified = false
+        fun check(path: Path, isRoot: Boolean) {
+            if (++entries > limits.maximumEntries) {
+                unverified = true
+                return
+            }
+            val key = sourceEntryKey(path)
+            if (key == null) unverified = true
+            else if (key in inside || isRoot && key in credentialSourceIdentity.ancestors) exposed = true
+        }
+        try {
+            Files.walkFileTree(root, emptySet(), limits.maximumDepth, object : SimpleFileVisitor<Path>() {
+                override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
+                    check(directory, directory == root)
+                    return if (exposed || unverified) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
+                }
+
+                override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
+                    // A directory reported here lies at the depth limit, so its children were not checked.
+                    if (attributes.isDirectory) unverified = true else check(file, file == root)
+                    return if (exposed || unverified) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
+                }
+
+                override fun visitFileFailed(file: Path, failure: IOException): FileVisitResult {
+                    unverified = true
+                    return FileVisitResult.TERMINATE
+                }
+
+                override fun postVisitDirectory(directory: Path, failure: IOException?): FileVisitResult {
+                    if (failure != null) unverified = true
+                    return if (unverified) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
+                }
+            })
+        } catch (_: Exception) {
+            unverified = true
+        }
+        if (exposed) refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
+        if (unverified) refuse(AcpProviderBrokerFailureKind.LAUNCH_SOURCE_UNVERIFIED)
     }
 
     /**
@@ -285,7 +415,7 @@ internal class AcpProviderBroker private constructor(
         }
         // Decoded names and strings, so JSON escapes cannot carry the capability or a credential upstream.
         val secrets = synchronized(lock) { liveSecrets(credential) }
-        if (containsSecret(document, secrets)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+        if (exposesSecret(document, secrets, NESTED_JSON_LAYERS)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
         // #960 adds the model, token and budget checks here.
         return body
     }
@@ -462,18 +592,52 @@ private val RESPONSE_FIELD_NAME = Regex("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 private fun refuse(kind: AcpProviderBrokerFailureKind): Nothing = throw AcpProviderBrokerFailure(kind)
 
-private fun containsSecret(value: JsonElement, secrets: List<String>): Boolean = when (value) {
-    is JsonObject -> value.any { (name, child) -> secrets.any { name.contains(it, ignoreCase = true) } || containsSecret(child, secrets) }
-    is JsonArray -> value.any { containsSecret(it, secrets) }
-    is JsonPrimitive -> secrets.any { value.content.contains(it, ignoreCase = true) }
+/**
+ * Whether a decoded JSON value carries a secret in any name or string. A string that is itself a JSON object or
+ * array is decoded and scanned again, up to [nestedLayers] more layers.
+ */
+private fun exposesSecret(value: JsonElement, secrets: List<String>, nestedLayers: Int): Boolean = when (value) {
+    is JsonObject -> value.any { (name, child) ->
+        secrets.any { name.contains(it, ignoreCase = true) } || exposesSecret(child, secrets, nestedLayers)
+    }
+    is JsonArray -> value.any { exposesSecret(it, secrets, nestedLayers) }
+    is JsonPrimitive -> secrets.any { value.content.contains(it, ignoreCase = true) } ||
+        value.isString && nestedLayers > 0 && nestedJson(value.content)?.let { exposesSecret(it, secrets, nestedLayers - 1) } == true
+}
+
+/** A string's content as strict JSON when it is a JSON object or array, otherwise null. */
+private fun nestedJson(text: String): JsonElement? {
+    val trimmed = text.trim()
+    if (trimmed.isEmpty() || trimmed[0] != '{' && trimmed[0] != '[') return null
+    return try {
+        // Wrapping keeps the strict parser (duplicate keys, depth and size bounds) for arrays as well as objects.
+        parseProviderObject("{\"v\":$trimmed}", trimmed.length + 8)["v"]
+    } catch (_: Exception) {
+        null
+    }
 }
 
 /**
- * Validates the bounded event stream the agent will consume before any of it is released. The stream must be
- * strict UTF-8 with LF or CRLF line ends, contain only `data`, `event`, `id` and `retry` fields or comments, end
- * every event with an empty line, and carry one strict JSON object as each event's data. Secrets are matched in
- * the raw text, every decoded field value and comment, every decoded JSON name and string, and the concatenation
- * of each event stream's `delta` strings in order, so JSON escapes and values split across deltas are caught.
+ * Validates the bounded event stream the agent will consume before any of it is released.
+ *
+ * Scope: this scan is defense in depth against accidental reflection of the credential, such as a provider error
+ * or a model echoing a header. It does not defend against an adversarial provider, and no pattern scan can,
+ * because such a provider could encode the value (in base64, for example). The approved provider is inside the
+ * trust model. The primary guarantee is structural: the agent never holds the credential and never receives it
+ * through the broker interface, because the credential lives only in the host broker and is written only into
+ * upstream request headers.
+ *
+ * Framing: strict UTF-8 with LF or CRLF line ends and no byte-order mark, only `data`, `event`, `id` and `retry`
+ * fields or comments, every event ended by an empty line, and one strict JSON object as each event's data. The
+ * supported Responses event shapes are validated ([requireSupportedEventShape]); other event types are allowed and
+ * scanned generically.
+ *
+ * Secrets are matched in the raw text, every field value and comment, and every decoded JSON name and string,
+ * including one more decoded layer for strings that are themselves JSON (function-call and MCP arguments and
+ * outputs, in deltas, `*.done` events and completed items). Deltas are joined as a consumer joins them: per event
+ * type and `item_id`, and per (`item_id`, `content_index`) or (`item_id`, `summary_index`) for content deltas, in
+ * arrival order when those keys are absent, plus every delta in arrival order. Each joined value is matched as
+ * text and, when it is JSON, one decoded layer deeper.
  */
 private fun requireSafeEventStream(body: ByteArray, secrets: List<String>, bounds: AcpProviderTransportBounds) {
     fun exposes(value: CharSequence) = secrets.any { value.contains(it, ignoreCase = true) }
@@ -496,10 +660,10 @@ private fun requireSafeEventStream(body: ByteArray, secrets: List<String>, bound
                 } catch (_: Exception) {
                     refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
                 }
-                if (containsSecret(event, secrets)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+                requireSupportedEventShape(event)
+                if (exposesSecret(event, secrets, NESTED_JSON_LAYERS)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
                 (event["delta"] as? JsonPrimitive)?.takeIf { it.isString }?.let { delta ->
-                    val stream = DELTA_STREAM_FIELDS.joinToString("\u0000") { (event[it] as? JsonPrimitive)?.content.orEmpty() }
-                    streams.getOrPut(stream) { StringBuilder() }.append(delta.content)
+                    streams.getOrPut(deltaStreamKey(event)) { StringBuilder() }.append(delta.content)
                     allDeltas.append(delta.content)
                 }
             }
@@ -522,11 +686,87 @@ private fun requireSafeEventStream(body: ByteArray, secrets: List<String>, bound
             else -> refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
         }
     }
-    if (exposes(allDeltas) || streams.values.any(::exposes)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+    (streams.values + allDeltas).forEach { joined ->
+        if (exposes(joined) || nestedJson(joined.toString())?.let { exposesSecret(it, secrets, NESTED_JSON_LAYERS - 1) } == true) {
+            refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+        }
+    }
 }
 
-/** The fields that identify one delta stream in a Responses event, so its deltas concatenate in order. */
-private val DELTA_STREAM_FIELDS = listOf("type", "item_id", "output_index", "content_index", "summary_index")
+/** One decoded layer below a JSON string field that itself carries JSON. */
+private const val NESTED_JSON_LAYERS = 1
+
+/**
+ * The consumer's join key for a delta: the event type and `item_id`, plus `content_index` or `summary_index` for
+ * content deltas. Absent keys are empty, so such deltas join in arrival order. Function-call and MCP argument
+ * deltas join per item.
+ */
+private fun deltaStreamKey(event: JsonObject): String {
+    val type = (event["type"] as? JsonPrimitive)?.content.orEmpty()
+    val item = (event["item_id"] as? JsonPrimitive)?.content.orEmpty()
+    val index = if (type in ARGUMENT_DELTA_TYPES) "" else {
+        ((event["content_index"] ?: event["summary_index"]) as? JsonPrimitive)?.content.orEmpty()
+    }
+    return listOf(type, item, index).joinToString("\u0000")
+}
+
+private val ARGUMENT_DELTA_TYPES = setOf("response.function_call_arguments.delta", "response.mcp_call_arguments.delta")
+private val CONTENT_DELTA_TYPES = setOf("response.output_text.delta", "response.refusal.delta")
+private val TEXT_DONE_TYPES = setOf("response.output_text.done", "response.reasoning_text.done", "response.reasoning_summary_text.done")
+private val ARGUMENT_DONE_TYPES = setOf("response.function_call_arguments.done", "response.mcp_call_arguments.done")
+private val ITEM_EVENT_TYPES = setOf("response.output_item.added", "response.output_item.done")
+private val RESPONSE_EVENT_TYPES = setOf(
+    "response.created", "response.in_progress", "response.completed", "response.failed", "response.incomplete",
+)
+
+/**
+ * The shapes of the supported Responses streaming events, checked only for the fields a consumer reads. An
+ * event without a type, or with a type outside this set, is allowed and scanned generically.
+ */
+private fun requireSupportedEventShape(event: JsonObject) {
+    val type = event["type"] ?: return
+    if (type !is JsonPrimitive || !type.isString) refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+    fun string(name: String, required: Boolean) {
+        val value = event[name]
+        if (value == null) {
+            if (required) refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+        } else if (value !is JsonPrimitive || !value.isString) refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+    }
+    fun indexes() = listOf("output_index", "content_index", "summary_index").forEach { name ->
+        val value = event[name] ?: return@forEach
+        if (value !is JsonPrimitive || value.isString || value.content.toLongOrNull()?.let { it >= 0 } != true) {
+            refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+        }
+    }
+    fun objectField(name: String): JsonObject =
+        event[name] as? JsonObject ?: refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+    val name = type.content
+    when {
+        name in ARGUMENT_DELTA_TYPES || name in CONTENT_DELTA_TYPES ||
+            name.startsWith("response.reasoning") && name.endsWith(".delta") -> {
+            string("delta", required = true)
+            string("item_id", required = false)
+            indexes()
+        }
+        name in TEXT_DONE_TYPES -> {
+            string("text", required = true)
+            string("item_id", required = false)
+            indexes()
+        }
+        name in ARGUMENT_DONE_TYPES -> {
+            string("arguments", required = true)
+            string("item_id", required = false)
+            indexes()
+        }
+        name in ITEM_EVENT_TYPES -> {
+            val item = objectField("item")
+            if ((item["type"] as? JsonPrimitive)?.isString != true) refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+            item["arguments"]?.let { if (it !is JsonPrimitive || !it.isString) refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE) }
+            indexes()
+        }
+        name in RESPONSE_EVENT_TYPES -> objectField("response")
+    }
+}
 
 /** Strict HTTP/1.1 response head: CRLF line endings, no folding, bounded fields and bytes. */
 private class ResponseHeadReader(private val input: InputStream, private val bounds: AcpProviderTransportBounds) {
@@ -627,6 +867,46 @@ private fun readChunkLine(input: InputStream): String {
     }
     refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
 }
+
+/** An entry's device and inode, read without following a link; null when it cannot be read. */
+private fun sourceEntryKey(path: Path): LinuxFileKey? = try {
+    val attributes = Files.readAttributes(path, "unix:dev,ino", LinkOption.NOFOLLOW_LINKS)
+    LinuxFileKey((attributes.getValue("dev") as Number).toLong(), (attributes.getValue("ino") as Number).toLong())
+} catch (_: Exception) {
+    null
+}
+
+/**
+ * Writes and flushes [bytes] on the caller's thread. A watchdog closes [channel] if that does not finish within
+ * [bound], which also unblocks a write stuck on a stream that never drains. True only if the write finished first.
+ */
+private fun writeWithinBound(channel: OutputStream, bytes: ByteArray, bound: Duration): Boolean {
+    val state = AtomicInteger(DELIVERY_WRITING)
+    val finished = CountDownLatch(1)
+    val watchdog = Thread({
+        try {
+            if (!finished.await(bound.toNanos(), TimeUnit.NANOSECONDS) && state.compareAndSet(DELIVERY_WRITING, DELIVERY_TIMED_OUT)) {
+                runCatching { channel.close() }
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }, "decomp-acp-provider-channel-delivery").apply { isDaemon = true }
+    watchdog.start()
+    return try {
+        channel.write(bytes)
+        channel.flush()
+        state.compareAndSet(DELIVERY_WRITING, DELIVERY_FINISHED)
+    } catch (_: Exception) {
+        false
+    } finally {
+        finished.countDown()
+    }
+}
+
+private const val DELIVERY_WRITING = 0
+private const val DELIVERY_FINISHED = 1
+private const val DELIVERY_TIMED_OUT = 2
 
 private fun brokerStrictUtf8(bytes: ByteArray): String = StandardCharsets.UTF_8.newDecoder()
     .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
