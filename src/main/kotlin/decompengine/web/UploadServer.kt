@@ -1531,10 +1531,7 @@ private fun HttpExchange.sendUntrustedAttachment(
     filename: String,
 ) {
     responseHeaders.set("Content-Disposition", attachmentDisposition(filename))
-    responseHeaders.set(
-        "Content-Security-Policy",
-        "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
-    )
+    // sendBytes applies the shared sandboxed WEB_INERT_CONTENT_SECURITY_POLICY to every attachment.
     sendBytes(status, body, contentType)
 }
 
