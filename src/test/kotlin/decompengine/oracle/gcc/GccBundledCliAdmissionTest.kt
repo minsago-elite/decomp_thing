@@ -52,6 +52,69 @@ class GccBundledCliAdmissionTest {
         }
 
     @Test
+    fun `genuine later-invocation recovery re-derives the intent but is refused while the admitted owner is live or unstarted`() =
+        withRequiredProvisioning {
+            val bundle = configuredDirectory("DECOMP_TEST_BUNDLED_GHIDRA_ROOT", "a root-owned bundled runtime is not provisioned")
+            val mount = configuredDirectory("DECOMP_TEST_ORACLE_EXT4_SCRATCH", "a dedicated ext4 scratch slot is not provisioned")
+            assertTrue(names(mount).isEmpty(), "dedicated scratch requires recovery before the test")
+            fixture { root ->
+                val output = privateDirectory(root.resolve("output-recovery"))
+                val args = arguments("cc1", genuineCc1(root), output, mount) + listOf("--resume-after-checkpoint", "512")
+                val options = GccBundledCliOptions.parse(args)
+                var owner: GccBundledPreparedOperation? = null
+                var reset: GccBundledAbandonedPreparation? = null
+                try {
+                    val earlier = withBundledGhidraRoot(bundle) { GccBundledCliCommand.admit(options, args) }
+                    owner = earlier
+                    reset = earlier.abandonedPreparation()
+                    val recoveryArgs = args + listOf("--recover-operation", earlier.intent.operationId)
+                    val recovery = GccBundledCliOptions.parse(recoveryArgs)
+                    val operation = output.resolve("journal/.gcc-bundled-operation-${earlier.intent.operationId}")
+                    val retained = (listOf("invocation.json") + names(output.resolve("inputs")).map { "inputs/$it" } +
+                        names(operation).map { "journal/${operation.fileName}/$it" }).associateWith {
+                        Files.readAllBytes(output.resolve(it)).toList()
+                    }
+                    fun requireUnchanged() {
+                        assertEquals(listOf("inputs", "invocation.json", "journal"), names(output))
+                        assertEquals(listOf("ExportProgramModel.java", "boot-classpath.json"), names(output.resolve("inputs")))
+                        assertEquals(listOf("definition.json", "intent.json", "lease-evidence.json", "prepared.json"), names(operation))
+                        retained.forEach { (name, bytes) -> assertEquals(bytes, Files.readAllBytes(output.resolve(name)).toList(), name) }
+                    }
+                    // A later invocation re-derives the byte-identical production intent from genuine inputs.
+                    val rebuilt = withBundledGhidraRoot(bundle) { GccBundledCliCommand.recoveryIntent(recovery, recoveryArgs) }
+                    assertContentEquals(earlier.intent.canonicalBytes, rebuilt.canonicalBytes)
+                    requireUnchanged()
+                    // The admitted owner is live, so the later invocation is refused at the journal locks.
+                    val live = assertFailsWith<IllegalArgumentException> {
+                        withBundledGhidraRoot(bundle) { GccBundledCliCommand.run(recovery, recoveryArgs) }
+                    }
+                    assertTrue(live.message.orEmpty().contains("held by a live owner"), live.toString())
+                    requireUnchanged()
+                    earlier.requireCurrent()
+                    earlier.close()
+                    owner = null
+                    // With that owner gone, an unstarted history is still no stopped checkpoint and is refused unchanged.
+                    val unstarted = assertFailsWith<IllegalArgumentException> {
+                        withBundledGhidraRoot(bundle) { GccBundledCliCommand.run(recovery, recoveryArgs) }
+                    }
+                    assertTrue(unstarted.message.orEmpty().contains("unexpected residue"), unstarted.toString())
+                    requireUnchanged()
+                    println("gcc-cli-later-invocation-refusal ${OracleJson.canonicalBytes(JsonObject(mapOf(
+                        "argv" to JsonArray((listOf(recovery.commandName) + recoveryArgs).map(::JsonPrimitive)),
+                        "intentSha256" to JsonPrimitive(rebuilt.requestSha256),
+                        "liveOwner" to JsonPrimitive(live.message.orEmpty()),
+                        "unstartedHistory" to JsonPrimitive(unstarted.message.orEmpty()),
+                        "startAuthorized" to JsonPrimitive(false),
+                    ))).decodeToString()}")
+                } finally {
+                    owner?.close()
+                    reset?.let { resetGccBundledAbandonedPreparation(mount, it) }
+                }
+            }
+            assertTrue(names(mount).isEmpty())
+        }
+
+    @Test
     fun `ordinary scratch is refused after durable intent and before any lease or START`() = withRequiredProvisioning {
         val bundle = configuredDirectory("DECOMP_TEST_BUNDLED_GHIDRA_ROOT", "a root-owned bundled runtime is not provisioned")
         fixture { root ->

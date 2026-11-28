@@ -147,7 +147,8 @@ private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean,
             fullRecoveryExport -> "gcc-engine-full-export"
             else -> "gcc-engine-plan"
         }
-        val resumeOption = if (fullRecoveryExport || nativeCallObservations) "" else " [--resume-after-checkpoint <multiple-of-512>]"
+        val resumeOption = if (fullRecoveryExport || nativeCallObservations) "" else
+            " [--resume-after-checkpoint <multiple-of-512> [--recover-operation <operation-id>]]"
         val engines = decompengine.oracle.gcc.GccBundledCliOptions.engineUsage(fullRecoveryExport = fullRecoveryExport,
             runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations)
         System.err.println("usage: llm_bin_patch $command $engines <stripped-binary> " +
@@ -1015,6 +1016,8 @@ private fun printHelp() {
           gcc-engine-full-export runs a fresh contained full-recovery export and emits an authenticated structural profile binding; it does not score or certify structural truth.
           gcc-engine-native-calls retains native call observations alongside an unchanged full model; results remain unscored and release-ineligible.
           --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.
+          --recover-operation <operation-id> repeats that exact interrupted argv in a later process: it resumes the stopped
+          checkpoint only after the earlier owner's journal and scratch locks are free and every retained record matches.
           Scratch defaults: 8 GiB available / 64 GiB maximum filesystem, 32768 available / 1000000 maximum inodes.
           Override with --scratch-min-bytes, --scratch-max-bytes, --scratch-min-inodes, --scratch-max-inodes.
           llvm-native-runtime-measurement retains raw read-only evidence with all authority flags false.

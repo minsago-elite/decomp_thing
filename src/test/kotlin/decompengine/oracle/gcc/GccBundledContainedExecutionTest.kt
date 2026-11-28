@@ -185,6 +185,8 @@ class GccBundledContainedExecutionTest {
             GccBundledOperationCoordinator.prepareNew(intent, journal, resumedMount).use { owner ->
                 val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(owner.definitionBytes)
                 outputs.add(definition.outputLease.path)
+                // Same live owner throughout: this demonstrates checkpoint resume, not later-invocation recovery.
+                assertEquals(GccBundledExecutionOwnership.SAME_OWNER_CHECKPOINT_RESUME, owner.executionOwnership)
                 val stopped = owner.executeUntilCheckpoint(512)
                 assertTrue(stopped.assessment.completed >= 512 && stopped.assessment.completed <= stopped.assessment.functionCount)
                 val stoppedReceipt = OracleJson.parseCanonical(stopped.executionReceiptBytes).jsonObject
@@ -217,6 +219,7 @@ class GccBundledContainedExecutionTest {
                 assertEquals(result.assessment.programModelSha256, assertExport(definition.outputLease.path, artifacts).programModelSha256)
                 originalRecords.forEach { (name, bytes) -> assertContentEquals(bytes, boundedRead(originalJournal.resolve(name), MAXIMUM_METADATA_BYTES)) }
                 assertEquals(17, names(originalJournal).size)
+                assertFalse(Files.exists(originalJournal.resolve("recovery-adopted.json")))
                 resumedModel = result.programModelBytes
                 resumedPlan = authoredPlan(resumedModel)
                 resumedReceiptSha256 = OracleArtifacts.sha256(result.executionReceiptBytes)
@@ -230,6 +233,7 @@ class GccBundledContainedExecutionTest {
             GccBundledOperationCoordinator.prepareNew(freshIntent, freshJournal, freshMount).use { owner ->
                 val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(owner.definitionBytes)
                 outputs.add(definition.outputLease.path)
+                assertEquals(GccBundledExecutionOwnership.FRESH_SINGLE_OWNER, owner.executionOwnership)
                 val result = owner.execute()
                 assertEquals(0L, result.assessment.reused)
                 val freshModel = result.programModelBytes
@@ -257,6 +261,105 @@ class GccBundledContainedExecutionTest {
         } finally {
             if (succeeded) Files.walk(fixture).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
             else println("Failed authored resume fixture retained for diagnosis: $fixture")
+        }
+    }
+
+    @Test
+    fun `authored multi-batch ELF resumes in a later owner only after the stopped owner is gone`() = withRequiredProvisioning {
+        val bundle = configuredDirectory("DECOMP_TEST_BUNDLED_GHIDRA_ROOT")
+        val mount = configuredDirectory("DECOMP_TEST_BUNDLED_GHIDRA_RECOVERY_EXT4_SCRATCH")
+        assumeLiveTools()
+        assertTrue(names(mount).isEmpty(), "dedicated later-owner recovery slot requires trusted reset")
+        val fixture = Files.createTempDirectory("gcc-bundled-contained-recovery-")
+        Files.setPosixFilePermissions(fixture, PosixFilePermissions.fromString("rwx------"))
+        var succeeded = false
+        val outputs = arrayListOf<Path>()
+        try {
+            val intent = authoredIntent(fixture, bundle, interrupted = true)
+            val artifacts = intent.artifacts.associateBy { it.role }
+            val journal = privateDirectory(fixture.resolve("journal"))
+            val operation = journal.resolve(".gcc-bundled-operation-${intent.operationId}")
+            // This authored operation has no CLI invocation, so a later owner records no recovery argv.
+            val laterArgv = emptyList<String>()
+            val earlier = GccBundledOperationCoordinator.prepareNew(intent, journal, mount)
+            val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(earlier.definitionBytes)
+            outputs.add(definition.outputLease.path)
+            val stopped: GccBundledInterruptedOperation
+            val stoppedRecords: Map<String, ByteArray>
+            try {
+                assertEquals(GccBundledExecutionOwnership.SAME_OWNER_CHECKPOINT_RESUME, earlier.executionOwnership)
+                stopped = earlier.executeUntilCheckpoint(512)
+                stoppedRecords = names(operation).associateWith { boundedRead(operation.resolve(it), MAXIMUM_METADATA_BYTES) }
+                assertEquals(11, stoppedRecords.size)
+                val runNames = names(definition.outputLease.path)
+                // The stopped owner is still live, so a later owner is refused before any retained record is reused.
+                val refused = assertFails { GccBundledOperationCoordinator.recoverInterrupted(intent, journal, mount, laterArgv) }
+                assertTrue(refused.message.orEmpty().contains("held by a live owner"), refused.toString())
+                assertEquals(stoppedRecords.keys.sorted(), names(operation))
+                stoppedRecords.forEach { (name, bytes) -> assertContentEquals(bytes, boundedRead(operation.resolve(name), MAXIMUM_METADATA_BYTES)) }
+                assertEquals(runNames, names(definition.outputLease.path))
+                earlier.requireInterruptedStateCurrent()
+            } finally {
+                // The earlier owner is gone: its journal and scratch locks are released and its residue is kept.
+                earlier.close()
+            }
+            // The first later owner adopts and is then gone before any resume definition (the adoption crash window).
+            GccBundledOperationCoordinator.recoverInterrupted(intent, journal, mount, laterArgv).use { crashed ->
+                assertEquals(GccBundledExecutionOwnership.LATER_INVOCATION_RECOVERY, crashed.executionOwnership)
+            }
+            val firstAdoption = boundedRead(operation.resolve("recovery-adopted.json"), MAXIMUM_METADATA_BYTES)
+            assertEquals(12, names(operation).size)
+            GccBundledOperationCoordinator.recoverInterrupted(intent, journal, mount, laterArgv).use { later ->
+                assertEquals(GccBundledExecutionOwnership.LATER_INVOCATION_RECOVERY, later.executionOwnership)
+                assertFailsWith<IllegalStateException> { later.execute() }
+                assertFailsWith<IllegalStateException> { later.plan() }
+                val adoptedBytes = boundedRead(operation.resolve("recovery-adopted.json"), MAXIMUM_METADATA_BYTES)
+                // The single adoption, and with it the original allowance, is reused rather than republished.
+                assertContentEquals(firstAdoption, adoptedBytes)
+                val adopted = OracleJson.parseCanonical(adoptedBytes).jsonObject
+                assertLinkedRecord(adopted, intent, "gcc-bundled-later-invocation-recovery-adopted-v1")
+                assertEquals(OracleArtifacts.sha256(stoppedRecords.getValue("analysis-state-captured.json")),
+                    adopted.getValue("previousSha256").jsonPrimitive.content)
+                val recovery = adopted.getValue("recovery").jsonObject
+                assertEquals(JsonArray(laterArgv.map(::JsonPrimitive)), recovery["recoveryArgv"])
+                assertEquals(JsonPrimitive(true), recovery.getValue("priorOwnerAbsence").jsonObject["interruptedUnitCgroupAbsent"])
+                assertEquals(definition.unitName, recovery.getValue("priorOwnerAbsence").jsonObject.getValue("interruptedUnit").jsonPrimitive.content)
+                // The allowance is capped by the budget committed with the stopped state, not the execution receipt.
+                val allowance = recovery.getValue("resumeWallBudgetMillis").jsonPrimitive.long
+                val committed = OracleJson.parseCanonical(stoppedRecords.getValue("analysis-state-captured.json")).jsonObject
+                    .getValue("analysisState").jsonObject.getValue("operationWallTime").jsonObject
+                val executed = OracleJson.parseCanonical(stoppedRecords.getValue("interrupted-execution.json")).jsonObject
+                    .getValue("execution").jsonObject.getValue("operationWallTime").jsonObject
+                assertEquals(minOf(intent.budgets.wallClockMillis,
+                    committed.getValue("remainingNanos").jsonPrimitive.long / 1_000_000_000L * 1_000L), allowance)
+                assertTrue(committed.getValue("remainingNanos").jsonPrimitive.long <= executed.getValue("remainingNanos").jsonPrimitive.long)
+                assertTrue(allowance in 2_000L until intent.budgets.wallClockMillis)
+                val result = later.resume()
+                assertEquals(stopped.assessment.completed, result.assessment.reused)
+                assertFalse(result.complete)
+                assertFalse(result.releaseEligible)
+                val receipt = OracleJson.parseCanonical(result.executionReceiptBytes).jsonObject
+                assertLinkedRecord(receipt, intent, "gcc-bundled-resume-executed-v1")
+                assertExecution(receipt.getValue("execution").jsonObject, intent, maximumWallMillis = allowance)
+                val resumePrepared = OracleJson.parseCanonical(boundedRead(operation.resolve("resume-prepared.json"), MAXIMUM_METADATA_BYTES)).jsonObject
+                assertEquals(OracleArtifacts.sha256(adoptedBytes), resumePrepared.getValue("previousSha256").jsonPrimitive.content)
+                assertEquals(result.assessment.programModelSha256, assertExport(definition.outputLease.path, artifacts).programModelSha256)
+                stoppedRecords.forEach { (name, bytes) -> assertContentEquals(bytes, boundedRead(operation.resolve(name), MAXIMUM_METADATA_BYTES)) }
+                assertEquals(18, names(operation).size)
+                val model = result.programModelBytes
+                retainFixtureEvidence(fixture, intent, definition, result.executionReceiptBytes, result.exportAssessmentReceiptBytes,
+                    result.assessment, model, journal, authoredPlan(model))
+                assertFails { later.resume() }
+            }
+            // A recovered operation is never adopted a second time.
+            assertFails { GccBundledOperationCoordinator.recoverInterrupted(intent, journal, mount, laterArgv) }
+            succeeded = true
+        } catch (failure: Throwable) {
+            runCatching { retainResumeFailure(fixture, outputs) }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        } finally {
+            if (succeeded) Files.walk(fixture).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+            else println("Failed authored later-owner recovery fixture retained for diagnosis: $fixture")
         }
     }
 
@@ -299,7 +402,9 @@ class GccBundledContainedExecutionTest {
         maximumEntities = 100_000, maximumDependencyEdges = 1_000_000, maximumWorkUnits = 10_000_000,
     ).plan(ProgramModelJson.readCanonical(model)).toJson().toByteArray(Charsets.UTF_8)
 
-    private fun assertExecution(command: JsonObject, intent: GccBundledOperationIntent) {
+    /** [maximumWallMillis] is the executing owner's own deadline: a later owner's recovered allowance, not the intent's. */
+    private fun assertExecution(command: JsonObject, intent: GccBundledOperationIntent,
+        maximumWallMillis: Long = intent.budgets.wallClockMillis) {
         assertEquals("kotlin-lease-contained-command-execution-v1", command.getValue("provider").jsonPrimitive.content)
         assertEquals(1L, command.getValue("schemaVersion").jsonPrimitive.long)
         assertEquals(0L, command.getValue("childExitCode").jsonPrimitive.long)
@@ -311,14 +416,14 @@ class GccBundledContainedExecutionTest {
             OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(command - "executionSha256"))),
             command.getValue("executionSha256").jsonPrimitive.content,
         )
-        assertTrue(command.getValue("derivationWallNanos").jsonPrimitive.long in 1..intent.budgets.wallClockMillis * 1_000_000L)
+        assertTrue(command.getValue("derivationWallNanos").jsonPrimitive.long in 1..maximumWallMillis * 1_000_000L)
         val wallTime = command.getValue("operationWallTime").jsonObject
-        assertEquals(intent.budgets.wallClockMillis, wallTime.getValue("maximumWallMillis").jsonPrimitive.long)
+        assertEquals(maximumWallMillis, wallTime.getValue("maximumWallMillis").jsonPrimitive.long)
         val elapsed = wallTime.getValue("elapsedNanos").jsonPrimitive.long
         val remaining = wallTime.getValue("remainingNanos").jsonPrimitive.long
         assertTrue(elapsed >= command.getValue("derivationWallNanos").jsonPrimitive.long)
         assertTrue(remaining > 0)
-        assertEquals(intent.budgets.wallClockMillis * 1_000_000L, elapsed + remaining)
+        assertEquals(maximumWallMillis * 1_000_000L, elapsed + remaining)
         val cgroup = command.getValue("cgroup").jsonObject
         assertTrue(cgroup.getValue("peakResidentBytes").jsonPrimitive.long in 1..intent.budgets.maximumResidentBytes)
         assertTrue(cgroup.getValue("cpuNanos").jsonPrimitive.long > 0)

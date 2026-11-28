@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if (($# > 1)); then
-  echo "usage: $0 [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control|--gcc-engine-{cc1,lto1}-{fresh,resume}]" >&2
+  echo "usage: $0 [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control|--bundled-ghidra-recovery|--gcc-engine-{cc1,lto1}-{fresh,resume}]" >&2
   exit 64
 fi
 source "$(cd "$(dirname "$0")" && pwd -P)/oracle-ext4-scratch-profile.sh"
@@ -33,12 +33,22 @@ if [[ -e "$image" || -L "$image" || -e "$mount_parent" || -L "$mount_parent" ]];
 fi
 
 complete=false
+publish_cleanup_coordinates() {
+  # Fixed profile-derived values; the release step revalidates both before acting on them.
+  {
+    printf '%s_SCRATCH=%s\n' "$environment_prefix" "$mount_path"
+    printf '%s_IMAGE=%s\n' "$environment_prefix" "$image"
+  } >>"$GITHUB_ENV"
+}
 cleanup_failed_provisioning() {
   if [[ "$complete" == true ]]; then
     return
   fi
-  if mountpoint --quiet "$mount_path" 2>/dev/null; then
-    sudo -n umount "$mount_path" || true
+  if mountpoint --quiet "$mount_path" 2>/dev/null && ! sudo -n umount "$mount_path"; then
+    # Keep the image and hand the validated coordinates to the always() release step for a retry.
+    echo "oracle scratch provisioning failed and could not unmount $mount_path; retaining $image for release" >&2
+    publish_cleanup_coordinates
+    return
   fi
   sudo -n rmdir "$mount_path" 2>/dev/null || true
   sudo -n rmdir "$mount_parent" 2>/dev/null || true
@@ -69,9 +79,6 @@ if [[ "$(stat --format='%u:%a' "$mount_path")" != "$user_id:700" ]]; then
   exit 1
 fi
 
-{
-  printf '%s_SCRATCH=%s\n' "$environment_prefix" "$mount_path"
-  printf '%s_IMAGE=%s\n' "$environment_prefix" "$image"
-} >>"$GITHUB_ENV"
+publish_cleanup_coordinates
 complete=true
 trap - EXIT

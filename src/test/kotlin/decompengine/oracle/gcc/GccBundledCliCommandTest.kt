@@ -1,6 +1,7 @@
 package decompengine.oracle.gcc
 
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleJson
 import java.io.File
 import java.nio.file.Files
@@ -8,6 +9,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertFalse
@@ -197,6 +199,229 @@ class GccBundledCliCommandTest {
     }
 
     @Test
+    fun `later-invocation recovery option is bound to an interrupted plan selection`() = fixture { root ->
+        val interrupted = arguments(root) + listOf("--resume-after-checkpoint", "512")
+        val selector = listOf("--recover-operation", RECOVERED_OPERATION)
+        val recovery = GccBundledCliOptions.parse(interrupted + selector)
+        assertEquals(RECOVERED_OPERATION, recovery.recoverOperationId)
+        assertEquals("gcc-engine-plan", recovery.commandName)
+        assertEquals(GccBundledCliOptions.parse(interrupted), recovery.copy(recoverOperationId = null))
+        for (bad in listOf(arguments(root) + selector, interrupted + listOf("--recover-operation", "A".repeat(64)),
+            interrupted + listOf("--recover-operation", "a".repeat(63)), interrupted + selector + selector,
+            interrupted + "--recover-operation")) {
+            assertFails { GccBundledCliOptions.parse(bad) }
+        }
+        assertFails { GccBundledCliOptions.parse(arguments(root) + selector, fullRecoveryExport = true) }
+        assertFails { GccBundledCliOptions.parse(arguments(root) + selector, nativeCallObservations = true) }
+        assertFails { GccBundledCliOptions.parse(arguments(root) + selector, fullRecoveryExport = true, runtimeDiagnostics = true) }
+        val children = listOf(recovery.output, privateDirectory(recovery.output.resolve("inputs")),
+            privateDirectory(recovery.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        // A later-invocation selection is never itself retained as an invocation or admitted as fresh work.
+        assertFails { GccBundledCliInvocation(recovery, interrupted + selector, identities) }
+        assertFails { GccBundledCliCommand.admit(recovery, interrupted + selector) }
+        for (path in children.drop(1) + listOf(recovery.scratch)) Files.list(path).use { assertEquals(0L, it.count()) }
+        assertEquals(listOf("inputs", "journal"), Files.list(recovery.output).use { it.map { p -> p.fileName.toString() }.sorted().toList() })
+    }
+
+    @Test
+    fun `later-invocation recovery refuses changed argv and finished output before any journal or lease`() = fixture { root ->
+        val interrupted = arguments(root) + listOf("--resume-after-checkpoint", "512")
+        val options = GccBundledCliOptions.parse(interrupted)
+        val output = options.output
+        val children = listOf(output, privateDirectory(output.resolve("inputs")), privateDirectory(output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        // The earlier invocation's retained selection, exactly as admission publishes it.
+        LinuxFilesystemSyscalls.openRoot(output).use { selected ->
+            DescriptorBoundAtomicStateFile.publishNoReplace(selected, "invocation.json",
+                GccBundledCliInvocation(options, interrupted, identities).canonicalBytes, 256 * 1024)
+        }
+        val retained = Files.readAllBytes(output.resolve("invocation.json"))
+        fun refused(arguments: List<String>): String = assertFails {
+            GccBundledCliCommand.run(GccBundledCliOptions.parse(arguments), arguments)
+        }.message.orEmpty()
+        val selector = listOf("--recover-operation", RECOVERED_OPERATION)
+        assertTrue(refused(interrupted + listOf("--scratch-min-bytes", "1048576") + selector)
+            .contains("differs from the retained invocation"))
+        val reordered = interrupted.take(2) + interrupted.drop(4).take(2) + interrupted.drop(2).take(2) + interrupted.drop(6)
+        assertEquals(options, GccBundledCliOptions.parse(reordered))
+        assertTrue(refused(reordered + selector).contains("differs from the retained invocation"))
+        // The exact argv authenticates, then the earlier owner's staged controls are required before any journal lock.
+        assertTrue(refused(selector + interrupted).contains("retain exactly its two staged controls"))
+        for (path in children.drop(1) + listOf(options.scratch)) Files.list(path).use { assertEquals(0L, it.count()) }
+        Files.writeString(output.resolve("result.json"), "{}")
+        assertTrue(refused(interrupted + selector).contains("unfinished interrupted invocation"))
+        assertContentEquals(retained, Files.readAllBytes(output.resolve("invocation.json")))
+        for (path in children.drop(1) + listOf(options.scratch)) Files.list(path).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
+    fun `later-invocation recovery from another working directory is refused against the retained invocation`() = fixture { root ->
+        val interrupted = arguments(root) + listOf("--resume-after-checkpoint", "512")
+        val options = GccBundledCliOptions.parse(interrupted)
+        val children = listOf(options.output, privateDirectory(options.output.resolve("inputs")),
+            privateDirectory(options.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val current = GccBundledCliWorkingDirectory.current()
+        assertEquals(current, GccBundledCliInvocation(options, interrupted, identities).workingDirectory)
+        val elsewhere = GccBundledCliWorkingDirectory(root, LinuxFilesystemSyscalls.openRoot(root).use { it.identity })
+        assertFalse(current == elsewhere)
+        val retained = GccBundledCliInvocation(options, interrupted, identities, elsewhere)
+        val document = OracleJson.parseCanonical(retained.canonicalBytes).jsonObject
+        assertEquals("gcc-bundled-cli-invocation-v2", document.getValue("provider").jsonPrimitive.content)
+        assertEquals(root.toString(), document.getValue("workingDirectory").jsonObject.getValue("path").jsonPrimitive.content)
+        assertEquals(LinuxFilesystemSyscalls.openRoot(root).use { it.identity.key.inode },
+            document.getValue("workingDirectory").jsonObject.getValue("inode").jsonPrimitive.content.toLong())
+        LinuxFilesystemSyscalls.openRoot(options.output).use { selected ->
+            DescriptorBoundAtomicStateFile.publishNoReplace(selected, "invocation.json", retained.canonicalBytes, 256 * 1024)
+        }
+        val recovery = interrupted + listOf("--recover-operation", RECOVERED_OPERATION)
+        val failure = assertFails { GccBundledCliCommand.run(GccBundledCliOptions.parse(recovery), recovery) }
+        assertTrue(failure.message.orEmpty().contains("differs from the retained invocation"), failure.toString())
+        for (path in children.drop(1) + listOf(options.scratch)) Files.list(path).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
+    fun `an unreadable but searchable working directory is pinned and recorded by the actual CLI`() = fixture { root ->
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it } +
+            listOf("--resume-after-checkpoint", "512")
+        val workingDirectory = privateDirectory(root.resolve("searchable-only"))
+        val classpath = GccKotlinBootClasspathReference.open().use { reference ->
+            parseBootClassPathManifest(reference.invocationManifestBytes(), root, emptySet()).joinToString(File.pathSeparator) { it.path.toString() }
+        }
+        val log = root.resolve("searchable-only.log")
+        // Search (x) without read (r): O_PATH and realpath(3) succeed where a read-only directory open would not.
+        Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("-wx------"))
+        try {
+            // A direct java launch has no start script: it passes -XX:-UsePerfData itself, as the script would here.
+            val builder = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx256m",
+                "-XX:-UsePerfData", "-cp", classpath, "decompengine.MainKt", "gcc-engine-plan") + args)
+                .directory(workingDirectory.toFile()).redirectErrorStream(true).redirectOutput(log.toFile())
+            builder.environment().remove(GccBundledCliWorkingDirectory.LAUNCH_DIRECTORY_VARIABLE)
+            val process = builder.start()
+            try {
+                assertTrue(process.waitFor(60, TimeUnit.SECONDS))
+            } finally {
+                if (process.isAlive) { process.destroyForcibly(); assertTrue(process.waitFor(5, TimeUnit.SECONDS)) }
+            }
+            val output = Files.readString(log).take(8192)
+            assertTrue(process.exitValue() != 0, output)
+            // Admission got past the working directory and the bound output; only the fixture binary is refused.
+            assertTrue(output.contains("binary differs from selected profile engine"), output)
+        } finally {
+            Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("rwx------"))
+        }
+        val invocation = OracleJson.parseCanonical(Files.readAllBytes(root.resolve("output/invocation.json"))).jsonObject
+        val recorded = invocation.getValue("workingDirectory").jsonObject
+        assertEquals(workingDirectory.toString(), recorded.getValue("path").jsonPrimitive.content)
+        val identity = LinuxFilesystemSyscalls.openRoot(workingDirectory).use { it.identity }
+        assertEquals(identity.key.inode, recorded.getValue("inode").jsonPrimitive.content.toLong())
+        assertEquals(identity.key.device, recorded.getValue("device").jsonPrimitive.content.toLong())
+        assertEquals(identity.mountId, recorded.getValue("mountId").jsonPrimitive.content.toLong())
+    }
+
+    @Test
+    fun `the installed start script disables perf data only for an unreadable launch directory and exports it`() = fixture { root ->
+        val launcher = installedLauncher()
+        val javaHome = Files.createDirectories(root.resolve("recording-java/bin")).parent
+        val record = root.resolve("recorded-launch.txt")
+        // Stands in for java so the test observes the exact JVM argv and environment the real script builds.
+        Files.writeString(javaHome.resolve("bin/java"), "#!/bin/sh\n{ printf 'launch=%s\\n' \"${'$'}{LLM_BIN_PATCH_LAUNCH_DIRECTORY-unset}\"; " +
+            "for argument in \"${'$'}@\"; do printf 'arg=%s\\n' \"${'$'}argument\"; done; } > \"${'$'}RECORDED_LAUNCH\"\n")
+        Files.setPosixFilePermissions(javaHome.resolve("bin/java"), PosixFilePermissions.fromString("rwx------"))
+        val readable = privateDirectory(root.resolve("readable"))
+        val link = Files.createSymbolicLink(root.resolve("readable-link"), readable)
+        val unreadable = privateDirectory(root.resolve("searchable-only"))
+        fun launch(directory: Path): List<String> {
+            Files.deleteIfExists(record)
+            val builder = ProcessBuilder(launcher.toString(), "gcc-engine-plan", "--help").directory(directory.toFile())
+                .redirectErrorStream(true).redirectOutput(root.resolve("recording-launch.log").toFile())
+            cleanLauncherEnvironment(builder).apply { put("JAVA_HOME", javaHome.toString()); put("RECORDED_LAUNCH", record.toString()) }
+            val process = builder.start()
+            try { assertTrue(process.waitFor(30, TimeUnit.SECONDS)) } finally { if (process.isAlive) process.destroyForcibly() }
+            assertEquals(0, process.exitValue(), Files.readString(root.resolve("recording-launch.log")))
+            return Files.readAllLines(record)
+        }
+        // An ordinary launch keeps perf data, so jps, jcmd and jstat still see the JVM.
+        val ordinary = launch(link)
+        assertFalse(ordinary.contains("arg=-XX:-UsePerfData"), ordinary.toString())
+        assertEquals("launch=${readable.toRealPath()}", ordinary.first())
+        assertTrue(ordinary.contains("arg=decompengine.MainKt"), ordinary.toString())
+        Files.setPosixFilePermissions(unreadable, PosixFilePermissions.fromString("-wx------"))
+        try {
+            val searchableOnly = launch(unreadable)
+            assertTrue(searchableOnly.contains("arg=-XX:-UsePerfData"), searchableOnly.toString())
+            assertEquals("launch=$unreadable", searchableOnly.first())
+        } finally {
+            Files.setPosixFilePermissions(unreadable, PosixFilePermissions.fromString("rwx------"))
+        }
+    }
+
+    @Test
+    fun `the installed GCC CLI admits an unreadable but searchable launch directory without a caller flag`() = fixture { root ->
+        val launcher = installedLauncher()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it } +
+            listOf("--resume-after-checkpoint", "512")
+        val workingDirectory = privateDirectory(root.resolve("searchable-only"))
+        val log = root.resolve("installed.log")
+        Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("-wx------"))
+        try {
+            val builder = ProcessBuilder(listOf(launcher.toString(), "gcc-engine-plan") + args)
+                .directory(workingDirectory.toFile()).redirectErrorStream(true).redirectOutput(log.toFile())
+            cleanLauncherEnvironment(builder)["JAVA_HOME"] = Path.of(System.getProperty("java.home")).toRealPath().toString()
+            val process = builder.start()
+            try { assertTrue(process.waitFor(60, TimeUnit.SECONDS)) } finally { if (process.isAlive) process.destroyForcibly() }
+            val output = Files.readString(log).take(8192)
+            assertTrue(process.exitValue() != 0, output)
+            assertTrue(output.contains("binary differs from selected profile engine"), output)
+        } finally {
+            Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("rwx------"))
+        }
+        val recorded = OracleJson.parseCanonical(Files.readAllBytes(root.resolve("output/invocation.json"))).jsonObject
+            .getValue("workingDirectory").jsonObject
+        assertEquals(workingDirectory.toString(), recorded.getValue("path").jsonPrimitive.content)
+        assertEquals(LinuxFilesystemSyscalls.openRoot(workingDirectory).use { it.identity.key.inode },
+            recorded.getValue("inode").jsonPrimitive.content.toLong())
+    }
+
+    @Test
+    fun `a working directory that differs from the exported launch directory is refused`() = fixture { root ->
+        val variable = GccBundledCliWorkingDirectory.LAUNCH_DIRECTORY_VARIABLE
+        val current = GccBundledCliWorkingDirectory.current { null }
+        assertEquals(current, GccBundledCliWorkingDirectory.current { if (it == variable) current.path.toString() else null })
+        val other = privateDirectory(root.resolve("elsewhere"))
+        val link = Files.createSymbolicLink(root.resolve("current-link"), current.path)
+        for ((case, exported) in listOf("other-directory" to other.toString(), "relative" to "build",
+            "symbolic-link" to link.toString(), "absent" to root.resolve("absent").toString())) {
+            val failure = assertFails(case) { GccBundledCliWorkingDirectory.current { if (it == variable) exported else null } }
+            assertTrue(failure is IllegalArgumentException && (failure.message.orEmpty().contains(variable) ||
+                failure.message.orEmpty().contains("launcher's physical working directory")), "$case: $failure")
+        }
+        // Admission refuses the mismatch before any output child exists.
+        val args = arguments(root)
+        val options = GccBundledCliOptions.parse(args)
+        assertFails { GccBundledCliCommand.admit(options, args) { GccBundledCliWorkingDirectory.current { if (it == variable) other.toString() else null } } }
+        Files.list(options.output).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
+    fun `a failed working-directory capture leaves the output empty and usable for a retry`() = fixture { root ->
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
+        val options = GccBundledCliOptions.parse(args)
+        val failure = assertFails { GccBundledCliCommand.admit(options, args) { error("working directory capture failed") } }
+        assertTrue(failure.message.orEmpty().contains("working directory capture failed"), failure.toString())
+        Files.list(options.output).use { assertEquals(0L, it.count()) }
+        // The retry is admitted against the same still-empty output and fails only on the fixture binary.
+        val retry = assertFails { GccBundledCliCommand.run(options, args) }
+        assertTrue(retry.message.orEmpty().contains("binary differs from selected profile engine"), retry.toString())
+        assertEquals(listOf("inputs", "invocation.json", "journal"),
+            Files.list(options.output).use { it.map { path -> path.fileName.toString() }.sorted().toList() })
+    }
+
+    @Test
     fun `command records selection but refuses a mismatched binary before staging or leasing`() = fixture { root ->
         val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
@@ -272,6 +497,21 @@ class GccBundledCliCommandTest {
         assertTrue(nonempty.second.contains("existing empty private directory"), nonempty.second)
         assertEquals("preserve me", Files.readString(prior))
         Files.list(root.resolve("output")).use { assertEquals(1L, it.count()) }
+    }
+
+    private companion object {
+        val RECOVERED_OPERATION = "a".repeat(64)
+    }
+
+    private fun installedLauncher(): Path =
+        Path.of(System.getProperty("user.dir"), "build/install/llm_bin_patch/bin/llm_bin_patch").toRealPath().also {
+            assertTrue(Files.isExecutable(it), "installDist did not produce the start script")
+        }
+
+    /** Leaves only the start script's own JVM option handling in effect. */
+    private fun cleanLauncherEnvironment(builder: ProcessBuilder): MutableMap<String, String> = builder.environment().apply {
+        for (name in listOf("JAVA_OPTS", "LLM_BIN_PATCH_OPTS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
+            GccBundledCliWorkingDirectory.LAUNCH_DIRECTORY_VARIABLE)) remove(name)
     }
 
     private fun arguments(root: Path) = listOf("cc1", root.resolve("binary").toString(), "--profile", root.resolve("profile").toString(),

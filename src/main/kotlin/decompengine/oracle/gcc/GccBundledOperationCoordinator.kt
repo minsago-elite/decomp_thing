@@ -38,6 +38,8 @@ import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandLauncher
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandResources
 import decompengine.oracle.fulltree.calculateFullTreeObservationRuntimeManifestSha256
 import decompengine.oracle.fulltree.OracleNativeLibraries
+import decompengine.oracle.fulltree.containedControlIdentityJson
+import decompengine.oracle.fulltree.findObservationCgroupsForUnit
 import decompengine.oracle.fulltree.isolatedObservationJvmTemporaryArguments
 import java.nio.file.Path
 
@@ -223,6 +225,33 @@ internal class GccBundledInterruptedOperation(
     val prefixAssessmentReceiptBytes: ByteArray get() = prefix.copyOf()
 }
 
+/** How the current live owner came to hold this operation; a same-owner resume is never cold recovery. */
+internal enum class GccBundledExecutionOwnership(val wireName: String) {
+    FRESH_SINGLE_OWNER("fresh-single-owner"),
+    SAME_OWNER_CHECKPOINT_RESUME("same-owner-checkpoint-resume"),
+    LATER_INVOCATION_RECOVERY("later-invocation-recovery"),
+}
+
+/**
+ * Stopped checkpoint state that a later owner re-derived from durable records and the re-locked run root.
+ * Constructed only by [GccBundledOperationCoordinator.recoverInterrupted].
+ */
+internal class GccBundledRecoveredCheckpoint internal constructor(
+    val interruption: GccBundledInterruptedOperation,
+    val trigger: GccBundledCheckpointTrigger,
+    val export: GccBundledInterruptedExportSnapshot,
+    val freshControlName: String,
+    val freshControlIdentity: LinuxFileIdentity,
+    val deadline: ContainedCommandOperationDeadline,
+    constructionPermit: Any,
+) {
+    init {
+        check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
+            "recovered GCC checkpoints require coordinator reconciliation"
+        }
+    }
+}
+
 internal class GccBundledPreparedOperation internal constructor(
     val intent: GccBundledOperationIntent,
     private val inputs: GccBundledOperationInputs,
@@ -232,6 +261,7 @@ internal class GccBundledPreparedOperation internal constructor(
     private val directories: Map<String, LinuxFileIdentity>,
     definitionBytes: ByteArray,
     constructionPermit: Any,
+    private val recovered: GccBundledRecoveredCheckpoint? = null,
 ) : AutoCloseable {
     val authority: String = "gcc-bundled-live-prepared-operation-v1"
     val complete: Boolean = false
@@ -265,8 +295,24 @@ internal class GccBundledPreparedOperation internal constructor(
     val diskEvidenceBytes: ByteArray
         get() = diskEvidence.copyOf()
 
+    val executionOwnership: GccBundledExecutionOwnership = when {
+        recovered != null -> GccBundledExecutionOwnership.LATER_INVOCATION_RECOVERY
+        intent.runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED -> GccBundledExecutionOwnership.SAME_OWNER_CHECKPOINT_RESUME
+        else -> GccBundledExecutionOwnership.FRESH_SINGLE_OWNER
+    }
+
     init {
         check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) { "GCC prepared operation requires retained coordinator ownership" }
+        recovered?.let { checkpoint ->
+            // A later owner may only resume its reconciled checkpoint: no fresh or interrupted START remains.
+            executionAttempted = true
+            operationDeadline = checkpoint.deadline
+            retainedInterruption = checkpoint.interruption
+            retainedTrigger = checkpoint.trigger
+            retainedExport = checkpoint.export
+            retainedControlIdentity = checkpoint.freshControlIdentity
+            completedControls[checkpoint.freshControlName] = checkpoint.freshControlIdentity
+        }
     }
 
     @Synchronized
@@ -390,7 +436,8 @@ internal class GccBundledPreparedOperation internal constructor(
             }
             inputs.verify("after stopped GCC analysis-state capture")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-            val stateReceipt = journal.recordInterruptedAnalysisState(state)
+            // The deadline snapshot is taken inside the stopped commit: an expired operation never commits.
+            val stateReceipt = journal.recordInterruptedAnalysisState(state) { checkNotNull(operationDeadline).snapshot() }
             GccBundledInterruptedOperation(receipt, prefixReceipt, prefix, state, stateReceipt)
         }.also {
             retainedInterruption = it
@@ -647,8 +694,10 @@ internal class GccBundledPreparedOperation internal constructor(
                 "plannerExecutionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(planned.executionReceiptBytes)),
                 "plannerAssessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(planned.plannerAssessmentReceiptBytes)),
                 "operationWallTime" to deadline.snapshot(),
+                "executionOwnership" to JsonPrimitive(executionOwnership.wireName),
                 "scratchDisposition" to JsonPrimitive("retained; release and cold recovery unqualified"),
-            )))
+            ) + (journal.recoveryRecordBytes?.let { mapOf("laterInvocationRecoverySha256" to JsonPrimitive(OracleArtifacts.sha256(it))) }
+                ?: emptyMap())))
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
                 decompengine.oracle.core.DescriptorBoundAtomicStateFile.publishNoReplace(
@@ -1398,6 +1447,171 @@ internal object GccBundledOperationCoordinator {
             journal = null
             lease = null
             return prepared
+        } catch (failure: Throwable) {
+            runCatching { lease?.abandonForRecovery() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            runCatching { journal?.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            runCatching { inputs?.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    /**
+     * Later-invocation recovery of one interrupted planning operation whose earlier owner is gone.
+     *
+     * The journal-root, operation-journal and scratch-mount locks are taken without blocking and in
+     * [prepareNew]'s order. Any lock still held means the earlier owner is live, and recovery is
+     * refused before records are reused. The journal must be exactly the stopped history; every
+     * record must rebuild byte for byte, the run root must still be the definition's output, and
+     * the stopped prefix, in-flight bytes and analysis state must match their durable assessment.
+     * The exact interrupted unit must have no cgroup. Only then is `recovery-adopted.json`
+     * published, and the returned owner can only resume, plan and publish this checkpoint.
+     * If an earlier later owner crashed after adopting but before any resume record, its single
+     * adoption is revalidated and reused (or its complete atomic temporary is renamed into place)
+     * under all three locks, and its recorded allowance stays the cap.
+     */
+    fun recoverInterrupted(
+        intent: GccBundledOperationIntent,
+        journalRoot: Path,
+        provisionedMount: Path,
+        recoveryArgv: List<String>,
+    ): GccBundledPreparedOperation {
+        requireGccBundledOperationPath(journalRoot)
+        requireGccBundledOperationPath(provisionedMount)
+        intent.cliInvocation?.let {
+            require(journalRoot == it.options.output.resolve("journal") && provisionedMount == it.options.scratch) {
+                "coordinator roots differ from bound CLI selection"
+            }
+        }
+        require(journalRoot.toRealPath() == journalRoot && provisionedMount.toRealPath() == provisionedMount) {
+            "GCC bundled operation roots must be canonical existing directories"
+        }
+        require(!journalRoot.startsWith(provisionedMount) && !provisionedMount.startsWith(journalRoot)) {
+            "GCC bundled journal and dedicated scratch must be disjoint"
+        }
+        require(intent.runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED &&
+            intent.bundledRuntime.invocationVersion == 3 && intent.bundledRuntime.recoveryMode == "planning") {
+            "later-invocation recovery requires an interrupted planning operation"
+        }
+        require(recoveryArgv.size <= 33 && recoveryArgv.sumOf { it.toByteArray().size.toLong() + 1 } <= 65536) {
+            "later-invocation recovery argv exceeds its bound"
+        }
+        require((intent.cliInvocation == null) == recoveryArgv.isEmpty()) {
+            "a later-invocation recovery argv is recorded exactly when the operation has a CLI invocation"
+        }
+        var inputs: GccBundledOperationInputs? = null
+        var journal: GccBundledOperationJournal? = null
+        var lease: FullTreeDiskScratchLease? = null
+        try {
+            val openedInputs = GccBundledOperationInputs.open(intent, listOf(journalRoot, provisionedMount))
+            inputs = openedInputs
+            val openedJournal = GccBundledOperationJournal.openStoppedForRecovery(
+                journalRoot, intent.operationId, intent.canonicalBytes, openedInputs.deploymentClosureSha256,
+            )
+            journal = openedJournal
+            val stopped = openedJournal.recoveredStoppedEvidence
+            val (openedLease, runRoot) = FullTreeDiskScratchAuthority.reacquireActiveRunForRecovery(
+                provisionedMount, intent.diskOperation(), intent.diskPolicy, stopped.diskEvidence,
+            )
+            lease = openedLease
+            openedInputs.verify("after GCC later-invocation lease reacquisition")
+            openedJournal.verify("after GCC later-invocation lease reacquisition")
+            val definition = stopped.definitionBytes
+            val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            val executed = OracleJson.parseCanonical(stopped.interruptedExecutionBytes) as JsonObject
+            val trigger = GccBundledCheckpointTrigger.restoreFromDurableAuthorization(
+                stopped.interruptAuthorizationBytes, intent.cliInvocation?.options?.resumeAfterCheckpoint,
+            )
+            // A fresh same-process deadline capped by the budget committed with the stopped state, after prefix and
+            // state capture. A retained adoption keeps its own recorded allowance, so a crash never refreshes it.
+            // Idle time between owners is not charged; whole-operation accounting across invocations remains #982.
+            val remainingMillis = stopped.resumeAllowanceMillis
+            require(remainingMillis in 2_000L..stopped.recoveryWallCapMillis) {
+                "GCC stopped operation has no remaining wall budget to resume"
+            }
+            val deadline = ContainedCommandOperationDeadline(remainingMillis)
+            val limits = GccAnalysisStateCaptureLimits(
+                maximumEntries = minOf(intent.diskPolicy.maximumFilesystemInodes, 32768L).toInt(),
+                maximumTotalBytes = intent.diskPolicy.maximumFilesystemBytes,
+                maximumWallMillis = deadline.remainingMillis(intent.budgets.wallClockMillis),
+            )
+            val directories = linkedMapOf<String, LinuxFileIdentity>()
+            val reconciled = openedLease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
+                borrowed.withPinnedDescriptor { descriptor ->
+                    val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+                    val policy = intent.diskPolicy
+                    val output = GccCompilerEngineOutputLeaseIdentity(
+                        borrowed.path, identity.key.device, identity.key.inode, identity.mountId,
+                        identity.uid, identity.gid, identity.mode.permissions, policy.requiredAvailableBytes,
+                        policy.maximumFilesystemBytes, policy.requiredAvailableInodes, policy.maximumFilesystemInodes,
+                    )
+                    val state = GccCompilerEngineAnalysisStateIdentity(
+                        GccCompilerEngineAnalysisStateMode.FRESH_EMPTY, borrowed.path.resolve("state"), null, 0, 0,
+                    )
+                    val derived = GccCompilerEngineContainmentContract.assessDefinition(GccCompilerEngineContainmentRequest(
+                        intent.engineId, intent.runKind, intent.artifacts, state,
+                        intent.bundledRuntime.command(intent.artifacts, state, output, intent.runKind), intent.environment,
+                        output, intent.budgets, intent.bundledRuntime,
+                    )).canonicalBytes
+                    require(derived.contentEquals(definition)) { "GCC stopped definition differs from the reacquired run root" }
+                    val controlName = checkNotNull(intent.bundledRuntime.freshControlDirectoryName(borrowed.path))
+                    require(LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 5).toSet() ==
+                        setOf("state", "reports", "tmp", controlName)) { "GCC stopped run membership changed" }
+                    for (name in listOf("state", "reports", "tmp")) {
+                        directories[name] = LinuxFilesystemSyscalls.openDirectoryAt(descriptor.fd, name).use { child ->
+                            LinuxFilesystemSyscalls.identity(child.fd).also { selected ->
+                                require(selected.uid == identity.uid && selected.mountId == identity.mountId &&
+                                    selected.isDirectory && !selected.isSymbolicLink && selected.mode.permissions == 448) {
+                                    "GCC stopped $name directory is not private on the dedicated mount"
+                                }
+                            }
+                        }
+                    }
+                    val control = LinuxFilesystemSyscalls.openDirectoryAt(descriptor.fd, controlName).use {
+                        LinuxFilesystemSyscalls.identity(it.fd)
+                    }
+                    require(executed["controlDirectory"] == JsonPrimitive(borrowed.path.resolve(controlName).toString()) &&
+                        executed["controlDirectoryIdentity"] == containedControlIdentityJson(controlName, control)) {
+                        "GCC fresh control directory differs from its interrupted execution record"
+                    }
+                    val snapshot = GccBundledExportCapture.captureInterruptedSnapshot(
+                        descriptor, directories.getValue("reports"), intent.artifacts,
+                    )
+                    require(trigger.assessStoppedPrefix(snapshot.assessment, snapshot.planningPrefixSha256, snapshot.inFlightArtifacts,
+                        snapshot.capturedProgress, snapshot.effectiveProgress).contentEquals(stopped.prefixAssessmentBytes)) {
+                        "GCC stopped prefix, progress or in-flight bytes differ from the earlier owner's assessment"
+                    }
+                    val analysisState = GccBundledAnalysisStateSnapshot(
+                        stopped.stateEntryCount, stopped.stateTotalBytes, stopped.stateManifestBytes,
+                    )
+                    GccBundledAnalysisStateCapture.requireUnchanged(descriptor, directories.getValue("state"), analysisState, limits)
+                    GccBundledRecoveredCheckpoint(
+                        GccBundledInterruptedOperation(stopped.interruptedRecordBytes, stopped.prefixRecordBytes,
+                            snapshot.assessment, analysisState, stopped.stateRecordBytes),
+                        trigger, snapshot, controlName, control, deadline, GCC_BUNDLED_PREPARED_OPERATION_PERMIT,
+                    )
+                }
+            }
+            require(findObservationCgroupsForUnit(original.unitName).isEmpty()) {
+                "the interrupted GCC unit still has a cgroup; later-invocation recovery refused"
+            }
+            val prepared = GccBundledPreparedOperation(
+                intent, openedInputs, openedJournal, openedLease, runRoot, java.util.Map.copyOf(directories), definition,
+                GCC_BUNDLED_PREPARED_OPERATION_PERMIT, reconciled,
+            )
+            inputs = null
+            journal = null
+            lease = null
+            try {
+                prepared.requireInterruptedStateCurrent()
+                // The journal rebuilds the adoption from verified stopped evidence and validates a retained one
+                // with the same full-payload check; the run root it names is the definition's, proven above.
+                if (stopped.retainedAdoptionPayloadBytes != null) openedJournal.completeRetainedRecoveryAdoption()
+                else openedJournal.recordRecoveryAdopted(recoveryArgv, remainingMillis)
+                return prepared
+            } catch (failure: Throwable) {
+                runCatching { prepared.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+                throw failure
+            }
         } catch (failure: Throwable) {
             runCatching { lease?.abandonForRecovery() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
             runCatching { journal?.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)

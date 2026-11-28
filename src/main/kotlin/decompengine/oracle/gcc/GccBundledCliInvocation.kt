@@ -15,6 +15,8 @@ internal data class GccBundledCliOptions(
     val resumeAfterCheckpoint: Long?, val fullRecoveryExport: Boolean = false,
     val runtimeDiagnostics: Boolean = false,
     val nativeCallObservations: Boolean = false,
+    /** A later invocation's selection of one unfinished interrupted operation; never part of a retained invocation. */
+    val recoverOperationId: String? = null,
 ) {
     val commandName: String get() = when {
         nativeCallObservations -> "gcc-engine-native-calls"
@@ -45,7 +47,7 @@ internal data class GccBundledCliOptions(
             val positionals = mutableListOf<String>()
             val values = linkedMapOf<String, String>()
             val allowed = setOf("--profile", "--ghidra-archive", "--output", "--scratch", "--resume-after-checkpoint",
-                "--scratch-min-bytes", "--scratch-max-bytes", "--scratch-min-inodes", "--scratch-max-inodes")
+                "--scratch-min-bytes", "--scratch-max-bytes", "--scratch-min-inodes", "--scratch-max-inodes", "--recover-operation")
             var index = 0
             while (index < arguments.size) {
                 val argument = arguments[index++]
@@ -80,13 +82,19 @@ internal data class GccBundledCliOptions(
             val threshold = number("--resume-after-checkpoint")?.also { GccBundledCheckpointTrigger(it) }
             require(!fullRecoveryExport || threshold == null) { "full-recovery export cannot resume from a planning checkpoint" }
             require(!nativeCallObservations || threshold == null) { "native call observations cannot resume from a planning checkpoint" }
+            val recovery = values["--recover-operation"]?.also {
+                require(it.matches(Regex("[a-f0-9]{64}"))) { "--recover-operation requires a 64-character lowercase hex operation ID" }
+                require(!fullRecoveryExport && !runtimeDiagnostics && !nativeCallObservations && threshold != null) {
+                    "--recover-operation requires the original interrupted gcc-engine-plan selection with --resume-after-checkpoint"
+                }
+            }
             return GccBundledCliOptions(positionals[0], path(positionals[1]), required("--profile"), required("--ghidra-archive"),
                 required("--output"), required("--scratch"), FullTreeDiskScratchPolicy(
                     number("--scratch-min-bytes", 8L * 1024 * 1024 * 1024)!!,
                     number("--scratch-max-bytes", 64L * 1024 * 1024 * 1024)!!,
                     number("--scratch-min-inodes", 32768)!!, number("--scratch-max-inodes", 1_000_000)!!), threshold,
                 fullRecoveryExport = fullRecoveryExport, runtimeDiagnostics = runtimeDiagnostics,
-                nativeCallObservations = nativeCallObservations).also {
+                nativeCallObservations = nativeCallObservations, recoverOperationId = recovery).also {
                 require(it.diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
                     it.diskPolicy.maximumFilesystemInodes <= 2_000_000)
                 require(!it.output.startsWith(it.scratch) && !it.scratch.startsWith(it.output)) { "output and scratch must be disjoint" }
@@ -98,13 +106,69 @@ internal data class GccBundledCliOptions(
     }
 }
 
-/** Immutable CLI selection and directory identity, committed as part of the operation request. */
+/** The launcher's process working directory: its canonical path and the identity of the directory it names. */
+internal data class GccBundledCliWorkingDirectory(val path: Path, val identity: LinuxFileIdentity) {
+    init {
+        require(path.isAbsolute && path.normalize() == path) { "CLI working directory must be canonical" }
+    }
+
+    fun toJson(): JsonObject = JsonObject(mapOf(
+        "path" to JsonPrimitive(path.toString()), "device" to JsonPrimitive(identity.key.device),
+        "inode" to JsonPrimitive(identity.key.inode), "mountId" to JsonPrimitive(identity.mountId),
+        "uid" to JsonPrimitive(identity.uid), "gid" to JsonPrimitive(identity.gid), "mode" to JsonPrimitive(identity.mode),
+    ))
+
+    companion object {
+        /** Exported by the installed start script: the physical launch directory, captured before Java started. */
+        const val LAUNCH_DIRECTORY_VARIABLE = "LLM_BIN_PATCH_LAUNCH_DIRECTORY"
+
+        /**
+         * Pins the kernel's working directory for this process with O_PATH, then requires its canonical path to
+         * name that same directory (device, inode and mount). Neither step needs read permission, so a searchable
+         * but unreadable working directory is admitted. When the start script exported the launch directory, the
+         * pinned directory must be that one by canonical path, device and inode, so a JVM that moved its working
+         * directory before this code ran is refused rather than bound. Without the variable (a direct `java`
+         * launch) the kernel's working directory is bound as captured.
+         */
+        fun current(environment: (String) -> String? = System::getenv): GccBundledCliWorkingDirectory =
+            LinuxFilesystemSyscalls.openCurrentWorkingDirectoryPath().use { cwd ->
+                val path = Path.of("").toAbsolutePath().toRealPath()
+                val named = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
+                    ?: throw IllegalArgumentException("CLI working directory path no longer exists")
+                named.use { selected ->
+                    require(selected.identity.isDirectory && selected.identity.key == cwd.identity.key &&
+                        selected.identity.mountId == cwd.identity.mountId) {
+                        "CLI working directory path differs from the process working directory"
+                    }
+                }
+                environment(LAUNCH_DIRECTORY_VARIABLE)?.let { exported ->
+                    val launched = Path.of(exported)
+                    val physical = try {
+                        launched.takeIf { it.isAbsolute && it.normalize() == it }?.toRealPath()
+                    } catch (failure: java.io.IOException) {
+                        throw IllegalArgumentException("$LAUNCH_DIRECTORY_VARIABLE names no directory", failure)
+                    }
+                    require(physical == launched) { "$LAUNCH_DIRECTORY_VARIABLE must name a canonical physical directory" }
+                    val launchedIdentity = LinuxFilesystemSyscalls.openAbsolutePathOrNull(launched)?.use { it.identity }
+                        ?: throw IllegalArgumentException("$LAUNCH_DIRECTORY_VARIABLE names no directory")
+                    require(launched == path && launchedIdentity.isDirectory && launchedIdentity.key == cwd.identity.key) {
+                        "CLI working directory differs from the launcher's physical working directory"
+                    }
+                }
+                GccBundledCliWorkingDirectory(path, cwd.identity)
+            }
+    }
+}
+
+/** Immutable CLI selection, working directory and directory identity, committed as part of the operation request. */
 internal class GccBundledCliInvocation(val options: GccBundledCliOptions, arguments: List<String>,
-    identities: Map<Path, LinuxFileIdentity>) {
+    identities: Map<Path, LinuxFileIdentity>,
+    val workingDirectory: GccBundledCliWorkingDirectory = GccBundledCliWorkingDirectory.current()) {
     private val directories = java.util.Map.copyOf(identities)
     val path: Path = options.output.resolve("invocation.json")
     private val encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
-        "provider" to JsonPrimitive("gcc-bundled-cli-invocation-v1"), "schemaVersion" to JsonPrimitive(1),
+        "provider" to JsonPrimitive("gcc-bundled-cli-invocation-v2"), "schemaVersion" to JsonPrimitive(2),
+        "workingDirectory" to workingDirectory.toJson(),
         "argv" to JsonArray((listOf(options.commandName) + arguments)
             .map(::JsonPrimitive)),
         "engineId" to JsonPrimitive(options.engineId), "binary" to JsonPrimitive(options.binary.toString()),
@@ -121,6 +185,7 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
     val canonicalBytes: ByteArray get() = encoded.copyOf()
 
     init {
+        require(options.recoverOperationId == null) { "a later-invocation recovery selection is never a retained invocation" }
         require(directories.keys == setOf(options.output, options.output.resolve("inputs"), options.output.resolve("journal")))
         require(GccBundledCliOptions.parse(arguments, fullRecoveryExport = options.fullRecoveryExport,
             runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations) == options) {

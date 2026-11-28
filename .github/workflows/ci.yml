@@ -491,6 +491,8 @@ jobs:
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-resume
       - name: Prepare separate bundled resume fresh-control scratch
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-resume-control
+      - name: Prepare separate bundled later-owner recovery scratch
+        run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-recovery
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
       - name: Cache verified pinned Goose archive
@@ -578,6 +580,9 @@ jobs:
       - name: Release bundled resume fresh-control scratch
         if: always()
         run: bash scripts/ci-release-oracle-ext4-scratch.sh --bundled-ghidra-resume-control
+      - name: Release bundled later-owner recovery scratch
+        if: always()
+        run: bash scripts/ci-release-oracle-ext4-scratch.sh --bundled-ghidra-recovery
       - uses: actions/upload-artifact@v7
         if: always()
         with:
