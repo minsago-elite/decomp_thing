@@ -65,6 +65,10 @@ internal class BuiltinJournalException : RuntimeException("Built-in journal unav
  * One JVM-wide lease per journal path, taken before any channel on that path is opened and held until it closes.
  * POSIX record locks belong to the process: when a same-JVM contender's tryLock is refused and it closes its own
  * channel, Linux also drops the lock held through the first channel. Contenders are refused before they open one.
+ *
+ * The lease is keyed by path, not by the opened file. Workflow maintenance must keep the journal path (the file and
+ * its parent) fixed until every holder closes; live relocation is unsupported. Binding the lease to the opened
+ * file's identity is future work.
  */
 internal object BuiltinJournalLeases {
     private val held = java.util.concurrent.ConcurrentHashMap.newKeySet<Path>()
@@ -157,12 +161,21 @@ internal class BuiltinJournal private constructor(
         throw BuiltinJournalException()
     }
 
-    override fun close(): Unit = guarded { try { lock.release() } finally { try { channel.close() } finally { lease.close() } } }
+    private var closed = false
+
+    /** Idempotent, so every exit path may close; the lease is released even if unlocking or closing throws. */
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        guarded { try { lock.release() } finally { try { channel.close() } finally { lease.close() } } }
+    }
 
     companion object {
         fun open(configuration: BuiltinJournalConfiguration, request: AgentExecutionRequest, secrets: List<String>): BuiltinJournal {
             var lease: BuiltinJournalLeases.Lease? = null
             var channel: FileChannel? = null
+            var transferred = false
             try {
                 verifyParent(configuration.path)
                 lease = BuiltinJournalLeases.acquire(configuration.path)
@@ -186,11 +199,13 @@ internal class BuiltinJournal private constructor(
                 check(journal.redact(identity) == identity)
                 journal.append(BuiltinJournalKind.START, identity)
                 FileChannel.open(parent, READ).use { it.force(true) }
+                transferred = true
                 return journal
             } catch (_: Exception) {
-                try { channel?.close() } catch (_: Exception) { }
-                lease?.close()
                 throw BuiltinJournalException()
+            } finally {
+                // Until ownership transfers, release on every Throwable: a leaked lease refuses this path until JVM exit.
+                if (!transferred) try { channel?.close() } catch (_: Exception) { } finally { lease?.close() }
             }
         }
 
@@ -248,6 +263,7 @@ internal class BuiltinJournal private constructor(
             expected: BuiltinJournalCommitment, secrets: List<String>): Pair<BuiltinJournal, JsonObject> {
             var lease: BuiltinJournalLeases.Lease? = null
             var channel: FileChannel? = null
+            var transferred = false
             try {
                 val inspection = inspect(configuration, AgentExecutionRequestBinding.capture(request), expected)
                 check(inspection.endsAtCheckpoint)
@@ -274,11 +290,13 @@ internal class BuiltinJournal private constructor(
                 }.distinct().sortedByDescending { it.length }
                 val journal = BuiltinJournal(configuration, lease, channel, lock, key, patterns)
                 journal.count = expected.records; journal.bytes = expected.bytes; journal.head = expected.headSha256
-                return journal to inspection.records.last().getValue("payload").jsonObject
+                val restored = journal to inspection.records.last().getValue("payload").jsonObject
+                transferred = true
+                return restored
             } catch (_: Exception) {
-                try { channel?.close() } catch (_: Exception) { }
-                lease?.close()
                 throw BuiltinJournalException()
+            } finally {
+                if (!transferred) try { channel?.close() } catch (_: Exception) { } finally { lease?.close() }
             }
         }
 

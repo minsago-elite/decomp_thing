@@ -154,7 +154,15 @@ class BuiltinAgentHarness(
         val repeated = mutableMapOf<String, Int>()
         val usedCallIds = mutableSetOf<String>()
 
-        fun run(binding: AgentExecutionRequestBinding): AgentExecutionReceipt {
+        /**
+         * Journal cleanup covers every exit, including an Error from session teardown or receipt construction. An
+         * unclosed journal would keep its JVM-wide lease and refuse every later resume of that path until JVM exit.
+         */
+        fun run(binding: AgentExecutionRequestBinding): AgentExecutionReceipt = try { runOwned(binding) } finally {
+            try { journal?.close() } catch (_: Exception) { /* The primary outcome or Throwable is already decided. */ }
+        }
+
+        private fun runOwned(binding: AgentExecutionRequestBinding): AgentExecutionReceipt {
             var stop: BuiltinStop
             var failureKind: AgentFailureKind? = null
             var cleanup = false
