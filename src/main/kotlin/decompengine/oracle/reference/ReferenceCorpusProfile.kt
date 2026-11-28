@@ -303,6 +303,7 @@ internal class AuthenticatedReferenceCorpusProfile private constructor(
     val definition: ReferenceCorpusDefinition,
     val nativeRuntimeSelection: ReferenceNativeRuntimeSelection,
     private val guards: List<StableControlFile>,
+    private val bindingGuards: Map<String, StableControlFile>,
     inputBindings: List<ReferenceCorpusSourceBinding>,
     artifacts: List<ReferenceCorpusArtifact>,
 ) : AutoCloseable {
@@ -318,6 +319,18 @@ internal class AuthenticatedReferenceCorpusProfile private constructor(
 
     fun artifact(role: String): ReferenceCorpusArtifact = originalArtifacts.singleOrNull { it.role == role }
         ?: throw IllegalArgumentException("unknown reference artifact role")
+
+    /** Reads only an already-registered retained input; callers cannot supply an approval digest. */
+    @Synchronized
+    fun registeredInput(id: String, maximumBytes: Int): ByteArray {
+        require(maximumBytes in 1..MAXIMUM_ARTIFACT_BYTES.toInt()) { "registered input read exceeds the bound" }
+        requireCurrent("before registered input read")
+        val guard = requireNotNull(bindingGuards[id]) { "input is not in the compiled registration" }
+        require(guard.size <= maximumBytes) { "registered input exceeds its consumer bound" }
+        val bytes = guard.readExactly(0, guard.size.toInt(), "registered input $id")
+        requireCurrent("after registered input read")
+        return bytes
+    }
 
     @Synchronized
     fun requireCurrent(label: String = "reference profile") {
@@ -428,7 +441,8 @@ internal class AuthenticatedReferenceCorpusProfile private constructor(
                     artifacts.map { it.role }.toSet() == definition.artifacts.keys) { "registered artifact roles differ from the profile" }
                 opened.forEach { it.verifyUnchanged("reference profile admitted") }
                 AuthenticatedReferenceCorpusProfile(registrationId, binding(profileId).first.path, definition, selection,
-                    immutableList(opened), bindings.map { it.first }, artifacts)
+                    immutableList(opened), java.util.Collections.unmodifiableMap(bindings.associate { it.first.id to it.second }),
+                    bindings.map { it.first }, artifacts)
             } catch (failure: Throwable) {
                 opened.asReversed().forEach { runCatching(it::close).exceptionOrNull()?.let(failure::addSuppressed) }
                 throw failure

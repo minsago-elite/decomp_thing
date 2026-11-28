@@ -193,6 +193,25 @@ report directories must belong to that UID and have exact mode 0700. The existin
 contained worker's user-namespace and capability policy is unchanged; the
 qualification entrypoint introduces no root-worker mode or permission bypass.
 
+Before either capture, the installed ordinary controller borrows the authenticated
+profile and admitted runtime to validate the closed orchestration declaration.
+The compiled registration additionally pins the exact v2 contract and its
+independently captured reference. It publishes `orchestration-declaration.json`
+under the private report root after validating all seven phase startup closures
+against selected literal/resolved runtime paths. The file declares 14 reference
+cases and four recorded produced-program invocations; it performs no phase,
+reconstructed-candidate or produced-program execution. Recorded produced-output
+ELF identities are not mounted. Historical policy/probe source hashes remain
+provenance data; no Python source is executed.
+
+The metadata qualification report is now schema/provider v2 and binds that exact
+declaration file's path, byte count and hash. The collector retains it both in
+the private archive and as a top-level artifact, including when a later metadata
+capture fails. A declaration receipt does not establish candidate behavior or a
+completed metadata capture. The earlier v1 qualification format and nine-input
+registration remain valid only at their own recorded source; this implementation
+uses eleven compiled input bindings without changing registration schema 2.
+
 Qualification performs two fresh coordinator captures on distinct dedicated
 filesystems. Both successful captures retain their journal, scratch lease and
 absence-proof ownership while the qualifier independently checks all 19 cases,

@@ -79,71 +79,88 @@ object GccMetadataReferenceQualificationCli {
                 GccMetadataReferenceProfile.open(profileRoot).use { profile ->
                     FrozenGccMetadataReference.open(profileRoot).use { frozen ->
                         ReferenceNativeRuntime.admit(ociLayout, runtimeRoot, profile).use { runtime ->
-                            fun capture(index: Int): RetainedReferenceCorpusCapture = try {
-                                ReferenceCorpusCoordinator.captureRetained(profile, runtime, deployment.configuration,
-                                    journalRoots[index], scratchMounts[index], deployment.expectedCgroupParent)
-                            } catch (failure: ReferenceCorpusRetainedFailure) {
-                                try { failure.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
-                                throw failure
+                            val declarationPath = reportPath.resolveSibling(GccOrchestrationReferenceDeclaration.FILE_NAME)
+                            val declaration = GccOrchestrationReferenceDeclaration.declare(profile, runtime)
+                            LinuxFilesystemSyscalls.openRoot(reportPath.parent).use { destination ->
+                                DescriptorBoundAtomicStateFile.publishManifestNoReplace(destination, declarationPath.fileName.toString(),
+                                    declaration, GccOrchestrationReferenceDeclaration.MAXIMUM_BYTES)
+                                require(Files.isSameFile(reportPath.parent, LinuxFilesystemSyscalls.descriptorPath(destination)))
                             }
-                            capture(0).use { first ->
-                                capture(1).use { replay ->
-                                    require(first.operationId != replay.operationId) { "independent captures reused an operation identity" }
-                                    val captures = listOf(first, replay)
-                                    val checked = captures.map { captured ->
-                                        captured.requireCurrent("before frozen reference comparison")
-                                        GccMetadataReferenceComparison.verify(profile.definition, frozen.bytes,
-                                            captured.canonicalBytes, runtime.identitySha256)
-                                    }
-                                    require(checked[0].stableCases.contentEquals(checked[1].stableCases)) {
-                                        "independent fresh reference operations produced different stable case bytes"
-                                    }
-                                    val operations = captures.mapIndexed { index, captured ->
-                                        qualificationOperation(captured, profile.definition, deployment,
-                                            journalRoots[index], scratchMounts[index])
-                                    }
-                                    val report = JsonObject(mapOf(
-                                        "schemaVersion" to JsonPrimitive(1),
-                                        "provider" to JsonPrimitive("gcc-metadata-reference-owner-qualification-v1"),
-                                        "qualificationKind" to JsonPrimitive("original-reference-execution-and-independent-replay"),
-                                        "controller" to controller.evidence(),
-                                        "deployment" to fileIdentity(deploymentPath, deploymentBytes),
-                                        "deploymentConfigurationSha256" to JsonPrimitive(deployment.configuration.canonicalSha256),
-                                        "expectedCgroupParent" to JsonPrimitive(deployment.expectedCgroupParent),
-                                        "frozenReference" to fileIdentity(frozen.path, frozen.bytes),
-                                        "profile" to JsonObject(mapOf("registrationId" to JsonPrimitive(profile.registrationId),
-                                            "path" to JsonPrimitive(profile.profilePath.toString()), "sha256" to JsonPrimitive(profile.profileSha256),
-                                            "inputs" to JsonArray(profile.inputBindings.map { binding -> JsonObject(mapOf(
-                                                "id" to JsonPrimitive(binding.id), "path" to JsonPrimitive(binding.path.toString()),
-                                                "bytes" to JsonPrimitive(binding.bytes), "sha256" to JsonPrimitive(binding.sha256))) }))),
-                                        "nativeRuntime" to OracleJson.parseCanonical(runtime.canonicalBytes),
-                                        "nativeRuntimeSha256" to JsonPrimitive(runtime.identitySha256),
-                                        "operations" to JsonArray(operations),
-                                        "stableCasesSha256" to JsonPrimitive(OracleArtifacts.sha256(checked[0].stableCases)),
-                                        "cases" to OracleJson.parseCanonical(checked[0].stableCases, QUALIFICATION_LIMITS),
-                                        "caseCount" to JsonPrimitive(19), "independentOperationCount" to JsonPrimitive(2),
-                                        "processCounterPhase" to JsonPrimitive("pre-teardown-frozen-sample"),
-                                        "processCountersAreTerminalFacts" to JsonPrimitive(false),
-                                        "executionAuthenticated" to JsonPrimitive(true), "referenceQualified" to JsonPrimitive(true),
-                                        "candidateQualified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
-                                        "scratchDisposition" to JsonPrimitive("retained-for-trusted-reset"),
-                                    ))
-                                    fun verifyCurrent() {
-                                        captures.forEach { it.requireCurrent("qualification publication") }
-                                        controller.requireCurrent("qualification publication")
-                                        frozen.requireCurrent()
-                                        deploymentGuard.verifyUnchanged("qualification deployment publication")
-                                        profile.requireCurrent("qualification publication")
-                                        runtime.requireCurrent("qualification publication")
-                                    }
-                                    verifyCurrent()
-                                    LinuxFilesystemSyscalls.openRoot(reportPath.parent).use { destination ->
-                                        DescriptorBoundAtomicStateFile.publishManifestNoReplace(destination, reportPath.fileName.toString(),
-                                            OracleJson.canonicalBytes(report, QUALIFICATION_LIMITS), QUALIFICATION_BYTES)
-                                        require(Files.isSameFile(reportPath.parent, LinuxFilesystemSyscalls.descriptorPath(destination))) {
-                                            "qualification report parent changed during publication"
+                            StableControlFile.open(declarationPath, GccOrchestrationReferenceDeclaration.MAXIMUM_BYTES.toLong(),
+                                "installed orchestration declaration").use { declarationGuard ->
+                                declarationGuard.requireSingleLink("installed orchestration declaration")
+                                require(declarationGuard.size == declaration.size.toLong() &&
+                                    declarationGuard.authenticatedSha256 == OracleArtifacts.sha256(declaration)) {
+                                    "installed orchestration declaration changed during publication"
+                                }
+                                fun capture(index: Int): RetainedReferenceCorpusCapture = try {
+                                    ReferenceCorpusCoordinator.captureRetained(profile, runtime, deployment.configuration,
+                                        journalRoots[index], scratchMounts[index], deployment.expectedCgroupParent)
+                                } catch (failure: ReferenceCorpusRetainedFailure) {
+                                    try { failure.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+                                    throw failure
+                                }
+                                capture(0).use { first ->
+                                    capture(1).use { replay ->
+                                        require(first.operationId != replay.operationId) { "independent captures reused an operation identity" }
+                                        val captures = listOf(first, replay)
+                                        val checked = captures.map { captured ->
+                                            captured.requireCurrent("before frozen reference comparison")
+                                            GccMetadataReferenceComparison.verify(profile.definition, frozen.bytes,
+                                                captured.canonicalBytes, runtime.identitySha256)
+                                        }
+                                        require(checked[0].stableCases.contentEquals(checked[1].stableCases)) {
+                                            "independent fresh reference operations produced different stable case bytes"
+                                        }
+                                        val operations = captures.mapIndexed { index, captured ->
+                                            qualificationOperation(captured, profile.definition, deployment,
+                                                journalRoots[index], scratchMounts[index])
+                                        }
+                                        val report = JsonObject(mapOf(
+                                            "schemaVersion" to JsonPrimitive(2),
+                                            "provider" to JsonPrimitive("gcc-metadata-reference-owner-qualification-v2"),
+                                            "qualificationKind" to JsonPrimitive("original-reference-execution-and-independent-replay"),
+                                            "controller" to controller.evidence(),
+                                            "deployment" to fileIdentity(deploymentPath, deploymentBytes),
+                                            "deploymentConfigurationSha256" to JsonPrimitive(deployment.configuration.canonicalSha256),
+                                            "expectedCgroupParent" to JsonPrimitive(deployment.expectedCgroupParent),
+                                            "frozenReference" to fileIdentity(frozen.path, frozen.bytes),
+                                            "profile" to JsonObject(mapOf("registrationId" to JsonPrimitive(profile.registrationId),
+                                                "path" to JsonPrimitive(profile.profilePath.toString()), "sha256" to JsonPrimitive(profile.profileSha256),
+                                                "inputs" to JsonArray(profile.inputBindings.map { binding -> JsonObject(mapOf(
+                                                    "id" to JsonPrimitive(binding.id), "path" to JsonPrimitive(binding.path.toString()),
+                                                    "bytes" to JsonPrimitive(binding.bytes), "sha256" to JsonPrimitive(binding.sha256))) }))),
+                                            "nativeRuntime" to OracleJson.parseCanonical(runtime.canonicalBytes),
+                                            "nativeRuntimeSha256" to JsonPrimitive(runtime.identitySha256),
+                                            "orchestrationDeclaration" to fileIdentity(declarationPath, declaration),
+                                            "operations" to JsonArray(operations),
+                                            "stableCasesSha256" to JsonPrimitive(OracleArtifacts.sha256(checked[0].stableCases)),
+                                            "cases" to OracleJson.parseCanonical(checked[0].stableCases, QUALIFICATION_LIMITS),
+                                            "caseCount" to JsonPrimitive(19), "independentOperationCount" to JsonPrimitive(2),
+                                            "processCounterPhase" to JsonPrimitive("pre-teardown-frozen-sample"),
+                                            "processCountersAreTerminalFacts" to JsonPrimitive(false),
+                                            "executionAuthenticated" to JsonPrimitive(true), "referenceQualified" to JsonPrimitive(true),
+                                            "candidateQualified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+                                            "scratchDisposition" to JsonPrimitive("retained-for-trusted-reset"),
+                                        ))
+                                        fun verifyCurrent() {
+                                            captures.forEach { it.requireCurrent("qualification publication") }
+                                            controller.requireCurrent("qualification publication")
+                                            frozen.requireCurrent()
+                                            deploymentGuard.verifyUnchanged("qualification deployment publication")
+                                            profile.requireCurrent("qualification publication")
+                                            runtime.requireCurrent("qualification publication")
+                                            declarationGuard.verifyUnchanged("qualification orchestration declaration")
                                         }
                                         verifyCurrent()
+                                        LinuxFilesystemSyscalls.openRoot(reportPath.parent).use { destination ->
+                                            DescriptorBoundAtomicStateFile.publishManifestNoReplace(destination, reportPath.fileName.toString(),
+                                                OracleJson.canonicalBytes(report, QUALIFICATION_LIMITS), QUALIFICATION_BYTES)
+                                            require(Files.isSameFile(reportPath.parent, LinuxFilesystemSyscalls.descriptorPath(destination))) {
+                                                "qualification report parent changed during publication"
+                                            }
+                                            verifyCurrent()
+                                        }
                                     }
                                 }
                             }
