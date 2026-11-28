@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.io.path.readLines
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -48,6 +49,22 @@ class ChildJvmTest {
         val command = ChildJvm.toolCommand("javap", "-J-XX:+PrintCommandLineFlags", "-version")
         assertEquals(ChildJvm.options().map { "-J$it" }, command.subList(1, 1 + ChildJvm.options().size))
         assertTrue(ChildJvm.NO_PERF_DATA in run(command).split(Regex("\\s+")), "javap JVM kept perf data")
+    }
+
+    @Test
+    fun `launcher JAVA_OPTS survive the start script's xargs split with spaces and quotes in paths`() {
+        val spaced = Files.createDirectories(Path.of(ChildJvm.temporaryDirectory).resolve("with space's \"dir\""))
+        assertTrue(spaced.toRealPath().startsWith(repositoryRoot.resolve("build")), spaced.toString())
+        val options = listOf("-Xmx64m", ChildJvm.NO_PERF_DATA, "-Djava.io.tmpdir=$spaced", "-Dprobe=a\\b \$HOME")
+        // The same split the Gradle-generated start scripts perform before exec'ing java.
+        val process = ProcessBuilder("/bin/sh", "-c", "printf '%s\\n' \"\$OPTS\" | xargs -n1").redirectErrorStream(true)
+            .apply { environment().clear(); environment()["PATH"] = "/usr/bin:/bin"; environment()["OPTS"] = ChildJvm.launcherJavaOpts(options) }
+            .withRepositoryTemporary().start()
+        val output = process.inputStream.readNBytes(64 * 1024).decodeToString()
+        assertTrue(process.waitFor(30, TimeUnit.SECONDS), output)
+        assertEquals(0, process.exitValue(), output)
+        assertEquals(options, output.lines().dropLastWhile(String::isEmpty))
+        assertFailsWith<IllegalArgumentException> { ChildJvm.launcherJavaOpts(listOf("-Dbad=a\nb")) }
     }
 
     /**

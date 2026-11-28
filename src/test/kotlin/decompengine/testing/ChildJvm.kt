@@ -33,6 +33,16 @@ object ChildJvm {
     fun toolCommand(tool: String, vararg arguments: String): List<String> =
         listOf(executable(tool)) + toolOptions() + arguments
 
+    /**
+     * [options] as one `JAVA_OPTS` value for a Gradle-generated start script. Those scripts split JVM options with
+     * `xargs`, which honours quotes, so each option is single-quoted to survive spaces (and quotes) in the
+     * repository path. Newlines and NUL cannot be represented and are refused.
+     */
+    fun launcherJavaOpts(options: List<String>): String = options.joinToString(" ") { option ->
+        require('\n' !in option && '\u0000' !in option) { "launcher JVM option cannot contain a newline or NUL: $option" }
+        "'" + option.replace("'", "'\\''") + "'"
+    }
+
     /** Points the child's `TMPDIR` at [temporaryDirectory]; call it after any `environment().clear()`. */
     fun ProcessBuilder.withRepositoryTemporary(): ProcessBuilder = apply {
         environment()["TMPDIR"] = temporaryDirectory

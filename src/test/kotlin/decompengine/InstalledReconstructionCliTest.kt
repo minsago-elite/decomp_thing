@@ -28,7 +28,10 @@ class InstalledReconstructionCliTest {
                 builder.environment().remove(key)
             }
             builder.environment()["JAVA_HOME"] = System.getProperty("java.home")
-            builder.environment()["JAVA_OPTS"] = (listOf("-Xmx256m") + ChildJvm.options()).joinToString(" ")
+            // A space in the repository path must not split a JVM option in the start script's xargs parse.
+            val spaced = Files.createDirectories(temp.resolve("child tmp $index"))
+            builder.environment()["JAVA_OPTS"] = ChildJvm.launcherJavaOpts(listOf("-Xmx256m") + ChildJvm.options() +
+                listOf("-Djava.io.tmpdir=$spaced", "-Djna.tmpdir=$spaced"))
             val process = builder.start()
             try {
                 assertTrue(process.waitFor(30, TimeUnit.SECONDS))
