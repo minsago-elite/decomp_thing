@@ -89,7 +89,13 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6; authenticate before Gradle execution
+      - uses: minsago-elite/gradle-cache-action@6dea8fd64949676aa3da5d1e107d8efaaca7e05a
+        with:
+          matrix: ${{ toJSON(matrix) }}
+          cache-family: decomp-gradle-dependencies-v1
+          cache-key-prefix: decomp-gradle-v1
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"

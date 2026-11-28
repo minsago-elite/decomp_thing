@@ -4,7 +4,7 @@ import './catalogue.css';
 type Catalogue = {
   label: string;
   schemaSha256: string;
-  scenarios: { name: string; description: string; jobPath: string; runPath: string; reportPath: string }[];
+  scenarios: { name: string; description: string; jobId: string; jobPath: string; runPath: string; reportPath: string }[];
   downloadPath: string;
 };
 
