@@ -1,0 +1,215 @@
+.proposal-review {
+  display: grid;
+  gap: 1rem;
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+.proposal-review__heading,
+.proposal-review__panel,
+.proposal-review__state,
+.proposal-review__error,
+.proposal-review__stale-candidate,
+.proposal-review-file {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.proposal-review__eyebrow,
+.proposal-review__fixture-notice,
+.proposal-review__toolbar,
+.proposal-review__history-note,
+.proposal-review__stale-base,
+.proposal-review__error-line,
+.proposal-review__omitted-files {
+  color: var(--muted);
+}
+
+.proposal-review__fixture-notice,
+.proposal-review__stale-base,
+.proposal-review__stale-candidate,
+.proposal-review__error {
+  border-inline-start: 0.3rem solid var(--attention);
+  background: var(--attention-surface);
+}
+
+.proposal-review__state {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(12rem, 1fr);
+  gap: 1rem;
+  align-items: start;
+  border-inline-start: 0.3rem solid var(--accent);
+}
+
+.proposal-review__state--validated-fail,
+.proposal-review__state--rejected {
+  border-inline-start-color: var(--danger);
+  background: var(--danger-surface);
+}
+
+.proposal-review__state h2,
+.proposal-review__panel h2,
+.proposal-review-file h3 {
+  margin-block-start: 0;
+}
+
+.proposal-review__identity,
+.proposal-review__validation-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.proposal-review__identity > div,
+.proposal-review__validation-meta > div {
+  min-width: 0;
+  padding: 0.75rem;
+  border-radius: var(--radius-control);
+  background: var(--surface-sunken);
+}
+
+.proposal-review dt {
+  color: var(--muted);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.proposal-review dd {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.proposal-review__hash {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.proposal-review__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.proposal-review button {
+  min-height: 2.75rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--control-line);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  cursor: pointer;
+}
+
+.proposal-review button:focus-visible,
+.proposal-review a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.proposal-review button:disabled {
+  color: var(--disabled);
+  cursor: wait;
+}
+
+.proposal-review__history,
+.proposal-review__findings {
+  display: grid;
+  gap: 0.75rem;
+  padding-inline-start: 1.5rem;
+}
+
+.proposal-review__history li,
+.proposal-review__findings li {
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+}
+
+.proposal-review__history li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.proposal-review-file {
+  display: grid;
+  gap: 0.75rem;
+  margin-block: 0.75rem;
+  background: var(--surface-sunken);
+}
+
+.proposal-review-file__header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.proposal-review-file__header h3 {
+  overflow-wrap: anywhere;
+}
+
+.proposal-review-file__kind,
+.proposal-review-owner {
+  color: var(--muted);
+}
+
+.proposal-review-file__links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.proposal-review-diff {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--code-surface);
+}
+
+.proposal-review-hunk h4 {
+  margin-block: 0.25rem;
+  color: var(--muted);
+  font: 0.875rem var(--mono);
+}
+
+.proposal-review-hunk pre {
+  max-width: 100%;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 0.875rem/1.45 var(--mono);
+}
+
+.proposal-review-ownership-warning,
+.proposal-review-omission {
+  padding: 0.65rem;
+  border-inline-start: 0.25rem solid var(--attention);
+  color: var(--text);
+  background: var(--attention-surface);
+}
+
+@media (max-width: 48rem) {
+  .proposal-review {
+    padding: 0.75rem;
+  }
+
+  .proposal-review__state {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .proposal-review-file__links {
+    width: 100%;
+  }
+}
