@@ -9,6 +9,7 @@ import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -77,10 +78,19 @@ class WebArchiveEvidenceTest {
             }
             val sources = WebSourceEvidence(store, listOf(GeneratedCMakeReconstructionProfile.descriptor), reader)
             val archives = WebArchiveEvidence(store, sources, reader)
-            kotlin.test.assertEquals(packed.archiveSha256, archives.read(job.id, reportPrefix = prefix).sha256)
+            val verified = archives.read(job.id, reportPrefix = prefix)
+            kotlin.test.assertEquals(packed.archiveSha256, verified.sha256)
+            kotlin.test.assertEquals(store.readArtifact(job.id, "$prefix/source-tree/source_tree_manifest.json", 1_048_576).sha256,
+                verified.manifestSha256)
             assertTrue(reads.isNotEmpty() && reads.all { it.startsWith("$prefix/") })
-            assertFailsWith<Exception> { archives.read(job.id) }
-            assertFailsWith<Exception> { archives.read(job.id, reportPrefix = "reports/runs/run_other") }
+            // Other namespaces have no archive: each is refused as a missing pinned read, never served from this attempt.
+            // A missing final file is refused by the pinned read itself; a missing namespace directory by the store.
+            val missingFile = assertFailsWith<decompengine.jobs.JobStoreException> { archives.read(job.id) }
+            assertEquals("artifact is unavailable or its path changed", missingFile.message)
+            val missingNamespace = assertFailsWith<decompengine.jobs.JobStoreException> {
+                archives.read(job.id, reportPrefix = "reports/runs/run_other")
+            }
+            assertEquals("artifact is unavailable or its path changed", missingNamespace.message)
         } finally { root.toFile().deleteRecursively() }
     }
 

@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED = {
     "decompengine.agent.AgentExecutionContractTest": 10,
-    "decompengine.builtin.BuiltinAgentHarnessTest": 15,
+    "decompengine.builtin.BuiltinAgentHarnessTest": 16,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
     "decompengine.builtin.BuiltinCapturedContextToolsTest": 6,
     "decompengine.builtin.BuiltinContextPackageTest": 5,
@@ -33,7 +33,9 @@ def main():
     summary.unlink(missing_ok=True)
     environment = dict(os.environ, DECOMP_REQUIRE_LIVE_ACP_CONTRACT="1")
     result = subprocess.run(
-        [str(ROOT / "gradlew"), "--no-daemon", "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
+        [str(ROOT / "gradlew"), "--no-daemon",
+         "-Dorg.gradle.internal.repository.max.tentatives=5", "-Dorg.gradle.internal.repository.initial.backoff=2000",
+         "--rerun-tasks", "test", "--tests", "decompengine.builtin.*",
          "--tests", "decompengine.agent.*", "--console=plain"], cwd=ROOT, env=environment,
     )
     suites, failures = [], []

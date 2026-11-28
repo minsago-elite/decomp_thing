@@ -69,8 +69,8 @@ class JobStoreTest {
         fun exercise(
             label: String,
             beforeRead: (java.nio.file.Path) -> Unit = {},
-            duringRead: (java.nio.file.Path) -> Unit,
-        ): Boolean {
+            duringRead: (JobStore, java.nio.file.Path) -> Unit,
+        ) {
             val root = createTempDirectory("jobs-metadata-$label-")
             val store = JobStore(root)
             val job = store.createFromUpload("snapshot.elf", elfFixture())
@@ -85,7 +85,7 @@ class JobStoreTest {
             var afterBytes: ByteArray? = null
 
             val result = store.getWithMetadataAuthorization(job.id) {
-                duringRead(jobDirectory)
+                duringRead(store, jobDirectory)
                 afterDirectory = directoryIdentity(jobDirectory)
                 afterMetadata = fileIdentity(metadata)
                 afterBytes = java.nio.file.Files.readAllBytes(metadata)
@@ -96,20 +96,16 @@ class JobStoreTest {
             assertEquals(beforeMetadata, afterMetadata)
             kotlin.test.assertContentEquals(beforeBytes, afterBytes)
             assertEquals(job, result)
-            return beforeDirectory.linkCount != observedDirectory.linkCount
         }
 
-        val creationChangedLinkCount = exercise("sibling-create") { directory ->
-            java.nio.file.Files.createDirectory(directory.resolve("reports"))
+        exercise("sibling-create") { store, directory ->
+            store.reportsDirectory(directory.fileName.toString())
         }
-        val removalChangedLinkCount = exercise(
+        exercise(
             "sibling-remove",
             beforeRead = { directory -> java.nio.file.Files.createDirectory(directory.resolve("reports")) },
-            duringRead = { directory -> java.nio.file.Files.delete(directory.resolve("reports")) },
+            duringRead = { _, directory -> java.nio.file.Files.delete(directory.resolve("reports")) },
         )
-        val filesystemType = java.nio.file.Files.getFileStore(java.nio.file.Path.of(".")).type()
-        assumeTrue(creationChangedLinkCount && removalChangedLinkCount,
-            "filesystem $filesystemType did not change directory nlink for both owned sibling controls")
     }
 
     @Test

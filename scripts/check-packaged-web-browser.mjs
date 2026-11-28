@@ -2,17 +2,25 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { promises as fs, readFileSync, createReadStream } from 'node:fs';
-import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
+import { join, basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
+import { seedStructure, qualifyStructure, structureFailureEvidence } from './packaged-browser-structure.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
+import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
+import { seedSources, qualifySources } from './packaged-browser-sources.mjs';
+import { seedLogs, qualifyLogs, logsFailureEvidence } from './packaged-browser-logs.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
+import { qualifyRestart, assertGracefulShutdown, publishReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence } from './packaged-browser-audit.mjs';
+import { TargetLifecycle, TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
+import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
+import { createServerPhaseCollector, serverPhaseReport } from './packaged-browser-log-server-phases.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,6 +28,7 @@ const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
+  profile: { type: 'string', default: 'reference' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
@@ -29,12 +38,15 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|logs|sources|scale|structure|live|proxy|upgrade|legacy|audit] [--profile reference|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; sources: session plus two preseeded retained candidates browsed, previewed, highlighted and compared by keyboard; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
-  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
+  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP, navigation timing budgets, 50 job-filter submissions, and 50 alternating source-file metadata/preview actions (100ms local feedback / 500ms first data).');
+  console.log('profile reference preserves browser defaults and enforces the documented navigation budgets; profile constrained applies 4x CPU throttling, 10 Mbit/s download, 2 Mbit/s upload and 100 ms latency to audit targets, records timings without applying those budgets, and does not establish a new threshold.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
-  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
+  console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh; then labels, archives and deliberately deletes one inert job with peer-tab, deep-link and focus recovery (#173).');
+  console.log('logs: session plus real bounded hostile recordings, deep-scroll filtering, whole-log search/download redaction, atomic replacement and SPA teardown heap/DOM budgets. Inert terminal attempts; does not claim live-worker follow qualification.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -46,7 +58,9 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'logs', 'sources', 'scale', 'structure', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, logs, sources, scale, structure, live, proxy, upgrade, legacy or audit');
+assert.ok(['reference', 'constrained'].includes(values.profile), '--profile must be reference or constrained');
+assert.ok(values.mode === 'audit' || values.profile === 'reference', '--profile constrained is only supported with --mode audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -77,12 +91,16 @@ async function fileHash(path) {
 }
 const root = await fs.mkdtemp(join(repo, 'build/packaged-browser-'));
 let application;
+let applicationPhases = null;
 let browser;
 let vite;
 let work;
 let browserTmp;
 let lastTarget;
+// Closed-vocabulary setup/loss record of every opened target (#1856); no identifiers, URLs or payloads.
+const targetLifecycle = new TargetLifecycle();
 const targets = [];
+const cdpDiagnostics = new PackagedBrowserCdpDiagnostics();
 const profile = join(root, 'browser profile');
 const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
@@ -92,6 +110,7 @@ let applicationOutput = '';
 let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
+  driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -115,55 +134,7 @@ async function waitFor(check, label, timeout = 20000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-class Protocol {
-  constructor(socket) {
-    this.socket = socket;
-    this.sequence = 0;
-    this.pending = new Map();
-    this.listeners = new Map();
-    socket.addEventListener('message', ({ data }) => {
-      let message;
-      try { message = JSON.parse(data); }
-      catch (error) {
-        const failure = new Error('Chrome DevTools returned invalid JSON', { cause: error });
-        for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(failure); }
-        this.pending.clear();
-        socket.close();
-        return;
-      }
-      if (message.id) {
-        const pending = this.pending.get(message.id);
-        if (!pending) return;
-        clearTimeout(pending.timer);
-        this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(message.error.message));
-        else pending.resolve(message.result);
-      } else {
-        for (const listener of this.listeners.get(`${message.sessionId ?? ''}:${message.method}`) ?? []) listener(message.params);
-      }
-    });
-    socket.addEventListener('close', () => {
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('DevTools connection closed'));
-      }
-      this.pending.clear();
-    });
-  }
-  call(method, params = {}, sessionId) {
-    const id = ++this.sequence;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`DevTools deadline: ${method}`)); }, 15000);
-      this.pending.set(id, { resolve, reject, timer });
-      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
-    });
-  }
-  on(method, listener, sessionId) {
-    const key = `${sessionId ?? ''}:${method}`;
-    if (!this.listeners.has(key)) this.listeners.set(key, []);
-    this.listeners.get(key).push(listener);
-  }
-}
+class Protocol extends TargetProtocol {}
 
 async function snapshot(directory, relative = '') {
   const result = {};
@@ -178,6 +149,7 @@ async function snapshot(directory, relative = '') {
   return result;
 }
 
+const forcedKill = new WeakSet();
 async function stop(process) {
   if (!process || process.exitCode !== null || process.signalCode !== null) return;
   if (!process.pid && launchErrors.has(process)) return; // Spawn failed before any process existed.
@@ -185,6 +157,7 @@ async function stop(process) {
   const deadline = Date.now() + 5000;
   while (process.exitCode === null && process.signalCode === null && Date.now() < deadline) await delay(50);
   if (process.exitCode === null && process.signalCode === null) {
+    forcedKill.add(process);
     process.kill('SIGKILL');
     const killDeadline = Date.now() + 5000;
     while (process.exitCode === null && process.signalCode === null && Date.now() < killDeadline) await delay(50);
@@ -242,11 +215,37 @@ function correlateDocumentResponse(state, requestId, response, source) {
   state.pendingDocumentRequests.delete(requestId);
 }
 
-async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
+async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = false, stage = cspProbe ? 'csp-probe' : 'mode' } = {}) {
   assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
-  const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
-  const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
+  // Same begin/enter/bind/watch/fail sequence as openLifecycleTarget, inlined because its fixed
+  // Target.createTarget cannot carry restart's newWindow or the CDP setup diagnostics. No retry/recreate/close.
+  const record = targetLifecycle.begin(stage);
+  try {
+    targetLifecycle.enter(record, 'create');
+    const initialization = cdpDiagnostics.beginTarget();
+    const { targetId } = await cdpDiagnostics.command(initialization, 'Target.createTarget', () =>
+      cdp.call('Target.createTarget', { url: 'about:blank', ...(newWindow ? { newWindow: true } : {}) }));
+    cdpDiagnostics.setTargetIds(initialization, targetId);
+    targetLifecycle.bind(record, { targetId });
+    targetLifecycle.enter(record, 'attach');
+    const { sessionId } = await cdpDiagnostics.command(initialization, 'Target.attachToTarget', () =>
+      cdp.call('Target.attachToTarget', { targetId, flatten: true }));
+    cdpDiagnostics.setTargetIds(initialization, targetId, sessionId);
+    targetLifecycle.bind(record, { sessionId });
+    cdp.watchSession(sessionId);
+    const step = async (phase, action) => { targetLifecycle.enter(record, phase); return action(); };
+    const state = await setupTarget({ targetId, sessionId, step, initialization, cspProbe, cacheEnabled });
+    targetLifecycle.enter(record, 'ready');
+    return state;
+  } catch (error) {
+    targetLifecycle.fail(record, error);
+    throw error;
+  }
+}
+
+async function setupTarget({ targetId, sessionId, step, initialization, cspProbe, cacheEnabled }) {
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    initializationComplete: false,
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
     cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
@@ -260,7 +259,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
     const type = event.type ?? (priorDocument ? 'Document' : undefined);
     const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
-    state.requests.push({ method: event.request.method, url, type });
+    state.requests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
@@ -274,7 +273,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
     if (cacheEnabled) state.cacheRequestIds.add(event.requestId);
   }, sessionId);
   cdp.on('Network.responseReceived', (event) => {
-    const response = { url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
+    const response = { requestId: event.requestId, url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
     if (cacheEnabled) state.cacheResponses.push({ requestId: event.requestId, ...response,
       fromDiskCache: event.response.fromDiskCache ?? null, fromServiceWorker: event.response.fromServiceWorker ?? null });
     if (event.type === 'Document' || state.pendingDocumentRequests.has(event.requestId)) {
@@ -306,22 +305,25 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
   cdp.on('Audits.issueAdded', ({ issue }) => {
     if (issue.code === 'ContentSecurityPolicyIssue') state.cspIssues.push(issue.details?.contentSecurityPolicyIssueDetails ?? issue);
   }, sessionId);
-  await cdp.call('Page.enable', {}, sessionId);
-  await cdp.call('Runtime.enable', {}, sessionId);
-  await cdp.call('Network.enable', {}, sessionId);
-  await cdp.call('Log.enable', {}, sessionId);
-  await cdp.call('Audits.enable', {}, sessionId);
-  await cdp.call('Runtime.addBinding', { name: '__decompRecordCspViolation' }, sessionId);
-  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
+  const initialize = (phase, method, params = {}) => step(phase, () => cdpDiagnostics.command(initialization, method,
+    () => cdp.call(method, params, sessionId)));
+  await initialize('page-enable', 'Page.enable');
+  await initialize('runtime-enable', 'Runtime.enable');
+  await initialize('network-enable', 'Network.enable');
+  await initialize('log-enable', 'Log.enable');
+  await initialize('audits-enable', 'Audits.enable');
+  await initialize('binding', 'Runtime.addBinding', { name: '__decompRecordCspViolation' });
+  await initialize('init-script', 'Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
     globalThis.__decompRecordCspViolation(JSON.stringify({
       blockedURI: event.blockedURI, columnNumber: event.columnNumber, disposition: event.disposition,
       documentURI: event.documentURI, effectiveDirective: event.effectiveDirective,
       lineNumber: event.lineNumber, originalPolicy: event.originalPolicy,
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
-  });` }, sessionId);
-  await cdp.call('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled }, sessionId);
-  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
+  });` });
+  await initialize('cache-policy', 'Network.setCacheDisabled', { cacheDisabled: !cacheEnabled });
+  await initialize('metrics', 'Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  state.initializationComplete = true;
   return state;
 }
 
@@ -411,9 +413,13 @@ async function ready(target, expression, label) {
   }, label);
 }
 
-async function capture(target, name) {
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
-  await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
+async function capture(target, name, clip) {
+  // Clipped (chart) captures stay inside the rendered viewport: beyond-viewport capture can resize
+  // the layout viewport (dropping the scrollbar) and reflow the figure after it was measured.
+  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport: false } : {}) }, target.sessionId);
+  const bytes = Buffer.from(data, 'base64');
+  await fs.writeFile(join(root, name), bytes);
+  return bytes;
 }
 
 async function prepareArchive(archivePath) {
@@ -462,12 +468,14 @@ function recordInstallation(installation) {
 async function launchApplication(installation, port = '0', frontendOrigin) {
   applicationOutput = '';
   applicationError = '';
+  const phases = values.mode === 'logs' ? createServerPhaseCollector() : null;
+  applicationPhases = phases;
   application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', values.mode === 'legacy' ? 'legacy' : 'spa', '--host', '127.0.0.1', '--port', port,
     '--base-path', values.mode === 'legacy' ? '/' : '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : [])], {
     cwd: installation.working, env: installation.environment, stdio: ['ignore', 'pipe', 'pipe'],
   });
   application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
-  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); });
+  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); phases?.push(chunk); });
   const origin = await waitFor(() => {
     if (application.exitCode !== null || application.signalCode !== null) throw new Error(`Packaged application exited: ${applicationError}`);
     return applicationOutput.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
@@ -490,11 +498,16 @@ try {
   recordInstallation(installation);
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
-  const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
+  const logFixture = values.mode === 'logs' ? await seedLogs(data) : null;
+  const historyFixture = values.mode === 'history' ? await seedHistory(data, { includeAccepted: true }) : null;
+  const sourcesFixture = values.mode === 'sources' ? await seedSources(data) : null;
+  const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
+  const structureFixture = values.mode === 'structure' ? await seedStructure(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || scaleFixture || liveFixture);
-  const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+  const populated = !!(logFixture || historyFixture || restartFixture || sourcesFixture || scaleFixture || structureFixture || liveFixture);
+  const libraryText = (logFixture || historyFixture || restartFixture) ? 'synthetic-history.elf' : sourcesFixture ? 'synthetic-sources.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+    : structureFixture ? 'synthetic-structure.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
@@ -511,14 +524,22 @@ try {
   const origin = await launchApplication(installation, '0', values.mode === 'proxy' ? browserOrigin : undefined);
   report.origin = origin;
   browserOrigin ??= origin;
+  const observeNativeVisibility = values.mode === 'restart';
+  if (observeNativeVisibility && !process.env.DISPLAY) {
+    throw new Error('restart mode requires a real X display; run it under xvfb-run rather than emulating visibility');
+  }
+  report.browserDisplayMode = observeNativeVisibility ? 'headful-x11' : 'headless';
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
   browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  const browserTmpForProcess = relative(repo, browserTmp);
+  assert(!isAbsolute(browserTmpForProcess) && browserTmpForProcess !== '..' && !browserTmpForProcess.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`),
+    'Browser temporary directory must remain inside the repository');
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
-  browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
-    env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
+  browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
+    cwd: repo, env: { ...process.env, TMPDIR: browserTmpForProcess }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
@@ -527,12 +548,30 @@ try {
   }, 'Chrome DevTools listener');
   const [port, socketPath] = portFile.trim().split('\n');
   const socket = await connectDevTools(`ws://127.0.0.1:${port}${socketPath}`);
-  cdp = new Protocol(socket);
+  cdp = new Protocol(socket, { lifecycle: targetLifecycle });
+  cdp.on('Target.targetCreated', ({ targetInfo }) => cdpDiagnostics.targetEvent('target-created', {
+    targetId: targetInfo?.targetId, targetType: targetInfo?.type, attached: targetInfo?.attached,
+  }));
+  cdp.on('Target.targetDestroyed', ({ targetId }) => cdpDiagnostics.targetEvent('target-destroyed', { targetId }));
+  cdp.on('Target.attachedToTarget', ({ sessionId, targetInfo }) => cdpDiagnostics.targetEvent('target-attached', {
+    targetId: targetInfo?.targetId, sessionId, targetType: targetInfo?.type, attached: targetInfo?.attached,
+  }));
+  cdp.on('Target.detachedFromTarget', ({ sessionId, targetId }) => cdpDiagnostics.targetEvent('target-detached', { targetId, sessionId }));
+  // Target.targetCrashed is only delivered with discovery on; it records loss events, it opens nothing.
+  const discoveryStarted = performance.now();
+  try {
+    await cdp.call('Target.setDiscoverTargets', { discover: true });
+    report.targetDiscoveryMonitoring = { outcome: 'success', elapsedMs: Math.max(0, Math.round(performance.now() - discoveryStarted)) };
+  } catch (error) {
+    report.targetDiscoveryMonitoring = { outcome: error?.message === 'DevTools deadline: Target.setDiscoverTargets' ? 'deadline' : 'protocol-error',
+      elapsedMs: Math.max(0, Math.round(performance.now() - discoveryStarted)) };
+    throw error;
+  }
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
   report.cspDetectorProbe = await qualifyCspDetector();
   if (legacyFixture) {
-    const tab = await makeTarget();
+    const tab = await makeTarget({ stage: 'legacy' });
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/login#bootstrap=')), 'legacy local bootstrap handoff');
     sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
     report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, bootstrapUrl, tab, cdp, evaluate, ready, makeTarget });
@@ -654,18 +693,54 @@ try {
     report.requests.upgradeCacheWarm = cacheProbe.requests;
     report.jobDataCreated = false;
   }
+  if (restartFixture) {
+    const restartApplication = async () => {
+      const previous = application;
+      const signalsSent = ['SIGTERM'];
+      previous.kill('SIGTERM');
+      await waitFor(() => previous.exitCode !== null || previous.signalCode !== null, 'graceful SIGTERM exit', 30000);
+      const exit = assertGracefulShutdown({ signalsSent, exitCode: previous.exitCode, signalCode: previous.signalCode });
+      const restartedOrigin = await launchApplication(installation, new URL(origin).port);
+      return { origin: restartedOrigin, exit };
+    };
+    const captureSafe = async (target, name) => {
+      const safe = await evaluate(target, `(() => {
+        if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
+        document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
+        return true;
+      })()`);
+      assert.ok(safe, 'Refusing to capture a page with a bootstrap fragment or visible credential');
+      await capture(target, name);
+    };
+    const restarted = await qualifyRestart({ fixture: restartFixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay,
+      readOutput: () => applicationOutput, restartApplication, captureSafe, sensitiveValues });
+    report.restart = restarted.evidence;
+    report.requests.restart = restarted.requests;
+    report.jobDataCreated = true;
+  }
   if (values.mode === 'audit') {
-    report.audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay });
+    const audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay,
+      profile: values.profile });
+    report.audit = audit;
     await delay(100); // Drain resource events from the last measured target.
-    report.auditVerdict = assertAudit(report.audit, manifest, targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin);
+    const interactionPages = auditFixtures(repo, manifest.buildId).pages;
+    report.auditVerdict = assertAudit(audit, manifest,
+      targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin, undefined,
+      { interactionPages, extraInteractionContexts: chromiumSupplementalInteractionContexts(interactionPages), profile: values.profile });
+    const compact = compactJobFilterAuditEvidence(audit);
+    if (compact !== audit) {
+      // Keep the original windows and reads alongside their compact timing representation.
+      report.auditReadEvidence = { fulfilled: audit.fulfilled, jobFilter: audit.jobFilter, fileOpen: audit.fileOpen };
+      report.audit = compact;
+    }
     assert.deepEqual(report.auditVerdict.failures, [], `Packaged audit failures:\n${report.auditVerdict.failures.join('\n')}`);
     assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
-    const home = await makeTarget();
+    const home = await makeTarget({ stage: 'home' });
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
     await ready(home, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'rendered packaged home');
     await ready(home, `document.activeElement === document.querySelector('main h1')`, 'home heading focus');
@@ -734,7 +809,7 @@ try {
     report.runtime = { identity: runtimeIdentity, lazyChunk: runtimeAsset.path, responseStatus: 200 };
     console.log('Packaged home, CSS/icon, lazy Runtime and exact manifest identities verified.');
 
-    const boundary = await makeTarget();
+    const boundary = await makeTarget({ stage: 'boundary' });
     const missingRoute = '/nested/not-a-packaged-route';
     await cdp.call('Page.navigate', { url: origin + '/nested/' }, boundary.sessionId);
     await ready(boundary, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'not-found fixture home');
@@ -748,7 +823,7 @@ try {
     await ready(boundary, `document.contentType === 'application/json' && document.body.innerText.length > 0`, 'inert API navigation');
     assert.ok(boundary.responses.some((response) => response.url === origin + inertRoute && response.status === 401));
     assert.deepEqual(boundary.exceptions, []);
-    const redirect = await makeTarget();
+    const redirect = await makeTarget({ stage: 'redirect' });
     await cdp.call('Page.navigate', { url: origin + '/nested/runtime/' }, redirect.sessionId);
     await ready(redirect, `location.pathname === '/nested/runtime' && document.querySelector('h1')?.textContent === 'Runtime status'`, 'packaged canonical route redirect');
     const redirectHops = redirect.documentRequests;
@@ -761,7 +836,7 @@ try {
     report.routeBoundaries = { notFoundClientNavigation: true, missingRouteReloadInert: true,
       inertJsonNavigation: true, canonicalRedirectDocumentHops: 2 };
 
-    const recovery = await makeTarget();
+    const recovery = await makeTarget({ stage: 'recovery' });
     const interceptionErrors = [];
     let intercepted = 0;
     cdp.on('Fetch.requestPaused', (event) => {
@@ -820,11 +895,11 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
-    const authenticated = await makeTarget();
+    const authenticated = await makeTarget({ stage: 'authenticated' });
     let hmrConnected = false;
     cdp.on('Network.webSocketFrameReceived', (event) => {
       if (event.response.payloadData.includes('"type":"connected"')) hmrConnected = true;
@@ -848,7 +923,18 @@ try {
       assert.equal(apiProof.buildId, manifest.buildId);
       report.backendBootstrap = apiProof;
     }
-    await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    try {
+      await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    } catch (failure) {
+      // Keep the bounded route/status evidence when a seeded library fails to load.
+      // Do not retain response bodies, request identifiers, or the bootstrap token.
+      const visible = await evaluate(authenticated, `({ pathname: location.pathname,
+        alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.innerText.slice(0, 240)),
+        libraryVisible: document.body.innerText.includes(${JSON.stringify(libraryText)}) })`).catch(() => null);
+      const requests = authenticated.requests.slice(-12).map(({ method, url }) => ({ method, route: urlPath(url) }));
+      const responses = authenticated.responses.slice(-12).map(({ url, status }) => ({ route: urlPath(url), status }));
+      throw new Error(`Persistent job library diagnostic: ${JSON.stringify({ visible, requests, responses })}`, { cause: failure });
+    }
     await evaluate(authenticated, `(() => {
       const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
@@ -862,6 +948,15 @@ try {
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'reset job library');
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
     report.dashboard = { emptyLibrary: !populated, populatedLibrary: populated, noMatches: true, filtersSurviveReload: true, resetFilters: true };
+    // #495: documented dashboard filters through real browser Back/Forward (isolated acceptance addition).
+    const searchField = `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input').value`;
+    await evaluate(authenticated, 'history.back()');
+    await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.') && ${searchField} === 'absent fixture'`, 'Back restores applied dashboard filter');
+    assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '?search=absent+fixture');
+    await evaluate(authenticated, 'history.forward()');
+    await ready(authenticated, `document.body.innerText.includes('${libraryText}') && ${searchField} === ''`, 'Forward restores reset dashboard filters');
+    assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '');
+    report.dashboard.filtersBackForward = true;
     if (historyFixture) {
       const row = await evaluate(authenticated, `(() => {
         const row = document.querySelector('ul[aria-label="Uploaded jobs"] li');
@@ -874,7 +969,7 @@ try {
       assert.equal(Date.parse(row.facts.Created), Date.parse(JSON.parse(historyFixture.retained['job.json']).created_at));
       assert.equal(row.facts['Workflow state'], 'Completed');
       assert.equal(row.facts['Latest attempt'], 'run_fixture_54');
-      assert.equal(row.facts['Accepted revision'], 'No accepted revision recorded');
+      assert.equal(row.facts['Accepted revision'], historyFixture.acceptedRevision.revisionId);
       assert.ok(row.facts.Updated);
       report.dashboard.exactRowMetadata = true;
       report.dashboard.jobAndRunIdentityDistinct = true;
@@ -921,7 +1016,7 @@ try {
     const postReload = await evaluate(authenticated, 'window.__sessionTestRequests');
     assert.ok(postReload.every((request) => request.method === 'GET' && request.fragmentEmpty));
     await capture(authenticated, 'authenticated-runtime.png');
-    const jobTab = await makeTarget();
+    const jobTab = await makeTarget({ stage: 'job' });
     const absentJobPath = '/nested/jobs/' + 'a'.repeat(32);
     await cdp.call('Page.navigate', { url: browserOrigin + absentJobPath }, jobTab.sessionId);
     await ready(jobTab, `document.querySelector('h1')?.textContent === 'Job overview' && document.body.innerText.includes('This job is unavailable. It may have been removed.')`, 'durable job deep link');
@@ -932,7 +1027,7 @@ try {
     report.dashboard.jobDeepLinkAndRefresh = true;
     report.dashboard.missingJobExplained = true;
     report.requests.job = jobTab.requests;
-    const runTab = await makeTarget();
+    const runTab = await makeTarget({ stage: 'run' });
     await cdp.call('Page.navigate', { url: browserOrigin + absentJobPath + '/runs/run_missing' }, runTab.sessionId);
     await ready(runTab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes('This attempt is unavailable for this job.')`, 'pinned attempt deep link');
     await cdp.call('Page.reload', {}, runTab.sessionId);
@@ -949,13 +1044,20 @@ try {
     assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
+    if (logFixture) report.logs = await qualifyLogs({ fixture: logFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+    if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
+      report.jobLifecycle = await qualifyLifecycle({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
     }
     if (historyFixture) {
       report.populatedHistory = await qualifyHistory({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+      report.jobDataCreated = true;
+    }
+    if (sourcesFixture) {
+      report.sources = await qualifySources({ fixture: sourcesFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin, manifest });
       report.jobDataCreated = true;
     }
     if (values.mode === 'metadata') {
@@ -973,7 +1075,7 @@ try {
     let unnotified;
     let unnotifiedState;
     if (historyFixture) {
-      unnotified = await makeTarget();
+      unnotified = await makeTarget({ stage: 'unnotified' });
       await cdp.call('Page.addScriptToEvaluateOnNewDocument', {
         source: "Object.defineProperty(globalThis, 'BroadcastChannel', { value: undefined, configurable: true });",
       }, unnotified.sessionId);
@@ -986,7 +1088,7 @@ try {
       unnotifiedState = await fs.readFile(join(historyFixture.directory, 'workflow-state.json'));
     }
 
-    const peer = await makeTarget();
+    const peer = await makeTarget({ stage: 'peer' });
     await cdp.call('Page.navigate', { url: browserOrigin + '/nested/runtime' }, peer.sessionId);
     await ready(peer, `document.querySelector('#server-runtime-title') !== null`, 'peer private Runtime');
     await evaluate(peer, `(() => {
@@ -1079,14 +1181,20 @@ try {
 
 } catch (error) {
   report.status = 'failed';
+  // Which target setup step ended how (reply, deadline, detach, crash); a classification, not a cause.
+  report.targetLifecycle = targetLifecycle.toJSON();
   report.contentSecurityPolicy = cspEvidence();
   report.error = safeDiagnostic(error.stack);
+  // Fixed logs phase labels and bounded counts only, captured in memory before the throw (#1872).
+  report.logsFailurePhase = logsFailureEvidence(error);
+  // Fixed Structure body-read facts only; observations, not a cause (#1879).
+  report.structureFailurePhase = structureFailureEvidence(error);
   report.applicationError = safeDiagnostic(applicationError);
   report.browserError = safeDiagnostic(browserError);
   report.viteError = safeDiagnostic(viteError);
   console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
-  if (lastTarget && cdp) {
+  if (lastTarget && cdp && lastTarget.initializationComplete) {
     try {
       // Fail closed if the handoff has not been scrubbed. Hide editable fields
       // before a diagnostic capture, and never capture visible credential text.
@@ -1102,16 +1210,21 @@ try {
     } catch {
       report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
     }
-  }
+  } else if (lastTarget && !lastTarget.initializationComplete) report.failureScreenshotSkipped = 'Target initialization failed before page commands completed';
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
+  if (values.mode === 'logs') report.serverDownloadPhases = serverPhaseReport(applicationPhases);
+  if (values.mode === 'restart' && application && forcedKill.has(application)) {
+    report.status = 'failed'; report.forcedShutdown = true; process.exitCode = 1;
+  }
   report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
   if (!report.shutdownConfirmed) {
     report.status = 'failed';
     report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => safeDiagnostic(result.reason));
     process.exitCode = 1;
   }
+  report.cdpTargetDiagnostics = cdpDiagnostics.snapshot();
   report.workRetained = true;
   if (report.shutdownConfirmed && !values['keep-workdir']) {
     try {
@@ -1127,7 +1240,9 @@ try {
       process.exitCode = 1;
     }
   }
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  console.log(JSON.stringify(report, null, 2));
+  // Scrubbed, bounded and lossless (#1882): report.json stays within 512 KiB, with any larger
+  // evidence in digest-referenced parts; a failed publication leaves a failure record and throws.
+  const { primaryText } = await publishReport(root, report, sensitiveValues);
+  console.log(primaryText.trimEnd());
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }

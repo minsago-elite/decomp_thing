@@ -115,6 +115,10 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                 snapshot.populate(request)
                 receipt.snapshot(snapshot)
                 original = request.originalBinary?.let(snapshot::captureOriginal)
+                require(request.expectedOriginalBinarySha256 == null ||
+                    original?.sha256 == request.expectedOriginalBinarySha256) {
+                    "captured original binary differs from the exploration snapshot"
+                }
                 val output = snapshot.beginBuild()
                 receipt.buildOutputLink(output)
                 val compiler = config.tools.getValue("compiler").destination

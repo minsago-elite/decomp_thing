@@ -151,7 +151,16 @@ export const activityRowCopy = {
   "permissionDigest": "Permission request digest",
   "messageChunkDigest": "Message chunk SHA-256",
   "changedFileDigest": "Reported changed-file SHA-256",
-  "toolCallDigest": "Tool call digest"
+  "toolCallDigest": "Tool call digest",
+  permissionRecorded: 'Recorded permission decision',
+  permissionDecisions: {
+    allow_once: 'allowed once',
+    allow_session: 'allowed for the agent session',
+    deny: 'denied',
+    cancelled: 'cancelled',
+  },
+  permissionNotRecorded: 'not recorded',
+  permissionReadOnly: 'Operator decisions are unavailable in this view.',
 } as const;
 
 export const observedUsageCopy = {
@@ -241,6 +250,8 @@ export const explorationEvidenceCopy = {
   "noNumericSummaryIsAvailableFromTheseReportBytesMissing": "No numeric summary is available from these report bytes. Missing or malformed values are not zero-valued results.",
   "theDigestIdentifiesTheObservedBytesItDoesNotValidate": "The digest identifies the observed bytes; it does not validate the producer's claims. Changed bytes require a refreshed report.",
   "downloadObservedExplorationJSON": "Download observed exploration JSON",
+  "explorationDownloadRedacted": "The download is a redacted copy of this report: credentials, configured secrets and private host paths are replaced, so its bytes can differ from the observed size and SHA-256 above.",
+  "explorationDownloadUnavailable": "Download and retained case details withheld: this report cannot be projected within the 64 MiB redacted-report limit. The numeric summary remains available when recorded.",
   "explorationObservationsDoNotEstablishAcceptedReconstruction": "Exploration observations do not establish accepted reconstruction.",
   "theReportDoesNotBelongToTheRequestedAttempt": "The report does not belong to the requested attempt.",
   "explorationEvidenceCouldNotBeReadCheckTheSessionAnd": "Exploration evidence could not be read. Check the session and refresh this attempt.",
@@ -255,6 +266,9 @@ export const explorationCasesCopy = {
   title: 'Retained exploration cases',
   scope: 'This view reads the selected report artifact only. Filtering and inspecting records never executes an input or starts a workflow.',
   outcomesUnreported: 'This unversioned format does not record timeout or execution-failure classifications. An observed exit code alone cannot distinguish them.',
+  versionedOutcomes: 'This versioned report separates generated observations from retained regression inputs. Viewing a retained input never executes it or changes exploration confidence.',
+  retainedDisplayOnly: '{count} retained regression input(s) are shown for inspection only; they were not run by this exploration.',
+  retainedInputsOmitted: '{count} retained regression input(s) were omitted by the display budget. Download the report artifact for its bounded record.',
   partialFormat: 'This partial record cannot provide coverage or confidence. Read its retained details to inspect the reported failure and any recorded inputs or observations.',
   preparationCase: '{group} position {index}: {id}', preparationPosition: 'Retained input position',
   preparationGroups: { seeds: 'Provided seeds', angr: 'Angr-generated inputs', staticHints: 'Static-hint inputs', expanded: 'Final expanded proposal' },
@@ -282,6 +296,7 @@ export const explorationCasesCopy = {
   failureReasons: {
     'behavior-deadline-exceeded': 'Producer-reported observation timeout.',
     'sandbox-unavailable': 'Producer-reported unavailable sandbox tooling.',
+    'sandbox-wrapper-start-failed': 'Producer-reported that the sandbox invocation wrapper process could not start.',
     'output-limit-exceeded': 'Producer-reported output-limit failure.',
     'completion-unverified': 'Producer-reported unverified execution completion.',
     'producer-interrupted': 'Producer-reported observation interruption.',
@@ -311,9 +326,9 @@ export const explorationCasesCopy = {
 } as const;
 
 export const runCopy = {
-  thisJobWasDeleted: "This attempt’s job was deleted. Its files were removed and cannot be recovered.",
-  attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence',
-  activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence',
+  thisJobWasDeleted: "This attempt’s job was deleted from the library and cannot be recovered. This page has not observed whether file cleanup finished.",
+  attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence', logsView: 'Build log',
+  activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence', logsTitle: 'Attempt build log',
   "wallClockLimit": "{value} milliseconds",
   "idleLimit": "{value} milliseconds",
   "outputLimit": "{value} bytes",

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { decodeContract, decodeResponse, encodeRequest } from '../src/api/decode';
+import '../src/structure/contract';
 import { ApiClientError } from '../src/api/errors';
 import { parseBoundedJson } from '../src/api/json';
 import type { ResponseOf, Run } from '../src/api/generated';
@@ -65,6 +66,17 @@ describe('generated v1 contract pipeline', () => {
     }
   });
 
+  it('retains unchanged legacy source fixtures and refuses unknown-size legacy inputs', () => {
+    for (const name of ['revision-sources', 'revision-directory-root', 'revision-file-root']) {
+      const text = fixture(`${name}-legacy`);
+      const legacy = JSON.parse(text) as { data: { items?: Array<{ kind?: string; sizeBytes?: string | null }>; item?: { sizeBytes?: string | null } } };
+      for (const mode of ['producer', 'response'] as const) expect(decodeContract(text, { mode })).toEqual(legacy);
+      // Omission means source-input, never a nullable-size manifest entry.
+      const item = legacy.data.item ?? legacy.data.items!.find(value => value.kind !== 'directory')!;
+      item.sizeBytes = null;
+      for (const mode of ['producer', 'response'] as const) expect(() => decodeContract(JSON.stringify(legacy), { mode })).toThrow(ApiClientError);
+    }
+  });
   it('accepts only coherent preflight status identity and fixed reason combinations', () => {
     const allowed = new Set(['idle:null:null', 'inspecting:inspection_fixture:null', 'ready:inspection_fixture:null',
       'cancelled:inspection_fixture:null', 'failed:inspection_fixture:AGENT_PREFLIGHT_FAILED']);
@@ -290,6 +302,22 @@ describe('generated v1 contract pipeline', () => {
       expect(decodeContract(JSON.stringify(partial), { mode })).toEqual(partial);
       expect(() => decodeContract(JSON.stringify({ ...partial, data: { ...partial.data, producerSchemaVersion: 3 } }), { mode }))
         .toThrow(expect.objectContaining({ code: 'unsupported_contract' }));
+    }
+  });
+  it('accepts only completed version-two exploration reports through the API decoder', () => {
+    const original = JSON.parse(fixture('report-exploration')) as ResponseOf<'report'>;
+    const versioned = { ...original, data: { ...original.data, producerSchemaVersion: 2 } };
+    for (const mode of ['producer', 'response'] as const) {
+      expect(decodeContract(JSON.stringify(versioned), { mode })).toEqual(versioned);
+      const invalid = [
+        { ...versioned.data, state: 'partial' },
+        { ...versioned.data, summary: null },
+        { ...versioned.data, authority: 'derived-presentation' },
+        { ...versioned.data, acceptance: 'accepted' },
+      ];
+      for (const data of invalid) {
+        expect(() => decodeContract(JSON.stringify({ ...versioned, data }), { mode })).toThrow(ApiClientError);
+      }
     }
   });
   it('keeps reported module validation optional and excludes private compiler fields', () => {

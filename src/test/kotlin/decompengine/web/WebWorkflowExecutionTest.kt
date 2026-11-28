@@ -1,6 +1,8 @@
 package decompengine.web
 
 import decompengine.jobs.WorkflowExecutionLimits
+import decompengine.agent.AgentToolEvent
+import decompengine.agent.AgentToolStatus
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory
 import org.junit.jupiter.api.AfterEach
@@ -12,6 +14,7 @@ import java.nio.file.Path
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 
 /** Filesystem-only controls: no workflow, helper, binary or agent is dispatched. */
 @ExtendWith(RecoveryMatrixEvidence::class)
@@ -51,5 +54,35 @@ class WebWorkflowExecutionTest {
         assertEquals(WorkflowLimitExhaustion.OUTPUT_BYTES, assertIs<BoundedWorkflowResult.Exhausted>(result).limit)
     }
 
-    private fun meter(path: Path) = WorkflowExecutionMeter(path, toolCallsMetered = false)
+    @Test
+    fun `exceptional completion still classifies a breached tool-call limit`() {
+        val meter = meter(root, toolCallsMetered = true)
+        val invocation = meter.invocation()
+        val failure = IllegalStateException("agent failed after its second tool call")
+
+        val (result, usage) = BoundedWorkflowExecutor().run(
+            WorkflowExecutionLimits(60_000uL, 60_000uL, 1024uL, 1uL), meter,
+        ) {
+            repeat(2) { invocation.observe(AgentToolEvent(it.toLong(), "call-$it", "inert", AgentToolStatus.SUCCEEDED)) }
+            throw failure
+        }
+
+        assertEquals(WorkflowLimitExhaustion.TOOL_CALLS, assertIs<BoundedWorkflowResult.Exhausted>(result).limit)
+        assertEquals(2uL, usage.toolCalls)
+    }
+
+    @Test
+    fun `exceptional completion remains a failure when no limit was breached`() {
+        val meter = meter(root, toolCallsMetered = true)
+        val failure = IllegalStateException("ordinary child failure")
+
+        val (result, _) = BoundedWorkflowExecutor().run(
+            WorkflowExecutionLimits(60_000uL, 60_000uL, 1024uL, 1uL), meter,
+        ) { throw failure }
+
+        assertSame(failure, assertIs<BoundedWorkflowResult.Threw>(result).failure)
+    }
+
+    private fun meter(path: Path, toolCallsMetered: Boolean = false) =
+        WorkflowExecutionMeter(path, toolCallsMetered = toolCallsMetered)
 }

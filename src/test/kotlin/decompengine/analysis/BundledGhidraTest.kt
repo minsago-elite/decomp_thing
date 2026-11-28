@@ -156,6 +156,13 @@ class BundledGhidraTest {
                 }
             }
         """)
+        val inferredInterfaceStub = source("ExportInferredInterfacesV1.java", """
+            public final class ExportInferredInterfacesV1 {
+                public static void collect(Object program, Object monitor, String[] args) {
+                    ghidra.app.script.GhidraScript.invocations.add("inferred-interface:" + java.util.Arrays.toString(args));
+                }
+            }
+        """)
         val probe = source("GuardProbe.java", """
             import ghidra.app.script.GhidraScript;
             import decompengine.ghidra.BundledGhidraWorker;
@@ -172,12 +179,13 @@ class BundledGhidraTest {
                 public static void verify() throws Exception {
                     for (String name : new String[] {"ExportProgramModel.java", "ExportProgramModelOwned.java",
                             "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class",
-                            "ExportNativeInterfacesV1.class"}) {
+                            "ExportNativeInterfacesV1.class", "ExportInferredInterfacesV1.class"}) {
                         prepare(name, "2", "argument with spaces", "--not-an-option");
                         new RunBundledExports().execute();
                         check(BundledGhidraWorker.completed);
                         String target = name.equals("ExportNativeCallsV1.class") ? "native" :
-                            name.equals("ExportNativeInterfacesV1.class") ? "native-interface" : name;
+                            name.equals("ExportNativeInterfacesV1.class") ? "native-interface" :
+                            name.equals("ExportInferredInterfacesV1.class") ? "inferred-interface" : name;
                         check(GhidraScript.invocations.equals(java.util.List.of(
                             target + ":[argument with spaces, --not-an-option]")));
                     }
@@ -223,7 +231,7 @@ class BundledGhidraTest {
         val compiler = checkNotNull(javax.tools.ToolProvider.getSystemJavaCompiler())
         assertEquals(0, compiler.run(null, null, null, "-proc:none", "-encoding", "UTF-8", "-d", work.toString(),
             scriptStub.toString(), workerStub.toString(), nativeStub.toString(), nativeInterfaceStub.toString(),
-            guard.toString(), probe.toString()))
+            inferredInterfaceStub.toString(), guard.toString(), probe.toString()))
         java.net.URLClassLoader(arrayOf(work.toUri().toURL()), null).use { loader ->
             loader.loadClass("GuardProbe").getMethod("verify").invoke(null)
         }

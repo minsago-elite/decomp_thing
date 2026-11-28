@@ -118,10 +118,11 @@ describe('feature detection (#631)', () => {
     const text = 'int main(void) { return 0; }\n';
     const sha256 = createHash('sha256').update(text).digest('hex');
     const binding = { jobId: '1234567890abcdef1234567890abcdef', runId: 'run_example_1', revisionId: 'revision_1' };
-    const file: RevisionFile = { ...metadata, binding, item: { ...metadata.item, displayName: 'main.c', sizeBytes: String(Buffer.byteLength(text)), sha256 } };
+    const sizeBytes = String(Buffer.byteLength(text));
+    const file: RevisionFile = { ...metadata, binding, item: { ...metadata.item, displayName: 'main.c', sizeBytes, sha256 } };
     const chunk: SourceChunk = { ...fixture<{ data: SourceChunk }>('source-chunk-mid-line').data, binding: file.binding, fileId: file.item.fileId,
-      sourceSha256: file.sourceSha256, metadataVersion: file.metadataVersion, sha256, sizeBytes: file.item.sizeBytes, offsetBytes: '0',
-      lengthBytes: file.item.sizeBytes, nextOffsetBytes: null, completeFile: true, text, firstLine: '1', startsMidLine: false, endsMidLine: false };
+      sourceSha256: file.sourceSha256, metadataVersion: file.metadataVersion, sha256, sizeBytes, offsetBytes: '0',
+      lengthBytes: sizeBytes, nextOffsetBytes: null, completeFile: true, text, firstLine: '1', startsMidLine: false, endsMidLine: false };
     transport.get.mockResolvedValue({ data: chunk });
     return file;
   }
@@ -186,6 +187,18 @@ describe('offline and sensitive-data policy (#632)', () => {
     const client = createApiClient({ basePath: '/nested', fetch });
     await expect(client.get('job', `/jobs/${'a'.repeat(32)}`)).rejects.toMatchObject({ code: 'network_error' });
     expect(fetch.mock.calls[0]![1]).toMatchObject({ cache: 'no-store', credentials: 'same-origin', mode: 'same-origin', redirect: 'error' });
+  });
+
+  // Under the document's no-referrer policy, Firefox and WebKit serialize a POST's Origin as "null"
+  // and the server refuses the mutation (found by the Firefox packaged run, #631). The request-level
+  // origin policy restores the exact Origin while sending no page path.
+  it('sends every mutation with an origin-only referrer policy', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(() => Promise.reject(new TypeError('offline')));
+    const client = createApiClient({ basePath: '/nested', fetch });
+    await expect(client.post('session', '/session', 'sessionStartRequest', { token: 'a'.repeat(43) })).rejects.toMatchObject({ code: 'network_error' });
+    await expect(client.upload(new File(['x'], 'x.elf'), { csrfToken: 'a'.repeat(43), idempotencyKey: 'b'.repeat(32) })).rejects.toMatchObject({ code: 'network_error' });
+    for (const call of fetch.mock.calls) expect(call[1]).toMatchObject({ method: 'POST', referrerPolicy: 'origin', mode: 'same-origin' });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('queues no command while offline and sends nothing when the connection returns', async () => {

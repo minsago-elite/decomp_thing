@@ -164,6 +164,8 @@ internal class ReconstructWorkflowAdapter(
     private val mode: WebReconstructionMode,
     override val harnessCapabilityId: String,
     private val sensitiveValues: Collection<String>,
+    // Inert integration controls only. Production registration never opts into uncontained compilation.
+    private val allowTestOnlyExecution: Boolean = false,
 ) : DurableWebWorkflowAdapter {
     private val agent = mode == WebReconstructionMode.AGENT
     override val workflow = WorkflowKind.RECONSTRUCT
@@ -172,7 +174,8 @@ internal class ReconstructWorkflowAdapter(
     override val checkpoints: DurableWebWorkflowCheckpointPolicy? = null
     override val limits = if (agent) WebWorkflowDefaults.RECONSTRUCT_AGENT else WebWorkflowDefaults.RECONSTRUCT_EVIDENCE
     override val limitsAdjustable = true
-    override val requirements = if (agent) setOf(WebWorkflowRequirement.GHIDRA, WebWorkflowRequirement.AGENT_HARNESS)
+    override val requirements = if (agent) setOf(WebWorkflowRequirement.GHIDRA, WebWorkflowRequirement.AGENT_HARNESS) +
+        if (!allowTestOnlyExecution) setOf(WebWorkflowRequirement.MODULE_COMPILATION_CONTAINMENT) else emptySet()
         else setOf(WebWorkflowRequirement.GHIDRA)
     override val input = DurableWebWorkflowInput.NONE
     override val launch = if (agent) DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = false,
@@ -183,6 +186,7 @@ internal class ReconstructWorkflowAdapter(
     init { require(harnessCapabilityId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) }
 
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+        if (agent && !allowTestOnlyExecution) return DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = true)
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->

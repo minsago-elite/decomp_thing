@@ -208,9 +208,9 @@ internal class BoundedWorkflowExecutor(
         val wall = TimeUnit.NANOSECONDS.toMillis(finishedAt - started)
         // A body that finished between samples is still held to every declared bound.
         val finished = exhausted?.let { BoundedWorkflowResult.Exhausted(it) } ?: checkNotNull(result)
-        val final = if (finished !is BoundedWorkflowResult.Returned) finished else {
+        val final = if (finished is BoundedWorkflowResult.Exhausted) finished else {
             val output = meter.outputBytes()
-            when {
+            val limit = when {
                 elapsed(finishedAt, started) > limits.wallClockMs -> BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.WALL_CLOCK)
                 meter.toolCallsMetered && meter.toolCalls().toULong() > limits.maxToolCalls ->
                     BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.TOOL_CALLS)
@@ -218,8 +218,9 @@ internal class BoundedWorkflowExecutor(
                 // Output written since the last sample is activity of unknown time, so it cannot prove idleness.
                 output == lastOutput && elapsed(finishedAt, meter.lastActivityNanos()) > limits.idleMs ->
                     BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.IDLE)
-                else -> finished
+                else -> null
             }
+            limit ?: finished
         }
         return final to meter.usage(wall)
     }

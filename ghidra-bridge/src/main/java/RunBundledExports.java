@@ -12,7 +12,7 @@ public final class RunBundledExports extends GhidraScript {
         // Keep the owned analyzer and typed listing collector on distinct exact-name routes.
         Set<String> exporters = Set.of("ExportProgramModel.java", "ExportProgramModelOwned.java",
             "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class",
-            "ExportNativeInterfacesV1.class");
+            "ExportNativeInterfacesV1.class", "ExportInferredInterfacesV1.class");
         for (int index = 0; index < arguments.length;) {
             String name = arguments[index++];
             if (!exporters.contains(name) || index == arguments.length) {
@@ -30,6 +30,8 @@ public final class RunBundledExports extends GhidraScript {
                     ExportNativeCallsV1.collect(currentProgram, monitor, exporterArguments);
                 } else if (name.equals("ExportNativeInterfacesV1.class")) {
                     ExportNativeInterfacesV1.collect(currentProgram, monitor, exporterArguments);
+                } else if (name.equals("ExportInferredInterfacesV1.class")) {
+                    ExportInferredInterfacesV1.collect(currentProgram, monitor, exporterArguments);
                 } else {
                     runScript(name, exporterArguments);
                 }
