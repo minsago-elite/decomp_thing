@@ -10,6 +10,14 @@ export async function boundedBody(response: Response, maxBytes: number, signal: 
   // Only engines without readable bodies need a whole-response read. Missing TextDecoder
   // must not bypass early byte-limit enforcement when a stream is available (#631).
   if (response.body === undefined) return bufferedBody(response, maxBytes, signal);
+  // A declared identity-encoded length was admitted above, before any body byte was read, and
+  // is the exact size HTTP framing delivers, so a whole read stays within that bound. It hands
+  // the body to the browser's own loader instead of a page reader: in Chromium 149 a page reader
+  // that waits at end of data on a no-store response lets the closing stream cancel a
+  // still-loading body consumer, so a complete HTTP 200 is reported as ERR_ABORTED (#536, #1055).
+  if (declared !== null && identityEncoded(response.headers)) {
+    return bufferedBody(response, Number(declared), signal, Number(declared));
+  }
   const reader = response.body.getReader();
   const cancel = () => { void reader.cancel().catch(() => undefined); };
   signal.addEventListener('abort', cancel, { once: true });
@@ -45,12 +53,25 @@ export async function boundedBody(response: Response, maxBytes: number, signal: 
   }
 }
 
-/** Whole-response read for engines without streams; the caller's deadline race still applies. */
-async function bufferedBody(response: Response, maxBytes: number, signal: AbortSignal): Promise<string> {
-  if (signal.aborted) throw new ApiClientError('aborted');
+/** Content-Length bounds the decoded body only without a content coding. */
+function identityEncoded(headers: Headers): boolean {
+  const coding = headers.get('Content-Encoding');
+  return coding === null || coding.trim().toLowerCase() === 'identity';
+}
+
+/**
+ * Whole-response read for engines without streams, or for an admitted declared length, which
+ * must then match exactly. The caller's deadline race still applies.
+ */
+async function bufferedBody(response: Response, maxBytes: number, signal: AbortSignal, exactBytes?: number): Promise<string> {
+  if (signal.aborted) {
+    if (response.body && !response.body.locked) void response.body.cancel().catch(() => undefined);
+    throw new ApiClientError('aborted');
+  }
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (signal.aborted) throw new ApiClientError('aborted');
   if (bytes.byteLength > maxBytes) throw new ApiClientError('response_too_large');
+  if (exactBytes !== undefined && bytes.byteLength !== exactBytes) throw new ApiClientError('invalid_response');
   if (typeof TextDecoder === 'function') {
     try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw new ApiClientError('invalid_json'); }
   }
