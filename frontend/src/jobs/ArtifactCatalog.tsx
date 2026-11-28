@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { useLocation } from 'preact-iso/router';
 import type { Artifacts } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { artifactCopy as copy } from '../copy/artifacts';
@@ -27,6 +28,68 @@ export function bindArtifactCatalog(data: Artifacts, jobId: string, runId: strin
   return data;
 }
 
+const CURSOR = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const SCOPE_KEY = 'artifacts', CURSOR_KEY = 'artifactCursor';
+
+/** The catalog scope and opaque server cursor saved in an attempt address; null means the list was not opened. */
+export type ArtifactLocation = { scope: 'run' | 'revision'; cursor: string | null } | null;
+
+function invalidLocation(): never { throw new Error('The saved artifact selection is invalid.'); }
+
+/** Read only this catalog's keys; other attempt query state, such as validation selection, is left to its owner. */
+export function artifactLocation(search: string): ArtifactLocation {
+  if (search.length > 4096) return invalidLocation();
+  const params = new URLSearchParams(search), scopes = params.getAll(SCOPE_KEY), cursors = params.getAll(CURSOR_KEY);
+  if (scopes.length === 0) return cursors.length === 0 ? null : invalidLocation();
+  const [scope] = scopes, [cursor] = cursors;
+  if (scopes.length !== 1 || cursors.length > 1 || (scope !== 'run' && scope !== 'revision')
+    || (cursor !== undefined && !CURSOR.test(cursor))) return invalidLocation();
+  return { scope, cursor: cursor ?? null };
+}
+
+/** Replace only the catalog keys in the current attempt query. */
+export function artifactRouteSearch(current: string, next: ArtifactLocation): string {
+  const params = new URLSearchParams(current);
+  params.delete(SCOPE_KEY); params.delete(CURSOR_KEY);
+  if (next !== null) {
+    params.set(SCOPE_KEY, next.scope);
+    if (next.cursor !== null) params.set(CURSOR_KEY, next.cursor);
+  }
+  const encoded = params.toString(), search = encoded ? `?${encoded}` : '';
+  artifactLocation(search);
+  return search;
+}
+
+type Selection = { request: number; revisionOnly: boolean; cursor: string | null };
+
+/**
+ * Inside the routed workbench the opened catalog, its revision filter and page live in the attempt URL, so Back,
+ * Forward and reload restore them (#495). Opening, filtering and paging push history; Refresh replaces it. The legacy
+ * embedding has no router and keeps the same selection in component state.
+ */
+function useCatalogSelection(revisionId: string | null): { selection: Selection; invalid: boolean; select: (next: Selection, replace?: boolean) => void } {
+  const route = useLocation();
+  const [local, setLocal] = useState<Selection>({ request: 0, revisionOnly: false, cursor: null });
+  const [refresh, setRefresh] = useState(0);
+  if (!route.url) return { selection: local, invalid: false, select: next => { setLocal(next); } };
+  const address = new URL(route.url, window.location.origin);
+  let saved: ArtifactLocation = null, invalid = false;
+  try {
+    saved = artifactLocation(address.search);
+    if (saved?.scope === 'revision' && revisionId === null) { saved = null; invalid = true; }
+  } catch { invalid = true; }
+  const selection = saved === null ? { request: 0, revisionOnly: false, cursor: null }
+    : { request: 1 + refresh, revisionOnly: saved.scope === 'revision', cursor: saved.cursor };
+  return { selection, invalid, select: (next, replace = false) => {
+    // A late click from a view the user already left must not rewrite another address.
+    if (window.location.pathname !== address.pathname) return;
+    const search = artifactRouteSearch(window.location.search,
+      { scope: next.revisionOnly && revisionId !== null ? 'revision' : 'run', cursor: next.cursor });
+    if (search === window.location.search) { setRefresh(value => value + 1); return; }
+    route.route(`${address.pathname}${search}`, replace || invalid);
+  } };
+}
+
 function failureMessage(failure: unknown): string {
   let text: string = copy.failed;
   if (failure instanceof ApiClientError) {
@@ -45,7 +108,7 @@ export function ArtifactCatalog({ jobId, runId, revisionId, basePath, onDeleted 
   const { client } = usePrivateTransport(basePath);
   const deletedHandler = useRef(onDeleted); deletedHandler.current = onDeleted;
   const heading = useRef<HTMLHeadingElement>(null);
-  const [selection, setSelection] = useState<{ request: number; revisionOnly: boolean; cursor: string | null }>({ request: 0, revisionOnly: false, cursor: null });
+  const { selection, invalid, select } = useCatalogSelection(revisionId);
   const [state, setState] = useState<{ key: string; loading: boolean; data: Artifacts | null; error: string }>({ key: '', loading: false, data: null, error: '' });
   const filter = selection.revisionOnly ? revisionId : null;
   const key = [jobId, runId, filter, selection.cursor, selection.request].join('/');
@@ -69,9 +132,10 @@ export function ArtifactCatalog({ jobId, runId, revisionId, basePath, onDeleted 
   return <section aria-labelledby="artifact-catalog-title" class="artifact-catalog">
     <h2 id="artifact-catalog-title" ref={heading} tabIndex={-1}>{copy.title}</h2>
     <p>{copy.boundary}</p>
+    {invalid && <p role="alert">{copy.invalidSaved}</p>}
     {revisionId !== null && <label><input type="checkbox" checked={selection.revisionOnly} disabled={current.loading}
-      onChange={event => setSelection(value => ({ request: value.request || 1, revisionOnly: (event.target as HTMLInputElement).checked, cursor: null }))} /> {copy.revisionOnly}</label>}
-    <button type="button" disabled={current.loading} onClick={() => setSelection(value => ({ ...value, request: value.request + 1, cursor: null }))}>
+      onChange={event => { select({ request: selection.request || 1, revisionOnly: (event.target as HTMLInputElement).checked, cursor: null }); }} /> {copy.revisionOnly}</label>}
+    <button type="button" disabled={current.loading} onClick={() => { select({ ...selection, request: selection.request + 1, cursor: null }, selection.request > 0); }}>
       {selection.request ? copy.refresh : copy.read}</button>
     {current.loading && <p role="status">{copy.loading}</p>}
     {current.error && <p role="alert">{current.error}</p>}
@@ -101,9 +165,9 @@ export function ArtifactCatalog({ jobId, runId, revisionId, basePath, onDeleted 
         </li>)}
       </ul>
       <nav aria-label={copy.title}>
-        <button type="button" disabled={selection.cursor === null} onClick={() => setSelection(value => ({ ...value, cursor: null }))}>{copy.first}</button>
+        <button type="button" disabled={selection.cursor === null} onClick={() => { select({ ...selection, cursor: null }); }}>{copy.first}</button>
         <button type="button" disabled={data.page.nextCursor === null} onClick={() => {
-          if (data.page.nextCursor !== null) setSelection(value => ({ ...value, cursor: data.page.nextCursor }));
+          if (data.page.nextCursor !== null) select({ ...selection, cursor: data.page.nextCursor });
         }}>{copy.next}</button>
       </nav>
     </>}
