@@ -19,6 +19,23 @@ mutation controls through accessible buttons and visible outcomes:
   cannot replace that policy. A later explicit change uses its latest version
   and a distinct intent, then verifies the resulting policy.
 
+`frontend/tests/command-reconnect.test.tsx` covers the remaining job commands.
+Its transport answers only when a test settles a call, and it rejects an
+aborted call the way the real client does:
+
+- Job organization (PATCH): repeated activation sends one change. Losing the
+  connection aborts it. After reconnecting, nothing is sent until the person
+  saves again. The status reports the abandoned change as unconfirmed instead
+  of still saving. The explicit save uses a fresh intent with the same version
+  guard, so an earlier write that did land is refused rather than applied twice.
+- Attempt retry (POST): repeated activation sends one command. A connection
+  failure keeps it retained. Reconnecting sends neither the command nor a read.
+  An explicit replay, even if activated twice, sends it once with the same
+  idempotency key and version.
+- Job deletion (DELETE): repeated activation sends one request. Connection loss
+  neither aborts nor repeats the accepted request. The controls stay inert until
+  its single outcome is reported.
+
 All responses, session callbacks, connection events and clock advances are
 controlled in memory. Ten-second advances are virtual; no service, actual
 browser, native process, auth provider or controller is started. These frontend
