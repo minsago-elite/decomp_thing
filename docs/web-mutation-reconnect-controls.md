@@ -28,8 +28,10 @@ aborted call the way the real client does:
   saves again. The status reports the abandoned change as unconfirmed instead
   of still saving. The explicit save uses a fresh intent with the same version
   guard, so an earlier write that did land is refused rather than applied twice.
-  If the server already answered and only the follow-up read is cut, its answer
-  stays reported.
+  If the server refused the change and only the follow-up read is cut, the
+  refusal stays reported and asks the person to refresh the job; the status
+  says the current version is shown only after that read is applied. A
+  successful change whose follow-up read is cut is not covered here.
 - Attempt retry (POST): repeated activation sends one command. A connection
   failure keeps it retained. Reconnecting sends neither the command nor a read.
   An explicit replay, even if activated twice, sends it once with the same

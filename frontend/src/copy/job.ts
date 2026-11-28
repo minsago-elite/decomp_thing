@@ -74,6 +74,7 @@ export const jobOrganizationCopy = {
   "saved": "Saved. The job was read again from the server.",
   "unchanged": "Nothing changed.",
   "changed": "The job changed in another tab or request. The current version is shown; review it before saving again.",
+  "refused": "The job changed in another tab or request, so this change was not saved. Refresh the job before saving again.",
   "invalidLabel": "Use 1–120 printable characters without leading or trailing spaces.",
   "storage": "The change was not saved: storage is full, read-only or unavailable. The previous label and archive state are kept.",
   "unconfirmed": "The change may have been written but could not be confirmed. Refresh the job before editing again.",

@@ -122,8 +122,25 @@ it('sends one organization change for repeated activation and only an explicit, 
   expect(put.fn).toHaveBeenCalledTimes(2);
 });
 
-it('keeps the refusal of an organization change when connection loss cuts only its follow-up read', async () => {
-  render(<JobOrganization job={job()} client={client()} basePath="/nested/" session={session} onChanged={vi.fn()} />);
+it('says the current version is shown after a refused organization change only once its follow-up read is applied', async () => {
+  const changed = vi.fn();
+  render(<JobOrganization job={job()} client={client()} basePath="/nested/" session={session} onChanged={changed} />);
+  fireEvent.input(screen.getByLabelText(jobOrganizationCopy.displayLabel), { target: { value: 'Router firmware' } });
+  await activateTwice(jobOrganizationCopy.save);
+  await act(async () => { put.calls[0]!.reject(new ApiClientError('http_error', { status: 412 })); await Promise.resolve(); }); await settle();
+  expect(get.fn).toHaveBeenCalledOnce();
+  // Until the read lands, the form still holds the version the change was refused against.
+  expect(status()).toBe(jobOrganizationCopy.refused);
+  const current = job({ label: 'Other tab', version: 'version_9' });
+  await act(async () => { get.calls[0]!.resolve({ data: current }); await Promise.resolve(); }); await settle();
+  expect(changed).toHaveBeenCalledOnce(); expect(changed).toHaveBeenCalledWith(current);
+  expect(status()).toBe(jobOrganizationCopy.changed);
+  expect(put.fn).toHaveBeenCalledOnce();
+});
+
+it('keeps the refusal of an organization change and asks for a refresh when connection loss cuts its follow-up read', async () => {
+  const changed = vi.fn();
+  render(<JobOrganization job={job()} client={client()} basePath="/nested/" session={session} onChanged={changed} />);
   fireEvent.input(screen.getByLabelText(jobOrganizationCopy.displayLabel), { target: { value: 'Router firmware' } });
   await activateTwice(jobOrganizationCopy.save);
   await act(async () => { put.calls[0]!.reject(new ApiClientError('http_error', { status: 412 })); await Promise.resolve(); }); await settle();
@@ -131,8 +148,11 @@ it('keeps the refusal of an organization change when connection loss cuts only i
   await disconnect();
   expect(get.calls[0]!.settings.signal?.aborted).toBe(true);
   await reconnect();
-  // The server answered the change, so its refusal stands; only the read of the current version was cut.
-  expect(status()).toBe(jobOrganizationCopy.changed);
+  // The server answered the change, so its refusal stands. The read of the current version was cut, so the form
+  // still holds the refused version and the status asks for a refresh instead of claiming the current one is shown.
+  expect(status()).toBe(jobOrganizationCopy.refused);
+  expect(status()).not.toContain('current version is shown');
+  expect(changed).not.toHaveBeenCalled();
   expect(put.fn).toHaveBeenCalledOnce(); expect(get.fn).toHaveBeenCalledOnce();
 });
 

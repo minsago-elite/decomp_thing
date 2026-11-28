@@ -44,11 +44,12 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
   useEffect(() => { active.current = null; setBusy(false); setNotice(''); }, [job.jobId]);
   const trimmed = label.trim();
   const invalid = trimmed.length > 0 && [...trimmed].length > 120;
-  /** One GET of this job; a response naming another job is ignored. */
+  /** One GET of this job; a response naming another job is ignored. Resolves whether the read job is now shown. */
   async function reread(signal: AbortSignal) {
-    if (readJob) { await readJob(signal); return; }
+    if (readJob) return (await readJob(signal)) !== null && !signal.aborted;
     const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal });
-    if (!signal.aborted && fresh.data.jobId === job.jobId) onChanged?.(fresh.data);
+    if (signal.aborted || fresh.data.jobId !== job.jobId) return false;
+    onChanged?.(fresh.data); return true;
   }
   async function save(event: Event) {
     event.preventDefault();
@@ -76,14 +77,15 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
       if (controller.signal.aborted) return;
       answered = true;
       if (isDeletedJob(failure) && onDeleted) { onDeleted(failure); return; }
-      setNotice(withApiFailureReference(status(failure) === 412 ? copy.changed
+      // A refusal names the current version as shown only once its readback is applied (#635).
+      setNotice(withApiFailureReference(status(failure) === 412 ? copy.refused
         : status(failure) === 422 ? copy.invalidLabel
         : [401, 403].includes(status(failure)) ? copy.denied
         : code(failure) === 'STORAGE_UNAVAILABLE' ? copy.storage
         : code(failure) === 'STORAGE_UNCONFIRMED' ? copy.unconfirmed : copy.failed, failure));
       if (status(failure) === 412) {
         try {
-          await reread(controller.signal);
+          if (await reread(controller.signal)) setNotice(withApiFailureReference(copy.changed, failure));
         } catch (readFailure: unknown) {
           if (!controller.signal.aborted && isDeletedJob(readFailure)) onDeleted?.(readFailure);
         }
