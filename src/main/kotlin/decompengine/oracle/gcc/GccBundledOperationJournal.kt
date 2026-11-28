@@ -258,7 +258,8 @@ internal class GccBundledOperationJournal private constructor(
             resumed.budgets.pidsMax <= original.budgets.pidsMax) { "GCC resume increased its operation budgets" }
         if (recoveredStopped != null) {
             // A later owner's resume may not outlive the allowance its single adoption recorded.
-            require(resumed.budgets.wallClockMillis <= adoptedAllowanceMillis(snapshots.getValue(RECOVERY_FILE).bytes)) {
+            val adoption = snapshots[RECOVERY_FILE]?.bytes ?: journalFail("GCC recovered resume has no recorded adoption")
+            require(resumed.budgets.wallClockMillis <= adoptedAllowanceMillis(adoption)) {
                 "GCC recovered resume exceeds its adopted wall allowance"
             }
         }

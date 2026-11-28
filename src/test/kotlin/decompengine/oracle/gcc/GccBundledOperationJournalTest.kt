@@ -515,7 +515,8 @@ class GccBundledOperationJournalTest {
             val before = names(path)
             // A reopened journal must name its later owner before any resume record.
             GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->
-                assertFails { later.recordResumePrepared(recoverableResumeDefinition()) }
+                val skipped = assertFails { later.recordResumePrepared(recoverableResumeDefinition()) }
+                assertTrue(skipped.message.orEmpty().contains("must record its later-invocation owner before resume"), skipped.toString())
             }
             assertEquals(before, names(path))
             GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->

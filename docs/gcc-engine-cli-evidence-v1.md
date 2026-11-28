@@ -30,9 +30,18 @@ execution (#984).
 A later process recovers an interrupted `gcc-engine-plan` by repeating the original argv exactly
 and adding `--recover-operation <operation-id>`. It must run from the same working directory.
 `GccBundledCliCommand.recoveryIntent` rebuilds the retained `invocation.json` (v2) and requires
-byte equality. The rebuild uses that argv, the launcher working directory's canonical path and
-identity (checked against `/proc/self/cwd`), and the current output, inputs and journal
-directory identities. It then re-derives the production intent from the current inputs and the
+byte equality. The rebuild uses three inputs:
+
+- that argv;
+- the current output, inputs and journal directory identities;
+- the working directory: the process cwd pinned with an O_PATH open of `.`, whose canonical path
+  must name the same device, inode and mount.
+
+Admission captures the working directory before creating any output child. A searchable but
+unreadable working directory is therefore admitted, and a failed capture leaves `--output` empty
+for a retry. The installed launcher passes `-XX:-UsePerfData`, because HotSpot's perf-data setup
+would otherwise move an unreadable working directory into `/tmp/hsperfdata_<user>`. Capture also
+refuses a working directory that was relocated that way. It then re-derives the production intent from the current inputs and the
 two staged controls, which it reuses but never rewrites.
 `GccBundledOperationCoordinator.recoverInterrupted` then takes the journal-root,
 operation-journal and scratch-mount locks without blocking, in `prepareNew`'s order. A lock that
@@ -64,6 +73,15 @@ links to. It records:
 - the run-root identity;
 - the resume allowance.
 
+The journal builds that payload from verified stopped evidence alone. Fresh publication and
+retained reuse go through one validator, which rebuilds every key and value and requires byte
+equality: the absence assertions, the stopped worker absence record digest, the unit, the run
+root, the lease evidence, and the operation and state identity. Two values come from the record
+itself and are checked by rule. The recorded argv must be the intent's own CLI argv plus exactly
+one `--recover-operation` selector naming this operation, and it must be empty for an operation
+without a CLI invocation. The allowance must be whole seconds within the committed cap.
+`resume-prepared.json` may not stage a resume definition above that adopted allowance.
+
 A later owner can crash after adopting but before any resume record. The next owner then
 revalidates and reuses that single adoption, or renames its complete temporary into place
 without writing new bytes, under all three locks. Its recorded allowance stays the cap.
@@ -88,13 +106,19 @@ Evidence and limits:
   - tampered or residual records;
   - an unproved worker absence;
   - an absence receipt for another command;
+  - a self-consistent retained adoption, as either the final file or its `.atomic` temporary,
+    that carries a foreign argv, absence digest, unit, run root, lease or allowance, or is
+    missing lock or cgroup assertions;
+  - a CLI argv without exactly one selector for this operation over the unchanged original;
+  - a resume definition staged above the adopted allowance;
   - a commit snapshot from another deadline, or one earlier than the execution receipt;
   - an allowance above the commit cap;
   - prepared, fresh, completed and resume-started histories;
   - a changed or reordered argv, or a finished output.
 
   They also reuse a published adoption, and complete an adoption temporary, with the original
-  allowance.
+  allowance. The CLI tests admit a searchable but unreadable working directory through the
+  actual CLI, and show that a failed capture leaves `--output` usable for a retry.
 - **`kotlin-oracle`, ext4 lease test:** it reacquires a crashed child process's active run, and
   refuses while any other holder has the mount. It fails, rather than skips, when
   `DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH` is set.
