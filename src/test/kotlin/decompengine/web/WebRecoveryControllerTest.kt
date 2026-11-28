@@ -483,13 +483,17 @@ class WebRecoveryControllerTest {
     fun `a shutdown signal after the launch permit interrupts the started continuation`() {
         val interrupted = java.util.concurrent.atomic.AtomicBoolean()
         lateinit var fixture: Fixture
+        lateinit var signaller: Thread
         Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
             duringLaunch = {
-                val signaller = Thread({ fixture.service.signalShutdown() }, "post-launch-shutdown-signal")
+                signaller = Thread({ fixture.service.signalShutdown() }, "post-launch-shutdown-signal")
                 signaller.start()
-                signaller.join(TimeUnit.SECONDS.toMillis(5))
-                check(!signaller.isAlive) { "the shutdown signal waited on the launched work" }
-                try { Thread.sleep(TimeUnit.SECONDS.toMillis(5)) } catch (cancelled: InterruptedException) {
+                // The interrupt may arrive during either wait; both are interruptible.
+                try {
+                    signaller.join(TimeUnit.SECONDS.toMillis(5))
+                    check(!signaller.isAlive) { "the shutdown signal waited on the launched work" }
+                    Thread.sleep(TimeUnit.SECONDS.toMillis(5))
+                } catch (cancelled: InterruptedException) {
                     interrupted.set(true)
                     throw cancelled
                 }
@@ -501,6 +505,8 @@ class WebRecoveryControllerTest {
             f.outcomes += DurableWebWorkflowOutcome.Completed()
             try { f.pending.remove().run() } finally { Thread.interrupted() }
             assertTrue(interrupted.get(), "shutdown must observe the granted permit and interrupt its holder")
+            signaller.join(TimeUnit.SECONDS.toMillis(5))
+            assertFalse(signaller.isAlive)
             assertContentEquals(CONTINUATION_BYTES, f.restored.single())
             assertEquals(WorkflowRunState.INTERRUPTED, f.attempt(successor).state)
             assertNull(f.attempt(successor).candidate)
@@ -511,15 +517,19 @@ class WebRecoveryControllerTest {
     fun `a launched continuation that waits for cancellation does not hold the service monitor`() {
         val interrupted = java.util.concurrent.atomic.AtomicBoolean()
         lateinit var fixture: Fixture
+        lateinit var cancel: java.util.concurrent.FutureTask<WorkflowAttempt>
         Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
             duringLaunch = {
                 val running = fixture.snapshot().latestRun!!
-                val cancel = java.util.concurrent.FutureTask {
+                cancel = java.util.concurrent.FutureTask {
                     fixture.service.cancelDurable(fixture.job.id, running.runId, running.version)
                 }
                 Thread(cancel, "launched-continuation-cancel").start()
-                assertEquals(WorkflowRunState.CANCELLING, cancel.get(5, TimeUnit.SECONDS).state)
-                try { Thread.sleep(TimeUnit.SECONDS.toMillis(5)) } catch (cancelled: InterruptedException) {
+                // Cancellation needs the service monitor; it interrupts this thread during either wait.
+                try {
+                    cancel.get(5, TimeUnit.SECONDS)
+                    Thread.sleep(TimeUnit.SECONDS.toMillis(5))
+                } catch (cancelled: InterruptedException) {
                     interrupted.set(true)
                     throw cancelled
                 }
@@ -531,6 +541,7 @@ class WebRecoveryControllerTest {
             f.outcomes += DurableWebWorkflowOutcome.Completed()
             try { f.pending.remove().run() } finally { Thread.interrupted() }
             assertTrue(interrupted.get())
+            assertEquals(WorkflowRunState.CANCELLING, cancel.get(5, TimeUnit.SECONDS).state)
             assertEquals(WorkflowRunState.CANCELLED, f.attempt(successor).state)
             assertEquals(WorkflowTerminalReason.CANCELLED, f.attempt(successor).terminalReason)
             assertNull(f.attempt(successor).candidate)
