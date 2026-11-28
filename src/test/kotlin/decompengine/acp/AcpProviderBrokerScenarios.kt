@@ -506,6 +506,19 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5))
         assertTrue(stuck.closed)
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { bounded.deliverChannelCapability(RecordingSink()) }
+        // The same bound holds for a real full pipe with nobody closing it: the write never blocks inside the pipe.
+        val fullPipe = java.nio.channels.Pipe.open()
+        try {
+            fullPipe.sink().configureBlocking(false)
+            while (fullPipe.sink().write(ByteBuffer.allocate(64 * 1024)) > 0) Unit
+            val boundedPipe = broker(connector = connector(server), brokerPolicy = approvedProviderPolicy("idleTimeoutMillis" to "200"))
+            val pipeStarted = System.nanoTime()
+            assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { boundedPipe.deliverChannelCapability(fullPipe.sink()) }
+            assertTrue(System.nanoTime() - pipeStarted < TimeUnit.SECONDS.toNanos(5))
+            assertFalse(fullPipe.sink().isOpen)
+        } finally {
+            fullPipe.source().close()
+        }
     }
 
     fun sourceWalkFailsClosedAndChecksBelowTheRoot() {
