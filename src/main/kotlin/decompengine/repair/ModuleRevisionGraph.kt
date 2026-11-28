@@ -2364,8 +2364,13 @@ internal class ModuleRevisionGraph private constructor(
         }
     }
 
+    // A reopened/copied graph cannot issue a dispatch commitment for an earlier run.
+    private var publicationDispatch: Pair<String, RepairPublicationOwner>? = null
+    private var publicationGraphSha256: String? = null
+
     @Synchronized
-    fun beginRun(maximumAttempts: Int, maximumWallMillis: Long): RepairRunState = graphOperation {
+    @JvmOverloads
+    fun beginRun(maximumAttempts: Int, maximumWallMillis: Long, owner: RepairPublicationOwner? = null): RepairRunState = graphOperation {
         enableRunContract()
         require(state.pending == null && state.runs.lastOrNull()?.terminal != false)
         require(maximumAttempts > 0 && maximumWallMillis > 0)
@@ -2375,6 +2380,7 @@ internal class ModuleRevisionGraph private constructor(
             RepairRunStatus.RUNNING, state.headId, state.fullyAcceptedHeadId, null,
             state.regressionCorpusSha256, maximumAttempts, 0, now, Math.addExact(now, maximumWallMillis))
         persist(state.copy(provisionalHeadId = null, runs = state.runs + run))
+        publicationDispatch = owner?.let { run.id to it }
         run
     }
 
@@ -2512,6 +2518,25 @@ internal class ModuleRevisionGraph private constructor(
             lifecycle = Lifecycle.POISONED
             throw failure
         }
+    }
+
+    @Synchronized
+    internal fun capturePublication(runId: String): RepairPublicationCommitment? = graphOperation {
+        val owner = publicationDispatch?.takeIf { it.first == runId }?.second ?: return@graphOperation null
+        val run = state.runs.lastOrNull() ?: return@graphOperation null
+        if (run.id != runId || run.status != RepairRunStatus.FULLY_ACCEPTED || state.pending != null ||
+            run.acceptedHeadId != state.fullyAcceptedHeadId || state.headId != run.acceptedHeadId) return@graphOperation null
+        val node = state.nodes.singleOrNull { it.id == run.acceptedHeadId } ?: return@graphOperation null
+        if (node.status != ModuleRevisionStatus.ROOT &&
+            (node.status != ModuleRevisionStatus.ACCEPTED || node.repairMetadata?.publicationMode != RepairPublicationMode.ACP_RELEASE))
+            return@graphOperation null
+        val proof = state.acceptedProof ?: return@graphOperation null
+        val observation = run.validationObservations.entries.singleOrNull {
+            it.invocation.runId == run.id && it.invocation.candidateRevisionId == run.acceptedHeadId &&
+                it.outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED && it.diff == null && it.proof == proof
+        } ?: return@graphOperation null
+        RepairPublicationCommitment(owner, publicationGraphSha256 ?: return@graphOperation null,
+            observation.invocation, observation.primary.sha256)
     }
 
     private fun workingHeadId(): String = state.provisionalHeadId ?: state.headId
@@ -4174,6 +4199,9 @@ internal class ModuleRevisionGraph private constructor(
     private fun persist(prepared: PreparedRevisionGraphState) {
         stateStore.writeGraph(prepared.payload)
         state = prepared.state
+        val run = state.runs.lastOrNull()
+        publicationGraphSha256 = if (run?.status == RepairRunStatus.FULLY_ACCEPTED && publicationDispatch?.first == run.id)
+            sha256(prepared.payload) else null
     }
 
     private fun synchronizeSourceManifest() {

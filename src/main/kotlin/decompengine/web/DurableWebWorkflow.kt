@@ -116,7 +116,8 @@ data class DurableWebWorkflowContext(val job: Job, val attempt: WorkflowAttempt,
 
 sealed interface DurableWebWorkflowOutcome {
     data class Completed(val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null,
-        val reason: WorkflowTerminalReason = WorkflowTerminalReason.COMPLETED) : DurableWebWorkflowOutcome {
+        val reason: WorkflowTerminalReason = WorkflowTerminalReason.COMPLETED,
+        val binding: decompengine.jobs.WorkflowRepairBinding? = null) : DurableWebWorkflowOutcome {
         init { require(reason in setOf(WorkflowTerminalReason.COMPLETED, WorkflowTerminalReason.NO_CHANGES)) }
     }
     data class Failed(val reason: WorkflowTerminalReason = WorkflowTerminalReason.FAILED,
