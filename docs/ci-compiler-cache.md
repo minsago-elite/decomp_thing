@@ -46,41 +46,29 @@ cache ownership is introduced for deliberately cold jobs or private replay homes
 The dependency action excludes `build/ci-compiler-cache`; its shared family never
 changes the single default-branch compiler publisher or the one-GiB limit.
 
-## Archival image dependency seed
+## Archival image Gradle resolution
 
 The `archival-ghidra` job builds its image with BuildKit, whose `/root/.gradle`
-cache mount starts empty on a hosted runner. To avoid downloading every plugin and
-dependency from Maven Central again, the job restores the dependency family manifest
-read-only into `build/archival-runner-gradle-home`. It never publishes.
-`scripts/validate-archival-docker.sh` then runs `scripts/stage-archival-gradle-seed.py`,
-which copies that home's `caches/modules-2` into `build/archival-gradle-seed`. Lock
-files and `gc.properties` are left out, which is the layout Gradle documents for a
-read-only dependency cache. The script passes the copy to `docker build` as the
-`gradle-seed` build context. `scripts/archival-gradle-install.sh` exposes it to the
-image's single `installDist` invocation as `GRADLE_RO_DEP_CACHE`. Artifacts already in
-the seed resolve without a repository request. Missing ones are downloaded into the
-writable cache mount.
+cache mount starts empty on a hosted runner, so the image's single `installDist`
+invocation resolves every plugin and dependency from its repository. The job does
+not restore the runner dependency cache into the image build. GitHub can serve a
+pull request a cache entry saved from that pull request's own merge ref, and the
+copied resolution metadata has no integrity check independent of the cache. A
+restored entry could therefore change which dependencies or plugins resolve. Reusing
+it safely would need repository-wide Gradle dependency verification metadata, which
+the build does not have.
 
-Every artifact in `files-2.1` sits in a directory named after its SHA-1. Staging
-refuses the whole seed and fails validation if any artifact's content differs from its
-directory name, and it leaves no partial seed. The seed comes only from manifests
-published by default-branch jobs, because PRs restore read-only. No mirror or
-repository is added. Gradle applies the same dependency verification to artifacts from
-the read-only cache as to downloaded ones. Without `DECOMP_ARCHIVAL_GRADLE_SEED`, or
-on a cache miss, the seed is empty. A plain `docker build` uses the Dockerfile's
-default `gradle-seed` stage, which has no `modules-2`. Both cases resolve cold.
-
-On a cold resolution, Gradle retries each transient repository failure, including
-HTTP 429, up to 8 requests per resource. It sleeps the initial backoff, then double
-that, and so on. Each build draws the initial backoff uniformly from 3000 to 5000 ms,
-so concurrent builds do not retry in lockstep. The sleeps total 127 times the initial
-backoff, so one throttled resource waits 381 to 635 seconds (6.4 to 10.6 minutes)
-before the build fails. The earlier window was 30 seconds: 5 requests from a fixed
-2000 ms. The 45-minute timeout still bounds the whole invocation.
-`scripts/test-archival-gradle-resolution.py` checks the window, the jitter, the
-tampered-seed refusal and the original resolver failure cases. It also shows that a
-seeded build succeeds with no requests while the loopback repository refuses every
-request, and that a cold build fails under the same refusal.
+`scripts/archival-gradle-install.sh` is the only place that sets the resolver retry
+properties for that invocation. On a transient repository failure, including HTTP
+429, Gradle sends up to 8 requests per resource. It sleeps the initial backoff, then
+double that, and so on. Each build draws the initial backoff uniformly from 3000 to
+5000 ms, so concurrent builds do not retry in lockstep. The sleeps total 127 times
+the initial backoff, so one throttled resource waits 381 to 635 seconds (6.4 to 10.6
+minutes) before the build fails. The earlier window was 30 seconds: 5 requests from
+a fixed 2000 ms. The 45-minute timeout bounds the whole invocation, and the image
+build capture keeps its 2700-second deadline inside the job's 60-minute timeout.
+`scripts/test-archival-gradle-resolution.py` checks the window, the jitter and the
+original resolver failure cases.
 
 ## Evidence
 

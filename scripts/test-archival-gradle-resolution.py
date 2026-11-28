@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Exercise CI Gradle dependency resolution against a loopback plugin repository.
 
-The archival target also covers the runner dependency seed (#2013): a seeded build must
-resolve cached artifacts without any repository request, a tampered cache must be refused
-before staging, and the jittered retry window must stay within its documented bounds.
+The archival target also checks that the jittered retry window of the image build's
+install script stays within its documented bounds (#2013).
 """
 import argparse
 from contextlib import contextmanager
@@ -26,7 +25,6 @@ MARKER = ("fixture.archival", "fixture.archival.gradle.plugin", "1.0")
 BOM = ("org.jetbrains.kotlin", "kotlin-gradle-plugins-bom", "2.4.0")
 API = ("org.jetbrains.kotlin", "kotlin-gradle-plugin-api", "2.4.0")
 INSTALL = ROOT / "scripts/archival-gradle-install.sh"
-STAGE = ROOT / "scripts/stage-archival-gradle-seed.py"
 # Scaled-down initial backoff for loopback controls; the tentative count is the real one.
 CONTROL_BACKOFF_MS = "100"
 # The documented minimum per-resource window for riding out HTTP 429 throttling.
@@ -78,16 +76,14 @@ def fixture():
 
 
 @contextmanager
-def serve(scenario, artifacts, statuses, requests=None, refuse=lambda: False):
+def serve(scenario, artifacts, statuses):
     class Handler(BaseHTTPRequestHandler):
         def respond(self, send_body):
             # A distinct repository URL per case keeps Gradle's negative-result cache isolated.
             key = self.path.removeprefix(f"/{scenario}/")
             data = artifacts.get(key)
             status = 404 if data is None else 200
-            if refuse():
-                data, status = None, 429
-            elif key == path_for(BOM, "pom"):
+            if key == path_for(BOM, "pom"):
                 if scenario == "persistent" or (scenario == "recover" and len(statuses) < 3):
                     status = 429
                 elif scenario in ("401", "403", "404"):
@@ -95,8 +91,6 @@ def serve(scenario, artifacts, statuses, requests=None, refuse=lambda: False):
                 elif scenario == "malformed":
                     data = b"<project><broken>"
                 statuses.append((self.command, status))
-            if requests is not None:
-                requests.append((self.command, key, status))
             body = data if status == 200 else b""
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
@@ -132,17 +126,13 @@ def install_constants():
     return values
 
 
-def archival_command(seed):
-    # The image build runs this script from the seed bind mount; check that wiring first.
+def archival_command():
+    # The image build runs this script as its one installDist step; check that wiring first.
     dockerfile = re.sub(r"\s*\\\n\s*", " ", (ROOT / "Dockerfile").read_text())
-    run = ("RUN --mount=type=bind,from=gradle-seed,target=/gradle-seed --mount=type=cache,target=/root/.gradle "
-           "sh scripts/archival-gradle-install.sh /gradle-seed")
-    if "FROM toolchain AS gradle-seed\n" not in dockerfile or not re.search(re.escape(run) + r"\s*\n", dockerfile):
-        raise ValueError("Dockerfile no longer runs the seeded archival install script")
-    validator = (ROOT / "scripts/validate-archival-docker.sh").read_text()
-    if "--build-context gradle-seed=build/archival-gradle-seed . " not in validator:
-        raise ValueError("archival validation no longer passes the gradle-seed build context")
-    return ["sh", str(INSTALL), str(seed)]
+    run = "RUN --mount=type=cache,target=/root/.gradle sh scripts/archival-gradle-install.sh"
+    if not re.search(re.escape(run) + r"\s*\n", dockerfile):
+        raise ValueError("Dockerfile no longer runs the archival install script")
+    return ["sh", str(INSTALL)]
 
 
 def window_controls(base, env):
@@ -157,7 +147,7 @@ def window_controls(base, env):
     picks = set()
     env = {key: value for key, value in env.items() if key != "ARCHIVAL_GRADLE_INITIAL_BACKOFF_MS"}
     for _ in range(6):
-        result = subprocess.run(archival_command(base / "absent-seed"), cwd=base, text=True, capture_output=True,
+        result = subprocess.run(archival_command(), cwd=base, text=True, capture_output=True,
                                 env={**env, "ARCHIVAL_GRADLEW": str(stub)}, timeout=20, check=True)
         flags = dict(line.removeprefix("-D").split("=", 1) for line in result.stdout.splitlines() if line.startswith("-D"))
         picks.add(int(flags["org.gradle.internal.repository.initial.backoff"]))
@@ -170,86 +160,6 @@ def window_controls(base, env):
     return tentatives
 
 
-def write_project(project, url, task):
-    project.mkdir()
-    (project / "settings.gradle").write_text(f"""pluginManagement {{
-    repositories {{ maven {{ url = uri('{url}'); allowInsecureProtocol = true }} }}
-}}
-rootProject.name = 'archival-resolver-control'
-""")
-    (project / "build.gradle").write_text("plugins { id 'fixture.archival' version '1.0' }\n" + task + """
-    doLast {
-        file('task-runs').append('ran\\n')
-        if (projectDir.name == 'task-failure') {
-            throw new GradleException('injected archival task failure')
-        }
-    }
-}
-""")
-
-
-def task_runs(project):
-    ran = project / "task-runs"
-    return ran.read_text().splitlines() if ran.exists() else []
-
-
-def seeded_controls(base, env, artifacts, gradle_home, tentatives):
-    task = "tasks.register('installDist') {"
-    requests = []
-    refusing = {"on": False}
-    empty_seed = base / "seeded-empty-seed"
-    empty_seed.mkdir()
-
-    def build(name, seed):
-        project = base / name
-        result = subprocess.run(archival_command(seed), cwd=project, env={**env, "GRADLE_USER_HOME": str(gradle_home(name))},
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=150)
-        return result, task_runs(project)
-
-    def stage(source, destination):
-        return subprocess.run([sys.executable, "-I", "-B", str(STAGE), str(source), str(destination)],
-                              text=True, capture_output=True, timeout=60)
-
-    # One server keeps the repository URL, and therefore Gradle's cache keys, identical.
-    with serve("seeded", artifacts, [], requests, lambda: refusing["on"]) as url:
-        for name in ("seeded-source", "seeded", "seeded-cold"):
-            write_project(base / name, url, task)
-        result, runs = build("seeded-source", empty_seed)
-        if result.returncode != 0 or not requests or runs != ["ran"]:
-            raise RuntimeError(f"seed source build failed: {result.returncode} {requests}\n{result.stdout[-3500:]}")
-
-        source_home = gradle_home("seeded-source", create=False)
-        tampered_home = base / "gradle-seeded-tampered"
-        shutil.copytree(source_home / "caches/modules-2", tampered_home / "caches/modules-2")
-        victim, = (tampered_home / "caches/modules-2/files-2.1").glob(f"{API[0]}/{API[1]}/{API[2]}/*/{API[1]}-{API[2]}.jar")
-        victim.write_bytes(victim.read_bytes() + b"tampered")
-        refused = stage(tampered_home, base / "seed-tampered")
-        if refused.returncode != 1 or "SHA-1 mismatch" not in refused.stderr or (base / "seed-tampered").exists():
-            raise AssertionError(f"tampered cache was not refused: {refused.returncode} {refused.stdout} {refused.stderr}")
-        staged = stage(source_home, base / "seed")
-        if staged.returncode != 0 or not (base / "seed/modules-2/files-2.1").is_dir():
-            raise AssertionError(f"seed staging failed: {staged.stdout} {staged.stderr}")
-        leftovers = [path for path in (base / "seed").rglob("*") if path.name.endswith(".lock") or path.name == "gc.properties"]
-        if leftovers:
-            raise AssertionError(f"seed retained Gradle lock state: {leftovers}")
-
-        # From here every repository request is refused with HTTP 429.
-        refusing["on"] = True
-        requests.clear()
-        result, runs = build("seeded", base / "seed")
-        if result.returncode != 0 or requests or runs != ["ran"] or "read-only dependency cache" not in result.stdout:
-            raise RuntimeError(f"seeded build contacted the repository or failed: exit {result.returncode}, "
-                               f"requests {requests}, task runs {runs}\n{result.stdout[-3500:]}")
-        print(f"seeded: 0 repository requests, archival task ran {len(runs)} time(s), Gradle exit 0", flush=True)
-
-        result, runs = build("seeded-cold", empty_seed)
-        if result.returncode == 0 or runs or len(requests) != tentatives or any(status != 429 for *_, status in requests):
-            raise RuntimeError(f"cold control under refusal: exit {result.returncode}, requests {requests}, task runs {runs}"
-                               f"\n{result.stdout[-3500:]}")
-        print(f"seeded-cold: {len(requests)} refused requests, archival task ran 0 time(s), Gradle exit {result.returncode}", flush=True)
-        print(f"{refused.stderr.strip()}", flush=True)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gradle", type=Path, default=ROOT / "gradlew", help="pinned Gradle wrapper or distribution executable")
@@ -257,6 +167,7 @@ def main():
     args = parser.parse_args()
     gradle = args.gradle.resolve()
     builtin = args.target == "builtin"
+    command = [sys.executable, "scripts/validate-builtin-contract.py"] if builtin else archival_command()
     build = ROOT / "build"
     build.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="archival-gradle-", dir=build) as work:
@@ -268,43 +179,48 @@ def main():
         env = {**os.environ, "TMPDIR": str(tmp), "ARCHIVAL_GRADLEW": str(gradle),
                "ARCHIVAL_GRADLE_INITIAL_BACKOFF_MS": CONTROL_BACKOFF_MS,
                "JAVA_TOOL_OPTIONS": os.environ.get("JAVA_TOOL_OPTIONS", "") + f" -XX:-UsePerfData -Djava.io.tmpdir={tmp}"}
+        # A host read-only dependency cache would let scenarios skip the loopback repository.
         env.pop("GRADLE_RO_DEP_CACHE", None)
-
-        def gradle_home(scenario, create=True):
-            # Share only the pinned wrapper distribution. Each scenario must fetch its own metadata.
-            home = base / f"gradle-{scenario}"
-            if create:
-                home.mkdir()
-                (home / "wrapper").symlink_to(wrapper_cache, target_is_directory=True)
-            return home
-
-        if builtin:
-            command, tentatives = [sys.executable, "scripts/validate-builtin-contract.py"], 5
-        else:
-            empty_seed = base / "empty-seed"
-            empty_seed.mkdir()
-            command, tentatives = archival_command(empty_seed), window_controls(base, env)
+        tentatives = 5 if builtin else window_controls(base, env)
         artifacts = fixture()
         cases = {"recover": [429, 429, 429, 200], "persistent": [429] * tentatives,
                  "401": [401], "403": [403], "404": [404], "malformed": [200], "task-failure": [200]}
         for scenario, expected in cases.items():
             project = base / scenario
-            home = gradle_home(scenario)
+            project.mkdir()
+            if builtin:
+                (project / "scripts").mkdir()
+                shutil.copyfile(ROOT / "scripts/validate-builtin-contract.py", project / "scripts/validate-builtin-contract.py")
+                (project / "gradlew").symlink_to(gradle)
+                test_sources = project / "src/test/java"
+                test_sources.mkdir(parents=True)
+                (test_sources / "FixtureProbe.java").write_text("class FixtureProbe {}\n")
+            # Share only the pinned wrapper distribution. Each scenario must fetch its own metadata.
+            gradle_home = base / f"gradle-{scenario}"
+            gradle_home.mkdir()
+            (gradle_home / "wrapper").symlink_to(wrapper_cache, target_is_directory=True)
             statuses = []
             with serve(scenario, artifacts, statuses) as url:
+                (project / "settings.gradle").write_text(f"""pluginManagement {{
+    repositories {{ maven {{ url = uri('{url}'); allowInsecureProtocol = true }} }}
+}}
+rootProject.name = 'archival-resolver-control'
+""")
                 task = "tasks.named('test') {\n    filter { failOnNoMatchingTests = false }" if builtin else "tasks.register('installDist') {"
-                write_project(project, url, task)
-                if builtin:
-                    (project / "scripts").mkdir()
-                    shutil.copyfile(ROOT / "scripts/validate-builtin-contract.py", project / "scripts/validate-builtin-contract.py")
-                    (project / "gradlew").symlink_to(gradle)
-                    test_sources = project / "src/test/java"
-                    test_sources.mkdir(parents=True)
-                    (test_sources / "FixtureProbe.java").write_text("class FixtureProbe {}\n")
-                result = subprocess.run(command, cwd=project, env={**env, "GRADLE_USER_HOME": str(home)},
+                (project / "build.gradle").write_text("plugins { id 'fixture.archival' version '1.0' }\n" + task + """
+    doLast {
+        file('task-runs').append('ran\\n')
+        if (projectDir.name == 'task-failure') {
+            throw new GradleException('injected archival task failure')
+        }
+    }
+}
+""")
+                result = subprocess.run(command, cwd=project, env={**env, "GRADLE_USER_HOME": str(gradle_home)},
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, text=True, timeout=150)
-            runs = task_runs(project)
+            ran = project / "task-runs"
+            runs = ran.read_text().splitlines() if ran.exists() else []
             gradle_exit = result.returncode
             if builtin:
                 # The fixture has no real contract suites. Even a successful Gradle invocation must fail validation.
@@ -317,8 +233,6 @@ def main():
                     or runs != (["ran"] if scenario in ("recover", "task-failure") else [])):
                 raise RuntimeError(f"{scenario}: exit {result.returncode}, BOM {statuses}, task runs {runs}\n{result.stdout[-3500:]}")
             print(f"{scenario}: BOM {statuses}, {args.target} task ran {len(runs)} time(s), Gradle exit {gradle_exit}", flush=True)
-        if not builtin:
-            seeded_controls(base, env, artifacts, gradle_home, tentatives)
 
 
 if __name__ == "__main__":

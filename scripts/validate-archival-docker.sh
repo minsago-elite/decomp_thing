@@ -108,15 +108,12 @@ mkdir -p "$validation_root/output/archival-image/reports"
 chmod -R a+rwX "$validation_root"
 
 image=decomp-thing-archival-ci
-# Reuse dependencies the runner already resolved; DECOMP_ARCHIVAL_GRADLE_SEED names a
-# Gradle user home. Unset, the seed is empty and the image build resolves cold.
-python3 -I -B scripts/stage-archival-gradle-seed.py "${DECOMP_ARCHIVAL_GRADLE_SEED:-}" build/archival-gradle-seed
 # archival-image-build: begin
 image_build_started=1
 set +e
 timeout --signal=TERM --kill-after=5s 2740s python3 -I -B scripts/capture-archival-image-build.py \
   "$validation_root" "$validation_device" "$validation_inode" --deadline-seconds 2700 \
-  -- docker build --tag "$image" --build-context gradle-seed=build/archival-gradle-seed . \
+  -- docker build --tag "$image" . \
   | timeout --signal=TERM --kill-after=1s 2750s python3 -I -B scripts/capture-archival-image-build.py \
   --parse-receipt --deadline-seconds 2700
 image_build_status=("${PIPESTATUS[@]}")

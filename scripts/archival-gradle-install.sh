@@ -1,12 +1,6 @@
 #!/bin/sh
 # One bounded Gradle installDist invocation for the archival image build (#2013).
-#
-# Seed: when SEED_DIR/modules-2 exists (a runner dependency cache staged by
-# scripts/stage-archival-gradle-seed.py), it becomes Gradle's read-only
-# dependency cache (GRADLE_RO_DEP_CACHE). Artifacts already in it resolve with
-# no repository request; anything missing is downloaded into the writable
-# cache. Gradle applies its dependency verification to artifacts from either
-# cache. Without a seed the build resolves from the repositories as before.
+# It is the single place that sets the archival resolver retry properties.
 #
 # Cold retry window: Gradle retries a transient repository failure, including
 # HTTP 429, up to MAX_TENTATIVES requests per resource and sleeps the initial
@@ -18,7 +12,6 @@
 # Gradle reports the failure. The 45-minute timeout bounds the whole invocation.
 set -eu
 
-seed=${1:?usage: archival-gradle-install.sh SEED_DIR}
 MAX_TENTATIVES=8
 BACKOFF_FLOOR_MS=3000
 BACKOFF_JITTER_MS=2000
@@ -34,14 +27,6 @@ case $initial_backoff_ms in
   '' | *[!0-9]*) echo "archival Gradle retry: invalid initial backoff" >&2; exit 2 ;;
 esac
 
-if [ -d "$seed/modules-2" ]; then
-  GRADLE_RO_DEP_CACHE=$seed
-  export GRADLE_RO_DEP_CACHE
-  echo "archival Gradle seed: read-only dependency cache at $seed"
-else
-  unset GRADLE_RO_DEP_CACHE
-  echo "archival Gradle seed: none; resolving every dependency from its repository"
-fi
 echo "archival Gradle retry: $MAX_TENTATIVES tentatives, initial backoff $initial_backoff_ms ms," \
   "at most $((initial_backoff_ms * ((1 << (MAX_TENTATIVES - 1)) - 1) / 1000)) s of backoff per resource"
 
