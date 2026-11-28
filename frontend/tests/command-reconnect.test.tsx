@@ -30,7 +30,7 @@ function controlled() {
   return { fn, calls };
 }
 
-const transport = vi.hoisted(() => ({ get: undefined as unknown, post: undefined as unknown, put: undefined as unknown }));
+const transport = vi.hoisted((): Record<'get' | 'post' | 'put', unknown> => ({ get: null, post: null, put: null }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 const fixture = <T,>(name: string) => (JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as { data: T }).data;
 const session = { csrf: () => 'a'.repeat(43) };
@@ -164,10 +164,11 @@ const preview: JobDeletionPreview = {
   storage: storage(), totalBytes: '4096', storageComplete: true,
   protections: [], deletable: true, finality: 'permanent', undoAvailable: false, tombstoneRetentionMs: '86400000',
 };
+const accepted = 'The job and its stored files were permanently deleted.';
 const operation: Operation = {
   operationId: 'jobdel_00112233445566778899aabbccddeeff', jobId, repositoryId: null, worktreeId: null, action: 'job.delete', state: 'completed',
   version: 'opv2_00112233445566778899aabbccddeeff', createdAt: '2026-10-25T00:00:00Z', endedAt: '2026-10-25T00:00:01Z',
-  resultObjectId: null, recoveryRequired: false, message: 'The job and its stored files were permanently deleted.',
+  resultObjectId: null, recoveryRequired: false, message: accepted,
 };
 
 it('keeps one confirmed deletion in flight across reconnection without sending another', async () => {
@@ -197,6 +198,6 @@ it('keeps one confirmed deletion in flight across reconnection without sending a
   await act(async () => { sent.resolve({ data: operation }); await Promise.resolve(); }); await settle();
   expect(deleted).toHaveBeenCalledOnce(); expect(deleted).toHaveBeenCalledWith(operation);
   expect(status()).toBe('Deletion accepted (completed).');
-  expect(screen.getByText(operation.message)).toBeTruthy();
+  expect(screen.getByText(accepted)).toBeTruthy();
   expect(put.fn).toHaveBeenCalledOnce();
 });
