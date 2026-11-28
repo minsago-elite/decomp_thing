@@ -134,6 +134,15 @@ class WebAdmissionBoundsTest {
         }
     }
 
+    /** A completed probe response can precede the executor task's finally block by a short interval. */
+    private fun awaitIdle(server: UploadServer) {
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (server.admissionSnapshot() != UploadServer.AdmissionSnapshot(0, 0, 0) &&
+            System.nanoTime() < deadline) Thread.sleep(10)
+        assertEquals(UploadServer.AdmissionSnapshot(0, 0, 0), server.admissionSnapshot(),
+            "the baseline probe must release admission before the saturation workload")
+    }
+
     /** Waits on observed occupancy instead of a fixed delay, so a slow host cannot probe before saturation. */
     private fun awaitOccupied(server: UploadServer, responders: Int = 0) {
         val deadline = System.nanoTime() + 20_000_000_000L
@@ -159,6 +168,7 @@ class WebAdmissionBoundsTest {
         try {
             val port = server.serverPort
             assertEquals(401, get(port).status, "an idle server answers normally")
+            awaitIdle(server)
             saturate(server)
             awaitOccupied(server)
             awaitRequestPoolSaturation(server)

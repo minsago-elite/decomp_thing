@@ -17,3 +17,15 @@ This advances selection preservation in #527 and filter history in #495. Their f
 criteria remain binding. Run/revision/workspace-tab URL state, comparisons, directory/row pagination,
 restored scroll/focus across every resource and full packaged navigation acceptance are not completed by
 the filter correction. The design contract remains docs/web-navigation.md; #495 and parent #167 stay open.
+
+## Attempt artifact catalog
+
+On attempt Overview and Evidence routes, the retained-artifact catalog keeps its documented Artifacts filter
+in the attempt query: `artifacts=run|revision` records that the list was opened and whether it is limited to
+the result revision, and `artifactCursor` carries the server's opaque page cursor. Opening the list, changing
+the revision filter and paging push history; Refresh returns to the first page with replace. Back, Forward and
+reload restore the selection and perform only its bounded catalog read; an entry without these keys shows the
+unopened catalog and reads nothing. An invalid saved selection, or a revision scope for an attempt without a
+result revision, is explained in place without a read and replaced when the list is opened again. Other attempt
+query keys, including the validation selection, are preserved. The router-less embedding keeps the selection in
+component state. The attempt tab (Overview, Activity, Evidence, Logs), run and revision are path segments.

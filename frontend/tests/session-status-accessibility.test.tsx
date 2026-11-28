@@ -1,5 +1,7 @@
-// #1895: SessionStatus keeps a semantic <aside> container, puts status semantics only on the
-// changing message, and keeps Check session / Sign out outside the live region.
+// #1895: SessionStatus keeps a semantic container, puts status semantics only on the changing
+// message, and keeps Check session / Sign out outside the live region. Ported onto #1908's
+// structure: each placement keeps one persistent, text-only status paragraph, and only the
+// active container's paragraph carries text.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import axe from 'axe-core';
@@ -35,27 +37,37 @@ function setup() {
 
 async function settle() {
   for (let index = 0; index < 3; index += 1) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  // #1908: a live paragraph takes its text only after it has been in the document for a paint.
+  await act(async () => { await new Promise(r => setTimeout(r, 40)); });
 }
 
-/** The role contract this issue requires; throws on the former `<aside role="status">` markup. */
-function expectStatusContract(message: string, action: string | null) {
-  const asides = document.querySelectorAll('aside.session-notice');
-  expect(asides).toHaveLength(1);
-  const aside = asides[0]!;
-  expect(aside.hasAttribute('role'), 'aside must keep its native complementary role').toBe(false);
+/**
+ * The role contract this issue requires; throws on the former `<aside role="status">` markup.
+ * Exactly one container is active: the complementary aside for page states, or the named group when
+ * connected. Every status is a text-only paragraph, and only the active container's one holds text.
+ */
+function expectStatusContract(message: string | null, action: string | null, container: 'page' | 'connected' = 'page') {
+  const active = document.querySelectorAll<HTMLElement>('.session-notice');
+  expect(active).toHaveLength(1);
+  const notice = active[0]!;
+  if (container === 'page') {
+    expect(notice.tagName).toBe('ASIDE');
+    expect(notice.hasAttribute('role'), 'aside must keep its native complementary role').toBe(false);
+  } else expect(notice.getAttribute('role')).toBe('group');
   const statuses = screen.getAllByRole('status');
-  expect(statuses).toHaveLength(1);
-  const status = statuses[0]!;
-  expect(status.tagName).toBe('P');
-  expect(aside.contains(status)).toBe(true);
-  expect(status.textContent).toBe(message);
-  expect(within(status).queryAllByRole('button')).toHaveLength(0);
-  const buttons = within(aside as HTMLElement).queryAllByRole('button');
+  for (const status of statuses) {
+    expect(status.tagName).toBe('P');
+    expect(within(status).queryAllByRole('button')).toHaveLength(0);
+  }
+  const spoken = statuses.filter(status => status.textContent !== '');
+  expect(spoken.map(status => status.textContent)).toEqual(message === null ? [] : [message]);
+  for (const status of spoken) expect(notice.contains(status)).toBe(true);
+  const buttons = within(notice).queryAllByRole('button');
   expect(buttons.map(button => button.textContent)).toEqual(action === null ? [] : [action]);
   for (const button of buttons) {
     expect(button.getAttribute('type')).toBe('button');
     expect(button.tabIndex).toBe(0);
-    expect(status.contains(button)).toBe(false);
+    for (const status of statuses) expect(status.contains(button)).toBe(false);
   }
 }
 
@@ -64,9 +76,13 @@ async function axeRoleViolations() {
   return result.violations.map(violation => violation.id);
 }
 
-it('public renders nothing; checking → required keeps status on the message and Check session outside it', async () => {
+it('public renders nothing visible; checking → required keeps status on the message and Check session outside it', async () => {
   const { gateway, session, view } = setup();
-  expect(view.container.innerHTML).toBe('');
+  await settle();
+  // #1908: idle placements keep only empty, out-of-flow live paragraphs.
+  expect(view.container.textContent).toBe('');
+  expect(document.querySelectorAll('.session-notice')).toHaveLength(0);
+  expect(screen.getAllByRole('status').every(status => status.textContent === '')).toBe(true);
   const pending = deferred<Bootstrap>();
   gateway.bootstrap.mockReturnValueOnce(pending.promise);
   void act(() => { void session.refresh(); });
@@ -98,15 +114,15 @@ it('authenticated server change announces only the change; Sign out → signing-
   gateway.bootstrap.mockResolvedValueOnce(bootstrap('instance-a')).mockResolvedValueOnce(bootstrap('instance-b'));
   await act(async () => { await session.refresh(); });
   await settle();
-  expect(screen.queryAllByRole('status')).toHaveLength(0);
-  const connected = screen.getByRole('complementary', { name: copy.localSession });
+  expectStatusContract(null, copy.signOut, 'connected');
+  const connected = screen.getByRole('group', { name: copy.localSession });
   expect(connected.textContent).toContain(copy.localSessionConnected);
   await act(async () => { await session.refresh(); });
   await settle();
   expect(session.snapshot()).toMatchObject({ status: 'authenticated', serverChanged: true });
-  const status = screen.getByRole('status');
+  expectStatusContract(copy.applicationInstanceChanged, copy.signOut, 'connected');
+  const status = screen.getAllByRole('status').find(candidate => candidate.textContent !== '')!;
   expect(status.textContent).toBe(copy.applicationInstanceChanged);
-  expect(within(status).queryAllByRole('button')).toHaveLength(0);
   expect(await axeRoleViolations()).toEqual([]);
   expect(gateway.logout).not.toHaveBeenCalled();
 
@@ -152,10 +168,11 @@ it('negative control: the former <aside role="status"> markup is rejected by the
   await act(async () => { await session.refresh(); });
   await settle();
   // Reconstruct the pre-#1895 markup from the real rendered component.
-  const aside = document.querySelector('aside.session-notice')!;
-  aside.querySelector('p')!.removeAttribute('role');
+  const aside = document.querySelector<HTMLElement>('aside.session-notice')!;
+  aside.querySelector('p[role="status"]')!.removeAttribute('role');
   aside.setAttribute('role', 'status');
   expect(() => expectStatusContract(copy.theLocalSessionCouldNotBeCheckedConfirmTheApplication, copy.checkSession)).toThrow();
-  expect(within(screen.getByRole('status')).queryAllByRole('button')).toHaveLength(1);
+  expect(screen.getAllByRole('status')).toContain(aside);
+  expect(within(aside).queryAllByRole('button')).toHaveLength(1);
   expect(await axeRoleViolations()).toContain('aria-allowed-role');
 });

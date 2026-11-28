@@ -307,6 +307,20 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 .capability-reports > li + li { margin-top: 0.5rem; }
 .capability-reports .job-facts { margin: 0.35rem 0 0; font-size: 0.875rem; }
 .capability-heading { font-weight: 600; }
+/*
+ * Workflow options and their nested fact lists reflow on the space they actually get, not the
+ * viewport: beside the 13rem navigation, a 48rem viewport leaves too little width for two nested
+ * two-column grids (#503). Below these widths each grid becomes a single column.
+ */
+.availability-list { container: workflow-options / inline-size; }
+.capability-reports > li { container: capability-report / inline-size; }
+@container workflow-options (width < 40rem) {
+  .availability-list > li { grid-template-columns: minmax(0, 1fr); }
+}
+@container capability-report (width < 28rem) {
+  .capability-reports .job-facts { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
+  .capability-reports .job-facts dd + dt { margin-top: 0.5rem; }
+}
 
 /* Activity and retained evidence */
 .activity-filters { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: 0.85rem 1rem; margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--control-line); border-radius: var(--radius-panel); background: var(--surface); }

@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { finalizePublication, loadReport, scrubReport } from './packaged-browser-report.mjs';
+import { recordCleanupTruth } from './packaged-browser-capture.mjs';
 import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, publishReport, scrubTokens, summarizeRequests, MAX_REPORT_BYTES, MAX_REPORT_PARTS, REPORT_PART_BYTES } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
@@ -392,8 +393,9 @@ async function runDriverFinalizer({ report, root, sensitiveValues, values = { mo
   // The driver publishes through #1882's finalizePublication; route its streams and exit status into this fake process.
   const publish = (...args) => finalizePublication(...args, { stdout: text => context.console.log(text), stderr: text => stderr.push(String(text)),
     fail: () => { process.exitCode = 1; } });
-  const context = vm.createContext({ report, root, sensitiveValues, values, process, join, finalizePublication: publish, boundReport, scrubTokens,
-    cdp: { call: async method => { calls.push(`cdp ${method}`); } },
+  // #1895's cleanup truth and CDP late-settlement evidence run in the same finalizer block.
+  const context = vm.createContext({ report, root, sensitiveValues, values, process, join, finalizePublication: publish, boundReport, scrubTokens, recordCleanupTruth,
+    cdp: { call: async method => { calls.push(`cdp ${method}`); }, lateEvidence: () => ({ settlements: [], dropped: 0 }) },
     stop: async child => { calls.push(`stop ${child}`); if (rejectStop && child === 'application') throw new Error(`stuck ${sensitiveValues[0]}`); },
     browser: 'browser', application: 'application', vite: null, forcedKill: new Set(), profile: '/fake/profile', browserTmp: null,
     safeDiagnostic: value => scrubTokens(String(value), sensitiveValues),

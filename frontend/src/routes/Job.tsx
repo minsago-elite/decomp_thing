@@ -238,7 +238,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
       <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
       <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
-        <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
+        <WorkflowAvailability runtime={runtime} job={job} attemptHistory={`${jobPath(basePath, job.jobId)}/runs`} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       </PanelBoundary>
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} onDeleted={markDeleted} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>

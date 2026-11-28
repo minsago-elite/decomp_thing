@@ -33,7 +33,8 @@ function failureMessage(failure: unknown, restoring: boolean): string {
 function requestedValidation(search: string, preserveRouteContext = false) {
   try {
     const location = preserveRouteContext ? validationRouteLocation(search) : validationLocation(search);
-    return { location, key: preserveRouteContext ? search : validationSearch(location), invalid: false };
+    // Only validation-owned keys identify a restoration; other attempt query state (#495 artifact catalog) must not restart it.
+    return { location, key: validationSearch(location), invalid: false };
   }
   catch { return { location: null, key: 'invalid:' + search.slice(0, 4097), invalid: true }; }
 }
@@ -111,9 +112,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation,
     }
     const selectedSearch = validationSearch(location);
     const search = nav.preserveRouteContext ? validationRouteSearch(actualSearch, selectedSearch) : selectedSearch;
-    installed.current = { binding, key: search }; binding.requestSearch = search;
-    if (search !== requested.key) nav.navigate(search, actualSearch);
-    return search;
+    installed.current = { binding, key: selectedSearch }; binding.requestSearch = selectedSearch;
+    if (selectedSearch !== requested.key) nav.navigate(search, actualSearch);
+    return selectedSearch;
   }
   async function loadHistory(controller: AbortController, page?: number, graph?: string) {
     const query = page === undefined ? '' : `?historyGraph=${graph}&historyPage=${page}`;
