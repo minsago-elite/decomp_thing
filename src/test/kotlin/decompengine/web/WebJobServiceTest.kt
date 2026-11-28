@@ -128,6 +128,43 @@ class WebJobServiceTest {
         } finally { service.dashboardStampBeforeRootRecheck = null; service.close() }
     }
 
+    @Test fun `a job renamed into the root with identical root metadata is listed by that page`() = withStore { store, root ->
+        val existing = store.createFromUpload("fixture.elf", elfFixture())
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage()
+            val scans = AtomicInteger()
+            val pages = WebJobPages({ scans.incrementAndGet(); service.collectionRecords() },
+                checkpointedSource = { checkpoint -> scans.incrementAndGet(); service.collectionRecordsWithProgress(checkpoint) },
+                collectionVersion = service::dashboardCollectionVersion,
+                collectionStamp = { _, checkpoint -> service.dashboardStorageStamp(Long.MAX_VALUE, checkpoint) })
+            fun ids() = pages.page("owner", WebJobQuery(), null).getValue("items").jsonArray
+                .map { it.jsonObject.getValue("jobId").jsonPrimitive.content }.toSet()
+            assertEquals(setOf(existing.id), ids())
+            assertEquals(1, scans.get())
+
+            // Same-tick rename of an in-root staging directory: the root's link count and size
+            // may not change and its times may stay in one tick, so the root stamps compare equal.
+            service.dashboardRootStampsEqual = { true }
+            assertEquals(setOf(existing.id), ids())
+            assertEquals(1, scans.get(), "Identical root metadata with an unchanged inventory still reuses the image")
+
+            var published: String? = null
+            service.dashboardStampBeforeRootRecheck = {
+                if (published == null) published = JobStore(root).createFromUpload("renamed.elf", elfFixture()).id
+            }
+            val listed = ids()
+            assertEquals(setOf(existing.id, checkNotNull(published)), listed,
+                "A job published by rename while root metadata stays identical must be listed")
+            assertEquals(2, scans.get(), "The job-id inventory recheck must force a rescan")
+        } finally {
+            service.dashboardStampBeforeRootRecheck = null
+            service.dashboardRootStampsEqual = null
+            service.close()
+        }
+    }
+
     @Test fun `startup seed preserves the workflow and organization presentation`() = withStore { store, root ->
         val job = store.createFromUpload("fixture.elf", elfFixture())
         val completed = WorkflowAttemptStore.open(root).use { attempts ->

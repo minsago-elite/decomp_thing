@@ -717,6 +717,9 @@ class WebJobService(
     /** Test hook run after job enumeration and stamping, before the final root metadata check. */
     @Volatile internal var dashboardStampBeforeRootRecheck: (() -> Unit)? = null
 
+    /** Test hook: maps the real before/after root-metadata equality to the value the stamp uses. */
+    @Volatile internal var dashboardRootStampsEqual: ((Boolean) -> Boolean)? = null
+
     /**
      * Revalidate the persisted inputs used by the dashboard image, including writes performed
      * through another JobStore instance or by a cooperating external process. This is metadata
@@ -843,26 +846,31 @@ class WebJobService(
             val emptyIds = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest())
             return WebJobCollectionStamp(HexFormat.of().formatHex(digest.digest()), emptyIds, cacheable)
         }
-        val allNames = try {
-            Files.newDirectoryStream(root).use { entries ->
-                val names = ArrayList<String>()
-                for (entry in entries) {
-                    checkpoint()
-                    if (names.size >= WebJobLibraryEntryLimits().maximumEntries) {
-                        cacheable = false
-                        break
+        // Bounded by the root-entry limit; only published job-id names (never `.upload-*`
+        // staging or service-owned siblings) are returned.
+        fun publishedJobIds(): List<String> {
+            val allNames = try {
+                Files.newDirectoryStream(root).use { entries ->
+                    val names = ArrayList<String>()
+                    for (entry in entries) {
+                        checkpoint()
+                        if (names.size >= WebJobLibraryEntryLimits().maximumEntries) {
+                            cacheable = false
+                            break
+                        }
+                        names += entry.fileName.toString()
                     }
-                    names += entry.fileName.toString()
+                    names.sorted()
                 }
-                names.sorted()
+            } catch (_: Exception) {
+                cacheable = false
+                inventoryComplete = false
+                emptyList()
             }
-        } catch (_: Exception) {
-            cacheable = false
-            inventoryComplete = false
-            emptyList()
+            return try { collectWebJobLibraryIds(allNames.asSequence(), checkpoint) }
+            catch (_: Exception) { cacheable = false; inventoryComplete = false; emptyList() }
         }
-        val ids = try { collectWebJobLibraryIds(allNames.asSequence(), checkpoint) }
-        catch (_: Exception) { cacheable = false; inventoryComplete = false; emptyList() }
+        val ids = publishedJobIds()
         for (id in ids) addName(2, id)
         val jobIdsDigest = MessageDigest.getInstance("SHA-256").also { hash ->
             ids.forEach { id -> hash.update(id.toByteArray(StandardCharsets.UTF_8)); hash.update(0.toByte()) }
@@ -891,7 +899,13 @@ class WebJobService(
         // Any root change while stamping (a job published after enumeration, or a service-owned
         // sibling appearing) makes this stamp unusable; the caller rescans instead of reusing it.
         val rootAfter = stampFile(root, 8, 0x4000, missingAllowed = false, identityOnly = true)
-        if (rootAfter == null || rootBefore != rootAfter) { cacheable = false; inventoryComplete = false }
+        val rootUnchanged = rootAfter != null && rootBefore == rootAfter
+        if (!(dashboardRootStampsEqual?.invoke(rootUnchanged) ?: rootUnchanged)) { cacheable = false; inventoryComplete = false }
+        // Root metadata cannot detect every publication: renaming a staging directory that is
+        // already inside the root can leave its link count and size unchanged, and its times may
+        // fall in the same filesystem tick. Accept the stamp only if the published job-id
+        // inventory is unchanged since enumeration (O(entry budget), names only).
+        if (cacheable && publishedJobIds() != ids) { cacheable = false; inventoryComplete = false }
         if (knownOrganizations == null && inventoryComplete) dashboardOrganizationIds = observedOrganizations.toSet()
         return WebJobCollectionStamp(HexFormat.of().formatHex(digest.digest()), jobIdsDigest, cacheable)
         } finally { probe?.close() }
