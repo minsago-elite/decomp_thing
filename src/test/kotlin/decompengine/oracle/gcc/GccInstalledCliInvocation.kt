@@ -1,6 +1,7 @@
 package decompengine.oracle.gcc
 
 import decompengine.testing.ChildJvm
+import decompengine.testing.ChildJvm.withLauncherJavaOpts
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.validation.terminateProcessTree
@@ -15,7 +16,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 // The installed launcher's JVM must not write /tmp/hsperfdata_* and keeps temporary files under the test root (#2001).
-private val INSTALLED_CLI_JAVA_OPTS: String get() = ChildJvm.launcherJavaOpts(listOf("-Xmx8g") + ChildJvm.options())
+private val INSTALLED_CLI_JAVA_OPTIONS: List<String> get() = listOf("-Xmx8g") + ChildJvm.options()
+private val INSTALLED_CLI_JAVA_OPTS: String get() = ChildJvm.launcherJavaOpts(INSTALLED_CLI_JAVA_OPTIONS)
 
 private val INSTALLED_GCC_CLI_COMMANDS = setOf(
     "gcc-engine-plan", "gcc-engine-full-export", "gcc-engine-runtime-diagnostic", "gcc-engine-native-calls",
@@ -48,8 +50,9 @@ internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, time
     builder.environment().apply {
         remove("JAVA_TOOL_OPTIONS"); remove("JDK_JAVA_OPTIONS"); remove("_JAVA_OPTIONS")
         remove("LLM_BIN_PATCH_OPTS")
-        put("JAVA_HOME", javaHome); put("JAVA_OPTS", INSTALLED_CLI_JAVA_OPTS)
+        put("JAVA_HOME", javaHome)
     }
+    builder.withLauncherJavaOpts(INSTALLED_CLI_JAVA_OPTIONS)
     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
     val process = builder.start()
     val readers = Executors.newFixedThreadPool(2)

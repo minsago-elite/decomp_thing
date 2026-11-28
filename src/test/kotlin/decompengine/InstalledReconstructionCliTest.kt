@@ -1,6 +1,7 @@
 package decompengine
 
 import decompengine.testing.ChildJvm
+import decompengine.testing.ChildJvm.withLauncherJavaOpts
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -30,7 +31,7 @@ class InstalledReconstructionCliTest {
             builder.environment()["JAVA_HOME"] = System.getProperty("java.home")
             // A space in the repository path must not split a JVM option in the start script's xargs parse.
             val spaced = Files.createDirectories(temp.resolve("child tmp $index"))
-            builder.environment()["JAVA_OPTS"] = ChildJvm.launcherJavaOpts(listOf("-Xmx256m") + ChildJvm.options() +
+            builder.withLauncherJavaOpts(listOf("-Xmx256m") + ChildJvm.options() +
                 listOf("-Djava.io.tmpdir=$spaced", "-Djna.tmpdir=$spaced"))
             val process = builder.start()
             try {

@@ -43,6 +43,16 @@ object ChildJvm {
         "'" + option.replace("'", "'\\''") + "'"
     }
 
+    /**
+     * Sets [options] as `JAVA_OPTS` for a Gradle-generated start script. `POSIXLY_CORRECT` is removed because it
+     * makes the `echo` behind the script's `xargs` interpret backslash escapes, so a `\c` in a value would drop
+     * the separator and join two JVM options.
+     */
+    fun ProcessBuilder.withLauncherJavaOpts(options: List<String>): ProcessBuilder = apply {
+        environment().remove("POSIXLY_CORRECT")
+        environment()["JAVA_OPTS"] = launcherJavaOpts(options)
+    }
+
     /** Points the child's `TMPDIR` at [temporaryDirectory]; call it after any `environment().clear()`. */
     fun ProcessBuilder.withRepositoryTemporary(): ProcessBuilder = apply {
         environment()["TMPDIR"] = temporaryDirectory

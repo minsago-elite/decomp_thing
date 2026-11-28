@@ -478,10 +478,9 @@ class SecureRepairRuntimeSurfaceTest {
     ) { "missing class bytes for ${type.name}" }.use { it.readBytes() }
 
     private fun javap(type: Class<*>, includeCode: Boolean = false): String {
-        val command = ChildJvm.toolCommand("javap", "-p").toMutableList()
-        if (includeCode) command += "-c"
-        command += listOf("-classpath", System.getProperty("java.class.path"), type.name)
-        val process = ProcessBuilder(command).redirectErrorStream(true).start()
+        val code = if (includeCode) arrayOf("-c") else emptyArray()
+        val process = ProcessBuilder(ChildJvm.toolCommand("javap", "-p", *code, "-classpath",
+            System.getProperty("java.class.path"), type.name)).redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().use { it.readText() }
         assertTrue(process.waitFor(10, TimeUnit.SECONDS), "javap timed out")
         assertEquals(0, process.exitValue(), output)
