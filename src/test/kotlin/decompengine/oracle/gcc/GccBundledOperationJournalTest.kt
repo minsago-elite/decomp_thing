@@ -335,15 +335,20 @@ class GccBundledOperationJournalTest {
 
     @Test
     fun `a CLI-bound adoption records exactly the original argv plus one recovery selector`() {
-        val original = listOf("gcc-engine-plan", "cc1", "/record-only-test/cc1", "--resume-after-checkpoint", "512")
+        val original = listOf("gcc-engine-plan", "cc1", "/record-only-test/cc1", "--profile", "/record-only-test/profile.json",
+            "--ghidra-archive", "/record-only-test/ghidra.zip", "--output", "/record-only-test/output",
+            "--scratch", "/record-only-test/scratch", "--resume-after-checkpoint", "512")
         val intent = OracleJson.canonicalBytes(JsonObject(mapOf("testIntent" to JsonPrimitive("cli"),
             "cliInvocation" to JsonObject(mapOf("argv" to JsonArray(original.map(::JsonPrimitive)))))))
         val selector = listOf("--recover-operation", OPERATION_ID)
-        val accepted = listOf(original + selector, original.take(2) + selector + original.drop(2))
+        val accepted = listOf(original + selector, original.take(3) + selector + original.drop(3))
         val refused = mapOf(
             "none" to emptyList(), "no-selector" to original, "other-operation" to original + listOf("--recover-operation", SECOND_OPERATION_ID),
             "two-selectors" to original + selector + selector, "selector-first" to selector + original,
             "changed-original" to original.dropLast(1) + "1024" + selector, "dangling-selector" to original + "--recover-operation",
+            // Removing these selectors restores the original, but the recorded argv itself does not parse.
+            "inside-checkpoint-option" to original.dropLast(1) + selector + original.last(),
+            "inside-profile-option" to original.take(4) + selector + original.drop(4),
         )
         for (argv in accepted) withJournalRoot { root ->
             recoverableStoppedJournal(root, intent).close()
@@ -352,17 +357,21 @@ class GccBundledOperationJournalTest {
                 assertEquals(JsonArray(argv.map(::JsonPrimitive)), record.getValue("recovery").jsonObject["recoveryArgv"])
             }
         }
-        for ((case, argv) in refused) withJournalRoot { root ->
-            recoverableStoppedJournal(root, intent).close()
-            val path = root.resolve(operationName())
-            GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->
-                assertFails(case) { later.recordRecoveryAdopted(argv, RECOVERY_CAP_MILLIS) }
+        for ((case, argv) in refused) {
+            withJournalRoot { root ->
+                recoverableStoppedJournal(root, intent).close()
+                GccBundledOperationJournal.openStoppedForRecovery(root, OPERATION_ID, intent, DEPLOYMENT_SHA256).use { later ->
+                    assertFails(case) { later.recordRecoveryAdopted(argv, RECOVERY_CAP_MILLIS) }
+                }
+                assertFalse(Files.exists(root.resolve(operationName()).resolve("recovery-adopted.json")), case)
             }
-            assertFalse(Files.exists(path.resolve("recovery-adopted.json")), case)
-            // The same foreign argv is refused when a crashed owner left it behind.
-            immutableFile(path.resolve("recovery-adopted.json"),
-                linkedAdoptionRecord(intent, path, expectedAdoption(intent, path, argv = argv)))
-            requireRefusedUnchanged(root, path, intent, "retained $case")
+            // The same foreign argv is refused when a crashed owner left it behind under either name.
+            for (name in listOf("recovery-adopted.json", ".recovery-adopted.json.atomic")) withJournalRoot { root ->
+                recoverableStoppedJournal(root, intent).close()
+                val path = root.resolve(operationName())
+                immutableFile(path.resolve(name), linkedAdoptionRecord(intent, path, expectedAdoption(intent, path, argv = argv)))
+                requireRefusedUnchanged(root, path, intent, "retained $name $case")
+            }
         }
     }
 

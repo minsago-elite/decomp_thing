@@ -119,35 +119,44 @@ internal data class GccBundledCliWorkingDirectory(val path: Path, val identity: 
     ))
 
     companion object {
+        /** Exported by the installed start script: the physical launch directory, captured before Java started. */
+        const val LAUNCH_DIRECTORY_VARIABLE = "LLM_BIN_PATCH_LAUNCH_DIRECTORY"
+
         /**
          * Pins the kernel's working directory for this process with O_PATH, then requires its canonical path to
          * name that same directory (device, inode and mount). Neither step needs read permission, so a searchable
-         * but unreadable working directory is admitted.
+         * but unreadable working directory is admitted. When the start script exported the launch directory, the
+         * pinned directory must be that one by canonical path, device and inode, so a JVM that moved its working
+         * directory before this code ran is refused rather than bound. Without the variable (a direct `java`
+         * launch) the kernel's working directory is bound as captured.
          */
-        fun current(): GccBundledCliWorkingDirectory = LinuxFilesystemSyscalls.openCurrentWorkingDirectoryPath().use { cwd ->
-            val path = Path.of("").toAbsolutePath().toRealPath()
-            requireNotRelocatedByJvm(path)
-            val named = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
-                ?: throw IllegalArgumentException("CLI working directory path no longer exists")
-            named.use { selected ->
-                require(selected.identity.isDirectory && selected.identity.key == cwd.identity.key &&
-                    selected.identity.mountId == cwd.identity.mountId) {
-                    "CLI working directory path differs from the process working directory"
+        fun current(environment: (String) -> String? = System::getenv): GccBundledCliWorkingDirectory =
+            LinuxFilesystemSyscalls.openCurrentWorkingDirectoryPath().use { cwd ->
+                val path = Path.of("").toAbsolutePath().toRealPath()
+                val named = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
+                    ?: throw IllegalArgumentException("CLI working directory path no longer exists")
+                named.use { selected ->
+                    require(selected.identity.isDirectory && selected.identity.key == cwd.identity.key &&
+                        selected.identity.mountId == cwd.identity.mountId) {
+                        "CLI working directory path differs from the process working directory"
+                    }
                 }
+                environment(LAUNCH_DIRECTORY_VARIABLE)?.let { exported ->
+                    val launched = Path.of(exported)
+                    val physical = try {
+                        launched.takeIf { it.isAbsolute && it.normalize() == it }?.toRealPath()
+                    } catch (failure: java.io.IOException) {
+                        throw IllegalArgumentException("$LAUNCH_DIRECTORY_VARIABLE names no directory", failure)
+                    }
+                    require(physical == launched) { "$LAUNCH_DIRECTORY_VARIABLE must name a canonical physical directory" }
+                    val launchedIdentity = LinuxFilesystemSyscalls.openAbsolutePathOrNull(launched)?.use { it.identity }
+                        ?: throw IllegalArgumentException("$LAUNCH_DIRECTORY_VARIABLE names no directory")
+                    require(launched == path && launchedIdentity.isDirectory && launchedIdentity.key == cwd.identity.key) {
+                        "CLI working directory differs from the launcher's physical working directory"
+                    }
+                }
+                GccBundledCliWorkingDirectory(path, cwd.identity)
             }
-            GccBundledCliWorkingDirectory(path, cwd.identity)
-        }
-
-        /**
-         * With perf data enabled, HotSpot saves the working directory with a read-only open, changes into its
-         * perf-data directory, and cannot change back from an unreadable directory. Such a relocated working
-         * directory no longer names the launch directory, so it is refused rather than bound.
-         */
-        internal fun requireNotRelocatedByJvm(path: Path) {
-            require(path != Path.of("/tmp", "hsperfdata_" + System.getProperty("user.name"))) {
-                "the JVM moved its working directory into its perf-data directory; launch with -XX:-UsePerfData"
-            }
-        }
     }
 }
 

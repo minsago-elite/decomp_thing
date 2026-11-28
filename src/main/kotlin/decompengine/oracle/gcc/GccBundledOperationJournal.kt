@@ -815,6 +815,18 @@ internal class GccBundledOperationJournal private constructor(
             if (selector < 1 || argv.lastIndexOf("--recover-operation") != selector || selector + 1 >= argv.size ||
                 argv[selector + 1] != operationId || argv.take(selector) + argv.drop(selector + 2) != original
             ) journalFail("GCC recovery argv is not the original invocation plus its recovery selector")
+            // The recorded argv must itself be an invocation the CLI accepts: the selector may not split an option
+            // from its value, and its parsed selection must be the original's plus exactly this recovery selector.
+            fun parsed(arguments: List<String>) = try {
+                GccBundledCliOptions.parse(arguments)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+            val recorded = parsed(argv.drop(1))
+            val originalSelection = parsed(original.drop(1))
+            if (original.first() != "gcc-engine-plan" || recorded == null || originalSelection == null ||
+                recorded.recoverOperationId != operationId || recorded.copy(recoverOperationId = null) != originalSelection
+            ) journalFail("GCC recovery argv is not a gcc-engine-plan invocation the CLI parses as the original plus its selector")
         }
         if (budget % 1_000L != 0L || budget < 2_000L || budget > context.wallCapMillis) {
             journalFail("GCC recovery allowance exceeds its committed wall budget or is not whole seconds")

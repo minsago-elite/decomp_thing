@@ -64,9 +64,24 @@ kotlin {
 application {
     mainClass.set("decompengine.MainKt")
     applicationName = "llm_bin_patch"
-    // HotSpot perf data would otherwise fchdir into /tmp/hsperfdata_<user> and, from an unreadable working
-    // directory, never return, so the CLI's working-directory binding would record that relocated directory.
-    applicationDefaultJvmArgs = listOf("-XX:-UsePerfData")
+}
+
+tasks.named<CreateStartScripts>("startScripts") {
+    // HotSpot's perf-data setup saves the working directory with a read-only open and changes into
+    // /tmp/hsperfdata_<user>; from an unreadable directory it cannot change back. Only that launch disables
+    // perf data, so ordinary launches keep jps, jcmd and jstat monitoring. The physical launch directory is
+    // captured before Java starts and exported for the GCC CLI's working-directory binding.
+    doLast {
+        val script = unixScript
+        val defaults = "DEFAULT_JVM_OPTS=\"\"\n"
+        val text = script.readText()
+        check(text.split(defaults).size == 2) { "generated start script no longer has one empty DEFAULT_JVM_OPTS line" }
+        script.writeText(text.replace(defaults, defaults + """
+            |[ -r . ] || DEFAULT_JVM_OPTS='"-XX:-UsePerfData"'
+            |LLM_BIN_PATCH_LAUNCH_DIRECTORY=${'$'}( pwd -P ) || die "cannot determine the physical launch working directory"
+            |export LLM_BIN_PATCH_LAUNCH_DIRECTORY
+            |""".trimMargin()))
+    }
 }
 
 val frontendDirectory = layout.projectDirectory.dir("frontend")

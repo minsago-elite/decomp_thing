@@ -294,10 +294,12 @@ class GccBundledCliCommandTest {
         // Search (x) without read (r): O_PATH and realpath(3) succeed where a read-only directory open would not.
         Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("-wx------"))
         try {
-            // The installed launcher's -XX:-UsePerfData keeps HotSpot from relocating this unreadable directory.
-            val process = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx256m",
+            // A direct java launch has no start script: it passes -XX:-UsePerfData itself, as the script would here.
+            val builder = ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx256m",
                 "-XX:-UsePerfData", "-cp", classpath, "decompengine.MainKt", "gcc-engine-plan") + args)
-                .directory(workingDirectory.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).start()
+                .directory(workingDirectory.toFile()).redirectErrorStream(true).redirectOutput(log.toFile())
+            builder.environment().remove(GccBundledCliWorkingDirectory.LAUNCH_DIRECTORY_VARIABLE)
+            val process = builder.start()
             try {
                 assertTrue(process.waitFor(60, TimeUnit.SECONDS))
             } finally {
@@ -317,12 +319,91 @@ class GccBundledCliCommandTest {
         assertEquals(identity.key.inode, recorded.getValue("inode").jsonPrimitive.content.toLong())
         assertEquals(identity.key.device, recorded.getValue("device").jsonPrimitive.content.toLong())
         assertEquals(identity.mountId, recorded.getValue("mountId").jsonPrimitive.content.toLong())
-        // A working directory HotSpot relocated into its perf-data directory is refused rather than bound.
-        val relocated = assertFails {
-            GccBundledCliWorkingDirectory.requireNotRelocatedByJvm(Path.of("/tmp", "hsperfdata_" + System.getProperty("user.name")))
+    }
+
+    @Test
+    fun `the installed start script disables perf data only for an unreadable launch directory and exports it`() = fixture { root ->
+        val launcher = installedLauncher()
+        val javaHome = Files.createDirectories(root.resolve("recording-java/bin")).parent
+        val record = root.resolve("recorded-launch.txt")
+        // Stands in for java so the test observes the exact JVM argv and environment the real script builds.
+        Files.writeString(javaHome.resolve("bin/java"), "#!/bin/sh\n{ printf 'launch=%s\\n' \"${'$'}{LLM_BIN_PATCH_LAUNCH_DIRECTORY-unset}\"; " +
+            "for argument in \"${'$'}@\"; do printf 'arg=%s\\n' \"${'$'}argument\"; done; } > \"${'$'}RECORDED_LAUNCH\"\n")
+        Files.setPosixFilePermissions(javaHome.resolve("bin/java"), PosixFilePermissions.fromString("rwx------"))
+        val readable = privateDirectory(root.resolve("readable"))
+        val link = Files.createSymbolicLink(root.resolve("readable-link"), readable)
+        val unreadable = privateDirectory(root.resolve("searchable-only"))
+        fun launch(directory: Path): List<String> {
+            Files.deleteIfExists(record)
+            val builder = ProcessBuilder(launcher.toString(), "gcc-engine-plan", "--help").directory(directory.toFile())
+                .redirectErrorStream(true).redirectOutput(root.resolve("recording-launch.log").toFile())
+            cleanLauncherEnvironment(builder).apply { put("JAVA_HOME", javaHome.toString()); put("RECORDED_LAUNCH", record.toString()) }
+            val process = builder.start()
+            try { assertTrue(process.waitFor(30, TimeUnit.SECONDS)) } finally { if (process.isAlive) process.destroyForcibly() }
+            assertEquals(0, process.exitValue(), Files.readString(root.resolve("recording-launch.log")))
+            return Files.readAllLines(record)
         }
-        assertTrue(relocated.message.orEmpty().contains("-XX:-UsePerfData"), relocated.toString())
-        GccBundledCliWorkingDirectory.requireNotRelocatedByJvm(workingDirectory)
+        // An ordinary launch keeps perf data, so jps, jcmd and jstat still see the JVM.
+        val ordinary = launch(link)
+        assertFalse(ordinary.contains("arg=-XX:-UsePerfData"), ordinary.toString())
+        assertEquals("launch=${readable.toRealPath()}", ordinary.first())
+        assertTrue(ordinary.contains("arg=decompengine.MainKt"), ordinary.toString())
+        Files.setPosixFilePermissions(unreadable, PosixFilePermissions.fromString("-wx------"))
+        try {
+            val searchableOnly = launch(unreadable)
+            assertTrue(searchableOnly.contains("arg=-XX:-UsePerfData"), searchableOnly.toString())
+            assertEquals("launch=$unreadable", searchableOnly.first())
+        } finally {
+            Files.setPosixFilePermissions(unreadable, PosixFilePermissions.fromString("rwx------"))
+        }
+    }
+
+    @Test
+    fun `the installed GCC CLI admits an unreadable but searchable launch directory without a caller flag`() = fixture { root ->
+        val launcher = installedLauncher()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter17.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it } +
+            listOf("--resume-after-checkpoint", "512")
+        val workingDirectory = privateDirectory(root.resolve("searchable-only"))
+        val log = root.resolve("installed.log")
+        Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("-wx------"))
+        try {
+            val builder = ProcessBuilder(listOf(launcher.toString(), "gcc-engine-plan") + args)
+                .directory(workingDirectory.toFile()).redirectErrorStream(true).redirectOutput(log.toFile())
+            cleanLauncherEnvironment(builder)["JAVA_HOME"] = Path.of(System.getProperty("java.home")).toRealPath().toString()
+            val process = builder.start()
+            try { assertTrue(process.waitFor(60, TimeUnit.SECONDS)) } finally { if (process.isAlive) process.destroyForcibly() }
+            val output = Files.readString(log).take(8192)
+            assertTrue(process.exitValue() != 0, output)
+            assertTrue(output.contains("binary differs from selected profile engine"), output)
+        } finally {
+            Files.setPosixFilePermissions(workingDirectory, PosixFilePermissions.fromString("rwx------"))
+        }
+        val recorded = OracleJson.parseCanonical(Files.readAllBytes(root.resolve("output/invocation.json"))).jsonObject
+            .getValue("workingDirectory").jsonObject
+        assertEquals(workingDirectory.toString(), recorded.getValue("path").jsonPrimitive.content)
+        assertEquals(LinuxFilesystemSyscalls.openRoot(workingDirectory).use { it.identity.key.inode },
+            recorded.getValue("inode").jsonPrimitive.content.toLong())
+    }
+
+    @Test
+    fun `a working directory that differs from the exported launch directory is refused`() = fixture { root ->
+        val variable = GccBundledCliWorkingDirectory.LAUNCH_DIRECTORY_VARIABLE
+        val current = GccBundledCliWorkingDirectory.current { null }
+        assertEquals(current, GccBundledCliWorkingDirectory.current { if (it == variable) current.path.toString() else null })
+        val other = privateDirectory(root.resolve("elsewhere"))
+        val link = Files.createSymbolicLink(root.resolve("current-link"), current.path)
+        for ((case, exported) in listOf("other-directory" to other.toString(), "relative" to "build",
+            "symbolic-link" to link.toString(), "absent" to root.resolve("absent").toString())) {
+            val failure = assertFails(case) { GccBundledCliWorkingDirectory.current { if (it == variable) exported else null } }
+            assertTrue(failure is IllegalArgumentException && (failure.message.orEmpty().contains(variable) ||
+                failure.message.orEmpty().contains("launcher's physical working directory")), "$case: $failure")
+        }
+        // Admission refuses the mismatch before any output child exists.
+        val args = arguments(root)
+        val options = GccBundledCliOptions.parse(args)
+        assertFails { GccBundledCliCommand.admit(options, args) { GccBundledCliWorkingDirectory.current { if (it == variable) other.toString() else null } } }
+        Files.list(options.output).use { assertEquals(0L, it.count()) }
     }
 
     @Test
@@ -420,6 +501,17 @@ class GccBundledCliCommandTest {
 
     private companion object {
         val RECOVERED_OPERATION = "a".repeat(64)
+    }
+
+    private fun installedLauncher(): Path =
+        Path.of(System.getProperty("user.dir"), "build/install/llm_bin_patch/bin/llm_bin_patch").toRealPath().also {
+            assertTrue(Files.isExecutable(it), "installDist did not produce the start script")
+        }
+
+    /** Leaves only the start script's own JVM option handling in effect. */
+    private fun cleanLauncherEnvironment(builder: ProcessBuilder): MutableMap<String, String> = builder.environment().apply {
+        for (name in listOf("JAVA_OPTS", "LLM_BIN_PATCH_OPTS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
+            GccBundledCliWorkingDirectory.LAUNCH_DIRECTORY_VARIABLE)) remove(name)
     }
 
     private fun arguments(root: Path) = listOf("cc1", root.resolve("binary").toString(), "--profile", root.resolve("profile").toString(),
